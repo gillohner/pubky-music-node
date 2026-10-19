@@ -19,7 +19,7 @@ Every social object (tag target, playlist item, review target, activity item) ca
 | recording | `https://musicbrainz.org/recording/<mbid>` | preferred |
 | release | `https://musicbrainz.org/release/<mbid>` | or `/release-group/<mbid>` for the album as a work |
 | artist | `https://musicbrainz.org/artist/<mbid>` | |
-| no MBID, ISRC known | `https://musicbrainz.org/isrc/<ISRC>` | **our fallback; still to agree with the Pinakes owner** |
+| no MBID, ISRC known | `https://musicbrainz.org/isrc/<ISRC>` | agreed with the Pinakes owner 2026-10-19 (answers §1): read as the exact key `isrc:<ISRC>`; an ISRC naming several recordings joins none |
 | neither | the service's canonical track/album/artist URL | Pinakes links service URLs to the MBID |
 
 `pm_model::MusicUri` is the only type that produces or parses these. It rejects `music:` with a
@@ -33,7 +33,10 @@ confidence; nothing under `Confidence::PUBLISH_THRESHOLD` (0.85) is published.
 
 - Clients join Pinakes cards and Nexus tags by URL, never by either side's id.
 - The ISRC fallback publishes a MusicBrainz *list* page, not one recording. Once the node resolves
-  the ISRC to an MBID it should re-tag with the recording URL; until the Pinakes owner confirms,
-  treat ISRC URIs as local-only.
+  the ISRC to an MBID it re-tags with the recording URL. Preference order: recording URL, then
+  ISRC URL, then the service's own track URL.
+- Do not trust a card's `type` to decide what is music (answers §4): detect music by parsing the
+  card's `uri` with `MusicUri`. Read `isrc`, `mbid`, `also_on` when present, ignore when absent.
+- Join with Nexus by URL (`uri` plus `details.aliases`), never by a Pinakes id (answers §5).
 - Pinakes step 8 will type music cards (`MusicRecording`, `MusicAlbum`, `MusicGroup`) and add
   `also_on`; the node's client types carry those fields as optional today.

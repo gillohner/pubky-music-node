@@ -61,7 +61,19 @@ pub struct RecordingInfo {
 }
 
 impl MusicBrainzClient {
+    /// Refuses to start without a usable contact: MusicBrainz requires one
+    /// and blocks agents that name a code host.
     pub fn new(config: MusicBrainzConfig) -> Result<Self> {
+        let c = config.contact.trim().to_ascii_lowercase();
+        if c.is_empty()
+            || c == "unknown"
+            || c.contains("github")
+            || !(c.contains('@') || c.starts_with("http"))
+        {
+            return Err(LibraryError::MusicBrainz(
+                "MusicBrainz needs a contact (email or URL, not a github link) in the User-Agent".into(),
+            ));
+        }
         let http = reqwest::Client::builder()
             .user_agent(config.user_agent())
             .timeout(config.timeout)

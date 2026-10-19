@@ -49,6 +49,14 @@ pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001
 pm-node discover trends                     # live Pinakes facets and music cards
 ```
 
+## Upstream etiquette
+
+Every outbound request carries `pubky-music-node/<version> (<contact>)`; the node refuses to
+start network commands without a `contact` (email or URL, never a code-host link). MusicBrainz
+is called at most once per second; for real catalogue use run a local MusicBrainz replica on the
+node (later milestone). Pinakes allows 120 requests per minute per IP, so batch through
+`POST /v1/resources/lookup`. The Pinakes owner's answers are in `docs/PINAKES-ANSWERS.md`.
+
 ## Hard constraints (handoff §2)
 
 No Roon protocol cloning. No copyrighted audio under a public `/pub/` path. One streaming account

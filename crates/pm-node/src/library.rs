@@ -110,7 +110,7 @@ pub async fn resolve(cfg: &NodeConfig, input: &str) -> anyhow::Result<()> {
         println!("already canonical: {}", uri.to_url());
         return Ok(());
     }
-    let contact = cfg.pubky_config().user_agent_contact;
+    let contact = cfg.pubky_config()?.user_agent_contact;
     let mb = pm_library::musicbrainz::MusicBrainzClient::new(
         pm_library::musicbrainz::MusicBrainzConfig::new(contact),
     )?;

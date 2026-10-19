@@ -285,14 +285,21 @@ pub struct SearchQuery {
     pub viewer: Option<String>,
     pub scheme: Option<String>,
     pub host: Option<String>,
-    /// `activity`, `recent`, `distance` or `start`.
+    /// `activity`, `recent`, `distance` or `start`; `trending` with `window`
+    /// arrives with Pinakes's music step (answers §3).
     pub sort: Option<String>,
+    /// With `sort=trending`: `1h`–`90d`, e.g. `7d`. Ranks by tags made inside
+    /// the window, not by event dates.
+    pub window: Option<String>,
+    /// Exact-id search across services: `mbid:<uuid>`, `isrc:<ISRC>`,
+    /// `upc:<digits>` (music step, answers §3).
+    pub key: Option<String>,
     /// RFC 3339, Unix ms or `now-7d`. Bounds the card's event `start`, so it
     /// excludes every card without a date (all music cards). Not a
     /// reference-time window.
     pub from: Option<String>,
     pub to: Option<String>,
-    /// Only `tags` is accepted.
+    /// `tags` today; `type` from the next core release (answers §2).
     pub facet: Option<String>,
     /// `group` for one row per group.
     pub collapse: Option<String>,
@@ -325,6 +332,8 @@ impl SearchQuery {
         push("scheme", &self.scheme);
         push("host", &self.host);
         push("sort", &self.sort);
+        push("window", &self.window);
+        push("key", &self.key);
         push("from", &self.from);
         push("to", &self.to);
         push("facet", &self.facet);
@@ -500,6 +509,28 @@ impl PinakesClient {
         Ok(self.lookup(&[uri.to_string()]).await?.into_iter().next())
     }
 
+    /// Full read for one URI (any spelling) via `GET /v1/resources/by-uri`,
+    /// which ships in the next core release (answers §2). On the previous
+    /// version the path matches `/resources/{id}` and answers 400, so this
+    /// falls back to `lookup` + `resource(id)`. `None` when Pinakes has not
+    /// seen the link; never fetches.
+    pub async fn resource_by_uri(&self, uri: &str) -> Result<Option<ResourceDetail>, PinakesError> {
+        let url = crate::nexus::with_query(&self.url("/resources/by-uri"), &[("uri", uri)]);
+        let resp = self.send(|| self.http.get(&url)).await?;
+        match Self::json::<ResourceDetail>(resp).await {
+            Ok(d) => Ok(Some(d)),
+            Err(PinakesError::NotFound) => Ok(None),
+            Err(PinakesError::BadRequest(_)) => {
+                tracing::debug!("by-uri route not on this Pinakes yet; falling back to lookup");
+                match self.card_for_uri(uri).await? {
+                    Some(card) => self.resource(&card.id).await.map(Some),
+                    None => Ok(None),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Full read with `details`, by Pinakes id.
     pub async fn resource(&self, id: &str) -> Result<ResourceDetail, PinakesError> {
         let url = self.url(&format!("/resources/{id}"));
@@ -527,6 +558,39 @@ impl PinakesClient {
         }
         let resp = self.send(|| self.http.post(&url).json(&body)).await?;
         Self::json(resp).await
+    }
+
+    /// `POST /v1/changes/lookup` with `{"uris": […]}` and an optional `since`,
+    /// the shape of the next core release (answers §2). On the previous
+    /// version the body is rejected (400) and this falls back to
+    /// [`changes_for_uris`](Self::changes_for_uris) with `since` defaulting
+    /// to `now-30d`.
+    pub async fn changes_lookup_uris(
+        &self,
+        uris: &[String],
+        since: Option<&str>,
+        cursor: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<ChangePage, PinakesError> {
+        let url = self.url("/changes/lookup");
+        let mut body = serde_json::json!({ "uris": uris });
+        if let Some(s) = since {
+            body["since"] = s.into();
+        }
+        if let Some(c) = cursor {
+            body["cursor"] = c.into();
+        }
+        if let Some(l) = limit {
+            body["limit"] = (l.min(MAX_LIMIT)).into();
+        }
+        let resp = self.send(|| self.http.post(&url).json(&body)).await?;
+        match Self::json(resp).await {
+            Err(PinakesError::BadRequest(_)) => {
+                tracing::debug!("uris body not accepted by this Pinakes yet; falling back to ids");
+                self.changes_for_uris(uris, since.unwrap_or("now-30d")).await
+            }
+            other => other,
+        }
     }
 
     /// Changes for URIs: one lookup to map URIs to ids, then the changes.

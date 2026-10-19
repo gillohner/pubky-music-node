@@ -92,11 +92,16 @@ enum PinakesCmd {
 
 #[derive(Subcommand)]
 enum DiscoverCmd {
-    /// Trending tags and the most active music cards.
+    /// Trending music: tags made inside a window (needs Pinakes's music
+    /// step), falling back to all-time activity and tag facets.
     Trends {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long, default_value = "7d")]
+        window: String,
     },
+    /// Every tagged link carrying an exact id: `mbid:<uuid>`, `isrc:<ISRC>`.
+    Key { key: String },
     /// Music cards tagged with a label.
     ByTag {
         label: String,
@@ -150,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Resolve { input } => library::resolve(&cfg, &input).await?,
         Cmd::Uri { input } => social::uri(&input)?,
         Cmd::Pinakes { cmd } => {
-            let pc = cfg.pubky_config();
+            let pc = cfg.pubky_config()?;
             match cmd {
                 PinakesCmd::Info => social::pinakes_info(&pc).await?,
                 PinakesCmd::Lookup { uris } => social::pinakes_lookup(&pc, &uris).await?,
@@ -158,9 +163,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Discover { cmd } => {
-            let pc = cfg.pubky_config();
+            let pc = cfg.pubky_config()?;
             match cmd {
-                DiscoverCmd::Trends { limit } => social::discover_trends(&pc, limit).await?,
+                DiscoverCmd::Trends { limit, window } => social::discover_trends(&pc, limit, &window).await?,
+                DiscoverCmd::Key { key } => social::discover_key(&pc, &key).await?,
                 DiscoverCmd::ByTag { label, limit } => social::discover_by_tag(&pc, &label, limit).await?,
                 DiscoverCmd::Friends { viewer, limit } => {
                     social::discover_friends(&pc, &viewer, limit).await?

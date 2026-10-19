@@ -68,13 +68,16 @@ impl NodeConfig {
         self.data_dir.join("library.db")
     }
 
-    /// The pm-pubky config with the node-level contact filled in.
-    pub fn pubky_config(&self) -> PmPubkyConfig {
+    /// The pm-pubky config with the node-level contact filled in. Errors
+    /// when no usable contact is set, since every upstream requires one.
+    pub fn pubky_config(&self) -> anyhow::Result<PmPubkyConfig> {
         let mut c = self.pubky.clone();
         if !self.contact.is_empty() {
             c.user_agent_contact = self.contact.clone();
         }
-        c
+        c.validate_contact()
+            .map_err(|e| anyhow::anyhow!("{e}: set `contact` in the node config"))?;
+        Ok(c)
     }
 }
 
@@ -97,7 +100,12 @@ listen = "0.0.0.0:7788"
         assert_eq!(cfg.library.folders.len(), 2);
         assert_eq!(cfg.api.listen, "0.0.0.0:7788");
         assert_eq!(cfg.pubky.network, pm_pubky::Network::Mainnet);
-        assert!(cfg.pubky_config().user_agent().contains("ops@example.org"));
+        assert!(cfg
+            .pubky_config()
+            .unwrap()
+            .user_agent()
+            .contains("ops@example.org"));
+        assert!(NodeConfig::default().pubky_config().is_err());
     }
 
     #[test]

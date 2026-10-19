@@ -55,9 +55,20 @@ pub async fn pinakes_search(cfg: &PmPubkyConfig, tags: &str, limit: usize) -> an
     Ok(())
 }
 
-pub async fn discover_trends(cfg: &PmPubkyConfig, limit: usize) -> anyhow::Result<()> {
+pub async fn discover_trends(cfg: &PmPubkyConfig, limit: usize, window: &str) -> anyhow::Result<()> {
     let (p, n) = clients(cfg)?;
     let d = Discovery::new(p, n);
+    match d.trending(window, limit).await {
+        Ok(page) => {
+            println!("trending in the last {window}:");
+            print_items(&page.items);
+            return Ok(());
+        }
+        Err(pm_pubky::discovery::DiscoveryError::Pinakes(pm_pubky::PinakesError::BadRequest(m))) => {
+            println!("(sort=trending not on this Pinakes yet: {m}; showing all-time activity)");
+        }
+        Err(e) => return Err(e.into()),
+    }
     let (facets, items) = d.trends(limit).await?;
     println!("top tags:");
     for f in facets.iter().take(15) {
@@ -65,6 +76,19 @@ pub async fn discover_trends(cfg: &PmPubkyConfig, limit: usize) -> anyhow::Resul
     }
     println!("items:");
     print_items(&items);
+    Ok(())
+}
+
+pub async fn discover_key(cfg: &PmPubkyConfig, key: &str) -> anyhow::Result<()> {
+    let (p, n) = clients(cfg)?;
+    let d = Discovery::new(p, n);
+    match d.tagged_anywhere(key, 50).await {
+        Ok(page) => print_items(&page.items),
+        Err(pm_pubky::discovery::DiscoveryError::Pinakes(pm_pubky::PinakesError::BadRequest(m))) => {
+            println!("(key= search not on this Pinakes yet: {m})")
+        }
+        Err(e) => return Err(e.into()),
+    }
     Ok(())
 }
 

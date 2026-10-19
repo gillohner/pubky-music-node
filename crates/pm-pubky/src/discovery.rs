@@ -149,8 +149,37 @@ impl Discovery {
         Ok((facets, items_from_cards(resp.items)))
     }
 
+    /// Every tagged link carrying this exact id on any service
+    /// (`search?key=mbid:…`, also `isrc:` and `upc:`), from Pinakes's music
+    /// step (answers §3). Until it ships the server answers 400, surfaced as
+    /// `PinakesError::BadRequest`.
+    pub async fn tagged_anywhere(&self, key: &str, limit: usize) -> Result<DiscoveryPage, DiscoveryError> {
+        self.page(SearchQuery {
+            key: Some(key.to_string()),
+            limit: Some(limit),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Music ranked by tags made inside `window` (`1h`–`90d`), one song
+    /// counted once across services (`collapse=group`). Music step, answers
+    /// §3; 400 until it ships, so callers fall back to [`trends`](Self::trends).
+    pub async fn trending(&self, window: &str, limit: usize) -> Result<DiscoveryPage, DiscoveryError> {
+        self.page(SearchQuery {
+            tags: Some(MUSIC_TAG.to_string()),
+            sort: Some("trending".to_string()),
+            window: Some(window.to_string()),
+            collapse: Some("group".to_string()),
+            limit: Some(limit),
+            ..Default::default()
+        })
+        .await
+    }
+
     /// Who tagged this recording: distinct taggers from Nexus, `None` if the
-    /// link is not indexed there.
+    /// link is not indexed there. Joins by the card's URL, never by a
+    /// Pinakes id (answers §5).
     pub async fn who_else_likes(&self, uri: &MusicUri) -> Result<Option<Vec<String>>, DiscoveryError> {
         match self.nexus.resource_by_uri(&uri.to_url()).await {
             Ok(view) => {
