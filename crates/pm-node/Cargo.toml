@@ -10,6 +10,22 @@ license.workspace = true
 name = "pm-node"
 path = "src/main.rs"
 
+[features]
+default = []
+alsa = ["pm-out-local/alsa"]
+
 [dependencies]
 pm-model = { workspace = true }
+pm-zones = { workspace = true }
+pm-out-local = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
