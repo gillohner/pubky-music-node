@@ -7,14 +7,25 @@
 //!   dedicated thread; the DAC's clock is the master and the sink pulls
 //!   (handoff §6.1 principle 2).
 //! * [`registry::OutputRegistry`] is where the node collects discovered outputs.
+//! * [`zone::Zone`] is an output plus a [`queue::Queue`] and a transport,
+//!   driven by its own audio thread: gapless joins, pause/seek, position,
+//!   state and events. It pulls audio through the [`source`] traits, which
+//!   `pm-audio` implements, so this crate stays codec-free.
 //!
 //! Two reference outputs ship here: [`outputs::NullOutput`] (counts frames,
 //! drops them) and [`outputs::WavFileOutput`] (writes a bit-exact WAV file,
 //! the basis of the byte-identical test in M1).
 
+mod engine;
 pub mod outputs;
+pub mod queue;
 pub mod registry;
 pub mod sink;
+pub mod source;
+pub mod zone;
 
+pub use queue::{Insert, Queue, QueueItem, Repeat};
 pub use registry::OutputRegistry;
 pub use sink::{AudioSink, BufferLevel, ClockSource, Output, OutputId, OutputInfo, SinkError};
+pub use source::{FrameSource, Processor, SourceError, SourceFactory};
+pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

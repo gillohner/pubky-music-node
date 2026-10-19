@@ -12,6 +12,7 @@ async-trait = { workspace = true }
 hound = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

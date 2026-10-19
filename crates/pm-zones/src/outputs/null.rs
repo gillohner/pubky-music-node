@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub struct NullOutput {
     caps: OutputCaps,
     frames: Arc<AtomicU64>,
+    opens: AtomicU64,
 }
 
 impl Default for NullOutput {
@@ -22,7 +23,18 @@ impl NullOutput {
         Self {
             caps: OutputCaps::unlimited(),
             frames: Arc::new(AtomicU64::new(0)),
+            opens: AtomicU64::new(0),
         }
+    }
+
+    /// Restrict what the output accepts (tests: a "16/44.1-only" device).
+    pub fn with_caps(caps: OutputCaps) -> Self {
+        Self { caps, ..Self::new() }
+    }
+
+    /// How many sinks were opened on this output (gapless = one per format run).
+    pub fn opens_total(&self) -> u64 {
+        self.opens.load(Ordering::Relaxed)
     }
 
     /// Total frames written through every sink opened on this output.
@@ -50,6 +62,7 @@ impl Output for NullOutput {
         if !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
+        self.opens.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(NullSink {
             fmt,
             written: 0,

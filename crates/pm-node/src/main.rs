@@ -32,8 +32,10 @@ enum Cmd {
     /// Inspect an audio file: container, format, duration.
     Info { file: PathBuf },
     /// Play a file to an output and print the signal path.
+    /// Play files in order through a zone (gapless when formats match).
     Play {
-        file: PathBuf,
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
         /// Output id from `outputs`, or `wav:<path>` to write a WAV file.
         #[arg(long, default_value = "null")]
         to: String,
@@ -142,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Info { file } => play::info(&file)?,
         Cmd::Play {
-            file,
+            files,
             to,
             volume_db,
             headroom_db,
@@ -154,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
                 headroom_db,
                 ..Default::default()
             };
-            play::play(&file, output, pcfg).await?;
+            play::play(&files, output, pcfg).await?;
         }
         Cmd::Volume { to, db } => {
             let registry = outputs::discover();

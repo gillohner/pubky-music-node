@@ -38,10 +38,25 @@ impl Source {
         }
     }
 
+    pub fn duration_ms(&self) -> Option<u64> {
+        match self {
+            Source::Pcm(d) => d.duration_ms(),
+            Source::Dsd(d) => d.duration_ms(),
+        }
+    }
+
     pub fn next_block(&mut self) -> Result<Option<AudioBlock>, AudioError> {
         match self {
             Source::Pcm(d) => d.next_block(),
             Source::Dsd(d) => d.next_block(),
+        }
+    }
+
+    /// Accurate seek: the next block starts at `ms`.
+    pub fn seek_ms(&mut self, ms: u64) -> Result<(), AudioError> {
+        match self {
+            Source::Pcm(d) => d.seek_ms(ms),
+            Source::Dsd(d) => d.seek_ms(ms),
         }
     }
 

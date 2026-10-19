@@ -50,6 +50,8 @@ pub struct DsdReader {
     /// DSF only: bytes per channel per block, and whether bytes are LSB-first.
     dsf_block_size: usize,
     dsf_lsb_first: bool,
+    /// DSF only: frames to drop from the next block after a seek inside a block.
+    skip_frames: usize,
 }
 
 impl DsdReader {
@@ -138,6 +140,7 @@ impl DsdReader {
             id3,
             dsf_block_size: block_size,
             dsf_lsb_first: lsb_first,
+            skip_frames: 0,
         })
     }
 
@@ -245,6 +248,7 @@ impl DsdReader {
             id3,
             dsf_block_size: 0,
             dsf_lsb_first: false,
+            skip_frames: 0,
         })
     }
 
@@ -270,9 +274,35 @@ impl DsdReader {
 
     /// Rewind to the first frame.
     pub fn rewind(&mut self) -> Result<(), AudioError> {
-        self.file.seek(SeekFrom::Start(self.data_start))?;
-        self.frames_read = 0;
+        self.seek_frames(0)
+    }
+
+    /// Exact seek: the next block starts at `frame` (one frame = one byte =
+    /// 8 bits per channel). Past the end clamps to the end.
+    pub fn seek_frames(&mut self, frame: u64) -> Result<(), AudioError> {
+        let frame = frame.min(self.total_frames);
+        let ch = self.format.channels as u64;
+        match self.container {
+            DsdContainer::Dff => {
+                self.file.seek(SeekFrom::Start(self.data_start + frame * ch))?;
+                self.frames_read = frame;
+                self.skip_frames = 0;
+            }
+            DsdContainer::Dsf => {
+                let bs = self.dsf_block_size as u64;
+                let block = frame / bs;
+                self.file
+                    .seek(SeekFrom::Start(self.data_start + block * bs * ch))?;
+                self.frames_read = block * bs;
+                self.skip_frames = (frame - block * bs) as usize;
+            }
+        }
         Ok(())
+    }
+
+    /// Seek to `ms`, rounded down to the frame.
+    pub fn seek_ms(&mut self, ms: u64) -> Result<(), AudioError> {
+        self.seek_frames(ms * self.format.rate_hz as u64 / 8_000)
     }
 
     /// Next block in the interleaved MSB-first layout; `None` at the end.
@@ -314,6 +344,14 @@ impl DsdReader {
                     }
                 }
                 self.frames_read += frames as u64;
+                if self.skip_frames > 0 {
+                    let drop = self.skip_frames.min(frames) * ch;
+                    out.drain(..drop);
+                    self.skip_frames = 0;
+                    if out.is_empty() {
+                        return self.next_block();
+                    }
+                }
                 Ok(Some(AudioBlock::dsd(self.format, out)))
             }
         }
@@ -592,6 +630,32 @@ mod tests {
         assert_eq!(raw[data_start + 4097], 0b1100_0000);
         let mut r = DsdReader::open(&dsf).unwrap();
         assert_eq!(r.read_all().unwrap(), data);
+    }
+
+    #[test]
+    fn seek_lands_on_the_exact_frame_in_both_containers() {
+        let ch = 2usize;
+        let fmt = AudioFormat::dsd(AudioFormat::DSD64_RATE, ch as u8);
+        let frames = 10_000usize;
+        let data = pattern(frames, ch);
+        let dir = tempfile::tempdir().unwrap();
+        let dsf = dir.path().join("s.dsf");
+        let dff = dir.path().join("s.dff");
+        write_dsf(&dsf, fmt, &data, None).unwrap();
+        write_dff(&dff, fmt, &data, None).unwrap();
+        for path in [&dsf, &dff] {
+            let mut r = DsdReader::open(path).unwrap();
+            // Mid-block, on a block boundary, in the last partial block, past the end.
+            for frame in [1u64, 4095, 4096, 4097, 8192, 9_999, 10_000, 20_000] {
+                r.seek_frames(frame).unwrap();
+                let rest = r.read_all().unwrap();
+                let f = frame.min(frames as u64) as usize;
+                assert_eq!(rest, &data[f * ch..], "{} frame {frame}", path.display());
+            }
+            // seek_ms rounds down to the frame: 1 ms of DSD64 = 352.8 frames.
+            r.seek_ms(1).unwrap();
+            assert_eq!(r.read_all().unwrap().len(), (frames - 352) * ch);
+        }
     }
 
     #[test]

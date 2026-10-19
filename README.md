@@ -13,12 +13,12 @@ they conflict. Decisions live in `docs/adr/`.
 | Crate | Handoff §5.1 | Status |
 | :-- | :-- | :-- |
 | `pm-model` | shared types: formats, caps, signal path, canonical IDs, library entities | M0 done |
-| `pm-zones` | `Output` / `AudioSink` traits, registry, null and WAV outputs | M0 done |
+| `pm-zones` | `Output` / `AudioSink` traits, registry, null and WAV outputs; zone engine (queue, transport, gapless, position, events) | M0 done; zone engine done (single output; groups at M2) |
 | `pm-audio` | decode (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path | M1 done |
 | `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
 | `pm-pubky` | `pubky.music` schemas, Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
 | `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |
-| `pm-node` | the binary: CLI over the services (scan, play, resolve, discover); API at M3 | CLI done |
+| `pm-node` | the binary: CLI over the services (scan, play, resolve, discover); API at M3 | CLI done (`play` is gapless over a queue) |
 
 Not started: `pm-sources`, `pm-out-oaat`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
 `pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.
@@ -41,6 +41,7 @@ disk small.
 cargo build -p pm-node
 pm-node info some.flac                      # container, format, duration
 pm-node play some.flac --to wav:/tmp/o.wav  # bit-perfect decode, prints the signal path
+pm-node play 01.flac 02.flac --to alsa:hw:1,0  # one zone, gapless join when formats match
 pm-node play some.flac --to null --volume-db=-6   # shows the float path and dither stages
 pm-node -c node.toml scan /music            # SQLite library with FTS5 search
 pm-node -c node.toml search "daft punk"
