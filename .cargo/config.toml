@@ -1,0 +1,6 @@
+# Keep builds small on this shared disk (handoff machine note).
+[build]
+incremental = false
+
+[profile.dev]
+debug = "line-tables-only"

@@ -1,0 +1,15 @@
+[package]
+name = "pm-node"
+description = "The Pubky Music Node binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pm-node"
+path = "src/main.rs"
+
+[dependencies]
+pm-model = { workspace = true }
+anyhow = { workspace = true }

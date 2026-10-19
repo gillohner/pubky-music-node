@@ -1,0 +1,19 @@
+[package]
+name = "pm-zones"
+description = "Output and AudioSink traits, zones, grouping, queue and transport for the Pubky Music Node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+async-trait = { workspace = true }
+hound = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
