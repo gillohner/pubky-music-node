@@ -82,7 +82,7 @@ impl AudioFormat {
                 if self.bits != 1 {
                     return Err(FormatError::UnsupportedBits(self.bits));
                 }
-                if self.rate_hz % Self::DSD64_RATE != 0 {
+                if !self.rate_hz.is_multiple_of(Self::DSD64_RATE) {
                     return Err(FormatError::NotDsdMultiple(self.rate_hz));
                 }
                 Ok(())

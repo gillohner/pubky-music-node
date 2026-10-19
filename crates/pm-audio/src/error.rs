@@ -29,10 +29,11 @@ impl From<symphonia::core::errors::Error> for AudioError {
         match e {
             E::IoError(io) => AudioError::Io(io),
             E::DecodeError(m) => AudioError::Decode(m.to_string()),
-            E::SeekError(k) => AudioError::Seek(k.as_str().to_string()),
+            E::SeekError(k) => AudioError::Seek(format!("{k:?}")),
             E::Unsupported(m) => AudioError::Unsupported(m.to_string()),
             E::LimitError(m) => AudioError::Malformed(m.to_string()),
             E::ResetRequired => AudioError::Decode("decoder reset required".into()),
+            other => AudioError::Decode(other.to_string()),
         }
     }
 }

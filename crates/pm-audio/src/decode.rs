@@ -49,7 +49,10 @@ pub struct Decoder {
 impl Decoder {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AudioError> {
         let path = path.as_ref();
-        let file = File::open(path).map_err(|source| AudioError::Open { path: path.to_path_buf(), source })?;
+        let file = File::open(path).map_err(|source| AudioError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -74,7 +77,9 @@ impl Decoder {
         };
         let track_id = track.id;
 
-        let sample_rate = params.sample_rate.ok_or_else(|| AudioError::Malformed("missing sample rate".into()))?;
+        let sample_rate = params
+            .sample_rate
+            .ok_or_else(|| AudioError::Malformed("missing sample rate".into()))?;
         let channels = params
             .channels
             .as_ref()
@@ -96,7 +101,8 @@ impl Decoder {
             }
         };
 
-        let bits = resolve_bits(&params).ok_or_else(|| AudioError::Unsupported("cannot determine bits per sample".into()))?;
+        let bits = resolve_bits(&params)
+            .ok_or_else(|| AudioError::Unsupported("cannot determine bits per sample".into()))?;
         if !matches!(bits, 8 | 16 | 20 | 24 | 32) {
             return Err(AudioError::Unsupported(format!("{bits}-bit samples")));
         }
@@ -196,7 +202,9 @@ impl Decoder {
             if let Some(until) = self.skip_until.take() {
                 let delta = until.get() - pts.get();
                 if delta > 0 {
-                    let skip_frames = ((delta as f64) * self.audio_format.rate_hz as f64 / self.ticks_per_second).round() as usize;
+                    let skip_frames = ((delta as f64) * self.audio_format.rate_hz as f64
+                        / self.ticks_per_second)
+                        .round() as usize;
                     if skip_frames >= frames {
                         self.skip_until = Some(until);
                         continue;
@@ -211,9 +219,13 @@ impl Decoder {
     /// Accurate seek: the next block starts at `ms` (frames before it are
     /// dropped).
     pub fn seek_ms(&mut self, ms: u64) -> Result<(), AudioError> {
-        let seeked = self
-            .format
-            .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from_millis_u64(ms), track_id: Some(self.track_id) })?;
+        let seeked = self.format.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time: Time::from_millis_u64(ms),
+                track_id: Some(self.track_id),
+            },
+        )?;
         self.decoder.reset();
         self.finished = false;
         self.skip_until = Some(seeked.required_ts);
