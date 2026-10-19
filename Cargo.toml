@@ -9,6 +9,8 @@ members = [
     "crates/pm-out-local",
     "crates/pm-api",
     "crates/pm-node",
+    "crates/pm-client",
+    "crates/pm-app",
 ]
 
 [workspace.package]
@@ -26,6 +28,7 @@ pm-library = { path = "crates/pm-library" }
 pm-pubky = { path = "crates/pm-pubky" }
 pm-out-local = { path = "crates/pm-out-local" }
 pm-api = { path = "crates/pm-api" }
+pm-client = { path = "crates/pm-client" }
 
 anyhow = "1.0"
 async-trait = "0.1"

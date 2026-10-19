@@ -91,6 +91,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
+        .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
         .route("/library/albums", get(albums))
         .route("/library/albums/{id}/tracks", get(album_tracks))
@@ -106,6 +107,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
 pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(%listen, "API listening");
+    serve_listener(state, listener).await
+}
+
+/// Serve on an already bound listener (tests bind port 0).
+pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -334,6 +340,47 @@ async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
     Ok(Json(t))
+}
+
+/// The track's audio file as stored, for a controller that plays locally
+/// (`pm-app`). Served only to authenticated callers of this node; never a
+/// public URL (constraint 2).
+async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let t = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_track(TrackId(id))?
+        .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
+    let bytes = tokio::fs::read(&t.file.path)
+        .await
+        .map_err(|e| ApiError::not_found(format!("file for track {id}: {e}")))?;
+    let mime = match t.file.container.as_str() {
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        "aiff" => "audio/aiff",
+        "isomp4" | "mp4" | "m4a" => "audio/mp4",
+        "dsf" => "audio/x-dsf",
+        "dff" => "audio/x-dff",
+        _ => "application/octet-stream",
+    };
+    let name = t
+        .file
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("track-{id}"));
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{}\"", name.replace('"', "")),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<Tracks> {

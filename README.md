@@ -18,7 +18,12 @@ they conflict. Decisions live in `docs/adr/`.
 | `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
 | `pm-pubky` | `pubky.music` schemas, Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
 | `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |
-| `pm-node` | the binary: CLI over the services (scan, play, resolve, discover); API at M3 | CLI done (`play` is gapless over a queue) |
+| `pm-api` | native `/v1` HTTP + WebSocket API (`docs/api.md`) | M3 server side done |
+| `pm-client` | Rust client for `/v1` (HTTP + event stream) | done |
+| `pm-app` | native controller and player (egui): Roon-style browse, queue, transport, signal path; plays locally through its own DAC | first cut, needs a desktop to run |
+| `pm-node` | the binary: CLI plus `serve` (API, one zone per output) | CLI and daemon |
+
+Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
 
 Not started: `pm-sources`, `pm-out-oaat`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
 `pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.
@@ -48,6 +53,7 @@ pm-node -c node.toml search "daft punk"
 pm-node resolve https://open.spotify.com/track/<id>   # MusicBrainz URL relations
 pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001)
 pm-node discover trends                     # live Pinakes facets and music cards
+pm-node -c node.toml serve                  # API + zones; then: cargo run -p pm-app (PM_NODE, PM_TOKEN)
 ```
 
 ## Upstream etiquette
