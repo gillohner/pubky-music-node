@@ -188,6 +188,9 @@ fn volume_selem(mixer: &Mixer) -> Option<Selem<'_>> {
     controls.into_iter().nth(pick)
 }
 
+/// `step` assumes the control's dB scale is linear in raw steps, which holds for UAC2
+/// feature units (the KA17: 0..127 = -127..0 dB). HDA codecs with non-linear TLV tables
+/// would need the per-step table; until then `step` is only an average for them.
 fn volume_kind(s: &Selem) -> VolumeKind {
     let (lo, hi) = s.get_playback_db_range();
     let (vmin, vmax) = s.get_playback_volume_range();
@@ -241,24 +244,18 @@ impl Output for AlsaOutput {
         if !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        let device = self.device.clone();
-        let id = self.id();
-        // ALSA calls block; keep them off the async executor.
-        run_blocking(move || AlsaSink::open(&device, id, fmt)).map(|s| Box::new(s) as Box<dyn AudioSink>)
+        // `snd_pcm_open` and `hw_params` block for a few ms. The zone engine calls this from
+        // its own audio thread (ADR 0005), so nothing async is held up; an API caller that
+        // opens outputs from a runtime should wrap the call in `spawn_blocking`.
+        AlsaSink::open(&self.device, self.id(), fmt).map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         if self.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
-        let device = self.device.clone();
-        run_blocking(move || set_mixer_volume(&device, v))
+        set_mixer_volume(&self.device, v)
     }
-}
-
-/// Run a blocking closure without depending on a specific runtime.
-fn run_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    std::thread::spawn(f).join().expect("alsa thread panicked")
 }
 
 /// Move whole `DSD_U32_BE` frames out of `pending` (interleaved, one byte per
@@ -389,6 +386,14 @@ impl AlsaSink {
         let mut offset = 0;
         while offset < bytes.len() {
             match io.writei(&bytes[offset..]) {
+                Ok(0) => {
+                    // A blocking `writei` never returns 0 frames; treat it as a device fault
+                    // rather than spinning here.
+                    return Err(SinkError::Device(format!(
+                        "{}: write accepted no frames",
+                        self.id
+                    )));
+                }
                 Ok(frames) => {
                     offset += frames * self.frame_bytes;
                     self.device_frames += frames as u64;
@@ -428,7 +433,7 @@ impl AudioSink for AlsaSink {
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.dsd_pending.clear();
-        if self.pcm.state() == State::Running {
+        if matches!(self.pcm.state(), State::Running | State::Draining | State::Paused) {
             self.pcm.drop().map_err(alsa_err)?;
         }
         self.pcm.prepare().map_err(alsa_err)
