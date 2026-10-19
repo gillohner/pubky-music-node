@@ -4,10 +4,11 @@
 //! exclusive on Windows and CoreAudio hog/integer mode on macOS. Only ALSA is
 //! written so far, behind the `alsa` cargo feature.
 //!
-//! **Verification status:** this machine has no `libasound` headers, so the
-//! `alsa` feature has not been compiled or run here. Treat the `alsa` module as a
-//! careful draft to be built and tested on the node at M1 (byte-identical
-//! loopback test). The non-feature build is what CI exercises.
+//! **Verification status:** the `alsa` feature is built and tested on a FiiO
+//! KA17 (M1 hardware acceptance): bit-perfect PCM to the DAC, byte-identical
+//! through `snd-aloop` at 16/44.1, 24/96 and 24/192. Native DSD is sent
+//! correctly but plays silent on that DAC (`docs/device-db/fiio-ka17.yaml`).
+//! The non-feature build is what CI exercises.
 
 #[cfg(feature = "alsa")]
 pub mod alsa;

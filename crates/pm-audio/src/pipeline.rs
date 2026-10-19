@@ -190,7 +190,10 @@ impl Plan {
                 reason: "sample-rate conversion (M8)".into(),
             });
         }
-        let candidates: Vec<u8> = [16u8, 24, 32].into_iter().filter(|b| *b <= max_bits).collect();
+        let candidates: Vec<u8> = [16u8, 24, 32]
+            .into_iter()
+            .filter(|b| *b <= max_bits && caps.takes_pcm_bits(*b))
+            .collect();
         if candidates.is_empty() {
             return Err(PipelineError::NoBitDepth);
         }
@@ -583,6 +586,38 @@ mod tests {
             panic!();
         }
         let _ = fmt;
+    }
+
+    #[test]
+    fn pad_24_into_32_bit_only_device() {
+        // FiiO KA17: S16_LE and S32_LE, no 24-bit format.
+        let c = OutputCaps {
+            pcm_rates: vec![44_100, 96_000],
+            pcm_bits: vec![16, 32],
+            ..OutputCaps::unlimited()
+        };
+        let src = AudioFormat::pcm(96_000, 24, 2);
+        let mut plan = Plan::negotiate(src, &c, &PipelineConfig::default()).unwrap();
+        assert_eq!(plan.output_format().bits, 32);
+        assert_eq!(plan.signal_path().headline(), Quality::Lossless);
+        let names: Vec<_> = plan
+            .signal_path()
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["decode", "pad", "output"]);
+        let b = random_block(src, 500);
+        let out = plan.process(b.clone()).unwrap();
+        if let (Samples::PcmI32(o), Samples::PcmI32(i)) = (&out.samples, &b.samples) {
+            assert!(o.iter().zip(i).all(|(o, i)| *o == (*i << 8)));
+        } else {
+            panic!();
+        }
+
+        // 16-bit stays bit-perfect on the same device.
+        let plan = Plan::negotiate(AudioFormat::pcm(44_100, 16, 2), &c, &PipelineConfig::default()).unwrap();
+        assert!(plan.is_bit_perfect());
     }
 
     #[test]

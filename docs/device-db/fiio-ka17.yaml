@@ -1,0 +1,35 @@
+# Measured on Linux 7.2.5 (snd-usb-audio), pm-node alsa:hw:1,0, 2026-10-19.
+# Source: /proc/asound/card1/stream0, amixer -c 1, pm-node outputs, playback checks (PR m1-hardware-fiio-ka).
+brand: FiiO
+model: KA17
+generation: "2023 (2x ES9069Q, XMOS XU316), USB 2972:0093, bcdDevice 2.25"
+protocols: [usb_uac2]
+# Linux enumerates three alt settings on interface 1, all 2 ch, async with a feedback endpoint:
+#   altset 1 S32_LE, altset 2 S16_LE, altset 3 DSD_U32_BE (raw DSD, DOP=0, bitrev=0),
+#   each at 44.1/48/88.2/96/176.4/192 kHz. No S24_3LE or S24_LE: 24-bit sources play as a
+#   Lossless `pad` into S32_LE. The datasheet's 768 kHz / DSD512 is not offered to this host.
+max_pcm: { rate_hz: 192000, bits: 32 }
+pcm_bits: [16, 32]
+pcm_rates: [44100, 48000, 88200, 96000, 176400, 192000]
+# Advertised: native DSD_U32_BE up to 192000 frames/s = DSD128 (5.6448 MHz).
+# Measured: display shows "DSD 2.8M" / "DSD 5.6M" but the output is SILENT (both byte orders,
+# also with an independent aplay stream); DoP in S32_LE is NOT detected (display "PCM 176.4K",
+# noise). The DSD data was verified correct offline. Root cause open (firmware/USB mode?).
+dsd: { mode: native, max: dsd128, audible: false }
+gapless: true                                # device side; the node has no queue layer yet
+# UAC2 feature unit: 'FIIO KA17 ',1 (mono master) and 'FIIO KA17 ',0 (L/R), each 0..127 = -127..0 dB.
+# pm-node drives the master; verified with amixer (-12 dB -> raw 115).
+volume: { kind: db, min: -127, max: 0, step: 1 }
+standby: false
+source_switch: false
+quirks:
+  - no_24bit_pcm_format                      # S16_LE and S32_LE only
+  - native_dsd_silent_on_linux               # see dsd above
+  - dop_not_detected                         # at 0 dB USB volume as well
+  - usb_autosuspend_already_off              # power/control was "on"; no change needed
+firmware_tested: "bcdDevice 2.25"
+tested_on: 2026-10-19
+tester: "gillohner"
+notes: >
+  PCM bit-perfect checks: 16/44.1 S16_LE (display PCM 44.1K), 24/96 and 24/192 as S32_LE with one
+  pad stage (display PCM 96K / 192K). Linux UAC2 descriptor rates differ from the spec sheet.

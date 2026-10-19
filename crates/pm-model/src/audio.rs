@@ -198,6 +198,10 @@ impl QualityCeiling {
 pub struct OutputCaps {
     pub pcm_rates: Vec<u32>,
     pub max_pcm_bits: u8,
+    /// PCM word widths the output opens as-is, e.g. `[16, 32]` for a USB DAC
+    /// with no 24-bit format. Empty means every width up to `max_pcm_bits`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pcm_bits: Vec<u8>,
     pub max_channels: u8,
     pub dsd: Option<DsdSupport>,
     pub hw_volume: Option<VolumeKind>,
@@ -210,6 +214,11 @@ pub struct OutputCaps {
 }
 
 impl OutputCaps {
+    /// Does the output open `bits`-wide PCM words without conversion?
+    pub fn takes_pcm_bits(&self, bits: u8) -> bool {
+        bits <= self.max_pcm_bits && (self.pcm_bits.is_empty() || self.pcm_bits.contains(&bits))
+    }
+
     /// Does this output accept the format as-is (no conversion)?
     pub fn accepts(&self, fmt: &AudioFormat) -> bool {
         if fmt.channels > self.max_channels {
@@ -218,7 +227,7 @@ impl OutputCaps {
         match fmt.kind {
             SampleKind::Pcm => {
                 self.pcm_rates.contains(&fmt.rate_hz)
-                    && fmt.bits <= self.max_pcm_bits
+                    && self.takes_pcm_bits(fmt.bits)
                     && match self.quality_ceiling {
                         QualityCeiling::LosslessUpTo { rate_hz, bits } => {
                             fmt.rate_hz <= rate_hz && fmt.bits <= bits
@@ -238,6 +247,7 @@ impl OutputCaps {
                 352_800, 384_000, 705_600, 768_000,
             ],
             max_pcm_bits: 32,
+            pcm_bits: Vec::new(),
             max_channels: 8,
             dsd: Some(DsdSupport::Native {
                 max_rate: AudioFormat::DSD512_RATE,
@@ -300,6 +310,15 @@ mod tests {
         };
         assert!(airplay.accepts(&AudioFormat::pcm(44_100, 16, 2)));
         assert!(!airplay.accepts(&AudioFormat::pcm(96_000, 24, 2)));
+
+        // A USB DAC with S16_LE and S32_LE but no 24-bit format (FiiO KA17).
+        let usb = OutputCaps {
+            pcm_bits: vec![16, 32],
+            ..OutputCaps::unlimited()
+        };
+        assert!(usb.accepts(&AudioFormat::pcm(96_000, 16, 2)));
+        assert!(!usb.accepts(&AudioFormat::pcm(96_000, 24, 2)));
+        assert!(usb.accepts(&AudioFormat::pcm(96_000, 32, 2)));
     }
 
     #[test]
