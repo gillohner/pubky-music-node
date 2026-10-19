@@ -1,5 +1,5 @@
 //! A zone: one output (groups come with clock sync, §6.5), a queue and a
-//! transport, driven by a dedicated audio thread (the [`engine`] module).
+//! transport, driven by a dedicated audio thread (the private `engine` module).
 //!
 //! [`Zone`] is the handle the API and the CLI hold: it mutates the queue
 //! directly, sends transport commands to the thread, and exposes the
