@@ -1,9 +1,24 @@
 [package]
 name = "pm-audio"
+description = "Decoding (symphonia), DSD readers, the DSP pipeline skeleton with signal-path tracing, probing and a blocking play helper for the Pubky Music Node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Test helpers (DSF/DFF writers) for other crates' tests.
+testutil = []
+
 [dependencies]
 pm-model = { workspace = true }
+pm-zones = { workspace = true }
+symphonia = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true }

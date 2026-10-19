@@ -1,0 +1,17 @@
+# Reference device (handoff §7.2). Datasheet values; not yet measured by us.
+brand: Linn
+model: Klimax DSM
+generation: "2021 (Organik DAC)"
+protocols: [openhome, upnp, airplay]
+max_pcm: { rate_hz: 384000, bits: 24 }
+dsd: { mode: dop, max: dsd256 }
+gapless: true
+volume: { kind: db, min: -80, max: 0, step: 1 }
+standby: true
+source_switch: true
+quirks:
+  - room_correction_default_off
+firmware_tested: ""
+tested_on: ""
+tester: ""
+notes: "Values from docs.linn.co.uk; replace with measurements at M6."
