@@ -15,7 +15,10 @@ impl OutputRegistry {
     }
 
     pub fn register(&self, output: Arc<dyn Output>) {
-        self.inner.write().expect("registry poisoned").insert(output.id(), output);
+        self.inner
+            .write()
+            .expect("registry poisoned")
+            .insert(output.id(), output);
     }
 
     pub fn remove(&self, id: &OutputId) -> Option<Arc<dyn Output>> {
@@ -27,7 +30,12 @@ impl OutputRegistry {
     }
 
     pub fn list(&self) -> Vec<OutputInfo> {
-        self.inner.read().expect("registry poisoned").values().map(|o| o.info()).collect()
+        self.inner
+            .read()
+            .expect("registry poisoned")
+            .values()
+            .map(|o| o.info())
+            .collect()
     }
 
     pub fn len(&self) -> usize {

@@ -7,13 +7,16 @@ use pm_pubky::{Discovery, NexusClient, PinakesClient, PmPubkyConfig, SearchQuery
 
 pub fn uri(input: &str) -> anyhow::Result<()> {
     let u = MusicUri::parse(input).with_context(|| format!("parsing {input}"))?;
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "url": u.to_url(),
-        "entity": u.entity(),
-        "canonical": u.is_canonical(),
-        "mbid": u.mbid(),
-        "parsed": u,
-    }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "url": u.to_url(),
+            "entity": u.entity(),
+            "canonical": u.is_canonical(),
+            "mbid": u.mbid(),
+            "parsed": u,
+        }))?
+    );
     Ok(())
 }
 
@@ -30,7 +33,14 @@ pub async fn pinakes_info(cfg: &PmPubkyConfig) -> anyhow::Result<()> {
 pub async fn pinakes_lookup(cfg: &PmPubkyConfig, uris: &[String]) -> anyhow::Result<()> {
     let (p, _) = clients(cfg)?;
     // Normalize through MusicUri where we can, so the spelling matches what the node tags.
-    let uris: Vec<String> = uris.iter().map(|u| MusicUri::parse(u).map(|m| m.to_url()).unwrap_or_else(|_| u.clone())).collect();
+    let uris: Vec<String> = uris
+        .iter()
+        .map(|u| {
+            MusicUri::parse(u)
+                .map(|m| m.to_url())
+                .unwrap_or_else(|_| u.clone())
+        })
+        .collect();
     let cards = p.lookup(&uris).await?;
     println!("{}", serde_json::to_string_pretty(&cards)?);
     Ok(())
@@ -82,7 +92,13 @@ fn print_items(items: &[pm_pubky::DiscoveredItem]) {
         println!(
             "  {:<16} {:<40} {}",
             it.card.type_.as_deref().unwrap_or("-"),
-            it.card.name.as_deref().unwrap_or("-").chars().take(40).collect::<String>(),
+            it.card
+                .name
+                .as_deref()
+                .unwrap_or("-")
+                .chars()
+                .take(40)
+                .collect::<String>(),
             it.uri.to_url()
         );
     }

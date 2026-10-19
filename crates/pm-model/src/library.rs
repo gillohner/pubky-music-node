@@ -97,7 +97,10 @@ pub struct Track {
 impl Track {
     /// The URI to publish, if any: canonical and above the threshold.
     pub fn publishable_uri(&self) -> Option<&MusicUri> {
-        self.canonical.as_ref().filter(|(_, c)| c.publishable()).map(|(u, _)| u)
+        self.canonical
+            .as_ref()
+            .filter(|(_, c)| c.publishable())
+            .map(|(u, _)| u)
     }
 }
 

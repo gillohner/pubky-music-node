@@ -31,7 +31,9 @@ pub struct Mbid(pub Uuid);
 
 impl Mbid {
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        Uuid::parse_str(s.trim()).map(Mbid).map_err(|_| IdError::InvalidMbid(s.to_string()))
+        Uuid::parse_str(s.trim())
+            .map(Mbid)
+            .map_err(|_| IdError::InvalidMbid(s.to_string()))
     }
 }
 
@@ -56,7 +58,12 @@ pub struct Isrc(String);
 
 impl Isrc {
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        let norm: String = s.trim().chars().filter(|c| *c != '-' && *c != ' ').map(|c| c.to_ascii_uppercase()).collect();
+        let norm: String = s
+            .trim()
+            .chars()
+            .filter(|c| *c != '-' && *c != ' ')
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
         let b = norm.as_bytes();
         let ok = b.len() == 12
             && b[0..2].iter().all(u8::is_ascii_alphabetic)
@@ -196,12 +203,22 @@ pub struct ServiceLink {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MusicUri {
-    Recording { mbid: Mbid },
-    Release { mbid: Mbid },
-    ReleaseGroup { mbid: Mbid },
-    Artist { mbid: Mbid },
+    Recording {
+        mbid: Mbid,
+    },
+    Release {
+        mbid: Mbid,
+    },
+    ReleaseGroup {
+        mbid: Mbid,
+    },
+    Artist {
+        mbid: Mbid,
+    },
     /// Fallback when no MBID is known yet (ADR 0001).
-    Isrc { isrc: Isrc },
+    Isrc {
+        isrc: Isrc,
+    },
     /// Fallback when neither MBID nor ISRC is known.
     Service(ServiceLink),
 }
@@ -232,13 +249,19 @@ impl MusicUri {
     pub fn is_canonical(&self) -> bool {
         matches!(
             self,
-            MusicUri::Recording { .. } | MusicUri::Release { .. } | MusicUri::ReleaseGroup { .. } | MusicUri::Artist { .. }
+            MusicUri::Recording { .. }
+                | MusicUri::Release { .. }
+                | MusicUri::ReleaseGroup { .. }
+                | MusicUri::Artist { .. }
         )
     }
 
     pub fn mbid(&self) -> Option<Mbid> {
         match self {
-            MusicUri::Recording { mbid } | MusicUri::Release { mbid } | MusicUri::ReleaseGroup { mbid } | MusicUri::Artist { mbid } => Some(*mbid),
+            MusicUri::Recording { mbid }
+            | MusicUri::Release { mbid }
+            | MusicUri::ReleaseGroup { mbid }
+            | MusicUri::Artist { mbid } => Some(*mbid),
             _ => None,
         }
     }
@@ -269,22 +292,40 @@ impl MusicUri {
         if url.scheme() != "https" && url.scheme() != "http" {
             return Err(IdError::UnsupportedScheme(url.scheme().to_string()));
         }
-        let host = url.host_str().ok_or_else(|| IdError::NotAUrl(s.to_string()))?.to_ascii_lowercase();
+        let host = url
+            .host_str()
+            .ok_or_else(|| IdError::NotAUrl(s.to_string()))?
+            .to_ascii_lowercase();
         let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
-        let segs: Vec<&str> = url.path_segments().map(|p| p.filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        let segs: Vec<&str> = url
+            .path_segments()
+            .map(|p| p.filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
 
         if host == "musicbrainz.org" || host == "beta.musicbrainz.org" {
             return match segs.as_slice() {
-                ["recording", id, ..] => Ok(MusicUri::Recording { mbid: Mbid::parse(id)? }),
-                ["release", id, ..] => Ok(MusicUri::Release { mbid: Mbid::parse(id)? }),
-                ["release-group", id, ..] => Ok(MusicUri::ReleaseGroup { mbid: Mbid::parse(id)? }),
-                ["artist", id, ..] => Ok(MusicUri::Artist { mbid: Mbid::parse(id)? }),
-                ["isrc", code, ..] => Ok(MusicUri::Isrc { isrc: Isrc::parse(code)? }),
+                ["recording", id, ..] => Ok(MusicUri::Recording {
+                    mbid: Mbid::parse(id)?,
+                }),
+                ["release", id, ..] => Ok(MusicUri::Release {
+                    mbid: Mbid::parse(id)?,
+                }),
+                ["release-group", id, ..] => Ok(MusicUri::ReleaseGroup {
+                    mbid: Mbid::parse(id)?,
+                }),
+                ["artist", id, ..] => Ok(MusicUri::Artist {
+                    mbid: Mbid::parse(id)?,
+                }),
+                ["isrc", code, ..] => Ok(MusicUri::Isrc {
+                    isrc: Isrc::parse(code)?,
+                }),
                 _ => Err(IdError::UnknownMusicBrainzPath(url.path().to_string())),
             };
         }
 
-        service::parse(&url, &host, &segs).map(MusicUri::Service).ok_or(IdError::UnknownHost(host))
+        service::parse(&url, &host, &segs)
+            .map(MusicUri::Service)
+            .ok_or(IdError::UnknownHost(host))
     }
 }
 
@@ -350,7 +391,12 @@ mod service {
     }
 
     fn link(service: Service, kind: ServiceLinkKind, id: Option<&str>, url: String) -> Option<ServiceLink> {
-        Some(ServiceLink { service, kind, id: id.map(str::to_string), url })
+        Some(ServiceLink {
+            service,
+            kind,
+            id: id.map(str::to_string),
+            url,
+        })
     }
 
     fn spotify(segs: &[&str]) -> Option<ServiceLink> {
@@ -367,7 +413,12 @@ mod service {
             ServiceLinkKind::Album => "album",
             _ => "artist",
         };
-        link(Service::Spotify, kind, Some(id), format!("https://open.spotify.com/{seg}/{id}"))
+        link(
+            Service::Spotify,
+            kind,
+            Some(id),
+            format!("https://open.spotify.com/{seg}/{id}"),
+        )
     }
 
     fn tidal(segs: &[&str]) -> Option<ServiceLink> {
@@ -386,7 +437,12 @@ mod service {
             ServiceLinkKind::Album => "album",
             _ => "artist",
         };
-        link(Service::Tidal, kind, Some(id), format!("https://tidal.com/{seg}/{id}"))
+        link(
+            Service::Tidal,
+            kind,
+            Some(id),
+            format!("https://tidal.com/{seg}/{id}"),
+        )
     }
 
     fn qobuz(host: &str, segs: &[&str]) -> Option<ServiceLink> {
@@ -402,16 +458,27 @@ mod service {
                 ServiceLinkKind::Album => "album",
                 _ => "artist",
             };
-            return link(Service::Qobuz, kind, Some(id), format!("https://open.qobuz.com/{seg}/{id}"));
+            return link(
+                Service::Qobuz,
+                kind,
+                Some(id),
+                format!("https://open.qobuz.com/{seg}/{id}"),
+            );
         }
         // www.qobuz.com/<locale>/album/<slug>/<id> or /interpreter/<slug>/<id>
         match segs {
-            [_locale, "album", _slug, id, ..] => {
-                link(Service::Qobuz, ServiceLinkKind::Album, Some(id), format!("https://open.qobuz.com/album/{id}"))
-            }
-            [_locale, "interpreter", _slug, id, ..] => {
-                link(Service::Qobuz, ServiceLinkKind::Artist, Some(id), format!("https://open.qobuz.com/artist/{id}"))
-            }
+            [_locale, "album", _slug, id, ..] => link(
+                Service::Qobuz,
+                ServiceLinkKind::Album,
+                Some(id),
+                format!("https://open.qobuz.com/album/{id}"),
+            ),
+            [_locale, "interpreter", _slug, id, ..] => link(
+                Service::Qobuz,
+                ServiceLinkKind::Artist,
+                Some(id),
+                format!("https://open.qobuz.com/artist/{id}"),
+            ),
             _ => None,
         }
     }
@@ -424,7 +491,10 @@ mod service {
         if cc.len() != 2 {
             return None;
         }
-        let track_param = url.query_pairs().find(|(k, _)| k == "i").map(|(_, v)| v.to_string());
+        let track_param = url
+            .query_pairs()
+            .find(|(k, _)| k == "i")
+            .map(|(_, v)| v.to_string());
         match segs {
             [cc, "album", _slug, album_id, ..] => {
                 let album_id = numeric(album_id)?;
@@ -436,20 +506,40 @@ mod service {
                         format!("https://music.apple.com/{cc}/album/{album_id}?i={tid}"),
                     )
                 } else {
-                    link(Service::AppleMusic, ServiceLinkKind::Album, Some(album_id), format!("https://music.apple.com/{cc}/album/{album_id}"))
+                    link(
+                        Service::AppleMusic,
+                        ServiceLinkKind::Album,
+                        Some(album_id),
+                        format!("https://music.apple.com/{cc}/album/{album_id}"),
+                    )
                 }
             }
             [cc, "album", album_id] => {
                 let album_id = numeric(album_id)?;
-                link(Service::AppleMusic, ServiceLinkKind::Album, Some(album_id), format!("https://music.apple.com/{cc}/album/{album_id}"))
+                link(
+                    Service::AppleMusic,
+                    ServiceLinkKind::Album,
+                    Some(album_id),
+                    format!("https://music.apple.com/{cc}/album/{album_id}"),
+                )
             }
             [cc, "song", _, id, ..] | [cc, "song", id] => {
                 let id = numeric(id)?;
-                link(Service::AppleMusic, ServiceLinkKind::Track, Some(id), format!("https://music.apple.com/{cc}/song/{id}"))
+                link(
+                    Service::AppleMusic,
+                    ServiceLinkKind::Track,
+                    Some(id),
+                    format!("https://music.apple.com/{cc}/song/{id}"),
+                )
             }
             [cc, "artist", _, id, ..] | [cc, "artist", id] => {
                 let id = numeric(id)?;
-                link(Service::AppleMusic, ServiceLinkKind::Artist, Some(id), format!("https://music.apple.com/{cc}/artist/{id}"))
+                link(
+                    Service::AppleMusic,
+                    ServiceLinkKind::Artist,
+                    Some(id),
+                    format!("https://music.apple.com/{cc}/artist/{id}"),
+                )
             }
             _ => None,
         }
@@ -466,7 +556,11 @@ mod service {
 
     fn deezer(segs: &[&str]) -> Option<ServiceLink> {
         // deezer.com/<lang>/track/<id> or deezer.com/track/<id>
-        let segs: Vec<&str> = if segs.len() >= 3 && segs[0].len() == 2 { segs[1..].to_vec() } else { segs.to_vec() };
+        let segs: Vec<&str> = if segs.len() >= 3 && segs[0].len() == 2 {
+            segs[1..].to_vec()
+        } else {
+            segs.to_vec()
+        };
         let (kind, id) = match segs.as_slice() {
             ["track", id, ..] => (ServiceLinkKind::Track, *id),
             ["album", id, ..] => (ServiceLinkKind::Album, *id),
@@ -479,28 +573,66 @@ mod service {
             ServiceLinkKind::Album => "album",
             _ => "artist",
         };
-        link(Service::Deezer, kind, Some(id), format!("https://www.deezer.com/{seg}/{id}"))
+        link(
+            Service::Deezer,
+            kind,
+            Some(id),
+            format!("https://www.deezer.com/{seg}/{id}"),
+        )
     }
 
     fn youtube(url: &Url, segs: &[&str], service: Service) -> Option<ServiceLink> {
-        let host = if service == Service::YouTubeMusic { "music.youtube.com" } else { "www.youtube.com" };
+        let host = if service == Service::YouTubeMusic {
+            "music.youtube.com"
+        } else {
+            "www.youtube.com"
+        };
         match segs {
             ["watch"] => {
-                let v = url.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.to_string())?;
-                let kind = if service == Service::YouTubeMusic { ServiceLinkKind::Track } else { ServiceLinkKind::Unknown };
+                let v = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "v")
+                    .map(|(_, v)| v.to_string())?;
+                let kind = if service == Service::YouTubeMusic {
+                    ServiceLinkKind::Track
+                } else {
+                    ServiceLinkKind::Unknown
+                };
                 link(service, kind, Some(&v), format!("https://{host}/watch?v={v}"))
             }
             ["playlist"] => {
-                let list = url.query_pairs().find(|(k, _)| k == "list").map(|(_, v)| v.to_string())?;
-                let kind = if service == Service::YouTubeMusic && list.starts_with("OLAK5uy_") { ServiceLinkKind::Album } else { ServiceLinkKind::Unknown };
-                link(service, kind, Some(&list), format!("https://{host}/playlist?list={list}"))
+                let list = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "list")
+                    .map(|(_, v)| v.to_string())?;
+                let kind = if service == Service::YouTubeMusic && list.starts_with("OLAK5uy_") {
+                    ServiceLinkKind::Album
+                } else {
+                    ServiceLinkKind::Unknown
+                };
+                link(
+                    service,
+                    kind,
+                    Some(&list),
+                    format!("https://{host}/playlist?list={list}"),
+                )
             }
             ["channel", id, ..] => {
-                let kind = if service == Service::YouTubeMusic { ServiceLinkKind::Artist } else { ServiceLinkKind::Unknown };
+                let kind = if service == Service::YouTubeMusic {
+                    ServiceLinkKind::Artist
+                } else {
+                    ServiceLinkKind::Unknown
+                };
                 link(service, kind, Some(id), format!("https://{host}/channel/{id}"))
             }
             ["browse", id, ..] if service == Service::YouTubeMusic => {
-                let kind = if id.starts_with("MPREb_") { ServiceLinkKind::Album } else if id.starts_with("UC") { ServiceLinkKind::Artist } else { ServiceLinkKind::Unknown };
+                let kind = if id.starts_with("MPREb_") {
+                    ServiceLinkKind::Album
+                } else if id.starts_with("UC") {
+                    ServiceLinkKind::Artist
+                } else {
+                    ServiceLinkKind::Unknown
+                };
                 link(service, kind, Some(id), format!("https://{host}/browse/{id}"))
             }
             _ => None,
@@ -509,21 +641,49 @@ mod service {
 
     fn youtu_be(segs: &[&str]) -> Option<ServiceLink> {
         let v = segs.first()?;
-        link(Service::YouTube, ServiceLinkKind::Unknown, Some(v), format!("https://www.youtube.com/watch?v={v}"))
+        link(
+            Service::YouTube,
+            ServiceLinkKind::Unknown,
+            Some(v),
+            format!("https://www.youtube.com/watch?v={v}"),
+        )
     }
 
     fn amazon(url: &Url, host: &str, segs: &[&str]) -> Option<ServiceLink> {
-        let track_asin = url.query_pairs().find(|(k, _)| k == "trackAsin").map(|(_, v)| v.to_string());
+        let track_asin = url
+            .query_pairs()
+            .find(|(k, _)| k == "trackAsin")
+            .map(|(_, v)| v.to_string());
         match segs {
             ["albums", asin, ..] => {
                 if let Some(t) = track_asin {
-                    link(Service::AmazonMusic, ServiceLinkKind::Track, Some(&t), format!("https://{host}/albums/{asin}?trackAsin={t}"))
+                    link(
+                        Service::AmazonMusic,
+                        ServiceLinkKind::Track,
+                        Some(&t),
+                        format!("https://{host}/albums/{asin}?trackAsin={t}"),
+                    )
                 } else {
-                    link(Service::AmazonMusic, ServiceLinkKind::Album, Some(asin), format!("https://{host}/albums/{asin}"))
+                    link(
+                        Service::AmazonMusic,
+                        ServiceLinkKind::Album,
+                        Some(asin),
+                        format!("https://{host}/albums/{asin}"),
+                    )
                 }
             }
-            ["tracks", asin, ..] => link(Service::AmazonMusic, ServiceLinkKind::Track, Some(asin), format!("https://{host}/tracks/{asin}")),
-            ["artists", asin, ..] => link(Service::AmazonMusic, ServiceLinkKind::Artist, Some(asin), format!("https://{host}/artists/{asin}")),
+            ["tracks", asin, ..] => link(
+                Service::AmazonMusic,
+                ServiceLinkKind::Track,
+                Some(asin),
+                format!("https://{host}/tracks/{asin}"),
+            ),
+            ["artists", asin, ..] => link(
+                Service::AmazonMusic,
+                ServiceLinkKind::Artist,
+                Some(asin),
+                format!("https://{host}/artists/{asin}"),
+            ),
             _ => None,
         }
     }
@@ -541,32 +701,82 @@ mod service {
             ServiceLinkKind::Album => "release",
             _ => "artist",
         };
-        link(Service::Beatport, kind, Some(id), format!("https://www.beatport.com/{seg}/{slug}/{id}"))
+        link(
+            Service::Beatport,
+            kind,
+            Some(id),
+            format!("https://www.beatport.com/{seg}/{slug}/{id}"),
+        )
     }
 
     fn soundcloud(segs: &[&str]) -> Option<ServiceLink> {
         match segs {
-            [user, "sets", slug, ..] => link(Service::SoundCloud, ServiceLinkKind::Album, None, format!("https://soundcloud.com/{user}/sets/{slug}")),
-            [user, slug] => link(Service::SoundCloud, ServiceLinkKind::Track, None, format!("https://soundcloud.com/{user}/{slug}")),
-            [user] => link(Service::SoundCloud, ServiceLinkKind::Artist, None, format!("https://soundcloud.com/{user}")),
+            [user, "sets", slug, ..] => link(
+                Service::SoundCloud,
+                ServiceLinkKind::Album,
+                None,
+                format!("https://soundcloud.com/{user}/sets/{slug}"),
+            ),
+            [user, slug] => link(
+                Service::SoundCloud,
+                ServiceLinkKind::Track,
+                None,
+                format!("https://soundcloud.com/{user}/{slug}"),
+            ),
+            [user] => link(
+                Service::SoundCloud,
+                ServiceLinkKind::Artist,
+                None,
+                format!("https://soundcloud.com/{user}"),
+            ),
             _ => None,
         }
     }
 
     fn bandcamp(host: &str, segs: &[&str]) -> Option<ServiceLink> {
         match segs {
-            ["track", slug, ..] => link(Service::Bandcamp, ServiceLinkKind::Track, None, format!("https://{host}/track/{slug}")),
-            ["album", slug, ..] => link(Service::Bandcamp, ServiceLinkKind::Album, None, format!("https://{host}/album/{slug}")),
-            [] | ["music"] => link(Service::Bandcamp, ServiceLinkKind::Artist, None, format!("https://{host}/")),
+            ["track", slug, ..] => link(
+                Service::Bandcamp,
+                ServiceLinkKind::Track,
+                None,
+                format!("https://{host}/track/{slug}"),
+            ),
+            ["album", slug, ..] => link(
+                Service::Bandcamp,
+                ServiceLinkKind::Album,
+                None,
+                format!("https://{host}/album/{slug}"),
+            ),
+            [] | ["music"] => link(
+                Service::Bandcamp,
+                ServiceLinkKind::Artist,
+                None,
+                format!("https://{host}/"),
+            ),
             _ => None,
         }
     }
 
     fn audiomack(segs: &[&str]) -> Option<ServiceLink> {
         match segs {
-            [artist, "song", slug, ..] => link(Service::Audiomack, ServiceLinkKind::Track, None, format!("https://audiomack.com/{artist}/song/{slug}")),
-            [artist, "album", slug, ..] => link(Service::Audiomack, ServiceLinkKind::Album, None, format!("https://audiomack.com/{artist}/album/{slug}")),
-            [artist] => link(Service::Audiomack, ServiceLinkKind::Artist, None, format!("https://audiomack.com/{artist}")),
+            [artist, "song", slug, ..] => link(
+                Service::Audiomack,
+                ServiceLinkKind::Track,
+                None,
+                format!("https://audiomack.com/{artist}/song/{slug}"),
+            ),
+            [artist, "album", slug, ..] => link(
+                Service::Audiomack,
+                ServiceLinkKind::Album,
+                None,
+                format!("https://audiomack.com/{artist}/album/{slug}"),
+            ),
+            [artist] => link(
+                Service::Audiomack,
+                ServiceLinkKind::Artist,
+                None,
+                format!("https://audiomack.com/{artist}"),
+            ),
             _ => None,
         }
     }
@@ -581,10 +791,22 @@ mod tests {
     #[test]
     fn musicbrainz_roundtrip() {
         for (url, entity) in [
-            (format!("https://musicbrainz.org/recording/{MB}"), MusicEntity::Recording),
-            (format!("https://musicbrainz.org/release/{MB}"), MusicEntity::Release),
-            (format!("https://musicbrainz.org/release-group/{MB}"), MusicEntity::ReleaseGroup),
-            (format!("https://musicbrainz.org/artist/{MB}"), MusicEntity::Artist),
+            (
+                format!("https://musicbrainz.org/recording/{MB}"),
+                MusicEntity::Recording,
+            ),
+            (
+                format!("https://musicbrainz.org/release/{MB}"),
+                MusicEntity::Release,
+            ),
+            (
+                format!("https://musicbrainz.org/release-group/{MB}"),
+                MusicEntity::ReleaseGroup,
+            ),
+            (
+                format!("https://musicbrainz.org/artist/{MB}"),
+                MusicEntity::Artist,
+            ),
         ] {
             let u = MusicUri::parse(&url).unwrap();
             assert_eq!(u.entity(), Some(entity));
@@ -593,7 +815,11 @@ mod tests {
             assert_eq!(u.mbid(), Some(Mbid::parse(MB).unwrap()));
         }
         // Uppercase MBID and www. host normalize.
-        let u = MusicUri::parse(&format!("https://www.musicbrainz.org/recording/{}", MB.to_uppercase())).unwrap();
+        let u = MusicUri::parse(&format!(
+            "https://www.musicbrainz.org/recording/{}",
+            MB.to_uppercase()
+        ))
+        .unwrap();
         assert_eq!(u.to_url(), format!("https://musicbrainz.org/recording/{MB}"));
     }
 
@@ -610,7 +836,10 @@ mod tests {
 
     #[test]
     fn music_scheme_is_rejected() {
-        assert_eq!(MusicUri::parse(&format!("music:recording:mbid:{MB}")), Err(IdError::MusicSchemeRetired));
+        assert_eq!(
+            MusicUri::parse(&format!("music:recording:mbid:{MB}")),
+            Err(IdError::MusicSchemeRetired)
+        );
     }
 
     #[test]
@@ -632,22 +861,43 @@ mod tests {
         assert_eq!(l.service, Service::Spotify);
         assert_eq!(l.kind, ServiceLinkKind::Track);
         assert_eq!(l.url, "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT");
-        assert_eq!(svc("https://open.spotify.com/album/1kCHru7uhxBUdzkm4gzRQc").kind, ServiceLinkKind::Album);
-        assert_eq!(svc("https://open.spotify.com/artist/4tZwfgrHOc3mvqYlEYSvVi").kind, ServiceLinkKind::Artist);
+        assert_eq!(
+            svc("https://open.spotify.com/album/1kCHru7uhxBUdzkm4gzRQc").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://open.spotify.com/artist/4tZwfgrHOc3mvqYlEYSvVi").kind,
+            ServiceLinkKind::Artist
+        );
     }
 
     #[test]
     fn tidal_qobuz_deezer() {
-        assert_eq!(svc("https://tidal.com/browse/track/251380836?u").url, "https://tidal.com/track/251380836");
-        assert_eq!(svc("https://listen.tidal.com/album/251380835").kind, ServiceLinkKind::Album);
-        assert_eq!(svc("https://tidal.com/artist/64518").kind, ServiceLinkKind::Artist);
-        assert_eq!(svc("https://open.qobuz.com/track/60187542").url, "https://open.qobuz.com/track/60187542");
+        assert_eq!(
+            svc("https://tidal.com/browse/track/251380836?u").url,
+            "https://tidal.com/track/251380836"
+        );
+        assert_eq!(
+            svc("https://listen.tidal.com/album/251380835").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://tidal.com/artist/64518").kind,
+            ServiceLinkKind::Artist
+        );
+        assert_eq!(
+            svc("https://open.qobuz.com/track/60187542").url,
+            "https://open.qobuz.com/track/60187542"
+        );
         let q = svc("https://www.qobuz.com/gb-en/album/random-access-memories-daft-punk/0886443927087");
         assert_eq!(q.kind, ServiceLinkKind::Album);
         assert_eq!(q.url, "https://open.qobuz.com/album/0886443927087");
         let d = svc("https://www.deezer.com/en/track/67238735");
         assert_eq!(d.url, "https://www.deezer.com/track/67238735");
-        assert_eq!(svc("https://deezer.com/album/6575789").kind, ServiceLinkKind::Album);
+        assert_eq!(
+            svc("https://deezer.com/album/6575789").kind,
+            ServiceLinkKind::Album
+        );
     }
 
     #[test]
@@ -669,30 +919,69 @@ mod tests {
         assert_eq!(y.service, Service::YouTube);
         assert_eq!(y.kind, ServiceLinkKind::Unknown);
         assert_eq!(y.url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
-        assert_eq!(svc("https://youtu.be/dQw4w9WgXcQ").url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+        assert_eq!(
+            svc("https://youtu.be/dQw4w9WgXcQ").url,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
         let m = svc("https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDAMVM");
         assert_eq!(m.service, Service::YouTubeMusic);
         assert_eq!(m.kind, ServiceLinkKind::Track);
-        assert_eq!(svc("https://music.youtube.com/browse/MPREb_abc").kind, ServiceLinkKind::Album);
+        assert_eq!(
+            svc("https://music.youtube.com/browse/MPREb_abc").kind,
+            ServiceLinkKind::Album
+        );
     }
 
     #[test]
     fn long_tail_services() {
-        assert_eq!(svc("https://music.amazon.com/albums/B00CIQ0BG0?trackAsin=B00CIQ2JEW").kind, ServiceLinkKind::Track);
-        assert_eq!(svc("https://music.amazon.de/albums/B00CIQ0BG0").kind, ServiceLinkKind::Album);
-        assert_eq!(svc("https://www.beatport.com/track/get-lucky/4456163").url, "https://www.beatport.com/track/get-lucky/4456163");
-        assert_eq!(svc("https://soundcloud.com/daftpunkofficialmusic").kind, ServiceLinkKind::Artist);
-        assert_eq!(svc("https://soundcloud.com/daftpunkofficialmusic/get-lucky").kind, ServiceLinkKind::Track);
-        assert_eq!(svc("https://soundcloud.com/daftpunkofficialmusic/sets/ram").kind, ServiceLinkKind::Album);
-        assert_eq!(svc("https://daftpunk.bandcamp.com/track/get-lucky").kind, ServiceLinkKind::Track);
-        assert_eq!(svc("https://daftpunk.bandcamp.com/album/ram").kind, ServiceLinkKind::Album);
-        assert_eq!(svc("https://audiomack.com/daft-punk/song/get-lucky").kind, ServiceLinkKind::Track);
+        assert_eq!(
+            svc("https://music.amazon.com/albums/B00CIQ0BG0?trackAsin=B00CIQ2JEW").kind,
+            ServiceLinkKind::Track
+        );
+        assert_eq!(
+            svc("https://music.amazon.de/albums/B00CIQ0BG0").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://www.beatport.com/track/get-lucky/4456163").url,
+            "https://www.beatport.com/track/get-lucky/4456163"
+        );
+        assert_eq!(
+            svc("https://soundcloud.com/daftpunkofficialmusic").kind,
+            ServiceLinkKind::Artist
+        );
+        assert_eq!(
+            svc("https://soundcloud.com/daftpunkofficialmusic/get-lucky").kind,
+            ServiceLinkKind::Track
+        );
+        assert_eq!(
+            svc("https://soundcloud.com/daftpunkofficialmusic/sets/ram").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://daftpunk.bandcamp.com/track/get-lucky").kind,
+            ServiceLinkKind::Track
+        );
+        assert_eq!(
+            svc("https://daftpunk.bandcamp.com/album/ram").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://audiomack.com/daft-punk/song/get-lucky").kind,
+            ServiceLinkKind::Track
+        );
     }
 
     #[test]
     fn unknown_host_and_scheme() {
-        assert_eq!(MusicUri::parse("https://example.com/x"), Err(IdError::UnknownHost("example.com".into())));
-        assert_eq!(MusicUri::parse("ftp://open.spotify.com/track/x"), Err(IdError::UnsupportedScheme("ftp".into())));
+        assert_eq!(
+            MusicUri::parse("https://example.com/x"),
+            Err(IdError::UnknownHost("example.com".into()))
+        );
+        assert_eq!(
+            MusicUri::parse("ftp://open.spotify.com/track/x"),
+            Err(IdError::UnsupportedScheme("ftp".into()))
+        );
         assert!(matches!(MusicUri::parse("not a url"), Err(IdError::NotAUrl(_))));
     }
 

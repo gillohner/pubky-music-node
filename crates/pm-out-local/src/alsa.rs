@@ -16,8 +16,10 @@ use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, DsdSupport, OutputCaps, QualityCeiling, SampleKind, Samples};
 use pm_zones::{check_block, AudioSink, BufferLevel, Output, OutputId, SinkError};
 
-const CANDIDATE_RATES: [u32; 14] =
-    [44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000, 8_000, 16_000, 22_050, 32_000];
+const CANDIDATE_RATES: [u32; 14] = [
+    44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000, 8_000, 16_000,
+    22_050, 32_000,
+];
 
 pub struct AlsaOutput {
     device: String,
@@ -54,9 +56,13 @@ impl AlsaOutput {
             // Native DSD rate limit is not exposed by ALSA as a single number; DSD rates are
             // tested as byte rates (bit rate / 8) when opening. Advertise DSD512 and let open()
             // refuse what the device cannot take.
-            Some(DsdSupport::Native { max_rate: AudioFormat::DSD512_RATE })
+            Some(DsdSupport::Native {
+                max_rate: AudioFormat::DSD512_RATE,
+            })
         } else if max_pcm_bits >= 24 && pcm_rates.contains(&176_400) {
-            Some(DsdSupport::DoP { max_rate: AudioFormat::DSD128_RATE })
+            Some(DsdSupport::DoP {
+                max_rate: AudioFormat::DSD128_RATE,
+            })
         } else {
             None
         };
@@ -83,7 +89,9 @@ impl AlsaOutput {
     pub fn enumerate() -> Vec<AlsaOutput> {
         let mut out = Vec::new();
         for card in alsa::card::Iter::new().flatten() {
-            let Ok(ctl) = alsa::Ctl::from_card(&card, false) else { continue };
+            let Ok(ctl) = alsa::Ctl::from_card(&card, false) else {
+                continue;
+            };
             let Ok(info) = ctl.card_info() else { continue };
             let card_name = info.get_name().unwrap_or("?").to_string();
             let mut dev: i32 = -1;
@@ -129,7 +137,8 @@ impl Output for AlsaOutput {
         let device = self.device.clone();
         let id = self.id();
         // ALSA calls block; keep them off the async executor.
-        tokio_free_blocking(move || AlsaSink::open(&device, id, fmt)).map(|s| Box::new(s) as Box<dyn AudioSink>)
+        tokio_free_blocking(move || AlsaSink::open(&device, id, fmt))
+            .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 }
 
@@ -179,7 +188,14 @@ impl AlsaSink {
             pcm.hw_params(&hwp).map_err(alsa_err)?;
             hwp.get_buffer_size().map_err(alsa_err)? as u64
         };
-        Ok(Self { id, pcm, fmt, alsa_format, buffer_frames, written: 0 })
+        Ok(Self {
+            id,
+            pcm,
+            fmt,
+            alsa_format,
+            buffer_frames,
+            written: 0,
+        })
     }
 
     fn pack(&self, block: &AudioBlock) -> Result<Vec<u8>, SinkError> {
@@ -201,7 +217,11 @@ impl AlsaSink {
                 }
             }
             (Samples::Dsd(b), Format::DSDU8) => out.extend_from_slice(b),
-            _ => return Err(SinkError::Device("block layout does not match the ALSA format".into())),
+            _ => {
+                return Err(SinkError::Device(
+                    "block layout does not match the ALSA format".into(),
+                ))
+            }
         }
         Ok(out)
     }
@@ -235,7 +255,10 @@ impl AudioSink for AlsaSink {
 
     fn buffer_level(&self) -> BufferLevel {
         let avail = self.pcm.avail_update().unwrap_or(0).max(0) as u64;
-        BufferLevel { queued_frames: self.buffer_frames.saturating_sub(avail), capacity_frames: self.buffer_frames }
+        BufferLevel {
+            queued_frames: self.buffer_frames.saturating_sub(avail),
+            capacity_frames: self.buffer_frames,
+        }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {

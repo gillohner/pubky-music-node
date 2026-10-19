@@ -4,6 +4,7 @@
 //! zones, homeserver embedding) arrives with M3.
 
 mod config;
+mod library;
 mod outputs;
 mod play;
 mod social;
@@ -43,6 +44,23 @@ enum Cmd {
         #[arg(long)]
         headroom_db: Option<f32>,
     },
+    /// Scan folders into the library (configured folders when none given).
+    Scan { folders: Vec<PathBuf> },
+    /// Library counts.
+    Stats,
+    /// List tracks.
+    Tracks {
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Full-text search over title, artist and album.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Resolve a service URL or ISRC URI to its MusicBrainz canonical form.
+    Resolve { input: String },
     /// Parse and normalize a music URL into its canonical form (ADR 0001).
     Uri { input: String },
     /// Read-only calls against the Pinakes index.
@@ -110,12 +128,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Info { file } => play::info(&file)?,
-        Cmd::Play { file, to, volume_db, headroom_db } => {
+        Cmd::Play {
+            file,
+            to,
+            volume_db,
+            headroom_db,
+        } => {
             let registry = outputs::discover();
             let output = play::resolve_output(&registry, &to)?;
-            let pcfg = pm_audio::PipelineConfig { volume_db, headroom_db, ..Default::default() };
+            let pcfg = pm_audio::PipelineConfig {
+                volume_db,
+                headroom_db,
+                ..Default::default()
+            };
             play::play(&file, output, pcfg).await?;
         }
+        Cmd::Scan { folders } => library::scan(&cfg, &folders)?,
+        Cmd::Stats => library::stats(&cfg)?,
+        Cmd::Tracks { limit } => library::tracks(&cfg, limit)?,
+        Cmd::Search { query, limit } => library::search(&cfg, &query, limit)?,
+        Cmd::Resolve { input } => library::resolve(&cfg, &input).await?,
         Cmd::Uri { input } => social::uri(&input)?,
         Cmd::Pinakes { cmd } => {
             let pc = cfg.pubky_config();
@@ -130,7 +162,9 @@ async fn main() -> anyhow::Result<()> {
             match cmd {
                 DiscoverCmd::Trends { limit } => social::discover_trends(&pc, limit).await?,
                 DiscoverCmd::ByTag { label, limit } => social::discover_by_tag(&pc, &label, limit).await?,
-                DiscoverCmd::Friends { viewer, limit } => social::discover_friends(&pc, &viewer, limit).await?,
+                DiscoverCmd::Friends { viewer, limit } => {
+                    social::discover_friends(&pc, &viewer, limit).await?
+                }
             }
         }
     }

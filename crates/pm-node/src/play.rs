@@ -34,9 +34,15 @@ pub async fn play(path: &Path, output: Arc<dyn Output>, cfg: PipelineConfig) -> 
     let report = pm_audio::play_file(path, output.as_ref(), &cfg)
         .await
         .with_context(|| format!("playing {} to {}", path.display(), output.id()))?;
-    println!("played {} frames: {} -> {}", report.frames, report.source_format, report.output_format);
+    println!(
+        "played {} frames: {} -> {}",
+        report.frames, report.source_format, report.output_format
+    );
     if let Some(ok) = report.verify_ok {
-        println!("decoder verification: {}", if ok { "ok (MD5 matches)" } else { "FAILED" });
+        println!(
+            "decoder verification: {}",
+            if ok { "ok (MD5 matches)" } else { "FAILED" }
+        );
     }
     print_signal_path(&report.signal_path);
     Ok(())
@@ -46,6 +52,9 @@ pub fn print_signal_path(p: &SignalPath) {
     println!("signal path ({:?}):", p.headline());
     for s in &p.stages {
         let note = s.note.as_deref().map(|n| format!("  [{n}]")).unwrap_or_default();
-        println!("  {:<12} {} -> {}  {:?}{}", s.name, s.in_format, s.out_format, s.quality, note);
+        println!(
+            "  {:<12} {} -> {}  {:?}{}",
+            s.name, s.in_format, s.out_format, s.quality, note
+        );
     }
 }

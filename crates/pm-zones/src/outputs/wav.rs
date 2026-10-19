@@ -23,7 +23,10 @@ impl WavFileOutput {
         let mut caps = OutputCaps::unlimited();
         caps.dsd = None;
         caps.quality_ceiling = QualityCeiling::BitPerfect;
-        Self { path: path.as_ref().to_path_buf(), caps }
+        Self {
+            path: path.as_ref().to_path_buf(),
+            caps,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -70,7 +73,11 @@ impl WavSink {
             sample_format: hound::SampleFormat::Int,
         };
         let writer = hound::WavWriter::create(path, spec).map_err(|e| SinkError::Device(e.to_string()))?;
-        Ok(Self { fmt, writer: Some(writer), written: 0 })
+        Ok(Self {
+            fmt,
+            writer: Some(writer),
+            written: 0,
+        })
     }
 
     fn finalize(&mut self) -> Result<(), SinkError> {
@@ -88,7 +95,10 @@ impl AudioSink for WavSink {
 
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
-        let w = self.writer.as_mut().ok_or_else(|| SinkError::Device("wav sink already finalized".into()))?;
+        let w = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| SinkError::Device("wav sink already finalized".into()))?;
         let Samples::PcmI32(samples) = &block.samples else {
             return Err(SinkError::Device("wav sink takes integer PCM only".into()));
         };
@@ -96,7 +106,10 @@ impl AudioSink for WavSink {
         for &s in samples {
             let s64 = s as i64;
             if s64 >= fs || s64 < -fs {
-                return Err(SinkError::Device(format!("sample {s} exceeds {}-bit range", self.fmt.bits)));
+                return Err(SinkError::Device(format!(
+                    "sample {s} exceeds {}-bit range",
+                    self.fmt.bits
+                )));
             }
             match self.fmt.bits {
                 16 => w.write_sample(s as i16),
@@ -109,7 +122,10 @@ impl AudioSink for WavSink {
     }
 
     fn buffer_level(&self) -> BufferLevel {
-        BufferLevel { queued_frames: 0, capacity_frames: 0 }
+        BufferLevel {
+            queued_frames: 0,
+            capacity_frames: 0,
+        }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {

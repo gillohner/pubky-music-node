@@ -44,7 +44,9 @@ impl Default for NodeConfig {
 
 impl Default for ApiConfig {
     fn default() -> Self {
-        Self { listen: "127.0.0.1:7788".into() }
+        Self {
+            listen: "127.0.0.1:7788".into(),
+        }
     }
 }
 

@@ -26,11 +26,21 @@ pub struct AudioFormat {
 
 impl AudioFormat {
     pub const fn pcm(rate_hz: u32, bits: u8, channels: u8) -> Self {
-        Self { kind: SampleKind::Pcm, rate_hz, bits, channels }
+        Self {
+            kind: SampleKind::Pcm,
+            rate_hz,
+            bits,
+            channels,
+        }
     }
 
     pub const fn dsd(rate_hz: u32, channels: u8) -> Self {
-        Self { kind: SampleKind::Dsd, rate_hz, bits: 1, channels }
+        Self {
+            kind: SampleKind::Dsd,
+            rate_hz,
+            bits: 1,
+            channels,
+        }
     }
 
     /// DSD64 is 64 × 44.1 kHz.
@@ -101,12 +111,7 @@ impl fmt::Display for AudioFormat {
                 self.rate_hz as f64 / 1000.0,
                 self.channels
             ),
-            SampleKind::Dsd => write!(
-                f,
-                "DSD{} {}ch",
-                self.dsd_multiple().unwrap_or(0),
-                self.channels
-            ),
+            SampleKind::Dsd => write!(f, "DSD{} {}ch", self.dsd_multiple().unwrap_or(0), self.channels),
         }
     }
 }
@@ -178,8 +183,14 @@ pub enum QualityCeiling {
 }
 
 impl QualityCeiling {
-    pub const AIRPLAY: QualityCeiling = QualityCeiling::LosslessUpTo { rate_hz: 44_100, bits: 16 };
-    pub const CAST: QualityCeiling = QualityCeiling::LosslessUpTo { rate_hz: 96_000, bits: 24 };
+    pub const AIRPLAY: QualityCeiling = QualityCeiling::LosslessUpTo {
+        rate_hz: 44_100,
+        bits: 16,
+    };
+    pub const CAST: QualityCeiling = QualityCeiling::LosslessUpTo {
+        rate_hz: 96_000,
+        bits: 24,
+    };
 }
 
 /// What an output can do (handoff §6.3).
@@ -215,10 +226,7 @@ impl OutputCaps {
                         _ => true,
                     }
             }
-            SampleKind::Dsd => self
-                .dsd
-                .map(|d| fmt.rate_hz <= d.max_rate())
-                .unwrap_or(false),
+            SampleKind::Dsd => self.dsd.map(|d| fmt.rate_hz <= d.max_rate()).unwrap_or(false),
         }
     }
 
@@ -226,12 +234,14 @@ impl OutputCaps {
     pub fn unlimited() -> Self {
         Self {
             pcm_rates: vec![
-                8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400,
-                192_000, 352_800, 384_000, 705_600, 768_000,
+                8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+                352_800, 384_000, 705_600, 768_000,
             ],
             max_pcm_bits: 32,
             max_channels: 8,
-            dsd: Some(DsdSupport::Native { max_rate: AudioFormat::DSD512_RATE }),
+            dsd: Some(DsdSupport::Native {
+                max_rate: AudioFormat::DSD512_RATE,
+            }),
             hw_volume: None,
             standby: false,
             source_switch: false,
@@ -272,7 +282,9 @@ mod tests {
             pcm_rates: vec![44_100, 48_000],
             max_pcm_bits: 24,
             max_channels: 2,
-            dsd: Some(DsdSupport::DoP { max_rate: AudioFormat::DSD128_RATE }),
+            dsd: Some(DsdSupport::DoP {
+                max_rate: AudioFormat::DSD128_RATE,
+            }),
             quality_ceiling: QualityCeiling::BitPerfect,
             ..OutputCaps::unlimited()
         };
@@ -282,7 +294,10 @@ mod tests {
         assert!(caps.accepts(&AudioFormat::dsd(AudioFormat::DSD64_RATE, 2)));
         assert!(!caps.accepts(&AudioFormat::dsd(AudioFormat::DSD256_RATE, 2)));
 
-        let airplay = OutputCaps { quality_ceiling: QualityCeiling::AIRPLAY, ..OutputCaps::unlimited() };
+        let airplay = OutputCaps {
+            quality_ceiling: QualityCeiling::AIRPLAY,
+            ..OutputCaps::unlimited()
+        };
         assert!(airplay.accepts(&AudioFormat::pcm(44_100, 16, 2)));
         assert!(!airplay.accepts(&AudioFormat::pcm(96_000, 24, 2)));
     }

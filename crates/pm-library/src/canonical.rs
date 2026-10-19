@@ -45,8 +45,10 @@ mod tests {
 
     #[test]
     fn mbid_wins_over_isrc() {
-        let mut t = TagSet::default();
-        t.isrc = Some(Isrc::parse("USRC17607839").unwrap());
+        let mut t = TagSet {
+            isrc: Some(Isrc::parse("USRC17607839").unwrap()),
+            ..TagSet::default()
+        };
         let (u, c) = assign(&t).unwrap();
         assert_eq!(u.to_url(), "https://musicbrainz.org/isrc/USRC17607839");
         assert_eq!(c, Confidence::TaggedIsrc);

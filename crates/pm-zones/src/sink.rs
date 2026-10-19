@@ -45,7 +45,10 @@ pub enum SinkError {
     #[error("output {0} does not accept format {1}")]
     UnsupportedFormat(OutputId, AudioFormat),
     #[error("block format {found} does not match the open format {expected}")]
-    FormatMismatch { expected: AudioFormat, found: AudioFormat },
+    FormatMismatch {
+        expected: AudioFormat,
+        found: AudioFormat,
+    },
     #[error("float blocks must be converted to integer PCM before an output")]
     FloatNotAccepted,
     #[error("output {0} is not available: {1}")]
@@ -116,7 +119,12 @@ pub trait Output: Send + Sync {
     fn caps(&self) -> &OutputCaps;
 
     fn info(&self) -> OutputInfo {
-        OutputInfo { id: self.id(), name: self.name(), protocol: self.id().protocol().to_string(), caps: self.caps().clone() }
+        OutputInfo {
+            id: self.id(),
+            name: self.name(),
+            protocol: self.id().protocol().to_string(),
+            caps: self.caps().clone(),
+        }
     }
 
     /// Open the output in exactly `fmt`. Implementations must not convert:
@@ -145,7 +153,10 @@ pub fn check_block(expected: AudioFormat, block: &AudioBlock) -> Result<(), Sink
         return Err(SinkError::FloatNotAccepted);
     }
     if block.format != expected {
-        return Err(SinkError::FormatMismatch { expected, found: block.format });
+        return Err(SinkError::FormatMismatch {
+            expected,
+            found: block.format,
+        });
     }
     Ok(())
 }

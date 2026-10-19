@@ -19,7 +19,10 @@ impl Default for NullOutput {
 
 impl NullOutput {
     pub fn new() -> Self {
-        Self { caps: OutputCaps::unlimited(), frames: Arc::new(AtomicU64::new(0)) }
+        Self {
+            caps: OutputCaps::unlimited(),
+            frames: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Total frames written through every sink opened on this output.
@@ -47,7 +50,11 @@ impl Output for NullOutput {
         if !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        Ok(Box::new(NullSink { fmt, written: 0, total: self.frames.clone() }))
+        Ok(Box::new(NullSink {
+            fmt,
+            written: 0,
+            total: self.frames.clone(),
+        }))
     }
 }
 
@@ -71,7 +78,10 @@ impl AudioSink for NullSink {
     }
 
     fn buffer_level(&self) -> BufferLevel {
-        BufferLevel { queued_frames: 0, capacity_frames: 0 }
+        BufferLevel {
+            queued_frames: 0,
+            capacity_frames: 0,
+        }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
@@ -100,7 +110,10 @@ mod tests {
         sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 8])).unwrap();
         assert_eq!(sink.frames_written(), 4);
         assert_eq!(out.frames_total(), 4);
-        let err = sink.write(&AudioBlock { format: fmt, samples: Samples::PcmF64(vec![0.0; 2]) });
+        let err = sink.write(&AudioBlock {
+            format: fmt,
+            samples: Samples::PcmF64(vec![0.0; 2]),
+        });
         assert!(matches!(err, Err(SinkError::FloatNotAccepted)));
         let err = sink.write(&AudioBlock::pcm_i32(AudioFormat::pcm(48_000, 16, 2), vec![0; 2]));
         assert!(matches!(err, Err(SinkError::FormatMismatch { .. })));

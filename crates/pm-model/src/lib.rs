@@ -15,9 +15,7 @@ pub mod ids;
 pub mod library;
 pub mod path;
 
-pub use audio::{
-    AudioFormat, DsdSupport, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind,
-};
+pub use audio::{AudioFormat, DsdSupport, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind};
 pub use block::{AudioBlock, Samples};
 pub use ids::{Isrc, Mbid, MusicEntity, MusicUri, Service, ServiceLink, ServiceLinkKind, Upc};
 pub use library::{Album, Artist, AudioFile, Confidence, Track, TrackId};

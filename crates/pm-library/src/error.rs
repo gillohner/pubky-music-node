@@ -5,7 +5,11 @@ pub enum LibraryError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("io error at {path}: {source}")]
-    Io { path: PathBuf, #[source] source: std::io::Error },
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("unsupported file: {0}")]
     Unsupported(PathBuf),
     #[error("cannot read {path}: {reason}")]

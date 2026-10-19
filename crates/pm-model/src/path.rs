@@ -41,8 +41,19 @@ pub struct PathStage {
 }
 
 impl PathStage {
-    pub fn new(name: impl Into<String>, in_format: AudioFormat, out_format: AudioFormat, quality: Quality) -> Self {
-        Self { name: name.into(), in_format, out_format, quality, note: None }
+    pub fn new(
+        name: impl Into<String>,
+        in_format: AudioFormat,
+        out_format: AudioFormat,
+        quality: Quality,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            in_format,
+            out_format,
+            quality,
+            note: None,
+        }
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
@@ -74,7 +85,11 @@ impl SignalPath {
 
     /// The worst quality in the chain, or `BitPerfect` for an empty chain.
     pub fn headline(&self) -> Quality {
-        self.stages.iter().map(|s| s.quality).max().unwrap_or(Quality::BitPerfect)
+        self.stages
+            .iter()
+            .map(|s| s.quality)
+            .max()
+            .unwrap_or(Quality::BitPerfect)
     }
 
     pub fn is_bit_perfect(&self) -> bool {

@@ -2125,8 +2125,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "pm-audio",
+ "pm-library",
  "pm-model",
  "pm-out-local",
+ "pm-pubky",
  "pm-zones",
  "serde",
  "serde_json",

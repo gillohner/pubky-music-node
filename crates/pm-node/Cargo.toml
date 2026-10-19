@@ -20,6 +20,7 @@ pm-zones = { workspace = true }
 pm-out-local = { workspace = true }
 pm-audio = { workspace = true }
 pm-pubky = { workspace = true }
+pm-library = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
