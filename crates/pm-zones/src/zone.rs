@@ -81,7 +81,8 @@ pub struct ZoneState {
     pub acked: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ZoneEvent {
     TrackStarted {
         item: QueueItem,

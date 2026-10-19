@@ -27,6 +27,8 @@ struct Cli {
 enum Cmd {
     /// Print the effective configuration as TOML.
     Config,
+    /// Run the node: API on `[api] listen`, one zone per output.
+    Serve,
     /// List the outputs this node can play to.
     Outputs,
     /// Inspect an audio file: container, format, duration.
@@ -126,6 +128,34 @@ enum DiscoverCmd {
     },
 }
 
+async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let db_path = cfg.db_path();
+    let lib = pm_library::Library::open(&db_path)?;
+    let registry = outputs::discover();
+    let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
+    if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
+        tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
+    }
+    let state = pm_api::NodeState::new(
+        pm_api::NodeSettings {
+            name: cfg.api.name.clone(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            db_path,
+            scan_folders: cfg.library.folders.clone(),
+            pipeline: pm_audio::PipelineConfig::default(),
+            token,
+        },
+        lib,
+        registry,
+    );
+    state.zones_for_all_outputs();
+    for z in state.zones.list() {
+        tracing::info!(zone = %z.id, output = %z.output, "zone ready");
+    }
+    pm_api::serve(state, &cfg.api.listen).await
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -136,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = NodeConfig::load_or_default(cli.config.as_deref())?;
     match cli.cmd {
         Cmd::Config => print!("{}", toml::to_string_pretty(&cfg)?),
+        Cmd::Serve => serve(&cfg).await?,
         Cmd::Outputs => {
             let registry = outputs::discover();
             for o in registry.list() {

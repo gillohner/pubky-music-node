@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 /// metadata is for display only; the engine never looks at it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueItem {
-    /// Unique within the queue, assigned on insertion.
+    /// Unique within the queue, assigned on insertion (ignored on input).
+    #[serde(default)]
     pub id: u64,
     pub uri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

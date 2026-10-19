@@ -28,6 +28,10 @@ pub struct LibraryConfig {
 #[serde(default)]
 pub struct ApiConfig {
     pub listen: String,
+    /// Bearer token clients must send. Empty = no auth: keep `listen` on localhost then.
+    pub token: String,
+    /// Name shown to controllers.
+    pub name: String,
 }
 
 impl Default for NodeConfig {
@@ -46,6 +50,8 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7788".into(),
+            token: String::new(),
+            name: "Pubky Music Node".into(),
         }
     }
 }

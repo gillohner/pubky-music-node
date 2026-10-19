@@ -7,6 +7,7 @@ members = [
     "crates/pm-library",
     "crates/pm-pubky",
     "crates/pm-out-local",
+    "crates/pm-api",
     "crates/pm-node",
 ]
 
@@ -24,9 +25,11 @@ pm-audio = { path = "crates/pm-audio" }
 pm-library = { path = "crates/pm-library" }
 pm-pubky = { path = "crates/pm-pubky" }
 pm-out-local = { path = "crates/pm-out-local" }
+pm-api = { path = "crates/pm-api" }
 
 anyhow = "1.0"
 async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "json"] }
 blake3 = "1.8"
 bytes = "1.12"
 clap = { version = "4.6", features = ["derive"] }
