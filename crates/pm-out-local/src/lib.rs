@@ -5,7 +5,7 @@
 //! written so far, behind the `alsa` cargo feature.
 //!
 //! **Verification status:** this machine has no `libasound` headers, so the
-//! `alsa` feature has not been compiled or run here. Treat [`alsa`] as a
+//! `alsa` feature has not been compiled or run here. Treat the `alsa` module as a
 //! careful draft to be built and tested on the node at M1 (byte-identical
 //! loopback test). The non-feature build is what CI exercises.
 
