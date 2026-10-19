@@ -44,6 +44,14 @@ enum Cmd {
         #[arg(long)]
         headroom_db: Option<f32>,
     },
+    /// Set an output's hardware volume in dB (0 = full scale). Leaves the
+    /// signal path bit-perfect; outputs without a mixer control refuse.
+    Volume {
+        /// Output id from `outputs`.
+        to: String,
+        #[arg(allow_hyphen_values = true)]
+        db: f32,
+    },
     /// Scan folders into the library (configured folders when none given).
     Scan { folders: Vec<PathBuf> },
     /// Library counts.
@@ -147,6 +155,12 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             play::play(&file, output, pcfg).await?;
+        }
+        Cmd::Volume { to, db } => {
+            let registry = outputs::discover();
+            let output = play::resolve_output(&registry, &to)?;
+            output.set_volume(pm_model::Volume::Db(db)).await?;
+            println!("{to}: volume {db:+.1} dB");
         }
         Cmd::Scan { folders } => library::scan(&cfg, &folders)?,
         Cmd::Stats => library::stats(&cfg)?,

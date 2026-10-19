@@ -25,9 +25,18 @@ pub fn resolve_output(registry: &OutputRegistry, to: &str) -> anyhow::Result<Arc
     if let Some(path) = to.strip_prefix("wav:") {
         return Ok(Arc::new(WavFileOutput::new(path)));
     }
-    registry
-        .get(&OutputId(to.to_string()))
-        .with_context(|| format!("unknown output {to}; run `pm-node outputs`"))
+    if let Some(out) = registry.get(&OutputId(to.to_string())) {
+        return Ok(out);
+    }
+    // Any `hw:` name, e.g. `alsa:hw:CARD=KA17,DEV=0` or `alsa:hw:Loopback,0,0`: stable across
+    // card renumbering, and reaches subdevices the index-based ids do not list.
+    #[cfg(feature = "alsa")]
+    if let Some(device) = to.strip_prefix("alsa:") {
+        let out = pm_out_local::alsa::AlsaOutput::probe(device, device)
+            .with_context(|| format!("probing ALSA device {device}"))?;
+        return Ok(Arc::new(out));
+    }
+    anyhow::bail!("unknown output {to}; run `pm-node outputs`")
 }
 
 pub async fn play(path: &Path, output: Arc<dyn Output>, cfg: PipelineConfig) -> anyhow::Result<()> {

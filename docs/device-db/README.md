@@ -9,7 +9,9 @@ model: Klimax DSM
 generation: "2021 (Organik)"
 protocols: [openhome, upnp, airplay]        # from the §7 table
 max_pcm: { rate_hz: 384000, bits: 24 }
-dsd: { mode: dop, max: dsd256 }             # native | dop | none
+pcm_bits: [16, 24, 32]                      # optional: word widths the device opens as-is
+pcm_rates: [44100, 48000, 96000, 192000]    # optional: measured rate list
+dsd: { mode: dop, max: dsd256 }             # native | dop | none; `audible: false` if it fails a listening test
 gapless: true
 volume: { kind: db, min: -80, max: 0, step: 1 }
 standby: true
