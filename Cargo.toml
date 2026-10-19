@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
 license = "MIT"
-repository = "https://github.com/pubky/pubky-music-node"
+repository = "https://github.com/gillohner/pubky-music-node"
 
 [workspace.dependencies]
 pm-model = { path = "crates/pm-model" }
