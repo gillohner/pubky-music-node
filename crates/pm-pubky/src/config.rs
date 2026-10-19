@@ -36,7 +36,11 @@ impl Default for PmPubkyConfig {
 
 impl PmPubkyConfig {
     pub fn user_agent(&self) -> String {
-        format!("pubky-music-node/{} ({})", env!("CARGO_PKG_VERSION"), self.user_agent_contact)
+        format!(
+            "pubky-music-node/{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            self.user_agent_contact
+        )
     }
 }
 

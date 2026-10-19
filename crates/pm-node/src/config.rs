@@ -15,7 +15,7 @@ pub struct NodeConfig {
     pub api: ApiConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LibraryConfig {
     /// Folders to scan. Mounted shares count as folders.
@@ -46,12 +46,6 @@ impl Default for NodeConfig {
             pubky: PubkyConfig::default(),
             api: ApiConfig::default(),
         }
-    }
-}
-
-impl Default for LibraryConfig {
-    fn default() -> Self {
-        Self { folders: Vec::new() }
     }
 }
 

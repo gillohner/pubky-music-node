@@ -5,7 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Microseconds since the Unix epoch, the unit of every `created_at`.
 pub fn now_micros() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_micros() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before 1970")
+        .as_micros() as i64
 }
 
 /// Timestamp ID: microseconds → 8 big-endian bytes → Crockford base32 (13 chars).
@@ -27,8 +30,11 @@ pub fn validate_timestamp_id(id: &str) -> Result<i64, String> {
     if id.len() != 13 {
         return Err("Validation Error: Invalid ID length: must be 13 characters".into());
     }
-    let bytes = base32::decode(Alphabet::Crockford, id).ok_or("Validation Error: Invalid Crockford Base32 encoding")?;
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| "Validation Error: Invalid ID length after decoding".to_string())?;
+    let bytes = base32::decode(Alphabet::Crockford, id)
+        .ok_or("Validation Error: Invalid Crockford Base32 encoding")?;
+    let bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| "Validation Error: Invalid ID length after decoding".to_string())?;
     let micros = i64::from_be_bytes(bytes);
     if micros < OCT_FIRST_2024_MICROS {
         return Err("Validation Error: Invalid ID, timestamp must be after October 1st, 2024".into());
