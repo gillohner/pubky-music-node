@@ -1,5 +1,6 @@
 //! Node configuration: one TOML file, every section optional with defaults.
 
+use pm_pubky::PmPubkyConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,8 @@ pub struct NodeConfig {
     /// Contact address for outbound User-Agent strings (MusicBrainz requires one).
     pub contact: String,
     pub library: LibraryConfig,
-    pub pubky: PubkyConfig,
+    /// Pinakes, Nexus and network settings (see `pm_pubky::PmPubkyConfig`).
+    pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
 }
 
@@ -20,15 +22,6 @@ pub struct NodeConfig {
 pub struct LibraryConfig {
     /// Folders to scan. Mounted shares count as folders.
     pub folders: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct PubkyConfig {
-    /// `mainnet` or `testnet`.
-    pub network: String,
-    pub pinakes_base: String,
-    pub nexus_base: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,18 +36,8 @@ impl Default for NodeConfig {
             data_dir: PathBuf::from("./data"),
             contact: String::new(),
             library: LibraryConfig::default(),
-            pubky: PubkyConfig::default(),
+            pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
-        }
-    }
-}
-
-impl Default for PubkyConfig {
-    fn default() -> Self {
-        Self {
-            network: "mainnet".into(),
-            pinakes_base: "https://8092--main--pinakes--gil.coder.riginode.xyz".into(),
-            nexus_base: "https://nexus.staging.pubky.app".into(),
         }
     }
 }
@@ -83,9 +66,13 @@ impl NodeConfig {
         self.data_dir.join("library.db")
     }
 
-    pub fn user_agent(&self) -> String {
-        let contact = if self.contact.is_empty() { "no-contact-configured" } else { self.contact.as_str() };
-        format!("pubky-music-node/{} ({contact})", env!("CARGO_PKG_VERSION"))
+    /// The pm-pubky config with the node-level contact filled in.
+    pub fn pubky_config(&self) -> PmPubkyConfig {
+        let mut c = self.pubky.clone();
+        if !self.contact.is_empty() {
+            c.user_agent_contact = self.contact.clone();
+        }
+        c
     }
 }
 
@@ -107,8 +94,8 @@ listen = "0.0.0.0:7788"
         .unwrap();
         assert_eq!(cfg.library.folders.len(), 2);
         assert_eq!(cfg.api.listen, "0.0.0.0:7788");
-        assert_eq!(cfg.pubky.network, "mainnet");
-        assert!(cfg.user_agent().contains("ops@example.org"));
+        assert_eq!(cfg.pubky.network, pm_pubky::Network::Mainnet);
+        assert!(cfg.pubky_config().user_agent().contains("ops@example.org"));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 mod config;
 mod outputs;
 mod play;
+mod social;
 
 use clap::{Parser, Subcommand};
 use config::NodeConfig;
@@ -42,6 +43,54 @@ enum Cmd {
         #[arg(long)]
         headroom_db: Option<f32>,
     },
+    /// Parse and normalize a music URL into its canonical form (ADR 0001).
+    Uri { input: String },
+    /// Read-only calls against the Pinakes index.
+    Pinakes {
+        #[command(subcommand)]
+        cmd: PinakesCmd,
+    },
+    /// Social discovery over Pinakes and Nexus (handoff §8.4).
+    Discover {
+        #[command(subcommand)]
+        cmd: DiscoverCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PinakesCmd {
+    /// Instance info and ingestion lag.
+    Info,
+    /// Cards for one or more URLs.
+    Lookup { uris: Vec<String> },
+    /// Search by tags (comma list, max 5).
+    Search {
+        #[arg(long, default_value = "music")]
+        tags: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiscoverCmd {
+    /// Trending tags and the most active music cards.
+    Trends {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Music cards tagged with a label.
+    ByTag {
+        label: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Music referenced by the people a viewer follows (raw z32 key).
+    Friends {
+        viewer: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -66,6 +115,23 @@ async fn main() -> anyhow::Result<()> {
             let output = play::resolve_output(&registry, &to)?;
             let pcfg = pm_audio::PipelineConfig { volume_db, headroom_db, ..Default::default() };
             play::play(&file, output, pcfg).await?;
+        }
+        Cmd::Uri { input } => social::uri(&input)?,
+        Cmd::Pinakes { cmd } => {
+            let pc = cfg.pubky_config();
+            match cmd {
+                PinakesCmd::Info => social::pinakes_info(&pc).await?,
+                PinakesCmd::Lookup { uris } => social::pinakes_lookup(&pc, &uris).await?,
+                PinakesCmd::Search { tags, limit } => social::pinakes_search(&pc, &tags, limit).await?,
+            }
+        }
+        Cmd::Discover { cmd } => {
+            let pc = cfg.pubky_config();
+            match cmd {
+                DiscoverCmd::Trends { limit } => social::discover_trends(&pc, limit).await?,
+                DiscoverCmd::ByTag { label, limit } => social::discover_by_tag(&pc, &label, limit).await?,
+                DiscoverCmd::Friends { viewer, limit } => social::discover_friends(&pc, &viewer, limit).await?,
+            }
         }
     }
     Ok(())
