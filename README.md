@@ -54,7 +54,7 @@ Excel export, matching by path, file name, then title and artist, and lists what
 Extension API (not yet run against a Core).
 
 Not there yet: subscription streaming services (blocked on accounts and API terms; the source
-factory is the plug point), AirPlay 2, a live Pubky transport for remote access (the node publishes
+factory is the plug point, and `docs/STREAMING-PROVIDERS.md` lists what each provider needs), AirPlay 2, a live Pubky transport for remote access (the node publishes
 its address privately on the homeserver instead, ADR 0008). Hardware runs beyond the FiiO KA17 are
 pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 
