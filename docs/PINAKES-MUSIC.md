@@ -100,3 +100,7 @@ What this repository does with each item of the steward's note:
   Pubky") writes one v1 `PubkyAppTag` per identified track on its canonical MusicBrainz URL; Pinakes then
   joins each to its group. Everything the node writes stays on the v1 specs: bookmarks for favourites
   (ADR 0010), tags (ADR 0011), posts with custom content for playlists, reviews and activity (ADR 0006).
+
+- **Which build the fixtures come from:** 8092 serves pubky/pinakes#21 or later (merged 17:09 UTC as
+  c84d1b8). Its OpenAPI equals the merge commit's and has the `key` and `window` search parameters,
+  which main before #21 (846704d) lacked. Fixtures re-recorded from it on 2026-10-20 evening.
