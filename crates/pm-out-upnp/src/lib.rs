@@ -144,14 +144,14 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
     if addr.starts_with("http://") || addr.starts_with("https://") {
         return Ok(describe(addr)?.into_iter().collect());
     }
-    // "ip mac": a Linn whose UDN is derived from its MAC; search the
-    // description server for the device-specific tail.
-    if let Some((ip, mac)) = addr.split_once(char::is_whitespace) {
-        let ip: std::net::IpAddr = ip
-            .trim()
+    // "ip mac [serial]": a Linn whose UDN is derived from its MAC and serial
+    // number; search the description server for the device-type byte.
+    let words: Vec<&str> = addr.split_whitespace().collect();
+    if words.len() >= 2 {
+        let ip: std::net::IpAddr = words[0]
             .parse()
-            .map_err(|_| UpnpError::Other(format!("{ip} is not an IP address")))?;
-        return linn_by_mac(ip, mac.trim());
+            .map_err(|_| UpnpError::Other(format!("{} is not an IP address", words[0])))?;
+        return linn_by_mac(ip, words[1], words.get(2).copied());
     }
     let dest: SocketAddr = if addr.contains(':') && addr.parse::<SocketAddr>().is_ok() {
         addr.parse().expect("checked")
@@ -218,10 +218,13 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
     Ok(out)
 }
 
-/// Linn UDNs are `4c494e4e-<MAC as 0026-0f22-3d5f>-<12 hex>` where the tail
-/// differs per device family and device type; try the known families with
-/// every last byte, in parallel, on Linn's description port.
-fn linn_by_mac(ip: std::net::IpAddr, mac: &str) -> Result<Vec<Renderer>, UpnpError> {
+/// Linn UDNs are `4c494e4e-<MAC as 0026-0f22-3d5f>-<serial, 8 digits>01<type>`
+/// (observed: Klimax DS `…-3898-012366860171`, Kiko DSM `…-bf92-01303737013f`;
+/// the type byte is 71 for the MediaRenderer, 3f Source, 33 Preamp). With the
+/// serial, every type byte is tried, in parallel, on Linn's description port;
+/// without it the known type bytes are tried with the serial unknown, which
+/// rarely hits.
+fn linn_by_mac(ip: std::net::IpAddr, mac: &str, serial: Option<&str>) -> Result<Vec<Renderer>, UpnpError> {
     let hex: String = mac
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
@@ -232,11 +235,34 @@ fn linn_by_mac(ip: std::net::IpAddr, mac: &str) -> Result<Vec<Renderer>, UpnpErr
     }
     let mid = format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12]);
     let mut candidates: Vec<String> = Vec::new();
-    for family in ["0123668601", "0123456789", "0123668600", "0123668602"] {
-        for b in 0..=255u8 {
-            candidates.push(format!("4c494e4e-{mid}-{family}{b:02x}"));
+    match serial {
+        Some(sn) => {
+            let digits: String = sn.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() || digits.len() > 8 {
+                return Err(UpnpError::Other(format!(
+                    "{sn} is not a Linn serial number (up to 8 digits)"
+                )));
+            }
+            let padded = format!("{digits:0>8}");
+            for b in [0x71u8, 0x3f, 0x33].into_iter().chain(0..=255u8) {
+                candidates.push(format!("4c494e4e-{mid}-{padded}01{b:02x}"));
+            }
+            // Some firmware writes the type under a different middle byte.
+            for b in [0x71u8, 0x3f, 0x33] {
+                for m in ["00", "02", "03"] {
+                    candidates.push(format!("4c494e4e-{mid}-{padded}{m}{b:02x}"));
+                }
+            }
+        }
+        None => {
+            for family in ["0123668601", "0123456789", "0130373701"] {
+                for b in 0..=255u8 {
+                    candidates.push(format!("4c494e4e-{mid}-{family}{b:02x}"));
+                }
+            }
         }
     }
+    candidates.dedup();
     let base = format!("http://{ip}:55178");
     if std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, 55178), Duration::from_millis(1500)).is_err()
     {
@@ -275,10 +301,16 @@ fn linn_by_mac(ip: std::net::IpAddr, mac: &str) -> Result<Vec<Renderer>, UpnpErr
     out.sort_by(|a, b| a.udn.cmp(&b.udn));
     out.dedup_by(|a, b| a.udn == b.udn);
     if out.is_empty() {
-        return Err(UpnpError::Other(format!(
-            "no renderer description found on {base} for MAC {mac} (tried {} UDN candidates); the device's UDN is outside the known patterns, so enter its description URL from the Linn app",
-            candidates.len()
-        )));
+        return Err(UpnpError::Other(match serial {
+            Some(sn) => format!(
+                "no renderer description found on {base} for MAC {mac} and serial {sn} (tried {} UDN candidates); check the serial number on the back of the device or in the Linn app",
+                candidates.len()
+            ),
+            None => format!(
+                "no renderer description found on {base} for MAC {mac} (tried {} UDN candidates); add the device's serial number as a third word (\"ip mac serial\"), it is the middle of the UDN",
+                candidates.len()
+            ),
+        }));
     }
     Ok(out)
 }
@@ -592,8 +624,17 @@ mod tests {
         assert_eq!(mid, "0026-0f22-3d5f");
         drop(listener);
         let _ = port;
-        assert!(linn_by_mac(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), "not-a-mac").is_err());
+        assert!(linn_by_mac(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), "not-a-mac", None).is_err());
+        assert!(linn_by_mac(
+            std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "00:26:0f:22:3d:5f",
+            Some("x")
+        )
+        .is_err());
         let err = probe_address("127.0.0.1 00:26:0f:22:3d:5f", Duration::from_millis(100)).unwrap_err();
+        assert!(err.to_string().contains("55178"), "{err}");
+        let err =
+            probe_address("127.0.0.1 00:26:0f:22:3d:5f 1236686", Duration::from_millis(100)).unwrap_err();
         assert!(err.to_string().contains("55178"), "{err}");
     }
 
