@@ -65,7 +65,10 @@ H. Newer screens (web UI at http://<laptop-ip>:7788/ and the app): Settings → 
    "On Pubky" row; an artist page with a portrait and biography (needs MusicBrainz artist ids in
    the tags); Radio: search "fip", play on the KA17 zone and on "This browser", watch the live
    title change; Favourites; search for an album title and an artist name. Say which of these
-   produced an error toast and paste the node log line.
+   produced an error toast and paste the node log line. Internet Archive: search "Grateful Dead
+   1977", open an item, play it on the KA17 zone (FLAC items should show a Lossless/BitPerfect
+   path, MP3 ones Lossy), heart it, add it to a playlist and play that playlist. In the Subsonic
+   client, check that the saved radio stations appear under Internet Radio and play.
 
 Commit on a branch `laptop-test-<date>`, push, open a PR against main with the results table,
 hw_params captures, screenshots of the app, the Subsonic client's error log if any, and the fixes.
