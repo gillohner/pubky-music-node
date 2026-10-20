@@ -131,6 +131,10 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         Library::open(&db).unwrap(),
         OutputRegistry::new(),
     );
+    // One zone on a null output for the jukebox calls.
+    let out = std::sync::Arc::new(pm_zones::outputs::NullOutput::new());
+    s.outputs.register(out.clone());
+    s.create_zone("Test zone", out);
     let app = router(s.clone());
     let salt = "abc123";
     let mut h = Md5::new();
@@ -322,6 +326,29 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     assert!(r["albumList2"]["album"].as_array().unwrap().is_empty(), "{r}");
     let r = call(&app, &format!("/rest/getAlbumList2?type=byYear&{auth}")).await;
     assert_eq!(r["albumList2"]["album"].as_array().unwrap().len(), 2);
+
+    // Jukebox: a Subsonic client drives the node's zone.
+    let r = call(
+        &app,
+        &format!("/rest/jukeboxControl?action=set&id={get_lucky}&id={instant_crush}&{auth}"),
+    )
+    .await;
+    assert_eq!(r["jukeboxStatus"]["currentIndex"], -1, "{r}");
+    assert_eq!(r["jukeboxStatus"]["playing"], false);
+    let r = call(&app, &format!("/rest/jukeboxControl?action=get&{auth}")).await;
+    let entries = r["jukeboxPlaylist"]["entry"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{r}");
+    assert_eq!(entries[1]["title"], "Instant Crush");
+    let r = call(&app, &format!("/rest/jukeboxControl?action=skip&index=1&{auth}")).await;
+    assert_eq!(r["jukeboxStatus"]["currentIndex"], 1, "{r}");
+    let r = call(&app, &format!("/rest/jukeboxControl?action=stop&{auth}")).await;
+    assert_eq!(r["jukeboxStatus"]["playing"], false);
+    let r = call(&app, &format!("/rest/jukeboxControl?action=clear&{auth}")).await;
+    assert_eq!(r["jukeboxStatus"]["currentIndex"], -1);
+    let r = call(&app, &format!("/rest/jukeboxControl?action=get&{auth}")).await;
+    assert!(r["jukeboxPlaylist"]["entry"].as_array().unwrap().is_empty());
+    let r = call(&app, &format!("/rest/jukeboxControl?action=set&zone=nope&{auth}")).await;
+    assert_eq!(r["error"]["code"], 70);
 
     // Lyrics: structured (OpenSubsonic) and legacy plain text; none for untagged songs.
     let r = call(&app, &format!("/rest/getLyricsBySongId?id={get_lucky}&{auth}")).await;

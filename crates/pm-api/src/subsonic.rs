@@ -14,10 +14,11 @@
 
 use crate::activity::resolve_described;
 use crate::playlists::{self, store};
+use crate::sources::NodeSources;
 use crate::state::NodeState;
 use crate::types::DescribedTrack;
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -27,6 +28,7 @@ use pm_library::{Library, MusicPostRow};
 use pm_model::{Album, MusicUri, Track, TrackId};
 use pm_pubky::schemas::post::TYPE_PLAYLIST;
 use pm_pubky::{MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
+use pm_zones::{Insert, QueueItem, ZoneId};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -224,17 +226,29 @@ fn to_xml(body: &Map<String, Value>) -> String {
 async fn rest(
     State(s): State<Arc<NodeState>>,
     Path(method): Path<String>,
-    Query(query): Query<Params>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let mut params = query;
+    // Last value wins in the map (what clients expect for `v`, `c`, `f`); every
+    // `id` is also kept in order for calls that take several (jukebox add).
+    let mut params = Params::new();
+    let mut ids = Vec::new();
+    for (k, v) in url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
+        if k == "id" {
+            ids.push(v.to_string());
+        }
+        params.insert(k.into_owned(), v.into_owned());
+    }
     let is_form = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"));
     if is_form && !body.is_empty() {
         for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
+            if k == "id" {
+                ids.push(v.to_string());
+            }
             params.entry(k.into_owned()).or_insert(v.into_owned());
         }
     }
@@ -243,7 +257,7 @@ async fn rest(
     if let Err(e) = authenticate(&s, &params) {
         return error_response(fmt, e);
     }
-    match dispatch(&s, &method, &params, &headers).await {
+    match dispatch(&s, &method, &params, &ids, &headers).await {
         Ok(Reply::Json(m)) => envelope(fmt, "ok", m),
         Ok(Reply::Raw(r)) => r,
         Err(e) => error_response(fmt, e),
@@ -517,14 +531,165 @@ fn multi(p: &Params, key: &str) -> Vec<String> {
 
 // ---- dispatch ----
 
+/// The zone a Subsonic client's jukebox drives: `?zone=` picks (and
+/// remembers) one; otherwise the remembered one, else the first by name.
+fn jukebox_zone(s: &NodeState, p: &Params) -> Result<Arc<pm_zones::Zone>, SubErr> {
+    const KEY: &str = "subsonic.jukebox_zone";
+    let lib = s.library.lock().expect("library poisoned");
+    if let Some(z) = p.get("zone").filter(|z| !z.is_empty()) {
+        let zone = s
+            .zones
+            .get(&ZoneId::new(z))
+            .ok_or_else(|| SubErr::new(70, format!("no zone {z}")))?;
+        lib.set_setting(KEY, z)
+            .map_err(|e| SubErr::new(0, e.to_string()))?;
+        return Ok(zone);
+    }
+    if let Some(z) = lib.get_setting(KEY).map_err(|e| SubErr::new(0, e.to_string()))? {
+        if let Some(zone) = s.zones.get(&ZoneId::new(&z)) {
+            return Ok(zone);
+        }
+    }
+    let mut zones = s.zones.list();
+    zones.sort_by(|a, b| a.name.cmp(&b.name));
+    zones
+        .first()
+        .and_then(|z| s.zones.get(&z.id))
+        .ok_or_else(|| SubErr::new(0, "the node has no zones"))
+}
+
+fn jukebox_status(zone: &pm_zones::Zone) -> Value {
+    let st = zone.state();
+    let mut v = json!({
+        "currentIndex": st.queue_index.map(|i| i as i64).unwrap_or(-1),
+        "playing": st.transport == pm_zones::Transport::Playing,
+        "gain": 1.0,
+    });
+    if let Some(np) = &st.now_playing {
+        v["position"] = json!(np.position_ms / 1000);
+    }
+    v
+}
+
 async fn dispatch(
     s: &Arc<NodeState>,
     method: &str,
     p: &Params,
+    ids: &[String],
     headers: &HeaderMap,
 ) -> Result<Reply, SubErr> {
     let mut m = Map::new();
     match method {
+        // Jukebox: a Subsonic client driving one of the node's zones.
+        "jukeboxControl" => {
+            let action = want(p, "action")?;
+            let zone = jukebox_zone(s, p)?;
+            let mut playlist = false;
+            match action.as_str() {
+                "get" => playlist = true,
+                "status" => {}
+                "set" | "add" => {
+                    let items: Vec<QueueItem> = {
+                        let lib = s.library.lock().expect("library poisoned");
+                        let mut items = Vec::new();
+                        for id in ids {
+                            let tid = parse_id(id, "")
+                                .ok_or_else(|| SubErr::new(70, format!("unknown song {id}")))?;
+                            let t = lib
+                                .get_track(TrackId(tid))
+                                .map_err(|e| SubErr::new(0, e.to_string()))?
+                                .ok_or_else(|| SubErr::new(70, format!("unknown song {id}")))?;
+                            if let Some(it) = NodeSources::item_for(&t) {
+                                items.push(it);
+                            }
+                        }
+                        items
+                    };
+                    if action == "set" {
+                        zone.stop();
+                        zone.clear();
+                    }
+                    if !items.is_empty() {
+                        zone.enqueue(items, Insert::End);
+                    }
+                }
+                "start" => {
+                    let st = zone.state();
+                    if st.transport == pm_zones::Transport::Stopped && !st.queue.is_empty() {
+                        zone.play_index(st.queue_index.unwrap_or(0));
+                    } else {
+                        zone.play();
+                    }
+                }
+                "stop" => zone.pause(),
+                "skip" => {
+                    let index = num(p, "index", 0) as usize;
+                    zone.play_index(index);
+                    let offset = num(p, "offset", 0) as u64;
+                    if offset > 0 {
+                        let mut events = zone.subscribe();
+                        let started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                            loop {
+                                match events.recv().await {
+                                    Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
+                                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                                    Ok(_) => {}
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if started {
+                            zone.seek_ms(offset * 1000);
+                        }
+                    }
+                }
+                "remove" => {
+                    let index = num(p, "index", 0) as usize;
+                    if let Some(it) = zone.queue().get(index) {
+                        zone.remove(it.id);
+                    }
+                }
+                "clear" => {
+                    zone.stop();
+                    zone.clear();
+                }
+                "shuffle" => {
+                    zone.shuffle_upcoming();
+                }
+                "setGain" => {
+                    // 0.0–1.0 → dB on outputs with hardware volume; others keep playing.
+                    let gain: f32 = p.get("gain").and_then(|g| g.parse().ok()).unwrap_or(1.0);
+                    let db = if gain <= 0.0 {
+                        -60.0
+                    } else {
+                        (20.0 * gain.log10()).clamp(-60.0, 0.0)
+                    };
+                    let _ = zone.set_volume(pm_model::Volume::Db(db)).await;
+                }
+                other => return Err(SubErr::new(0, format!("unknown jukebox action {other}"))),
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), zone.wait_acked()).await;
+            let mut status = jukebox_status(&zone);
+            if playlist {
+                let lib = s.library.lock().expect("library poisoned");
+                let entries: Vec<Value> = zone
+                    .queue()
+                    .iter()
+                    .filter_map(|it| {
+                        it.uri
+                            .strip_prefix(crate::sources::TRACK_SCHEME)
+                            .and_then(|r| r.parse::<i64>().ok())
+                            .and_then(|id| lib.get_track(TrackId(id)).ok().flatten())
+                            .map(|t| song_json(&t))
+                    })
+                    .collect();
+                status["entry"] = json!(entries);
+                m.insert("jukeboxPlaylist".into(), status);
+            } else {
+                m.insert("jukeboxStatus".into(), status);
+            }
+        }
         "ping" => {}
         "getLicense" => {
             m.insert(

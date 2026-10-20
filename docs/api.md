@@ -110,6 +110,7 @@ alphabetical, byYear), `getSong`, `getRandomSongs`, `search2/3`, `stream`/`downl
 file, `Range` supported, no transcoding), `getCoverArt`, `getPlaylists`, `getPlaylist`,
 `createPlaylist`, `updatePlaylist`, `deletePlaylist` (the same playlists as `/v1`, so tracks need a
 canonical identity), `scrobble` (private activity), `startScan`, `getScanStatus`,
-`getLyrics` (plain text by artist and title) and `getLyricsBySongId` (OpenSubsonic `songLyrics`, timed lines when the source was), plus empty
+`getLyrics` (plain text by artist and title) and `getLyricsBySongId` (OpenSubsonic `songLyrics`, timed lines when the source was),
+`jukeboxControl` (drives one of the node's zones from a Subsonic client: `set`/`add`/`clear`/`remove`/`shuffle`/`start`/`stop`/`skip`/`setGain`/`get`/`status`; `?zone=<id>` picks and remembers the zone, otherwise the first by name), plus empty
 answers for info calls. Ids: songs are track ids, albums `al-<id>`,
 artists `ar-<id>`, playlists `pl-<id>`.
