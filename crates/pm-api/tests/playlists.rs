@@ -34,6 +34,7 @@ fn write_wav(path: &std::path::Path, title: &str, mbid: Option<&str>) {
     t.set_title(title);
     t.set_artist("Tester");
     t.set_album("Lists");
+    t.set_genre("Disco; Funk");
     if let Some(m) = mbid {
         t.add_frame(id3::frame::ExtendedText {
             description: "MusicBrainz Track Id".into(),
@@ -496,6 +497,62 @@ async fn playlist_lifecycle() {
     let (_, mine) = call(&app, "GET", &format!("/v1/tags?uri={}", urlencoding(&uri)), None).await;
     assert_eq!(mine["tags"].as_array().unwrap().len(), 1);
     assert_eq!(mine["tags"][0]["label"], "funk");
+
+    // Genres come from the files' tags, split on separators.
+    let (st, genres) = call(&app, "GET", "/v1/library/genres", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let names: Vec<&str> = genres
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["value"].as_str().or(g["name"].as_str()).unwrap())
+        .collect();
+    assert_eq!(names, vec!["Disco", "Funk"], "{genres}");
+    assert_eq!(genres[0]["tracks"], 2);
+    let gid = genres[0]["id"].as_i64().unwrap();
+    let (st, d) = call(&app, "GET", &format!("/v1/library/genres/{gid}"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(d["genre"]["name"], "Disco");
+    assert_eq!(d["tracks"].as_array().unwrap().len(), 2);
+    assert_eq!(d["tracks"][0]["genres"], serde_json::json!(["Disco", "Funk"]));
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getGenres?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(sub["subsonic-response"]["genres"]["genre"][0]["value"], "Disco");
+    assert_eq!(sub["subsonic-response"]["genres"]["genre"][0]["songCount"], 2);
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getSongsByGenre?genre=funk&count=5&f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(
+        sub["subsonic-response"]["songsByGenre"]["song"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        sub["subsonic-response"]["songsByGenre"]["song"][0]["genre"],
+        "Disco"
+    );
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getAlbumList2?type=byGenre&genre=Disco&f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert!(!sub["subsonic-response"]["albumList2"]["album"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 fn urlencoding(s: &str) -> String {

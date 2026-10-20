@@ -3,7 +3,7 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
-    Favourites, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Tags, TransportAction,
+    Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Tags, TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -104,6 +104,8 @@ pub enum Cmd {
     LoadCover(i64),
     LoadArtists,
     LoadArtist(i64),
+    LoadGenres,
+    LoadGenre(i64),
     Discover(DiscoverKind),
     CreateZone {
         name: String,
@@ -161,6 +163,8 @@ pub enum Msg {
     PubkyLoginDone(Option<String>),
     Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
+    Genres(Vec<pm_library::GenreSummary>),
+    Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
     Error(String),
@@ -566,6 +570,8 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadArtists => out.send(Msg::Artists(c.artists().await?)),
         Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),
+        Cmd::LoadGenres => out.send(Msg::Genres(c.genres().await?)),
+        Cmd::LoadGenre(id) => out.send(Msg::Genre(Box::new(c.genre(id).await?))),
         Cmd::LoadCover(id) => {
             let decoded = match c.album_cover(id).await? {
                 Some((_, bytes)) => tokio::task::spawn_blocking(move || {

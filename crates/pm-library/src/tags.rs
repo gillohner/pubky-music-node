@@ -48,6 +48,21 @@ pub struct TagSet {
     pub acoustid: Option<String>,
     pub replaygain_track_gain_db: Option<f32>,
     pub replaygain_album_gain_db: Option<f32>,
+    /// Genres, split on `;`, `/`, `,` and NUL, trimmed, de-duplicated case-insensitively.
+    pub genres: Vec<String>,
+}
+
+impl TagSet {
+    /// Add genres from one tag value (which may list several).
+    pub fn push_genre(&mut self, value: &str) {
+        for g in value.split([';', '/', ',', '\0']) {
+            let g = g.trim();
+            if g.is_empty() || self.genres.iter().any(|x| x.eq_ignore_ascii_case(g)) {
+                continue;
+            }
+            self.genres.push(g.to_string());
+        }
+    }
 }
 
 /// An embedded image.
@@ -274,6 +289,9 @@ impl TagSet {
             replaygain_track_gain_db,
             replaygain_album_gain_db
         );
+        if !other.genres.is_empty() {
+            self.genres = other.genres;
+        }
         if !other.artists.is_empty() {
             self.artists = other.artists;
         }
@@ -448,6 +466,7 @@ fn merge_symphonia_tags(tags: &mut TagSet, list: &[Tag]) {
                     tags.set_upc(s)
                 }
                 StandardTag::AcoustIdId(s) => tags.acoustid = Some(s.to_string()),
+                StandardTag::Genre(s) => tags.push_genre(s),
                 StandardTag::ReplayGainTrackGain(s) => tags.replaygain_track_gain_db = parse_gain(s),
                 StandardTag::ReplayGainAlbumGain(s) => tags.replaygain_album_gain_db = parse_gain(s),
                 _ => {}
@@ -500,6 +519,9 @@ pub fn from_id3(t: &id3::Tag) -> TagSet {
     };
     if let Some(isrc) = t.text_for_frame_id("TSRC") {
         tags.set_isrc(isrc);
+    }
+    if let Some(g) = t.genre_parsed() {
+        tags.push_genre(&g);
     }
     for et in t.extended_texts() {
         tags.apply_named(&et.description, &et.value);

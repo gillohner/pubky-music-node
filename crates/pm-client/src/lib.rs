@@ -330,6 +330,14 @@ impl NodeClient {
             .tracks)
     }
 
+    pub async fn genres(&self) -> Result<Vec<pm_library::GenreSummary>> {
+        self.get("library/genres", &[]).await
+    }
+
+    pub async fn genre(&self, id: i64) -> Result<GenreDetail> {
+        self.get(&format!("library/genres/{id}"), &[]).await
+    }
+
     pub async fn artists(&self) -> Result<Vec<pm_library::ArtistSummary>> {
         self.get("library/artists", &[]).await
     }

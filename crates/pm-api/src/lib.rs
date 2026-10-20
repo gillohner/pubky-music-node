@@ -110,6 +110,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
+        .route("/library/genres", get(genres))
+        .route("/library/genres/{id}", get(genre))
         .route("/library/albums", get(albums))
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/albums/{id}/cover", get(album_cover))
@@ -655,6 +657,22 @@ async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
             .expect("library poisoned")
             .list_albums(p.after, limit)?,
     ))
+}
+
+async fn genres(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::GenreSummary>> {
+    Ok(Json(s.library.lock().expect("library poisoned").list_genres()?))
+}
+
+async fn genre(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<GenreDetail> {
+    let lib = s.library.lock().expect("library poisoned");
+    let genre = lib
+        .get_genre(id)?
+        .ok_or_else(|| ApiError::not_found(format!("no genre {id}")))?;
+    Ok(Json(GenreDetail {
+        albums: lib.genre_albums(id)?,
+        tracks: lib.genre_tracks(id, 500)?,
+        genre,
+    }))
 }
 
 async fn album_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {

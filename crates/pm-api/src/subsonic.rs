@@ -347,6 +347,9 @@ fn song_json(t: &Track) -> Value {
     if let Some(a) = t.artists.first().and_then(|a| a.id) {
         m["artistId"] = json!(format!("ar-{a}"));
     }
+    if let Some(g) = t.genres.first() {
+        m["genre"] = json!(g);
+    }
     m
 }
 
@@ -542,7 +545,29 @@ async fn dispatch(
             );
         }
         "getGenres" => {
-            m.insert("genres".into(), json!({"genre": []}));
+            let lib = s.library.lock().expect("library poisoned");
+            let list: Vec<Value> = lib
+                .list_genres()?
+                .iter()
+                .map(|g| json!({"value": g.name, "songCount": g.tracks, "albumCount": g.albums}))
+                .collect();
+            m.insert("genres".into(), json!({"genre": list}));
+        }
+        "getSongsByGenre" => {
+            let name = want(p, "genre")?;
+            let count = num(p, "count", 10).min(500);
+            let offset = num(p, "offset", 0);
+            let lib = s.library.lock().expect("library poisoned");
+            let songs: Vec<Value> = match lib.genre_by_name(&name)? {
+                Some(g) => lib
+                    .genre_tracks(g.id, offset + count)?
+                    .iter()
+                    .skip(offset as usize)
+                    .map(song_json)
+                    .collect(),
+                None => Vec::new(),
+            };
+            m.insert("songsByGenre".into(), json!({"song": songs}));
         }
         "getUser" => {
             m.insert(
@@ -675,7 +700,16 @@ async fn dispatch(
                     all.truncate(size as usize);
                     all
                 }
-                "starred" | "byGenre" => Vec::new(),
+                "starred" => Vec::new(),
+                "byGenre" => match p.get("genre").and_then(|g| lib.genre_by_name(g).ok().flatten()) {
+                    Some(g) => lib
+                        .genre_albums(g.id)?
+                        .into_iter()
+                        .skip(offset as usize)
+                        .take(size as usize)
+                        .collect(),
+                    None => Vec::new(),
+                },
                 _ => {
                     let mut all = lib.list_albums(None, 5000)?;
                     match kind {

@@ -276,6 +276,7 @@ pub fn track_from_tags(file: AudioFile, t: &TagSet) -> Track {
         canonical: canonical::assign(t),
         replaygain_track_gain_db: t.replaygain_track_gain_db,
         replaygain_album_gain_db: t.replaygain_album_gain_db,
+        genres: t.genres.clone(),
     }
 }
 

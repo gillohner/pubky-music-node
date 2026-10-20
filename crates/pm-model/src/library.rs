@@ -92,6 +92,9 @@ pub struct Track {
     pub canonical: Option<(MusicUri, Confidence)>,
     pub replaygain_track_gain_db: Option<f32>,
     pub replaygain_album_gain_db: Option<f32>,
+    /// Genres from the file's tags, as written (several when the tag lists several).
+    #[serde(default)]
+    pub genres: Vec<String>,
 }
 
 impl Track {

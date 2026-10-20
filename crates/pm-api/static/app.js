@@ -308,7 +308,7 @@
   const main = $('#main');
   const setView = (v, arg) => {
     state.view = v; state.viewArg = arg;
-    $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'playlist' && b.dataset.view === 'playlists')));
+    $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists')));
     $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
     render();
@@ -514,6 +514,24 @@
           bindTagRow({ artist_id: d.artist.id });
           $('#artplay').onclick = async () => { try { const r = await api('GET', `/library/artists/${state.viewArg}/tracks`); playTracks(r.tracks, true); } catch (er) { toast(er.message, 'error'); } };
           $('#heart').onclick = async () => { try { await setFavourite({ artist_id: d.artist.id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
+          break;
+        }
+        case 'genres': {
+          loading();
+          const genres = await api('GET', '/library/genres');
+          if (state.view !== 'genres') return;
+          main.innerHTML = pageHead('Genres', genres.length) + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${g.tracks} track${g.tracks === 1 ? '' : 's'}</div></button>`).join('')}</div>` : emptyState('genre', 'No genres yet', 'Genres come from the files\' tags; tag your music and rescan.'));
+          $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
+          break;
+        }
+        case 'genre': {
+          const d = await api('GET', `/library/genres/${state.viewArg}`);
+          if (state.view !== 'genre') return;
+          main.innerHTML = backBtn('genres', 'Genres') + `<div class="page-head"><div><div class="eyebrow">Genre</div><h1>${esc(d.genre.name)}</h1><div class="muted">${d.genre.albums} albums · ${d.genre.tracks} tracks</div></div><div class="actions"><button class="btn primary" id="gplay">${icon('play')} Play all</button></div></div>`
+            + (d.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(d.albums)}</section>` : '')
+            + `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(d.tracks, { key: 'genre' })}</section>`;
+          lists.genre = d.tracks;
+          $('#gplay').onclick = () => playTracks(d.tracks, true);
           break;
         }
         case 'tracks': {

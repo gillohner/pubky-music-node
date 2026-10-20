@@ -71,6 +71,8 @@ enum View {
     Album(i64),
     Artists,
     Artist(i64),
+    Genres,
+    Genre(i64),
     Playlists,
     Playlist(String),
     Discover,
@@ -123,6 +125,8 @@ struct App {
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
+    genres: Vec<pm_library::GenreSummary>,
+    genre_details: HashMap<i64, pm_api::types::GenreDetail>,
     artist_details: HashMap<i64, ArtistDetail>,
     discover_kind: DiscoverKind,
     discover: Option<(DiscoverKind, DiscoverPage)>,
@@ -195,6 +199,8 @@ impl App {
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
+            genres: Vec::new(),
+            genre_details: HashMap::new(),
             artist_details: HashMap::new(),
             discover_kind: DiscoverKind::Trends,
             discover: None,
@@ -309,6 +315,11 @@ impl App {
                     self.toast("scan started");
                 }
                 Msg::Artists(a) => self.artists = a,
+                Msg::Genres(g) => self.genres = g,
+                Msg::Genre(d) => {
+                    self.remember_tracks(d.tracks.iter());
+                    self.genre_details.insert(d.genre.id, *d);
+                }
                 Msg::PubkyLoginUrl(url) => {
                     let tex = qr_texture(&self.cover_ctx, &url);
                     self.login = Some((url, tex, std::time::Instant::now()));
@@ -687,6 +698,7 @@ impl App {
             ("Favourites", View::Favourites),
             ("Albums", View::Albums),
             ("Artists", View::Artists),
+            ("Genres", View::Genres),
             ("Tracks", View::Tracks),
             ("Playlists", View::Playlists),
             ("Radio", View::Radio),
@@ -694,6 +706,7 @@ impl App {
             let selected = self.view == view
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
                 || matches!((&self.view, &view), (View::Artist(_), View::Artists))
+                || matches!((&self.view, &view), (View::Genre(_), View::Genres))
                 || matches!((&self.view, &view), (View::Playlist(_), View::Playlists));
             if theme::nav_item(ui, selected, label).clicked() {
                 if view == View::Tracks && self.tracks.is_empty() {
@@ -704,6 +717,9 @@ impl App {
                 }
                 if view == View::Artists {
                     self.backend.send(Cmd::LoadArtists);
+                }
+                if view == View::Genres {
+                    self.backend.send(Cmd::LoadGenres);
                 }
                 if view == View::Home {
                     self.backend.send(Cmd::LoadHome);
@@ -801,6 +817,8 @@ impl App {
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
             View::Artist(id) => self.artist_view(ui, id),
+            View::Genres => self.genres_view(ui),
+            View::Genre(id) => self.genre_view(ui, id),
             View::Discover => self.discover_view(ui),
             View::Playlists => self.playlists_view(ui),
             View::Playlist(id) => self.playlist_view(ui, &id),
@@ -1144,6 +1162,87 @@ impl App {
                 ui.add_space(20.0);
                 ui.weak("Search for a station above, or save one to see it here.");
             }
+        });
+    }
+
+    fn genres_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Genres");
+            ui.weak(format!("{}", self.genres.len()));
+        });
+        if self.genres.is_empty() {
+            ui.weak("No genres yet. Genres come from the files' tags.");
+            return;
+        }
+        let genres = self.genres.clone();
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                for g in &genres {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
+                    let _ = r;
+                    let label = egui::RichText::new(format!("{}  ", g.name)).size(15.0).strong();
+                    let sub = egui::RichText::new(format!(
+                        "{} album{} · {} track{}",
+                        g.albums,
+                        if g.albums == 1 { "" } else { "s" },
+                        g.tracks,
+                        if g.tracks == 1 { "" } else { "s" }
+                    ))
+                    .size(12.0)
+                    .color(theme::MUTED);
+                    let resp = egui::Frame::new()
+                        .fill(theme::SURFACE)
+                        .stroke(egui::Stroke::new(1.0, theme::LINE))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(16, 12))
+                        .show(ui, |ui| {
+                            ui.set_min_width(180.0);
+                            ui.vertical(|ui| {
+                                ui.label(label);
+                                ui.label(sub);
+                            });
+                        })
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        if !self.genre_details.contains_key(&g.id) {
+                            self.backend.send(Cmd::LoadGenre(g.id));
+                        }
+                        self.view = View::Genre(g.id);
+                    }
+                }
+            });
+        });
+    }
+
+    fn genre_view(&mut self, ui: &mut egui::Ui, id: i64) {
+        ui.horizontal(|ui| {
+            if ui.button("‹ Genres").clicked() {
+                self.view = View::Genres;
+            }
+        });
+        let Some(d) = self.genre_details.get(&id).cloned() else {
+            ui.spinner();
+            return;
+        };
+        ui.add_space(6.0);
+        theme::eyebrow(ui, "Genre");
+        ui.horizontal(|ui| {
+            ui.heading(egui::RichText::new(&d.genre.name).size(26.0).strong());
+            if ui.add(theme::primary("▶  Play all")).clicked() {
+                self.play_tracks(&d.tracks, true, QueueAt::End);
+            }
+        });
+        ui.weak(format!("{} albums · {} tracks", d.genre.albums, d.genre.tracks));
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if !d.albums.is_empty() {
+                self.album_row(ui, "Albums", &d.albums, None);
+            }
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("Tracks").strong().size(16.0));
+            self.track_table(ui, &d.tracks, true);
         });
     }
 

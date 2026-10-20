@@ -21,6 +21,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("migrations/0005_plays.sql")),
     (6, include_str!("migrations/0006_favourites.sql")),
     (7, include_str!("migrations/0007_tags.sql")),
+    (8, include_str!("migrations/0008_genres.sql")),
 ];
 
 pub struct Library {
@@ -57,6 +58,15 @@ pub struct FavouriteRow {
     pub created_at: i64,
     pub synced_at: Option<i64>,
     pub deleted: bool,
+}
+
+/// A genre as the browse views list it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GenreSummary {
+    pub id: i64,
+    pub name: String,
+    pub tracks: u64,
+    pub albums: u64,
 }
 
 /// One of the user's own tags (a v1 PubkyAppTag) as stored locally.
@@ -224,6 +234,7 @@ impl Library {
                     ],
                 )?;
                 tx.execute("DELETE FROM track_artists WHERE track_id = ?1", params![id])?;
+                tx.execute("DELETE FROM track_genres WHERE track_id = ?1", params![id])?;
                 id
             }
             None => {
@@ -247,6 +258,18 @@ impl Library {
                 params![track_id, artist_id, pos as i64],
             )?;
         }
+        for g in &track.genres {
+            tx.execute("INSERT OR IGNORE INTO genres(name) VALUES (?1)", params![g])?;
+            let gid: i64 = tx.query_row(
+                "SELECT id FROM genres WHERE name = ?1 COLLATE NOCASE",
+                params![g],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO track_genres(track_id, genre_id) VALUES (?1, ?2)",
+                params![track_id, gid],
+            )?;
+        }
         let f = &track.file;
         tx.execute(
             "INSERT INTO files(track_id, path, size_bytes, mtime_unix, container, sample_kind, rate_hz, bits, channels, duration_ms, missing)
@@ -265,7 +288,11 @@ impl Library {
             .map(|a| a.name.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let album_text = track.album.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+        let mut album_text = track.album.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+        for g in &track.genres {
+            album_text.push(' ');
+            album_text.push_str(g);
+        }
         tx.execute("DELETE FROM tracks_fts WHERE track_id = ?1", params![track_id])?;
         tx.execute(
             "INSERT INTO tracks_fts(track_id, title, artist, album) VALUES (?1, ?2, ?3, ?4)",
@@ -534,6 +561,66 @@ impl Library {
             params![id, at_micros],
         )?;
         Ok(())
+    }
+
+    // ----- genres -----------------------------------------------------------
+
+    /// Every genre with track and album counts, by name.
+    pub fn list_genres(&self) -> Result<Vec<GenreSummary>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT g.id, g.name, COUNT(DISTINCT t.id), COUNT(DISTINCT t.album_id)
+             FROM genres g JOIN track_genres tg ON tg.genre_id = g.id JOIN tracks t ON t.id = tg.track_id
+             GROUP BY g.id ORDER BY g.name COLLATE NOCASE",
+        )?;
+        let v = stmt
+            .query_map([], |r| {
+                Ok(GenreSummary {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    tracks: r.get::<_, i64>(2)?.max(0) as u64,
+                    albums: r.get::<_, i64>(3)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn get_genre(&self, id: i64) -> Result<Option<GenreSummary>> {
+        Ok(self.list_genres()?.into_iter().find(|g| g.id == id))
+    }
+
+    pub fn genre_by_name(&self, name: &str) -> Result<Option<GenreSummary>> {
+        Ok(self
+            .list_genres()?
+            .into_iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name.trim())))
+    }
+
+    /// Albums with at least one track of the genre, by artist then title.
+    pub fn genre_albums(&self, genre_id: i64) -> Result<Vec<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+             FROM albums al JOIN tracks t ON t.album_id = al.id JOIN track_genres tg ON tg.track_id = t.id
+             WHERE tg.genre_id = ?1 ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
+        )?;
+        let v = stmt
+            .query_map(params![genre_id], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
+    }
+
+    pub fn genre_tracks(&self, genre_id: i64, limit: u32) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} JOIN track_genres tg ON tg.track_id = t.id WHERE tg.genre_id = ?1
+             ORDER BY al.album_artist COLLATE NOCASE, al.title COLLATE NOCASE, t.disc_no, t.track_no LIMIT ?2"
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![genre_id, limit as i64], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
     }
 
     // ----- tags -------------------------------------------------------------
@@ -979,6 +1066,10 @@ impl Library {
             "DELETE FROM artists WHERE id NOT IN (SELECT DISTINCT artist_id FROM track_artists)",
             [],
         )?;
+        tx.execute(
+            "DELETE FROM genres WHERE id NOT IN (SELECT DISTINCT genre_id FROM track_genres)",
+            [],
+        )?;
         tx.execute("DELETE FROM folders WHERE path = ?1", params![root_s])?;
         tx.commit()?;
         Ok((files, tracks))
@@ -1212,6 +1303,7 @@ fn row_to_track_raw(r: &Row<'_>) -> rusqlite::Result<RawTrack> {
         canonical: None,
         replaygain_track_gain_db: r.get(12)?,
         replaygain_album_gain_db: r.get(13)?,
+        genres: Vec::new(),
     };
     let raw_strings = RawStrings {
         recording_mbid: get_str(6)?,
@@ -1292,6 +1384,12 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
             mbid: opt_mbid(mbid, "artists.mbid")?,
         });
     }
+    let mut stmt = conn.prepare_cached(
+        "SELECT g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id WHERE tg.track_id = ?1 ORDER BY g.name COLLATE NOCASE",
+    )?;
+    track.genres = stmt
+        .query_map(params![id], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(track)
 }
 
@@ -1393,6 +1491,7 @@ pub(crate) mod tests_support {
             )),
             replaygain_track_gain_db: Some(-7.35),
             replaygain_album_gain_db: None,
+            genres: vec!["Disco".into(), "Electronic".into()],
         }
     }
 }
@@ -1405,7 +1504,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 7);
+        assert_eq!(lib.schema_version().unwrap(), 8);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -1679,5 +1778,58 @@ mod folder_tests {
         let (files, _) = lib.remove_folder(Path::new("/m/a_other")).unwrap();
         assert_eq!(files, 0);
         assert!(lib.get_track(a).unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod genre_tests {
+    use super::tests_support::sample_track;
+    use super::*;
+
+    #[test]
+    fn genres_are_stored_browsable_and_searchable() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
+        let mut jazz = sample_track("/m/b.flac", "B");
+        jazz.genres = vec!["jazz".into()];
+        jazz.album.as_mut().unwrap().title = "Blue".into();
+        jazz.album.as_mut().unwrap().release_mbid = None;
+        let b = lib.upsert_track(&jazz).unwrap();
+        let t = lib.get_track(a).unwrap().unwrap();
+        assert_eq!(t.genres, vec!["Disco", "Electronic"]);
+        let genres = lib.list_genres().unwrap();
+        let names: Vec<&str> = genres.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["Disco", "Electronic", "jazz"]);
+        let disco = genres.iter().find(|g| g.name == "Disco").unwrap();
+        assert_eq!((disco.tracks, disco.albums), (1, 1));
+        assert_eq!(
+            lib.genre_albums(disco.id).unwrap()[0].title,
+            "Random Access Memories"
+        );
+        assert!(lib.genre_tracks(disco.id, 0).unwrap().is_empty(), "limit 0");
+        assert_eq!(lib.genre_tracks(disco.id, 10).unwrap()[0].id, Some(a));
+        assert!(
+            lib.search_tracks("jazz", 10)
+                .unwrap()
+                .iter()
+                .any(|t| t.id == Some(b)),
+            "genre words match in search"
+        );
+        // Re-upserting with another genre replaces, case-insensitively de-duplicated.
+        let mut again = sample_track("/m/a.flac", "A");
+        again.genres = vec!["DISCO".into()];
+        lib.upsert_track(&again).unwrap();
+        let genres = lib.list_genres().unwrap();
+        assert_eq!(
+            genres.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            vec!["Disco", "jazz"]
+        );
+        assert!(lib.genre_by_name("disco").unwrap().is_some());
+        lib.add_folder(Path::new("/m")).unwrap();
+        lib.remove_folder(Path::new("/m")).unwrap();
+        assert!(
+            lib.list_genres().unwrap().is_empty(),
+            "orphan genres go with their tracks"
+        );
     }
 }

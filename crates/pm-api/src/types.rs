@@ -511,6 +511,13 @@ pub struct ArtistDetail {
     pub albums: Vec<Album>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreDetail {
+    pub genre: pm_library::GenreSummary,
+    pub albums: Vec<Album>,
+    pub tracks: Vec<Track>,
+}
+
 // ---- discovery ----
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
