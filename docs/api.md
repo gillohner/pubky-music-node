@@ -32,6 +32,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |
 | DELETE | `/v1/playlists/{id}/items/{index}` | | `PlaylistDetail` |
 | POST | `/v1/playlists/{id}/play` | `{zone, replace?}` | `{queued, missing}` |
+| POST | `/v1/playlists/import` | `{name, description?, tracks: [{title, artist?, album?, uri?}]}` | `{id, imported, unresolved}`; items resolve through the library to canonical URLs |
+| GET / POST | `/v1/activity` | POST: `{track: {title, artist?, album?, uri?}, source, duration_ms?}` | plays as private activity posts; 422 when nothing canonical resolves |
 | GET | `/v1/pubky` | | `{user, unsynced}` |
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
 | GET | `/v1/events` | WebSocket | first `{"type":"snapshot","zones":[...]}`, then `zone` (full state), `zone_event`, `zone_removed`, `library_changed` |

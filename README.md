@@ -24,6 +24,8 @@ they conflict. Decisions live in `docs/adr/`.
 | `pm-node` | the binary: CLI plus `serve` (API, one zone per output) | CLI and daemon |
 
 Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
+Roon: `sidecars/roon-bridge` scrobbles Roon playback to the node and imports Roon playlists through
+the official Extension API (untested against a Core so far).
 
 Not started: `pm-sources`, `pm-out-oaat`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
 `pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.

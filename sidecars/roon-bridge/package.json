@@ -1,0 +1,19 @@
+{
+  "name": "pubky-music-roon-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Roon Extension that scrobbles Roon playback to a Pubky Music Node and imports Roon playlists",
+  "type": "module",
+  "main": "index.js",
+  "bin": { "pm-roon-bridge": "index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "node-roon-api": "^1.2.0",
+    "node-roon-api-browse": "^1.0.1",
+    "node-roon-api-status": "^1.0.1",
+    "node-roon-api-transport": "^1.0.1"
+  }
+}

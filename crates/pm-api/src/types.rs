@@ -2,7 +2,7 @@
 //! can reuse them without pulling in the server.
 
 use pm_model::{Track, Volume};
-use pm_pubky::Playlist;
+use pm_pubky::{ActivitySource, Playlist};
 use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
 
@@ -230,4 +230,62 @@ pub struct PubkyStatus {
     /// Signed-in user's raw z32 key, when the node has a session.
     pub user: Option<String>,
     pub unsynced: usize,
+}
+
+// ---- activity and import (integrations) ----
+
+/// A track as an integration knows it; `uri` is a canonical music URL when available.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DescribedTrack {
+    pub title: String,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordActivity {
+    pub track: DescribedTrack,
+    /// `local`, `roon`, or a streaming service name.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedActivity {
+    pub id: String,
+    pub uri: String,
+    pub track_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub id: String,
+    pub uri: String,
+    pub played_at: i64,
+    pub source: ActivitySource,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub track: Option<Track>,
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportPlaylist {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub tracks: Vec<DescribedTrack>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportedPlaylist {
+    pub id: String,
+    pub imported: usize,
+    pub unresolved: Vec<DescribedTrack>,
 }

@@ -9,6 +9,7 @@
 //! trusts whoever can reach the socket, so bind to localhost. Remote access
 //! by pubkey (M5) wraps this API rather than replacing it.
 
+pub mod activity;
 pub mod playlists;
 pub mod sources;
 pub mod state;
@@ -101,6 +102,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/folders", get(folders))
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
+        .route("/playlists/import", post(activity::import_playlist))
+        .route("/activity", get(activity::list).post(activity::record))
         .route(
             "/playlists/{id}",
             get(playlists::get)
