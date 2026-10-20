@@ -196,6 +196,10 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                 client_id: cfg.spotify.client_id.clone(),
                 client_secret: cfg.spotify.client_secret.clone(),
             },
+            acoustid_key: std::env::var("PM_ACOUSTID_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty())
+                .unwrap_or_else(|| cfg.acoustid.api_key.clone()),
         },
         lib,
         registry,

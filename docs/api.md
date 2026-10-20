@@ -101,6 +101,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/search` | `?q=&type=&limit=` | Pinakes text search over music tagged on Pubky, joined to the library |
 | GET | `/v1/discover/item` | `?uri=` | one card: facts (`mbid`, `isrcs`, `upc`, `duration_secs`, albums), every `also_on` link, `on_pubky` tags/taggers, `in_library_album` |
 | GET | `/v1/discover/play` | `?uri=` | where the item plays from, resolved through the node's connected services: the library (`track_ids`), else the best service link, tagged first, TIDAL before Spotify Connect (`items` to queue, or `spotify_uris` for `POST /v1/sources/spotify/play`); albums expand to their tracks on that service. With nothing connected: `plays_from` absent, `connect` names the services that have it, `preview` a 30 s Deezer excerpt. Rows and `/discover/item` carry the same `plays_from`/`connect` without expanding |
+| GET | `/v1/library/identify` | | `{progress: {running, total, done, identified, suggested, unknown, errors, last_error?}, counts: {total, identified, suggested, unknown, unchecked}, acoustid}` |
+| POST | `/v1/library/identify` | `{retry?}` | start the identify job (fingerprint → AcoustID → folder as release → suggestions); resumes, `retry` looks again at "not found" tracks |
+| GET | `/v1/library/suggestions` | | open suggestions with their track: `{id, track_id, recording_mbid, release_mbid?, title?, artist?, release_title?, score, source: fingerprint\|search, track}` |
+| POST | `/v1/library/suggestions/{id}/accept` | | the owner confirms: the track's identity becomes that recording (`confirmed_by_user`) |
+| DELETE | `/v1/library/suggestions/{id}` | | not this one |
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |

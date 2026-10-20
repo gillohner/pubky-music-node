@@ -20,6 +20,15 @@ pub struct NodeConfig {
     pub tidal: TidalConfig,
     /// Spotify developer app (developer.spotify.com); optional.
     pub spotify: SpotifyConfig,
+    /// AcoustID application key for identifying untagged files; optional.
+    pub acoustid: AcoustIdConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct AcoustIdConfig {
+    /// From acoustid.org/new-application; `PM_ACOUSTID_KEY` overrides.
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -78,6 +87,7 @@ impl Default for NodeConfig {
             outputs: OutputsConfig::default(),
             tidal: TidalConfig::default(),
             spotify: SpotifyConfig::default(),
+            acoustid: AcoustIdConfig::default(),
         }
     }
 }

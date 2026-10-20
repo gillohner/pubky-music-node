@@ -1,0 +1,23 @@
+{"status": "ok", "results": [
+  {"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0", "score": 0.96, "recordings": [
+    {"id": "b1a9c0e9-d987-4042-ae91-78d6a3267d69", "title": "Bohemian Rhapsody", "duration": 355,
+     "artists": [{"name": "Queen"}],
+     "releasegroups": [
+       {"id": "e3f9b6b4-7c2a-3d9a-8a8b-2f5d6c1e0a11", "title": "A Night at the Opera", "releases": [
+         {"id": "1a5b6a49-4c4f-3d18-9e3d-1c4d1b0a7a3e", "title": "A Night at the Opera", "track_count": 12, "medium_count": 1,
+          "mediums": [{"position": 1, "track_count": 12, "tracks": [{"position": 11}]}]}]},
+       {"id": "c2d3e4f5-a6b7-3c8d-9e0f-1a2b3c4d5e6f", "title": "Greatest Hits", "releases": [
+         {"id": "d4e5f6a7-b8c9-3d0e-8f1a-2b3c4d5e6f70", "title": "Greatest Hits", "track_count": 17, "medium_count": 1,
+          "mediums": [{"position": 1, "track_count": 17, "tracks": [{"position": 1}]}]}]}
+     ]},
+    {"id": "ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d", "title": "Bohemian Rhapsody", "duration": 356,
+     "artists": [{"name": "Queen"}],
+     "releases": [
+       {"id": "f6a7b8c9-d0e1-3f2a-9b3c-4d5e6f708192", "title": "Classic Rock Anthems", "track_count": 20, "medium_count": 1,
+        "mediums": [{"position": 1, "track_count": 20, "tracks": [{"position": 11}]}]}
+     ]}
+  ]},
+  {"id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f", "score": 0.42, "recordings": [
+    {"id": "7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01", "title": "Bohemian Rhapsody (live)", "duration": 361, "artists": [{"name": "Queen"}]}
+  ]}
+]}

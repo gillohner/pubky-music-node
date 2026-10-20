@@ -129,6 +129,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             session_secret_path: None,
             tidal: Default::default(),
             spotify: Default::default(),
+            acoustid_key: String::new(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

@@ -12,6 +12,7 @@
 #   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
 #   PM_TIDAL_SCOPES   scopes to request at sign-in (default: all the node can use; must be enabled on the app)
 #   PM_SPOTIFY_CLIENT_ID / PM_SPOTIFY_CLIENT_SECRET   Spotify developer app (developer.spotify.com); optional
+#   PM_ACOUSTID_KEY   AcoustID application key (acoustid.org/new-application); identifies untagged files
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"
 CONF="${PM_CONFIG:-$DATA_DIR/node.toml}"
@@ -44,6 +45,9 @@ scopes = "${PM_TIDAL_SCOPES:-}"
 [spotify]
 client_id = "${PM_SPOTIFY_CLIENT_ID:-}"
 client_secret = "${PM_SPOTIFY_CLIENT_SECRET:-}"
+
+[acoustid]
+api_key = "${PM_ACOUSTID_KEY:-}"
 TOML
 fi
 if [ -z "${PM_TOKEN:-}" ] && [ "${PM_LISTEN:-0.0.0.0:7788}" != "127.0.0.1:7788" ]; then

@@ -19,26 +19,55 @@ pub enum Confidence {
     TaggedMbid,
     /// The file's tags carry an ISRC that resolved to one recording.
     TaggedIsrc,
-    /// An AcoustID fingerprint match with this score (0–1).
+    /// An AcoustID fingerprint match with this score (0–1): one recording
+    /// at or above [`Confidence::FINGERPRINT_ACCEPT`].
     Fingerprint { score: f32 },
-    /// Artist / title / duration match with this score (0–1).
+    /// A fingerprint match disambiguated by the folder as a release (track
+    /// count, position and duration fit one MusicBrainz release).
+    #[serde(rename = "fingerprint+release")]
+    FingerprintRelease { score: f32 },
+    /// The owner confirmed a suggestion.
+    ConfirmedByUser,
+    /// Artist / title / duration match with this score (0–1). A suggestion
+    /// only: never canonical, never published (identify brief).
     Fuzzy { score: f32 },
 }
 
 impl Confidence {
     /// Below this, a canonical URI is kept locally but never published.
     pub const PUBLISH_THRESHOLD: f32 = 0.85;
+    /// AcoustID results at or above this score count as a match.
+    pub const FINGERPRINT_ACCEPT: f32 = 0.9;
 
     pub fn score(&self) -> f32 {
         match self {
-            Confidence::TaggedMbid => 1.0,
+            Confidence::TaggedMbid | Confidence::ConfirmedByUser => 1.0,
             Confidence::TaggedIsrc => 0.95,
-            Confidence::Fingerprint { score } | Confidence::Fuzzy { score } => *score,
+            Confidence::Fingerprint { score }
+            | Confidence::FingerprintRelease { score }
+            | Confidence::Fuzzy { score } => *score,
         }
     }
 
+    /// Whether this identity may be used for social data (tags, playlists,
+    /// activity, reviews) and Pinakes lookups: everything but a fuzzy
+    /// suggestion, at or above the publish threshold.
     pub fn publishable(&self) -> bool {
-        self.score() >= Self::PUBLISH_THRESHOLD
+        !matches!(self, Confidence::Fuzzy { .. }) && self.score() >= Self::PUBLISH_THRESHOLD
+    }
+
+    /// The identify brief's name for this level: `tagged_mbid`,
+    /// `tagged_isrc`, `fingerprint`, `fingerprint+release`,
+    /// `confirmed_by_user`, `suggested`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Confidence::TaggedMbid => "tagged_mbid",
+            Confidence::TaggedIsrc => "tagged_isrc",
+            Confidence::Fingerprint { .. } => "fingerprint",
+            Confidence::FingerprintRelease { .. } => "fingerprint+release",
+            Confidence::ConfirmedByUser => "confirmed_by_user",
+            Confidence::Fuzzy { .. } => "suggested",
+        }
     }
 }
 

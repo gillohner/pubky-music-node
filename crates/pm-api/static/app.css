@@ -516,3 +516,15 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .playsfrom { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
 .playsfrom .plays { font-size: 13px; padding: 4px 10px 4px 5px; }
 .list-row > .plays { margin-right: 6px; }
+
+/* Identification: the row mark, the Settings bar, the review view. */
+.idmark { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-right: 6px; border-radius: 50%; border: 1px dashed var(--line-strong); background: transparent; color: var(--muted); font-size: 10px; line-height: 1; cursor: pointer; vertical-align: 1px; padding: 0; }
+.idmark:hover { color: var(--accent-strong); border-color: var(--accent); }
+.idbar { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 6px 0 8px; }
+.idbar span { display: block; height: 100%; background: var(--accent); }
+.idrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
+.idrow:first-child { border-top: 0; }
+.idopts { display: flex; flex-direction: column; gap: 6px; }
+.idopt { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.idopt .grow { min-width: 0; flex: 1; }
+@media (max-width: 720px) { .idrow { grid-template-columns: 1fr; } }

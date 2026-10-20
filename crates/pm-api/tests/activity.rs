@@ -92,6 +92,7 @@ async fn record_and_import_resolve_through_the_library() {
             session_secret_path: None,
             tidal: Default::default(),
             spotify: Default::default(),
+            acoustid_key: String::new(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

@@ -15,6 +15,7 @@ pub mod decode;
 pub mod dsd;
 pub mod dsp;
 pub mod error;
+pub mod fingerprint;
 pub mod pipeline;
 pub mod play;
 pub mod probe;

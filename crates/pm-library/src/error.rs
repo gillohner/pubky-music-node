@@ -21,6 +21,9 @@ pub enum LibraryError {
     #[cfg(feature = "musicbrainz")]
     #[error("musicbrainz: {0}")]
     MusicBrainz(String),
+    #[cfg(feature = "musicbrainz")]
+    #[error("acoustid: {0}")]
+    AcoustId(String),
 }
 
 pub type Result<T> = std::result::Result<T, LibraryError>;

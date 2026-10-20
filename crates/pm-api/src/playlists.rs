@@ -254,7 +254,12 @@ pub(crate) async fn from_queue(
     if items.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "nothing in the queue has a canonical identity (MusicBrainz id, ISRC or a service URL)",
+            format!(
+                "{} track{} in the queue {} not identified yet: identify them in Settings › Identify library",
+                skipped.len(),
+                if skipped.len() == 1 { "" } else { "s" },
+                if skipped.len() == 1 { "is" } else { "are" }
+            ),
         ));
     }
     let name = body.name.filter(|n| !n.trim().is_empty()).unwrap_or(default_name);

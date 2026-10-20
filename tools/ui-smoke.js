@@ -120,6 +120,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const dtabs = [...w.document.querySelectorAll('#main .tabs .chip')].map((c) => c.textContent.trim());
   console.log('discover tabs:', dtabs.join(' | '), '| rows', w.document.querySelectorAll('#main [data-ditem]').length);
   if (!dtabs.includes('Top tracks') || !dtabs.includes('Search Pubky')) errors.push('discover tabs incomplete');
+  // Identify library: a card in Settings; an unidentified row's mark opens the review view.
+  w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(1500);
+  const idbox = w.document.querySelector('#idbox');
+  console.log('identify card:', idbox ? idbox.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) : null);
+  if (!idbox || /Loading/.test(idbox.textContent)) errors.push('no identify card in Settings');
+  w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(900);
+  const mark = w.document.querySelector('.track .idmark');
+  if (mark) {
+    mark.click(); await sleep(900);
+    const idh = (w.document.querySelector('#main h2') || {}).textContent || '';
+    console.log('identify view:', idh);
+    if (!/Confirm matches/.test(idh)) errors.push('identify review view missing');
+  }
   const drow = w.document.querySelector('#main [data-dmore]');
   if (drow) { drow.click(); await sleep(300); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('discover menu:', items.join(' | ')); if (!items.some((t) => t.startsWith('Details'))) errors.push('discover row menu lacks details'); w.document.body.click(); await sleep(100); }
   const first = w.document.querySelector('#main [data-ditem]');

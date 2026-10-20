@@ -1,0 +1,10 @@
+{"status": "ok", "results": [
+  {"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0", "score": 0.97, "recordings": [
+    {"id": "b1a9c0e9-d987-4042-ae91-78d6a3267d69", "title": "Bohemian Rhapsody", "duration": 355,
+     "artists": [{"id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3", "name": "Queen"}],
+     "releasegroups": [{"id": "e3f9b6b4-7c2a-3d9a-8a8b-2f5d6c1e0a11", "title": "A Night at the Opera", "releases": [
+       {"id": "1a5b6a49-4c4f-3d18-9e3d-1c4d1b0a7a3e", "title": "A Night at the Opera", "track_count": 12, "medium_count": 1,
+        "mediums": [{"position": 1, "track_count": 12, "format": "CD", "tracks": [{"position": 11, "id": "6f0a3f4e-7d2b-4d6f-9a1e-0b2c3d4e5f60"}]}]}
+     ]}]}
+  ]}
+]}

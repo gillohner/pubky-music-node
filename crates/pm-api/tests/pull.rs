@@ -53,6 +53,7 @@ async fn pull_stream_is_the_exact_pcm() {
             session_secret_path: None,
             tidal: Default::default(),
             spotify: Default::default(),
+            acoustid_key: String::new(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

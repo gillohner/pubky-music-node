@@ -17,6 +17,7 @@ pub mod canonical;
 pub mod db;
 pub mod dsd;
 pub mod error;
+pub mod identify;
 pub mod import;
 pub mod lyrics;
 #[cfg(feature = "musicbrainz")]
@@ -27,7 +28,8 @@ pub mod tags;
 
 pub use canonical::{assign, Resolver};
 pub use db::{
-    AlbumArt, AlbumFormat, ArtistSummary, FavouriteRow, Focus, GenreSummary, PlayEntry, PlayedTrack, TagRow,
+    AlbumArt, AlbumFormat, ArtistSummary, FavouriteRow, Focus, GenreSummary, IdentityCounts, PlayEntry,
+    PlayedTrack, SuggestionRow, TagRow,
 };
 pub use db::{Library, LibraryStats};
 pub use error::{LibraryError, Result};

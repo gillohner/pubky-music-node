@@ -19,6 +19,7 @@ pub mod discover;
 pub mod favourites;
 pub mod files;
 pub mod hls;
+pub mod identify;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod playlists;
@@ -188,6 +189,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/search", get(discover::search))
         .route("/discover/item", get(discover::item_detail))
         .route("/discover/play", get(discover::play_plan))
+        .route(
+            "/library/identify",
+            get(identify::get_status).post(identify::start),
+        )
+        .route("/library/suggestions", get(identify::suggestions))
+        .route("/library/suggestions/{id}/accept", post(identify::accept))
+        .route("/library/suggestions/{id}", delete(identify::reject))
         .route("/discover/uri", get(discover::on_pubky))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
@@ -1979,6 +1987,7 @@ mod tests {
                 session_secret_path: None,
                 tidal: Default::default(),
                 spotify: Default::default(),
+                acoustid_key: String::new(),
             },
             lib,
             outputs,
@@ -3302,6 +3311,190 @@ mod tests {
         assert_eq!(plan["plays_from"]["mode"], "full");
         assert_eq!(plan["track_ids"][0], tid);
         assert!(plan["connect"].is_null());
+    }
+
+    fn tone_wav(path: &std::path::Path, secs: u32) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..(secs * 44_100) {
+            let t = i as f64 / 44_100.0;
+            let f = [261.6, 329.6, 392.0, 440.0][((t * 2.0) as usize) % 4];
+            let v = ((t * f * std::f64::consts::TAU).sin() * 12_000.0) as i16;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn untagged_track(path: std::path::PathBuf, title: &str, artist: &str) -> pm_model::Track {
+        pm_model::Track {
+            id: None,
+            title: title.into(),
+            artists: vec![pm_model::Artist {
+                id: None,
+                name: artist.into(),
+                mbid: None,
+            }],
+            album: None,
+            track_no: Some(11),
+            disc_no: Some(1),
+            duration_ms: Some(10_000),
+            file: pm_model::AudioFile {
+                path,
+                size_bytes: 1,
+                mtime_unix: 0,
+                container: "wav".into(),
+                format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                duration_ms: Some(10_000),
+            },
+            recording_mbid: None,
+            isrc: None,
+            acoustid: None,
+            canonical: None,
+            replaygain_track_gain_db: None,
+            replaygain_album_gain_db: None,
+            genres: vec![],
+        }
+    }
+
+    /// Identify library: an untagged file is fingerprinted, looked up on
+    /// AcoustID once (the answer is cached by file key), and identified;
+    /// without a key, MusicBrainz search gives suggestions the owner must
+    /// confirm.
+    #[tokio::test]
+    async fn identify_library_fingerprints_looks_up_and_suggests() {
+        let single = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-library/tests/fixtures/acoustid/single.json"
+        ))
+        .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v2/lookup",
+                post(move |body: String| {
+                    let single = single.clone();
+                    let calls = c2.clone();
+                    async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        assert!(body.contains("client=test-key") && body.contains("fingerprint=AQ"), "{body}");
+                        ([(header::CONTENT_TYPE, "application/json")], single)
+                    }
+                }),
+            )
+            .route(
+                "/ws/2/recording",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        r#"{"recordings":[{"id":"b1a9c0e9-d987-4042-ae91-78d6a3267d69","score":100},{"id":"ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d","score":62}]}"#,
+                    )
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let a = music.join("11 bohemian.wav");
+        tone_wav(&a, 10);
+        let s = state(dir.path(), None).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+        };
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        let tid = s
+            .library
+            .lock()
+            .unwrap()
+            .upsert_track(&untagged_track(a.clone(), "Bohemian Rhapsody", "Queen"))
+            .unwrap();
+        let app = router(s.clone());
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["counts"]["unchecked"], 1, "{st}");
+        assert_eq!(st["acoustid"], true);
+        identify::run(&s, false).await.unwrap();
+        let t = s.library.lock().unwrap().get_track(tid).unwrap().unwrap();
+        let (uri, conf) = t.canonical.clone().expect("identified");
+        assert_eq!(
+            uri.to_url(),
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
+        );
+        assert!(
+            matches!(conf, pm_model::Confidence::Fingerprint { .. }),
+            "{conf:?}"
+        );
+        assert_eq!(
+            t.acoustid.as_deref(),
+            Some("9ff43b6a-4f16-427c-93c2-92307ca505e0")
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The same audio under another name: no second lookup (cached by key).
+        let b = music.join("copy.wav");
+        std::fs::copy(&a, &b).unwrap();
+        let tid2 = s
+            .library
+            .lock()
+            .unwrap()
+            .upsert_track(&untagged_track(b, "Bohemian Rhapsody", "Queen"))
+            .unwrap();
+        identify::run(&s, false).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(tid2)
+            .unwrap()
+            .unwrap()
+            .canonical
+            .is_some());
+        // Without a key: a new file gets MusicBrainz search suggestions only.
+        s.acoustid.write().unwrap().api_key.clear();
+        let c = music.join("other.wav");
+        tone_wav(&c, 9);
+        let tid3 = s
+            .library
+            .lock()
+            .unwrap()
+            .upsert_track(&untagged_track(c, "Bohemian Rhapsody", "Queen"))
+            .unwrap();
+        identify::run(&s, false).await.unwrap();
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(tid3)
+            .unwrap()
+            .unwrap()
+            .canonical
+            .is_none());
+        let (_, sug) = call(&app, "GET", "/v1/library/suggestions", None).await;
+        let sug = sug.as_array().unwrap();
+        assert_eq!(sug.len(), 1, "only MusicBrainz scores >= 80: {sug:?}");
+        assert_eq!(sug[0]["source"], "search");
+        assert_eq!(sug[0]["track"]["id"], tid3.0);
+        let (st, t3) = call(
+            &app,
+            "POST",
+            &format!("/v1/library/suggestions/{}/accept", sug[0]["id"]),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{t3}");
+        assert_eq!(t3["canonical"][1]["source"], "confirmed_by_user", "{t3}");
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["counts"]["identified"], 3, "{st}");
+        assert_eq!(st["counts"]["suggested"], 0);
     }
 
     #[test]

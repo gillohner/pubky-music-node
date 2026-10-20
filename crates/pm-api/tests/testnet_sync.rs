@@ -44,6 +44,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             session_secret_path: None,
             tidal: Default::default(),
             spotify: Default::default(),
+            acoustid_key: String::new(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

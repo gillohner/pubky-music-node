@@ -62,6 +62,9 @@ pub struct NodeSettings {
     /// TIDAL developer app credentials; empty = TIDAL not offered.
     pub tidal: crate::tidal::TidalCredentials,
     pub spotify: crate::spotify::SpotifyCredentials,
+    /// AcoustID application key (acoustid.org/new-application); empty = fingerprints
+    /// are computed and cached but not looked up.
+    pub acoustid_key: String,
 }
 
 pub struct NodeState {
@@ -120,6 +123,12 @@ pub struct NodeState {
     /// shared with the source factory so the audio thread can resolve `tidal:track:` URIs.
     pub tidal: crate::tidal::SharedEndpoints,
     pub spotify: crate::spotify::SharedEndpoints,
+    /// AcoustID key and origin (tests point it at a mock).
+    pub acoustid: std::sync::RwLock<crate::identify::AcoustIdSettings>,
+    /// MusicBrainz ws/2 origin for identification suggestions (tests: a mock).
+    pub mb_base: std::sync::RwLock<String>,
+    /// The library identification job's progress.
+    pub identify: Mutex<crate::identify::IdentifyProgress>,
     /// Deezer API origin (tests point it at a mock).
     pub deezer_base: crate::deezer::SharedBase,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -220,6 +229,12 @@ impl NodeState {
             audius_base: std::sync::RwLock::new(String::new()),
             deezer_base,
             spotify,
+            acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
+                api_key: settings.acoustid_key.clone(),
+                base_url: "https://api.acoustid.org".into(),
+            }),
+            mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
+            identify: Mutex::new(Default::default()),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),

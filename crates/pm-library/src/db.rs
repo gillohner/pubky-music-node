@@ -23,6 +23,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("migrations/0007_tags.sql")),
     (8, include_str!("migrations/0008_genres.sql")),
     (9, include_str!("migrations/0009_lyrics.sql")),
+    (10, include_str!("migrations/0010_identify.sql")),
 ];
 
 pub struct Library {
@@ -48,6 +49,34 @@ pub struct ArtistSummary {
     pub mbid: Option<Mbid>,
     pub albums: u64,
     pub tracks: u64,
+}
+
+/// An identification suggestion waiting for the owner.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SuggestionRow {
+    pub id: i64,
+    pub track_id: i64,
+    pub recording_mbid: String,
+    pub release_mbid: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub release_title: Option<String>,
+    pub score: f32,
+    /// `fingerprint` or `search`.
+    pub source: String,
+}
+
+/// How much of the library has a canonical identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityCounts {
+    pub total: u64,
+    pub identified: u64,
+    /// Tracks with suggestions to confirm.
+    pub suggested: u64,
+    /// Tracks identification found nothing for (or failed on).
+    pub unknown: u64,
+    /// Tracks identification has not looked at yet.
+    pub unchecked: u64,
 }
 
 /// A favourite as stored locally (a v1 bookmark of a canonical music URL).
@@ -268,8 +297,14 @@ impl Library {
         let track_id = match existing {
             Some(id) => {
                 tx.execute(
-                    "UPDATE tracks SET title=?2, album_id=?3, track_no=?4, disc_no=?5, duration_ms=?6, recording_mbid=?7, isrc=?8, acoustid=?9,
-                     canonical_uri=?10, canonical_confidence_source=?11, canonical_confidence_score=?12, replaygain_track_gain_db=?13, replaygain_album_gain_db=?14
+                    // A rescan of a file without IDs in its tags keeps what identification
+                    // found (fingerprint, release match, the owner's confirmation).
+                    "UPDATE tracks SET title=?2, album_id=?3, track_no=?4, disc_no=?5, duration_ms=?6, recording_mbid=?7, isrc=?8,
+                     acoustid=COALESCE(?9, acoustid),
+                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
+                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
+                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
+                     replaygain_track_gain_db=?13, replaygain_album_gain_db=?14
                      WHERE id=?1",
                     params![
                         id, track.title, album_id, track.track_no, track.disc_no, track.duration_ms.map(|d| d as i64),
@@ -1144,6 +1179,231 @@ impl Library {
             .optional()?)
     }
 
+    // ---- identification (crate::identify) ----
+
+    /// A cheap content key for the fingerprint cache: size plus BLAKE3 of
+    /// the first and last MiB. Renames and retags of the same audio keep it
+    /// only when the bytes at both ends are unchanged; good enough to avoid
+    /// a second AcoustID lookup for a moved file.
+    pub fn file_key(path: &std::path::Path) -> std::io::Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path)?;
+        let len = f.metadata()?.len();
+        let mut h = blake3::Hasher::new();
+        h.update(&len.to_le_bytes());
+        let mut buf = vec![0u8; 1 << 20];
+        let n = f.read(&mut buf)?;
+        h.update(&buf[..n]);
+        if len > (2 << 20) {
+            f.seek(SeekFrom::End(-(1 << 20)))?;
+            let n = f.read(&mut buf)?;
+            h.update(&buf[..n]);
+        }
+        Ok(h.finalize().to_hex()[..32].to_string())
+    }
+
+    /// The cached fingerprint and AcoustID answer for a file key.
+    pub fn cached_fingerprint(&self, key: &str) -> Result<Option<(u64, String, Option<String>)>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT duration_secs, fingerprint, lookup_json FROM fingerprints WHERE file_key = ?1",
+                params![key],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    }
+
+    pub fn save_fingerprint(&self, key: &str, duration_secs: u64, fingerprint: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO fingerprints(file_key, duration_secs, fingerprint) VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_key) DO UPDATE SET duration_secs = excluded.duration_secs, fingerprint = excluded.fingerprint",
+            params![key, duration_secs as i64, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_lookup(&self, key: &str, json: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE fingerprints SET lookup_json = ?2, looked_up_at = ?3 WHERE file_key = ?1",
+            params![key, json, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// Set a track's canonical identity found after the scan (fingerprint,
+    /// release match, the owner's confirmation). Tag-derived identities are
+    /// set by the scanner; this never overwrites one of those.
+    pub fn set_identity(
+        &self,
+        track: i64,
+        uri: &MusicUri,
+        confidence: Confidence,
+        acoustid: Option<&str>,
+    ) -> Result<bool> {
+        let n = self.lock().execute(
+            "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = ?3, canonical_confidence_score = ?4,
+             acoustid = COALESCE(?5, acoustid)
+             WHERE id = ?1 AND (canonical_confidence_source IS NULL OR canonical_confidence_source NOT IN ('tagged_mbid','tagged_isrc'))",
+            params![track, uri.to_url(), confidence_source(&confidence), confidence.score() as f64, acoustid],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_identify_state(&self, track: i64, state: &str, detail: Option<&str>) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO identify_state(track_id, state, detail, checked_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at",
+            params![track, state, detail, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// Tracks without a canonical identity that identification has not
+    /// looked at yet (with `retry`, also those it found nothing for or
+    /// failed on; suggestions wait for the owner either way).
+    pub fn tracks_to_identify(&self, retry: bool) -> Result<Vec<Track>> {
+        let clause = if retry {
+            "t.canonical_uri IS NULL AND ?1 = '' AND COALESCE((SELECT state FROM identify_state s WHERE s.track_id = t.id), '') <> 'suggested'"
+        } else {
+            "t.canonical_uri IS NULL AND ?1 = '' AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)"
+        };
+        self.tracks_where(clause, String::new())
+    }
+
+    /// Audio files in the folder of `path` that the library knows.
+    pub fn tracks_in_folder(&self, dir: &std::path::Path) -> Result<Vec<Track>> {
+        let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
+        let all = self.tracks_where("fi.path LIKE ?1 || '%'", prefix)?;
+        Ok(all
+            .into_iter()
+            .filter(|t| t.file.path.parent() == Some(dir))
+            .collect())
+    }
+
+    pub fn add_suggestions(&self, track: i64, candidates: &[crate::identify::Candidate]) -> Result<()> {
+        let conn = self.lock();
+        for c in candidates {
+            conn.execute(
+                "INSERT INTO identify_suggestions(track_id, recording_mbid, release_mbid, title, artist, release_title, score, source, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(track_id, recording_mbid) DO UPDATE SET score = MAX(score, excluded.score),
+                   release_mbid = COALESCE(excluded.release_mbid, release_mbid)",
+                params![
+                    track,
+                    c.recording.to_string(),
+                    c.release.map(|r| r.to_string()),
+                    c.title,
+                    c.artist,
+                    c.release_title,
+                    c.score as f64,
+                    c.source,
+                    now_unix()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Open suggestions, grouped by track (best first within a track).
+    pub fn suggestions(&self) -> Result<Vec<SuggestionRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.track_id, s.recording_mbid, s.release_mbid, s.title, s.artist, s.release_title, s.score, s.source
+             FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id
+             WHERE t.canonical_uri IS NULL
+             ORDER BY t.album_id, t.disc_no, t.track_no, s.track_id, s.score DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SuggestionRow {
+                    id: r.get(0)?,
+                    track_id: r.get(1)?,
+                    recording_mbid: r.get(2)?,
+                    release_mbid: r.get(3)?,
+                    title: r.get(4)?,
+                    artist: r.get(5)?,
+                    release_title: r.get(6)?,
+                    score: r.get::<_, f64>(7)? as f32,
+                    source: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The owner confirms a suggestion: the track gets that recording as its
+    /// identity (`confirmed_by_user`) and its other suggestions go.
+    pub fn accept_suggestion(&self, id: i64) -> Result<Option<(i64, MusicUri)>> {
+        let row: Option<(i64, String)> = self
+            .lock()
+            .query_row(
+                "SELECT track_id, recording_mbid FROM identify_suggestions WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((track, mbid)) = row else { return Ok(None) };
+        let mbid = pm_model::Mbid::parse(&mbid).map_err(|_| LibraryError::Corrupt {
+            column: "identify_suggestions.recording_mbid",
+            value: mbid.clone(),
+        })?;
+        let uri = MusicUri::Recording { mbid };
+        self.set_identity(track, &uri, Confidence::ConfirmedByUser, None)?;
+        self.lock().execute(
+            "DELETE FROM identify_suggestions WHERE track_id = ?1",
+            params![track],
+        )?;
+        self.set_identify_state(track, "identified", Some("confirmed_by_user"))?;
+        Ok(Some((track, uri)))
+    }
+
+    /// Drop one suggestion; when it was the last for its track, the track is
+    /// "unknown" until the next retry.
+    pub fn reject_suggestion(&self, id: i64) -> Result<bool> {
+        let conn = self.lock();
+        let track: Option<i64> = conn
+            .query_row(
+                "SELECT track_id FROM identify_suggestions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(track) = track else { return Ok(false) };
+        conn.execute("DELETE FROM identify_suggestions WHERE id = ?1", params![id])?;
+        let left: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1",
+            params![track],
+            |r| r.get(0),
+        )?;
+        drop(conn);
+        if left == 0 {
+            self.set_identify_state(track, "unknown", Some("suggestions rejected"))?;
+        }
+        Ok(true)
+    }
+
+    /// How identified the library is.
+    pub fn identity_counts(&self) -> Result<IdentityCounts> {
+        let conn = self.lock();
+        let q = |sql: &str| -> rusqlite::Result<u64> {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).map(|n| n as u64)
+        };
+        Ok(IdentityCounts {
+            total: q("SELECT COUNT(*) FROM tracks")?,
+            identified: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL")?,
+            suggested: q(
+                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL",
+            )?,
+            unknown: q(
+                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state IN ('unknown','error')",
+            )?,
+            unchecked: q(
+                "SELECT COUNT(*) FROM tracks t WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)",
+            )?,
+        })
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1373,6 +1633,8 @@ fn confidence_source(c: &Confidence) -> &'static str {
         Confidence::TaggedMbid => "tagged_mbid",
         Confidence::TaggedIsrc => "tagged_isrc",
         Confidence::Fingerprint { .. } => "fingerprint",
+        Confidence::FingerprintRelease { .. } => "fingerprint+release",
+        Confidence::ConfirmedByUser => "confirmed_by_user",
         Confidence::Fuzzy { .. } => "fuzzy",
     }
 }
@@ -1382,6 +1644,8 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
         "tagged_mbid" => Confidence::TaggedMbid,
         "tagged_isrc" => Confidence::TaggedIsrc,
         "fingerprint" => Confidence::Fingerprint { score: score as f32 },
+        "fingerprint+release" => Confidence::FingerprintRelease { score: score as f32 },
+        "confirmed_by_user" => Confidence::ConfirmedByUser,
         "fuzzy" => Confidence::Fuzzy { score: score as f32 },
         other => {
             return Err(LibraryError::Corrupt {
@@ -1828,7 +2092,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 9);
+        assert_eq!(lib.schema_version().unwrap(), 10);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -2155,5 +2419,130 @@ mod genre_tests {
             lib.list_genres().unwrap().is_empty(),
             "orphan genres go with their tracks"
         );
+    }
+}
+
+#[cfg(test)]
+mod identify_tests {
+    use super::tests_support::sample_track;
+    use super::*;
+    use crate::identify::Candidate;
+
+    const BOHEMIAN: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+
+    /// A scanned file whose tags carry no IDs.
+    fn untagged(path: &str, title: &str) -> Track {
+        let mut t = sample_track(path, title);
+        t.recording_mbid = None;
+        t.isrc = None;
+        t.canonical = None;
+        t
+    }
+
+    #[test]
+    fn suggestions_need_confirmation_and_identities_survive_rescans() {
+        let lib = Library::open_in_memory().unwrap();
+        let t = untagged("/music/Queen/11.flac", "Bohemian Rhapsody");
+        let id = lib.upsert_track(&t).unwrap().0;
+        assert_eq!(lib.tracks_to_identify(false).unwrap().len(), 1);
+        let c = |mbid: &str, score: f32| Candidate {
+            recording: Mbid::parse(mbid).unwrap(),
+            release: None,
+            title: Some("Bohemian Rhapsody".into()),
+            artist: Some("Queen".into()),
+            release_title: None,
+            score,
+            source: "fingerprint".into(),
+        };
+        lib.add_suggestions(
+            id,
+            &[c(BOHEMIAN, 0.95), c("ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d", 0.93)],
+        )
+        .unwrap();
+        lib.set_identify_state(id, "suggested", None).unwrap();
+        // A suggestion is not an identity.
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_none());
+        let counts = lib.identity_counts().unwrap();
+        assert_eq!((counts.identified, counts.suggested, counts.unchecked), (0, 1, 0));
+        assert!(
+            lib.tracks_to_identify(true).unwrap().is_empty(),
+            "suggestions wait for the owner"
+        );
+        let rows = lib.suggestions().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].recording_mbid, BOHEMIAN, "best first");
+        let (tid, uri) = lib.accept_suggestion(rows[0].id).unwrap().unwrap();
+        assert_eq!(tid, id);
+        assert_eq!(
+            uri.to_url(),
+            format!("https://musicbrainz.org/recording/{BOHEMIAN}")
+        );
+        let tr = lib.get_track(TrackId(id)).unwrap().unwrap();
+        assert_eq!(tr.canonical.as_ref().unwrap().1, Confidence::ConfirmedByUser);
+        assert!(lib.suggestions().unwrap().is_empty());
+        // A rescan of the same untagged file keeps the confirmed identity.
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(
+            lib.get_track(TrackId(id)).unwrap().unwrap().canonical.unwrap().1,
+            Confidence::ConfirmedByUser
+        );
+        assert_eq!(lib.tracks_by_canonical(&uri).unwrap().len(), 1);
+        // Tags with an MBID win over identification and are never overwritten by it.
+        let mut tagged = t.clone();
+        let other = Mbid::parse("ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d").unwrap();
+        tagged.canonical = Some((MusicUri::Recording { mbid: other }, Confidence::TaggedMbid));
+        lib.upsert_track(&tagged).unwrap();
+        assert!(!lib
+            .set_identity(id, &uri, Confidence::Fingerprint { score: 0.99 }, Some("a"))
+            .unwrap());
+        assert_eq!(
+            lib.get_track(TrackId(id)).unwrap().unwrap().canonical.unwrap().1,
+            Confidence::TaggedMbid
+        );
+    }
+
+    #[test]
+    fn rejecting_the_last_suggestion_leaves_the_track_unknown() {
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib.upsert_track(&untagged("/m/a.flac", "A")).unwrap().0;
+        lib.add_suggestions(
+            id,
+            &[Candidate {
+                recording: Mbid::parse(BOHEMIAN).unwrap(),
+                release: None,
+                title: None,
+                artist: None,
+                release_title: None,
+                score: 0.6,
+                source: "search".into(),
+            }],
+        )
+        .unwrap();
+        let s = lib.suggestions().unwrap();
+        assert!(lib.reject_suggestion(s[0].id).unwrap());
+        assert_eq!(lib.identity_counts().unwrap().unknown, 1);
+        assert_eq!(
+            lib.tracks_to_identify(true).unwrap().len(),
+            1,
+            "retry looks again"
+        );
+        assert!(lib.tracks_to_identify(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_tracks_and_file_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let p = |n: &str| dir.path().join(n).to_string_lossy().to_string();
+        lib.upsert_track(&sample_track(&p("a.flac"), "A")).unwrap();
+        lib.upsert_track(&sample_track(&p("b.flac"), "B")).unwrap();
+        lib.upsert_track(&sample_track(&p("sub/c.flac"), "C")).unwrap();
+        assert_eq!(lib.tracks_in_folder(dir.path()).unwrap().len(), 2);
+        std::fs::write(dir.path().join("x.bin"), vec![7u8; 3 << 20]).unwrap();
+        let k1 = Library::file_key(&dir.path().join("x.bin")).unwrap();
+        std::fs::write(dir.path().join("y.bin"), vec![7u8; 3 << 20]).unwrap();
+        assert_eq!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
+        std::fs::write(dir.path().join("y.bin"), vec![8u8; 3 << 20]).unwrap();
+        assert_ne!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
     }
 }
