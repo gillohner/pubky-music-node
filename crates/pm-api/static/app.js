@@ -294,8 +294,37 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false;
   };
-  $('#scrim').onclick = () => { closePop(); $('#sidebar').classList.remove('open'); };
-  $('#menu').onclick = () => { $('#sidebar').classList.toggle('open'); $('#scrim').hidden = !$('#sidebar').classList.contains('open'); };
+  $('#scrim').onclick = () => { closePop(); if ($('#sidebar').classList.contains('open')) closeSheet(); };
+  // ☰: phones open the sidebar as a sheet (closes on back, outside tap, Esc or a pick);
+  // wider screens collapse it to icons (or expand it on tablets), remembered per browser.
+  const shell = $('.shell');
+  const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
+  const phone = () => mq('(max-width: 720px)');
+  const tablet = () => mq('(max-width: 1100px)');
+  const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
+  applySide();
+  // Icon-only nav items keep their names as tooltips and accessible labels.
+  $$('.nav-item').forEach((b) => { const t = (b.querySelector('span') || {}).textContent; if (t) { b.title = t; b.setAttribute('aria-label', t); } });
+  const sheetOpen = () => $('#sidebar').classList.contains('open');
+  let sheetBack = false;
+  const closeSheet = (fromBack) => { if (!sheetOpen()) return; sheetBack = !!fromBack; $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; $('#menu').setAttribute('aria-expanded', 'false'); if (!fromBack && history.state && history.state.sheet) history.back(); };
+  $('#menu').setAttribute('aria-expanded', 'false');
+  $('#menu').onclick = () => {
+    if (phone()) {
+      if (sheetOpen()) { closeSheet(); return; }
+      $('#sidebar').classList.add('open'); $('#scrim').hidden = false; $('#menu').setAttribute('aria-expanded', 'true');
+      // A transient history entry, so back closes the sheet instead of leaving the page.
+      try { history.pushState({ ...(history.state || {}), sheet: true }, '', location.pathname + location.search); } catch { /* sandboxed */ }
+      return;
+    }
+    const collapsedNow = shell.classList.contains('collapsed') || (tablet() && !shell.classList.contains('expanded'));
+    const next = collapsedNow ? (tablet() ? 'names' : 'auto') : 'icons';
+    try { localStorage.setItem('pm.sidebar', next); } catch { /* no storage */ }
+    applySide();
+    $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(tablet() && next === 'auto')));
+  };
+  window.addEventListener('popstate', () => { if (sheetOpen()) closeSheet(true); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOpen()) closeSheet(); });
 
   // ---- player bar ----------------------------------------------------------
   const ORDER = { bit_perfect: 0, enhanced: 1, lossless: 2, lossy: 3 };
@@ -464,18 +493,19 @@
       const cur = history.state || {};
       try { history.replaceState({ ...cur, scroll: main.scrollTop }, '', location.pathname + location.search); } catch { /* sandboxed */ }
       // Changing a query or tab inside the same page replaces; opening another page pushes.
-      const replace = how === 'replace' || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { v, arg: histArg(v, arg), backLabel: replace ? cur.backLabel : hereLabel(), depth: replace ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const replace = how === 'replace' || !!cur.sheet || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
+      const entry = { sheet: false, v, arg: histArg(v, arg), backLabel: replace ? cur.backLabel : hereLabel(), depth: replace ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; closePop();
+    if ($('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false'); } $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
     return render();
   };
   window.addEventListener('popstate', async (e) => {
+    if (sheetBack) { sheetBack = false; return; } // back only closed the sidebar sheet
     const st = e.state || routeFromPath() || { v: 'home' };
     navDepth = st.depth || 0;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; await runSearch('pop'); }

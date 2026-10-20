@@ -168,10 +168,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w2.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
   w2.HTMLMediaElement.prototype.play = async function () {};
   w2.HTMLMediaElement.prototype.pause = function () {};
+  w2.matchMedia = (q) => ({ matches: /max-width: (720|1100)px/.test(q), media: q, addEventListener() {}, removeEventListener() {} });
   w2.eval(js); await sleep(6000);
+  // Phone: ☰ opens the sheet; back closes it and stays on the same page.
+  const path0 = w2.location.pathname;
+  w2.document.querySelector('#menu').click(); await sleep(100);
+  const opened = w2.document.querySelector('#sidebar').classList.contains('open');
+  w2.history.back(); await sleep(800);
+  const closed = !w2.document.querySelector('#sidebar').classList.contains('open');
+  console.log('phone sheet: opened', opened, '| closed on back', closed, '| same page', w2.location.pathname === path0);
+  if (!opened || !closed || w2.location.pathname !== path0) errors.push('the phone sidebar sheet does not open or close on back');
   const dh = w2.document.querySelector('#main h1');
   console.log('deep link /song/mb-…:', dh && dh.textContent, '|', (w2.document.querySelector('#main .notice') || {}).textContent || '');
   if (!dh) errors.push('deep link to a song page did not render');
+  // ☰ does something at every width: desktop collapses the sidebar to icons and back.
+  const shellEl = w.document.querySelector('.shell'); const menuBtn = w.document.querySelector('#menu');
+  const sideBefore = shellEl.classList.contains('collapsed');
+  menuBtn.click(); await sleep(100);
+  const sideChanged = shellEl.classList.contains('collapsed') || shellEl.classList.contains('expanded') || w.document.querySelector('#sidebar').classList.contains('open');
+  console.log('menu button: collapsed', sideBefore, '->', shellEl.classList.contains('collapsed'), '| sheet', w.document.querySelector('#sidebar').classList.contains('open'));
+  if (!sideChanged && sideBefore === shellEl.classList.contains('collapsed')) errors.push('the menu button does nothing');
+  menuBtn.click(); await sleep(100);
+  if (shellEl.classList.contains('collapsed') !== sideBefore) errors.push('the menu button does not toggle back');
   console.log('errors:', errors.length ? errors : 'none');
   process.exit(errors.length ? 1 : 0);
 })();
