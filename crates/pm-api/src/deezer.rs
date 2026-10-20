@@ -231,8 +231,25 @@ impl StreamingService for Deezer {
         };
         let (artists, albums, tracks) =
             tokio::join!(q("artist", 5), q("album", limit.min(20)), q("track", limit));
+        // Deezer ranks tribute acts and "DJ <name>" high; the exact name goes first,
+        // and only a few artists are worth a chip.
+        let needle = term.trim().to_lowercase();
+        let mut artists = artists?;
+        artists.sort_by_key(|h| {
+            let name = h.title.to_lowercase();
+            if name == needle {
+                0
+            } else if name.starts_with(&needle) || needle.starts_with(&name) {
+                1
+            } else if name.contains(&needle) {
+                2
+            } else {
+                3
+            }
+        });
+        artists.truncate(3);
         let mut out = Vec::new();
-        out.extend(artists?);
+        out.extend(artists);
         out.extend(albums?);
         out.extend(tracks?);
         Ok(out)
