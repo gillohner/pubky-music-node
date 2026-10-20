@@ -4,8 +4,8 @@
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
     FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
-    PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags, TransportAction,
-    UpdatePlaylist,
+    PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags,
+    TransportAction, UpdatePlaylist,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -85,6 +85,12 @@ pub enum Cmd {
     },
     ClearQueue(String),
     ShuffleQueue(String),
+    /// Save a queue as a playlist: a node zone's queue, or the local
+    /// player's queue given as URIs.
+    SaveQueueAsPlaylist {
+        zone: Option<String>,
+        uris: Vec<String>,
+    },
     RemoveItem {
         zone: String,
         item: u64,
@@ -548,6 +554,27 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadPlaylists => out.send(Msg::Playlists(c.playlists().await?)),
         Cmd::LoadPlaylist(id) => out.send(Msg::Playlist(Box::new(c.playlist(&id).await?))),
+        Cmd::SaveQueueAsPlaylist { zone, uris } => {
+            let r = c
+                .playlist_from_queue(&PlaylistFromQueue {
+                    zone,
+                    uris,
+                    name: None,
+                })
+                .await?;
+            let note = if r.skipped.is_empty() {
+                format!("saved the queue as “{}”", r.playlist.summary.name)
+            } else {
+                format!(
+                    "saved the queue as “{}”; {} without a canonical id skipped",
+                    r.playlist.summary.name,
+                    r.skipped.len()
+                )
+            };
+            out.send(Msg::Notice(note));
+            out.send(Msg::Playlist(Box::new(r.playlist)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
         Cmd::CreatePlaylist { name, track_ids } => {
             let d = c
                 .create_playlist(&CreatePlaylist {

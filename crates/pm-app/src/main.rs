@@ -2500,6 +2500,24 @@ impl App {
                     self.backend.send(Cmd::ShuffleQueue(self.settings.zone.clone()));
                 }
             }
+            if ui
+                .add_enabled(!items.is_empty(), egui::Button::new("Save as playlist"))
+                .on_hover_text("A new private playlist from this queue")
+                .clicked()
+            {
+                let cmd = if self.is_local() {
+                    Cmd::SaveQueueAsPlaylist {
+                        zone: None,
+                        uris: items.iter().map(|i| i.uri.clone()).collect(),
+                    }
+                } else {
+                    Cmd::SaveQueueAsPlaylist {
+                        zone: Some(self.settings.zone.clone()),
+                        uris: Vec::new(),
+                    }
+                };
+                self.backend.send(cmd);
+            }
             let mut repeat = zone.repeat;
             egui::ComboBox::from_id_salt("repeat")
                 .selected_text(match repeat {

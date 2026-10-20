@@ -133,6 +133,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
+        .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
         .route("/activity", get(activity::list).post(activity::record))
@@ -1723,6 +1724,66 @@ mod tests {
 
     /// Library radio: with the flag on, a zone that runs out of queue gets
     /// similar tracks appended and keeps playing.
+    #[tokio::test]
+    async fn a_queue_can_be_saved_as_a_playlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("untagged.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let archive = "https://archive.org/download/gd1977-05-08/gd77-05-08d1t01.flac";
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [
+                {"uri": archive, "title": "Scarlet Begonias"},
+                {"uri": wav.to_string_lossy(), "title": "Untagged"},
+            ], "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/playlists/from-queue",
+            Some(serde_json::json!({"zone": zid})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r["playlist"]["summary"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Queue · "));
+        assert_eq!(r["playlist"]["playlist"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(r["playlist"]["playlist"]["items"][0]["uri"], archive);
+        assert_eq!(r["skipped"], serde_json::json!(["Untagged"]));
+        // Explicit URIs (the browser's queue) and a name of one's own.
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/playlists/from-queue",
+            Some(serde_json::json!({"uris": [archive, archive], "name": "Twice"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["playlist"]["summary"]["name"], "Twice");
+        assert_eq!(r["playlist"]["playlist"]["items"].as_array().unwrap().len(), 2);
+        // Nothing canonical: 422, no playlist.
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/playlists/from-queue",
+            Some(serde_json::json!({"uris": [wav.to_string_lossy()]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, pls) = call(&app, "GET", "/v1/playlists", None).await;
+        assert_eq!(pls.as_array().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn shuffle_reorders_only_the_upcoming_items() {
         let dir = tempfile::tempdir().unwrap();

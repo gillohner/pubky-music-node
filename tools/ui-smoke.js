@@ -82,6 +82,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w.document.querySelector('.nav-item[data-view="queue"]').click(); await sleep(700);
   const before = w.document.querySelectorAll('.list.queue .list-row').length;
   const shuffle = w.document.querySelector('#qshuffle'); if (shuffle) { shuffle.click(); await sleep(300); }
+  // Save the browser queue as a playlist (fixtures carry no canonical ids, so a 422 is the expected answer; anything else is a bug).
+  const save = w.document.querySelector('#qsave');
+  if (save) {
+    const plBefore = await (await fetch(BASE + '/v1/playlists', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
+    save.click(); await sleep(600);
+    const plAfter = await (await fetch(BASE + '/v1/playlists', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
+    console.log('save queue as playlist: playlists', plBefore.length, '->', plAfter.length);
+    for (const p of plAfter) if (!plBefore.some((b) => b.id === p.id)) await fetch(BASE + '/v1/playlists/' + encodeURIComponent(p.id), { method: 'DELETE', headers: { authorization: 'Bearer ' + TOKEN } });
+  } else errors.push('no save-as-playlist button on the queue page');
   if (w.document.querySelectorAll('.list.queue .list-row').length !== before) errors.push('shuffle changed the queue length');
   const down = w.document.querySelector('[data-qdown="0"]'); if (down) { down.click(); await sleep(400); }
   const rm = w.document.querySelector('[data-qrm="0"]'); if (rm) { rm.click(); await sleep(400); }

@@ -192,6 +192,85 @@ pub(crate) async fn create(
     Ok(Json(d))
 }
 
+/// The canonical identity behind one queue entry, if it has one.
+fn canonical_for_queue_uri(lib: &Library, uri: &str) -> Option<MusicUri> {
+    if let Some(id) = uri
+        .strip_prefix(crate::sources::TRACK_SCHEME)
+        .and_then(|r| r.parse::<i64>().ok())
+    {
+        return lib
+            .get_track(TrackId(id))
+            .ok()
+            .flatten()
+            .and_then(|t| t.publishable_uri().cloned());
+    }
+    if let Ok(m) = MusicUri::parse(uri) {
+        return Some(m);
+    }
+    let path = std::path::Path::new(uri);
+    if path.is_absolute() {
+        let row = lib.file_by_path(path).ok().flatten()?;
+        return lib
+            .get_track(row.track_id)
+            .ok()
+            .flatten()
+            .and_then(|t| t.publishable_uri().cloned());
+    }
+    None
+}
+
+/// Save a queue as a new private playlist. Entries without a canonical
+/// identity are reported in `skipped` rather than failing the whole save.
+pub(crate) async fn from_queue(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<PlaylistFromQueue>,
+) -> ApiResult<PlaylistFromQueueResult> {
+    let (entries, default_name): (Vec<(String, String)>, String) = match &body.zone {
+        Some(z) => {
+            let zone = s
+                .zones
+                .get(&ZoneId::new(z))
+                .ok_or_else(|| ApiError::not_found(format!("no zone {z}")))?;
+            let q = zone.queue();
+            (
+                q.iter().map(|it| (it.uri.clone(), it.label())).collect(),
+                format!("Queue · {}", zone.name()),
+            )
+        }
+        None => (
+            body.uris.iter().map(|u| (u.clone(), u.clone())).collect(),
+            "Queue".to_string(),
+        ),
+    };
+    let lib = s.library.lock().expect("library poisoned");
+    let mut items = Vec::with_capacity(entries.len());
+    let mut skipped = Vec::new();
+    for (uri, label) in &entries {
+        match canonical_for_queue_uri(&lib, uri) {
+            Some(m) => items.push(PlaylistItem::new(&m)),
+            None => skipped.push(label.clone()),
+        }
+    }
+    if items.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "nothing in the queue has a canonical identity (MusicBrainz id, ISRC or a service URL)",
+        ));
+    }
+    let name = body.name.filter(|n| !n.trim().is_empty()).unwrap_or(default_name);
+    let playlist = Playlist::new(name, None, None, items);
+    let post = MusicPost::new(MusicContent::Playlist(playlist));
+    let id = post.create_id();
+    post.validate(Some(&id))
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    store(&lib, &post, &id, Visibility::Private)?;
+    let (row, p) = load(&lib, &id)?;
+    let d = detail(&lib, &row, &p);
+    drop(lib);
+    s.notify_library();
+    Ok(Json(PlaylistFromQueueResult { playlist: d, skipped }))
+}
+
 pub(crate) async fn get(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,

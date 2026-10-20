@@ -526,6 +526,12 @@ impl NodeClient {
         self.send(reqwest::Method::POST, "playlists", Some(req)).await
     }
 
+    /// Save a zone's queue (or explicit queue URIs) as a new playlist.
+    pub async fn playlist_from_queue(&self, req: &PlaylistFromQueue) -> Result<PlaylistFromQueueResult> {
+        self.send(reqwest::Method::POST, "playlists/from-queue", Some(req))
+            .await
+    }
+
     pub async fn update_playlist(&self, id: &str, req: &UpdatePlaylist) -> Result<PlaylistDetail> {
         self.send(reqwest::Method::PUT, &format!("playlists/{id}"), Some(req))
             .await

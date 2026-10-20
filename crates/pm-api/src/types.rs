@@ -390,6 +390,27 @@ pub struct PlaylistDetail {
     pub tracks: Vec<Option<Track>>,
 }
 
+/// Save a play queue as a playlist: either a zone's queue or an explicit
+/// list of queue URIs (`track:<id>`, local paths, canonical music URLs).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaylistFromQueue {
+    #[serde(default)]
+    pub zone: Option<String>,
+    #[serde(default)]
+    pub uris: Vec<String>,
+    /// Defaults to "Queue · <zone>" or "Queue".
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistFromQueueResult {
+    pub playlist: PlaylistDetail,
+    /// Labels of queue entries without a canonical identity (untagged files,
+    /// radio streams); they are not in the playlist.
+    pub skipped: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreatePlaylist {
     pub name: String,

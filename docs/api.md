@@ -63,6 +63,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/reviews` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, reviews: [{id, uri, rating?, text, created_at, updated_at, synced}]}`: my private reviews (v1 `pubky.music/review` posts) |
 | PUT | `/v1/reviews` | `{uri|track_id|album_id|artist_id, rating?: 1–5, text?}` | creates or replaces my review of that object (same post id); 400 with neither rating nor text, 422 without a canonical identity |
 | DELETE | `/v1/reviews` | `?…` | removes it (tombstoned until the delete is pushed) |
+| POST | `/v1/playlists/from-queue` | `{zone?, uris?, name?}` | `{playlist: PlaylistDetail, skipped: [label]}`; a new private playlist from a zone's queue (or the given queue URIs: `track:<id>`, local paths, canonical URLs); entries without a canonical identity are listed in `skipped`; 422 when nothing qualifies |
 | POST | `/v1/playlists/import` | `{name, description?, tracks: [{title, artist?, album?, uri?, path?}]}` | `{id, name, parsed, imported, unresolved}`; items resolve through the library (canonical URL, exact path, file name, title + artist) to canonical URLs |
 | POST | `/v1/playlists/import/file` | `?file=<name>&name=&format=` raw body: M3U/M3U8, CSV (Exportify, Soundiiz, Roon export saved as CSV) or Roon's Excel export (.xlsx) | same report; 422 when nothing matched |
 | GET / POST | `/v1/activity` | POST: `{track: {title, artist?, album?, uri?}, source, duration_ms?}` | plays as private activity posts; 422 when nothing canonical resolves |
