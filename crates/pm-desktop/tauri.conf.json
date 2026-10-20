@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pubky Music",
+  "mainBinaryName": "pubky-music",
+  "identifier": "to.synonym.pubkymusic",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "msi", "nsis", "appimage", "deb"],
+    "category": "Music",
+    "shortDescription": "The Pubky Music Node in a window, with a built-in player",
+    "longDescription": "Controls a Pubky Music Node and plays through this computer's DACs: bit-perfect ALSA on Linux, the system output on macOS and Windows.",
+    "publisher": "Pubky Music",
+    "homepage": "https://github.com/gillohner/pubky-music-node",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libasound2t64 | libasound2"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}

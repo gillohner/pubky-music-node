@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The app's own connect page; the node's page gets no IPC.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": ["core:event:default"]
+}

@@ -1,22 +1,31 @@
 [package]
 name = "pm-desktop"
-description = "Pubky Music desktop: the web UI in a native window, signed in with Pubky Ring"
+description = "Pubky Music app: the node's web UI in a native window (desktop and Android), connected with Pubky Ring, with a built-in player on desktops"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/gillohner/pubky-music-node"
 
-# Kept out of the workspace members: wry needs WebKitGTK on Linux, which the
-# node's build machines do not have. CI and the release build it on their own.
+# Kept out of the workspace members: Tauri needs WebKitGTK on Linux, which the
+# node's build machines do not have. CI and the release build it on their own
+# (`npx @tauri-apps/cli build` in this directory; see README.md here).
+
+[lib]
+# Mobile builds load the app as a shared library; desktop links the rlib.
+name = "pm_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
 pm-pubky = { path = "../pm-pubky" }
-pm-client = { path = "../pm-client" }
-pm-stream = { path = "../pm-stream" }
-tao = "0.30"
-wry = "0.47"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tauri = { version = "=2.12.1", features = [] }
+tauri-plugin-opener = "=2.7.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -24,10 +33,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
-# The built-in player: bit-perfect ALSA `hw:` devices on Linux, the system
-# output elsewhere.
+# The built-in player (desktops only for now; an Android endpoint is a later
+# phase): bit-perfect ALSA `hw:` devices on Linux, the system output elsewhere.
 [target.'cfg(target_os = "linux")'.dependencies]
+pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["alsa", "cpal"] }
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"

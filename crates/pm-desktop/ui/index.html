@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pubky Music</title>
+  <link rel="stylesheet" href="connect.css">
+</head>
+<body>
+  <main>
+    <svg class="logo" viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#1e1e24"/><circle cx="128" cy="128" r="70" fill="none" stroke="#785adc" stroke-width="18"/><circle cx="128" cy="128" r="18" fill="#785adc"/></svg>
+    <h1>Pubky Music</h1>
+
+    <section id="saved" hidden>
+      <p id="saved-msg">Connecting…</p>
+      <div class="row">
+        <button id="retry" class="primary" hidden>Try again</button>
+        <button id="other" class="secondary" hidden>Connect to another node</button>
+      </div>
+    </section>
+
+    <section id="connect" hidden>
+      <p>Sign in with Pubky Ring. The app finds your node by itself.</p>
+      <button id="ring" class="primary">Sign in with Pubky Ring</button>
+      <div id="ring-out" class="out" hidden>
+        <div id="qr" class="qr"></div>
+        <p>Scan this with Pubky Ring on your phone, or open it on this device.</p>
+        <button id="ring-open" class="secondary">Open Pubky Ring</button>
+        <p class="muted">Waiting for approval…</p>
+      </div>
+      <details id="manual-box">
+        <summary>Or connect by address</summary>
+        <form id="manual">
+          <label>Node address<input id="url" autocomplete="url" inputmode="url" placeholder="192.168.1.10:7788" required></label>
+          <label>API token<input id="tok" type="password" autocomplete="current-password"></label>
+          <button class="primary" type="submit">Connect</button>
+        </form>
+      </details>
+    </section>
+
+    <p id="err" class="err" role="alert" hidden></p>
+  </main>
+  <script src="connect.js"></script>
+</body>
+</html>
