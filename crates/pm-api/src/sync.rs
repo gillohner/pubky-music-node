@@ -44,6 +44,20 @@ impl PubkySync {
         })
     }
 
+    /// Wrap an existing session (tests, or a sign-in flow handled elsewhere).
+    pub fn from_session(homeserver: NodeHomeserver, session: PubkySession) -> Self {
+        let z32 = session.public_key().to_string();
+        Self {
+            homeserver,
+            session,
+            z32,
+        }
+    }
+
+    pub fn session(&self) -> &PubkySession {
+        &self.session
+    }
+
     /// The signed-in user's raw z32 key.
     pub fn z32(&self) -> &str {
         &self.z32

@@ -33,6 +33,8 @@ Not started: `pm-sources`, `pm-out-oaat`, `pm-out-openhome`, `pm-out-slimproto`,
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+# with a local `pubky-testnet` running: playlist sync round trip through the private folder
+PM_TESTNET=1 cargo test -p pm-api --test testnet_sync
 # on the node, with ALSA headers installed:
 cargo build -p pm-node --features alsa
 ```
