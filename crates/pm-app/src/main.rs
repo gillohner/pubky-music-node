@@ -2144,6 +2144,26 @@ impl App {
                     if ui.add(theme::secondary("Add to queue")).clicked() {
                         self.play_tracks(&tracks, false, QueueAt::End);
                     }
+                    if !self.is_local()
+                        && !tracks.is_empty()
+                        && ui
+                            .add(theme::secondary("Start radio"))
+                            .on_hover_text(
+                                "A random track of this album, then similar music from the library",
+                            )
+                            .clicked()
+                    {
+                        let pick = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos() as usize)
+                            .unwrap_or(0)
+                            % tracks.len();
+                        self.play_tracks(&tracks[pick..=pick], true, QueueAt::End);
+                        self.backend.send(Cmd::SetRadio {
+                            zone: self.settings.zone.clone(),
+                            on: true,
+                        });
+                    }
                     self.heart(
                         ui,
                         album
