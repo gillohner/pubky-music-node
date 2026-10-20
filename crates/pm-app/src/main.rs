@@ -151,6 +151,8 @@ struct App {
     /// Sleep timer for the local player (node zones keep theirs on the node).
     local_sleep_at: Option<Instant>,
     new_releases: Option<pm_api::types::NewReleasesPage>,
+    /// Client-side filter shared by the Albums, Artists and Tracks lists.
+    list_filter: String,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -247,6 +249,7 @@ impl App {
             pubky_files: None,
             local_sleep_at: None,
             new_releases: None,
+            list_filter: String::new(),
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -1110,8 +1113,37 @@ impl App {
             View::Playlists => self.playlists_view(ui),
             View::Playlist(id) => self.playlist_view(ui, &id),
             View::Tracks => {
-                let tracks = self.tracks.clone();
-                ui.heading("Tracks");
+                let needle = self.list_filter.trim().to_lowercase();
+                let tracks: Vec<Track> = self
+                    .tracks
+                    .iter()
+                    .filter(|t| {
+                        needle.is_empty()
+                            || t.title.to_lowercase().contains(&needle)
+                            || t.artists.iter().any(|a| a.name.to_lowercase().contains(&needle))
+                            || t.album
+                                .as_ref()
+                                .is_some_and(|a| a.title.to_lowercase().contains(&needle))
+                    })
+                    .cloned()
+                    .collect();
+                ui.horizontal(|ui| {
+                    ui.heading("Tracks");
+                    if tracks.len() != self.tracks.len() {
+                        ui.weak(format!("{} of {}", tracks.len(), self.tracks.len()));
+                    } else {
+                        ui.weak(format!("{}", self.tracks.len()));
+                    }
+                    if self.tracks.len() > 12 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.list_filter)
+                                    .hint_text("Filter tracks")
+                                    .desired_width(200.0),
+                            );
+                        });
+                    }
+                });
                 self.track_table(ui, &tracks, true);
             }
             View::Search => {
@@ -1945,21 +1977,35 @@ impl App {
 
     fn albums_view(&mut self, ui: &mut egui::Ui) {
         use pm_library::Focus;
-        let albums: Vec<Album> = match self.album_focus {
-            Some(f) => self
-                .albums
-                .iter()
-                .filter(|a| self.album_in_focus(a.id, f))
-                .cloned()
-                .collect(),
-            None => self.albums.clone(),
-        };
+        let needle = self.list_filter.trim().to_lowercase();
+        let albums: Vec<Album> = self
+            .albums
+            .iter()
+            .filter(|a| self.album_focus.is_none_or(|f| self.album_in_focus(a.id, f)))
+            .filter(|a| {
+                needle.is_empty()
+                    || a.title.to_lowercase().contains(&needle)
+                    || a.album_artist
+                        .as_deref()
+                        .is_some_and(|x| x.to_lowercase().contains(&needle))
+            })
+            .cloned()
+            .collect();
         ui.horizontal(|ui| {
             ui.heading("Albums");
-            if self.album_focus.is_some() {
+            if albums.len() != self.albums.len() {
                 ui.weak(format!("{} of {}", albums.len(), self.albums.len()));
             } else {
                 ui.weak(format!("{}", self.albums.len()));
+            }
+            if self.albums.len() > 12 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.list_filter)
+                            .hint_text("Filter albums")
+                            .desired_width(200.0),
+                    );
+                });
             }
         });
         if self.albums.is_empty() {
@@ -1998,7 +2044,11 @@ impl App {
             ui.add_space(6.0);
         }
         if albums.is_empty() {
-            ui.weak("No album has a file of that quality.");
+            ui.weak(if needle.is_empty() {
+                "No album has a file of that quality."
+            } else {
+                "No album matches the filter."
+            });
             return;
         }
         let tile = 168.0;
@@ -2266,15 +2316,38 @@ impl App {
     }
 
     fn artists_view(&mut self, ui: &mut egui::Ui) {
+        let needle = self.list_filter.trim().to_lowercase();
+        let artists: Vec<_> = self
+            .artists
+            .iter()
+            .filter(|a| needle.is_empty() || a.name.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
         ui.horizontal(|ui| {
             ui.heading("Artists");
-            ui.weak(format!("{}", self.artists.len()));
+            if artists.len() != self.artists.len() {
+                ui.weak(format!("{} of {}", artists.len(), self.artists.len()));
+            } else {
+                ui.weak(format!("{}", self.artists.len()));
+            }
+            if self.artists.len() > 12 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.list_filter)
+                            .hint_text("Filter artists")
+                            .desired_width(200.0),
+                    );
+                });
+            }
         });
         if self.artists.is_empty() {
             ui.weak("No artists yet.");
             return;
         }
-        let artists = self.artists.clone();
+        if artists.is_empty() {
+            ui.weak("No artist matches the filter.");
+            return;
+        }
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("artists")
                 .num_columns(3)
