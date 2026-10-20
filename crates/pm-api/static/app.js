@@ -153,6 +153,9 @@
     }
     try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${qitems.length} tracks added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
+  // TIDAL's official embed player in a panel: full-length playback for subscribers, inside this UI, no tier needed.
+  const tidalEmbed = (kind, id, title) => { const p = $('#embedpanel'); $('#embedtitle').textContent = title || 'TIDAL player'; $('#embedframe').src = `https://embed.tidal.com/${kind}/${encodeURIComponent(id)}?layout=gridify`; p.hidden = false; };
+  $('#embedclose').onclick = () => { const p = $('#embedpanel'); p.hidden = true; $('#embedframe').src = 'about:blank'; };
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i) => {
     const it = state.browserQueue[i];
@@ -559,7 +562,7 @@
     const seeds = tracks.filter((t) => t && trackHasId(t));
     let versionItems = [];
     if (single && single.id != null && single.isrc) {
-      try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); } catch { /* no versions */ }
+      try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); const tv = vs.find((v) => v.source === 'tidal' && /^track:/.test(v.id)); if (tv) versionItems.push({ label: 'Full length in TIDAL\'s player (here)', icon: 'external', run: () => tidalEmbed('tracks', tv.id.replace(/^track:/, ''), single.title) }); } catch { /* no versions */ }
     }
     const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const items = [
@@ -868,7 +871,7 @@
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: b.dataset.src || 'tidal', id: b.dataset.sitem }));
           $$('[data-sartist]', main).forEach((b) => b.onclick = () => setView('source-artist', { source: b.dataset.src || 'tidal', id: b.dataset.sartist }));
           $$('[data-tplay]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tplay)])], true));
-          $$('[data-tplayon]', main).forEach((b) => b.onclick = () => { const h = tTracks[Number(b.dataset.tplayon)]; showMenu(b, [{ title: h.title }, ...[h, ...(h.others || [])].map((o) => ({ label: `Play on ${o.source.toUpperCase()}${o.source === 'deezer' ? ' (30 s preview)' : ''}`, icon: 'zone', run: () => playSourceItems([hitItem(o)], true) }))]); });
+          $$('[data-tplayon]', main).forEach((b) => b.onclick = () => { const h = tTracks[Number(b.dataset.tplayon)]; const all = [h, ...(h.others || [])]; const tid = all.find((o) => o.source === 'tidal'); showMenu(b, [{ title: h.title }, ...all.map((o) => ({ label: `Play on ${o.source.toUpperCase()}${o.source === 'deezer' ? ' (30 s preview)' : ''}`, icon: 'zone', run: () => playSourceItems([hitItem(o)], true) })), ...(tid ? [{ label: 'Full length in TIDAL\'s player (here)', icon: 'external', run: () => tidalEmbed('tracks', tid.id.replace(/^track:/, ''), h.title) }] : [])]); });
           $$('[data-tnext]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tnext)])], false, 'next'));
           $$('[data-tadd]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tadd)])], false, 'end'));
           $('#s-archive').onclick = () => { state.sourceResults = null; setView('sources', { source: 'archive', q }); };

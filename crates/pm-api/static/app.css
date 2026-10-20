@@ -495,3 +495,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .qrbox .qr svg { width: 100%; height: 100%; display: block; }
 .qrbox p { margin: 0 0 10px; }
 
+/* TIDAL's embedded player, docked above the transport bar. */
+.embedpanel { position: fixed; right: 16px; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: min(440px, calc(100vw - 32px)); background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow); z-index: 40; overflow: hidden; }
+.embedhead { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.embedhead .muted { flex: 1; }
+.embedpanel iframe { width: 100%; height: 160px; border: 0; display: block; background: #000; }
+
