@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 #[async_trait::async_trait]
 pub trait StreamingService: Send + Sync {
-    /// Stable id used in URLs (`archive`, `audius`, `tidal`).
+    /// Stable id used in URLs (`archive`, `audius`, `tidal`, `deezer`).
     fn id(&self) -> &'static str;
     fn info(&self, s: &NodeState) -> SourceInfo;
     /// Whether the main search should query this service alongside the library.
@@ -34,6 +34,7 @@ pub fn services() -> Vec<Box<dyn StreamingService>> {
         Box::new(crate::archive::InternetArchive),
         Box::new(crate::audius::Audius),
         Box::new(crate::tidal::Tidal),
+        Box::new(crate::deezer::Deezer),
     ]
 }
 

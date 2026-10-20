@@ -39,6 +39,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/search` | `?q=&limit=&sources=1` | `{tracks, albums, artists, genres, sources: [{source, items}]}`: tracks by full text (title, artist, album, genre words), albums by title, artists and genres by name; `sources` carries hits from streaming services that take part (TIDAL when configured; `sources=0` skips them), each hit flagged with `library_track_id` / `library_album_id` when the library has the same ISRC or UPC |
 | GET | `/v1/library/albums/{id}/versions`, `/v1/library/tracks/{id}/versions` | | `[{source, id, label, url, uri?}]`: the same album (by UPC) or track (by ISRC) on TIDAL, cached a week; empty when unknown |
 | GET | `/v1/sources/tidal/stream/{id}` | | the track's HLS segments as one `audio/mp4` body for browsers (`X-Tidal-Presentation: FULL\|PREVIEW`); sign-in required |
+| GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
@@ -80,7 +81,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |
-| GET | `/v1/sources` | | streaming sources the node can search and play: `[{id, name, description, status}]` (`archive` = Internet Archive, `audius` = Audius; subscription services plug in here) |
+| GET | `/v1/sources` | | streaming sources the node can search and play: `[{id, name, description, status}]` (`archive` = Internet Archive, `audius` = Audius, `tidal` = TIDAL, `deezer` = Deezer catalogue with 30 s previews; hits carry `uri` when a track can be queued directly) |
 | GET | `/v1/sources/{source}/search` | `?q=&limit=` | `{source, items: [{id, title, creator?, year?, downloads?, image?, kind: item\|track, url}]}` |
 | GET | `/v1/sources/tidal/login` | | `{url}`: TIDAL's sign-in page (OAuth 2 + PKCE, scopes incl. `playback`); the browser comes back to `/tidal/callback` (no token needed there), which stores the user's tokens and redirects to `/?tidal=signed_in` |
 | GET / DELETE | `/v1/sources/tidal/status` (DELETE `…/session`) | | `{configured, signed_in, user_id?, country?, scope?, expires_at?, redirect_uri, requested_scopes, access_tier?, playback_limit?}` (`playback_limit` such as `FULL_REQUIRES_HIGHER_ACCESS_TIER` means TIDAL serves previews to this app's tier); DELETE forgets the tokens |

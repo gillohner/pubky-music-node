@@ -847,6 +847,9 @@ pub struct SourceHit {
     pub library_track_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_album_id: Option<i64>,
+    /// Queue URI of a track hit (`tidal:track:…`, `deezer:track:…`, a stream URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     /// The source's own page for it.
     pub url: String,
 }

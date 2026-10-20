@@ -82,6 +82,7 @@ pub(crate) fn hit(host: &str, t: &serde_json::Value) -> Option<SourceHit> {
         upc: None,
         library_track_id: None,
         library_album_id: None,
+        uri: Some(format!("{host}/v1/tracks/{id}/stream?app_name={APP_NAME}")),
         url: if permalink.is_empty() {
             format!("{host}/v1/tracks/{id}")
         } else {

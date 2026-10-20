@@ -14,6 +14,7 @@ pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod audius;
+pub mod deezer;
 pub mod discover;
 pub mod favourites;
 pub mod files;
@@ -186,6 +187,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
+        .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/tidal/collection/import", post(tidal::import_collection))
         .route("/sources/tidal/playlists", get(tidal::playlists))
         .route(
@@ -924,7 +926,7 @@ async fn backup(State(s): State<Arc<NodeState>>) -> Result<axum::response::Respo
         .into_response())
 }
 
-/// Where else a library track streams from (TIDAL by ISRC); empty when nothing is known.
+/// Where else a library track streams from (TIDAL and Deezer by ISRC); empty when nothing is known.
 async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
     let track = s
         .library
@@ -932,10 +934,16 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    Ok(Json(tidal::track_versions(&s, &track).await.unwrap_or_default()))
+    let (t, d) = tokio::join!(
+        tidal::track_versions(&s, &track),
+        deezer::track_versions(&s, &track)
+    );
+    let mut out = t.unwrap_or_default();
+    out.extend(d.unwrap_or_default());
+    Ok(Json(out))
 }
 
-/// Where else a library album streams from (TIDAL by UPC).
+/// Where else a library album streams from (TIDAL and Deezer by UPC).
 async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
     let album = s
         .library
@@ -943,7 +951,13 @@ async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_album(id)?
         .ok_or_else(|| ApiError::not_found(format!("no album {id}")))?;
-    Ok(Json(tidal::album_versions(&s, &album).await.unwrap_or_default()))
+    let (t, d) = tokio::join!(
+        tidal::album_versions(&s, &album),
+        deezer::album_versions(&s, &album)
+    );
+    let mut out = t.unwrap_or_default();
+    out.extend(d.unwrap_or_default());
+    Ok(Json(out))
 }
 
 /// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
@@ -1574,6 +1588,8 @@ mod tests {
             lib,
             outputs,
         );
+        // Never reach the real Deezer API from tests; a closed port fails fast.
+        *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
         s.zones_for_all_outputs();
         s
     }
@@ -2114,6 +2130,229 @@ mod tests {
             "POST",
             &format!("/v1/zones/{zid}/queue"),
             Some(serde_json::json!({"items": [{"uri": url, "title": "Ambient Piano Interlude"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+    }
+
+    /// Deezer against a local mock: artists, albums and tracks come back from
+    /// one search with ISRC/UPC, an album item lists its tracks, versions of a
+    /// library track/album are found by ISRC/UPC, the browser proxy redirects
+    /// to the preview, and a `deezer:track:` URI plays through the zone.
+    #[tokio::test]
+    async fn deezer_source_searches_matches_and_plays_previews() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let preview = format!("http://127.0.0.1:{port}/preview.mp3");
+        let track = serde_json::json!({"id": 138547415, "title": "Creep", "isrc": "GBAYE9200070", "duration": 238, "rank": 9,
+            "preview": preview, "artist": {"id": 399, "name": "Radiohead"},
+            "album": {"id": 12047952, "title": "Pablo Honey", "cover_medium": "http://img/pablo.jpg", "release_date": "1993-02-22"}});
+        let album = serde_json::json!({"id": 12047952, "title": "Pablo Honey", "upc": "724381230321", "release_date": "1993-02-22", "label": "Parlophone",
+            "cover_big": "http://img/pablo-big.jpg", "artist": {"id": 399, "name": "Radiohead"}, "tracks": {"data": [track]}});
+        let artist = serde_json::json!({"id": 399, "name": "Radiohead", "nb_fan": 1000, "picture_big": "http://img/rh.jpg"});
+        let (t1, t2, t3, a1, a2, a3, a4, ar1, ar2, ar3) = (
+            track.clone(),
+            track.clone(),
+            track.clone(),
+            album.clone(),
+            album.clone(),
+            album.clone(),
+            album.clone(),
+            artist.clone(),
+            artist.clone(),
+            artist.clone(),
+        );
+        let mock = Router::new()
+            .route(
+                "/search/track",
+                get(move || {
+                    let t = t1.clone();
+                    async move { Json(serde_json::json!({"data": [t]})) }
+                }),
+            )
+            .route(
+                "/search/album",
+                get(move || {
+                    let a = a1.clone();
+                    async move { Json(serde_json::json!({"data": [a]})) }
+                }),
+            )
+            .route(
+                "/search/artist",
+                get(move || {
+                    let a = ar1.clone();
+                    async move { Json(serde_json::json!({"data": [a]})) }
+                }),
+            )
+            .route(
+                "/album/{id}",
+                get(move |Path(id): Path<String>| {
+                    let a = a2.clone();
+                    async move {
+                        if id == "12047952" || id == "upc:724381230321" {
+                            Json(a)
+                        } else {
+                            Json(serde_json::json!({"error": {"code": 800, "message": "no data"}}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/track/{id}",
+                get(move |Path(id): Path<String>| {
+                    let t = t2.clone();
+                    async move {
+                        if id == "138547415" || id == "isrc:GBAYE9200070" {
+                            Json(t)
+                        } else {
+                            Json(serde_json::json!({"error": {"code": 800, "message": "no data"}}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/artist/{id}",
+                get(move || {
+                    let a = ar2.clone();
+                    async move { Json(a) }
+                }),
+            )
+            .route(
+                "/artist/{id}/albums",
+                get(move || {
+                    let a = a3.clone();
+                    async move { Json(serde_json::json!({"data": [a]})) }
+                }),
+            )
+            .route(
+                "/preview.mp3",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        let _ = (t3, a4, ar3);
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.deezer_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, r) = call(&app, "GET", "/v1/sources/deezer/search?q=creep", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let kinds: Vec<&str> = r["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["artist", "album", "track"]);
+        assert_eq!(r["items"][2]["uri"], "deezer:track:138547415");
+        assert_eq!(r["items"][2]["isrc"], "GBAYE9200070");
+        assert_eq!(r["items"][2]["duration_ms"], 238_000);
+        assert_eq!(r["items"][1]["upc"], "724381230321");
+        let (st, it) = call(&app, "GET", "/v1/sources/deezer/items/album:12047952", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(it["tracks"][0]["url"], "deezer:track:138547415");
+        assert_eq!(it["image"], "http://img/pablo-big.jpg");
+        let (st, _) = call(&app, "GET", "/v1/sources/deezer/items/album:1", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, ar) = call(&app, "GET", "/v1/sources/deezer/artists/artist:399", None).await;
+        assert_eq!(st, StatusCode::OK, "{ar}");
+        assert_eq!(ar["albums"][0]["id"], "album:12047952");
+        // The unified search shows Deezer without any configuration.
+        let (st, u) = call(&app, "GET", "/v1/library/search?q=creep", None).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert!(
+            u["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["source"] == "deezer"),
+            "{u}"
+        );
+        // Versions of a library track/album with the same ISRC/UPC.
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let t = pm_model::Track {
+                id: None,
+                title: "Creep".into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: "Radiohead".into(),
+                    mbid: None,
+                }],
+                album: Some(pm_model::Album {
+                    id: None,
+                    title: "Pablo Honey".into(),
+                    album_artist: Some("Radiohead".into()),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: Some(1993),
+                    upc: Some(pm_model::Upc::parse("724381230321").unwrap()),
+                    total_discs: None,
+                }),
+                track_no: Some(2),
+                disc_no: None,
+                duration_ms: Some(238_000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join("creep.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(238_000),
+                },
+                recording_mbid: None,
+                isrc: Some(pm_model::Isrc::parse("GBAYE9200070").unwrap()),
+                acoustid: None,
+                canonical: None,
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            lib.upsert_track(&t).unwrap().0
+        };
+        let (st, v) = call(&app, "GET", &format!("/v1/library/tracks/{tid}/versions"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v[0]["source"], "deezer");
+        assert_eq!(v[0]["uri"], "deezer:track:138547415");
+        let (_, t) = call(&app, "GET", &format!("/v1/library/tracks/{tid}"), None).await;
+        let aid = t["album"]["id"].as_i64().unwrap();
+        let (st, v) = call(&app, "GET", &format!("/v1/library/albums/{aid}/versions"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v[0]["id"], "album:12047952");
+        // Browser proxy: a redirect to the preview.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sources/deezer/stream/138547415")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            resp.headers()["location"],
+            format!("http://127.0.0.1:{port}/preview.mp3")
+        );
+        // And the zone plays the URI itself.
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": "deezer:track:138547415", "title": "Creep"}], "replace": true, "play": true})),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{q}");

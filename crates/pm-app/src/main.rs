@@ -1296,8 +1296,10 @@ impl App {
                             self.view = View::Sources;
                         }
                         if let Some((h, replace)) = play {
-                            let mut item =
-                                QueueItem::new(format!("tidal:track:{}", h.id.trim_start_matches("track:")));
+                            let uri = h.uri.clone().unwrap_or_else(|| {
+                                format!("tidal:track:{}", h.id.trim_start_matches("track:"))
+                            });
+                            let mut item = QueueItem::new(uri);
                             item.title = Some(h.title.clone());
                             item.artist = h.creator.clone();
                             self.play_source_items(vec![item], replace);
@@ -1706,12 +1708,15 @@ impl App {
             items
                 .into_iter()
                 .map(|mut it| {
-                    if let Some(id) = it.uri.strip_prefix("tidal:track:") {
-                        it.uri = format!(
-                            "{}/v1/sources/tidal/stream/{id}?token={}",
-                            self.settings.node_url.trim_end_matches('/'),
-                            self.settings.token
-                        );
+                    for svc in ["tidal", "deezer"] {
+                        if let Some(id) = it.uri.strip_prefix(&format!("{svc}:track:")) {
+                            it.uri = format!(
+                                "{}/v1/sources/{svc}/stream/{id}?token={}",
+                                self.settings.node_url.trim_end_matches('/'),
+                                self.settings.token
+                            );
+                            break;
+                        }
                     }
                     it
                 })

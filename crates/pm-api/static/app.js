@@ -121,7 +121,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); $('#zonename').textContent = z ? z.name : 'Zone'; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { const m = /^tidal:track:([A-Za-z0-9]+)$/.exec(uri || ''); if (m) return `/v1/sources/tidal/stream/${m[1]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { const m = /^(tidal|deezer):track:([A-Za-z0-9]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -133,7 +133,7 @@
     }
     try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${qitems.length} tracks added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
-  const hitItem = (h, album) => ({ uri: `tidal:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
+  const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i) => {
     const it = state.browserQueue[i];
     if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; }

@@ -23,6 +23,8 @@ pub struct NodeSources {
     dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
     /// TIDAL credentials and origins, for `tidal:track:` URIs on the audio thread.
     tidal: crate::tidal::SharedEndpoints,
+    /// Deezer API origin, for `deezer:track:` URIs (previews).
+    deezer: crate::deezer::SharedBase,
 }
 
 impl NodeSources {
@@ -30,6 +32,7 @@ impl NodeSources {
         library: Arc<Mutex<Library>>,
         cfg: PipelineConfig,
         tidal: crate::tidal::SharedEndpoints,
+        deezer: crate::deezer::SharedBase,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -48,6 +51,7 @@ impl NodeSources {
             default_cfg: cfg,
             dsp: RwLock::new(dsp),
             tidal,
+            deezer,
         }
     }
 
@@ -497,6 +501,9 @@ impl SourceFactory for NodeSources {
         }
         if let Some(id) = item.uri.strip_prefix(crate::tidal::TRACK_URI_PREFIX) {
             return crate::tidal::open_track_blocking(&self.library, &self.tidal, id);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::deezer::TRACK_URI_PREFIX) {
+            return crate::deezer::open_track_blocking(&self.deezer, id);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

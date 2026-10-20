@@ -126,6 +126,7 @@ pub(crate) fn parse_search(v: &serde_json::Value) -> Vec<SourceHit> {
                         upc: None,
                         library_track_id: None,
                         library_album_id: None,
+                        uri: None,
                         title: str_or_first(&d["title"]).unwrap_or_else(|| id.clone()),
                         creator: str_or_first(&d["creator"]),
                         year: str_or_first(&d["year"])

@@ -681,6 +681,7 @@ impl StreamingService for Tidal {
                     upc: at["barcodeId"].as_str().map(str::to_string),
                     library_track_id: None,
                     library_album_id: None,
+                    uri: None,
                     url: tidal_url("album", &id),
                 });
             }
@@ -722,6 +723,7 @@ impl StreamingService for Tidal {
                     upc: None,
                     library_track_id: None,
                     library_album_id: None,
+                    uri: Some(track_uri(&id)),
                     url: tidal_url("track", &id),
                 });
             }
@@ -1136,6 +1138,7 @@ async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Ve
                 upc: None,
                 library_track_id: None,
                 library_album_id: None,
+                uri: Some(track_uri(&id)),
                 url: tidal_url("track", &id),
             });
             docs.push(t);
@@ -1174,6 +1177,7 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
                 upc: a["attributes"]["barcodeId"].as_str().map(str::to_string),
                 library_track_id: None,
                 library_album_id: None,
+                uri: None,
                 url: tidal_url("album", &id),
             });
         }
@@ -1218,6 +1222,7 @@ async fn artist_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Ap
                         upc: None,
                         library_track_id: None,
                         library_album_id: None,
+                        uri: None,
                         url: tidal_url("artist", id),
                     })
                 })
@@ -1428,14 +1433,14 @@ pub(crate) async fn import_playlist(
 
 // ---- versions: where a library album or track streams from on TIDAL ----
 
-fn cache_get(s: &NodeState, key: &str) -> Option<Vec<Version>> {
+pub(crate) fn cache_get(s: &NodeState, key: &str) -> Option<Vec<Version>> {
     let lib = s.library.lock().expect("library poisoned");
     let j = lib.get_setting(key).ok().flatten()?;
     let (at, v): (i64, Vec<Version>) = serde_json::from_str(&j).ok()?;
     (now_unix() - at < 7 * 24 * 3600).then_some(v)
 }
 
-fn cache_put(s: &NodeState, key: &str, v: &[Version]) {
+pub(crate) fn cache_put(s: &NodeState, key: &str, v: &[Version]) {
     let lib = s.library.lock().expect("library poisoned");
     let _ = lib.set_setting(key, &serde_json::to_string(&(now_unix(), v)).expect("serializes"));
 }

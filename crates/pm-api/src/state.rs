@@ -114,6 +114,8 @@ pub struct NodeState {
     /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock);
     /// shared with the source factory so the audio thread can resolve `tidal:track:` URIs.
     pub tidal: crate::tidal::SharedEndpoints,
+    /// Deezer API origin (tests point it at a mock).
+    pub deezer_base: crate::deezer::SharedBase,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -130,10 +132,12 @@ impl NodeState {
                 creds: settings.tidal.clone(),
                 ..Default::default()
             }));
+        let deezer_base = crate::deezer::shared_base();
         let sources = Arc::new(NodeSources::new(
             library.clone(),
             settings.pipeline,
             tidal.clone(),
+            deezer_base.clone(),
         ));
         let (events, _) = broadcast::channel(1024);
         // A contact saved through the API wins over an unset config value.
@@ -192,6 +196,7 @@ impl NodeState {
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
+            deezer_base,
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
