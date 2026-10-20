@@ -151,6 +151,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/", get(web_ui))
         .route("/app", get(web_ui))
         .route("/app/", get(web_ui))
+        .route("/app.css", get(web_css))
+        .route("/app.js", get(web_js))
         .nest("/v1", v1)
         .merge(subsonic::router(state))
 }
@@ -194,6 +196,28 @@ async fn auth(
 
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
+async fn web_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/app.css"),
+    )
+        .into_response()
+}
+
+async fn web_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/app.js"),
+    )
+        .into_response()
+}
+
 async fn web_ui() -> Response {
     (
         [
@@ -1087,7 +1111,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), Some("s3cret")).await;
         let app = router(s);
-        for path in ["/", "/app", "/app/"] {
+        for (path, needle) in [
+            ("/", "<title>Pubky Music</title>"),
+            ("/app", "<title>Pubky Music</title>"),
+            ("/app/", "<title>Pubky Music</title>"),
+            ("/app.css", ".player"),
+            ("/app.js", "/v1/events"),
+        ] {
             let resp = app
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -1095,9 +1125,7 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
             let body = resp.into_body().collect().await.unwrap().to_bytes();
-            assert!(std::str::from_utf8(&body)
-                .unwrap()
-                .contains("<title>Pubky Music</title>"));
+            assert!(std::str::from_utf8(&body).unwrap().contains(needle), "{path}");
         }
     }
 
