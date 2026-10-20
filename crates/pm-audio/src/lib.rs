@@ -24,7 +24,7 @@ pub use decode::Decoder;
 pub use dsd::DsdReader;
 pub use dsp::{BandKind, EqBand, Equalizer};
 pub use error::AudioError;
-pub use pipeline::{DsdMode, PipelineConfig, PipelineError, Plan};
+pub use pipeline::{DsdMode, Loudness, PipelineConfig, PipelineError, Plan};
 pub use play::{play_file, play_to_sink, PlayReport};
 pub use probe::{probe_file, FileInfo};
 pub use zone::LocalFiles;

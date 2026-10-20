@@ -52,6 +52,31 @@ pub struct PipelineConfig {
     pub resample: bool,
     /// Parametric EQ bands (M8); empty keeps the path bit-perfect.
     pub eq: Vec<crate::dsp::EqBand>,
+    /// ReplayGain application, when the track carries values.
+    pub loudness: Loudness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Loudness {
+    #[default]
+    Off,
+    /// Track gain; album gain when the track has none.
+    Track,
+    /// Album gain; track gain when the album has none.
+    Album,
+}
+
+impl Loudness {
+    /// The gain to apply for this mode, if the tags provide one.
+    pub fn gain_db(self, rg: Option<pm_zones::ReplayGain>) -> Option<f32> {
+        let rg = rg?;
+        match self {
+            Loudness::Off => None,
+            Loudness::Track => rg.track_db.or(rg.album_db),
+            Loudness::Album => rg.album_db.or(rg.track_db),
+        }
+    }
 }
 
 impl Default for PipelineConfig {
@@ -63,6 +88,7 @@ impl Default for PipelineConfig {
             dsd_mode: DsdMode::Auto,
             resample: true,
             eq: Vec::new(),
+            loudness: Loudness::Off,
         }
     }
 }
@@ -145,13 +171,25 @@ impl Plan {
         caps: &OutputCaps,
         cfg: &PipelineConfig,
     ) -> Result<Plan, PipelineError> {
+        Self::negotiate_for(source, caps, cfg, None)
+    }
+
+    /// Like [`negotiate`](Self::negotiate), with the track's ReplayGain for
+    /// the `loudness` stage.
+    pub fn negotiate_for(
+        source: AudioFormat,
+        caps: &OutputCaps,
+        cfg: &PipelineConfig,
+        replay_gain: Option<pm_zones::ReplayGain>,
+    ) -> Result<Plan, PipelineError> {
         source
             .validate()
             .map_err(|e| PipelineError::InvalidFormat(e.to_string()))?;
         let mut path = SignalPath::new();
         path.push(PathStage::passthrough("decode", source));
+        let loudness_db = cfg.loudness.gain_db(replay_gain).filter(|g| *g != 0.0);
         match source.kind {
-            SampleKind::Pcm => Self::negotiate_pcm(source, caps, cfg, path),
+            SampleKind::Pcm => Self::negotiate_pcm(source, caps, cfg, loudness_db, path),
             SampleKind::Dsd => Self::negotiate_dsd(source, caps, cfg, path),
         }
     }
@@ -160,6 +198,7 @@ impl Plan {
         source: AudioFormat,
         caps: &OutputCaps,
         cfg: &PipelineConfig,
+        loudness_db: Option<f32>,
         mut path: SignalPath,
     ) -> Result<Plan, PipelineError> {
         let (ceil_rate, ceil_bits) = match caps.quality_ceiling {
@@ -226,7 +265,7 @@ impl Plan {
         };
         let mut stages = Vec::new();
 
-        if cfg.wants_float() || resample_to.is_some() {
+        if cfg.wants_float() || resample_to.is_some() || loudness_db.is_some() {
             let mut cur = source;
             let fbits = AudioFormat {
                 bits: 32,
@@ -252,6 +291,20 @@ impl Plan {
                 path.push(
                     PathStage::new("headroom", cur, fbits, Quality::Lossy)
                         .with_note(format!("{db:+.1} dB in 64-bit float")),
+                );
+                cur = fbits;
+            }
+            if let Some(db) = loudness_db {
+                let db = db.clamp(-30.0, 12.0);
+                stages.push(Stage::Gain { gain: db_to_gain(db) });
+                path.push(
+                    PathStage::new("loudness", cur, fbits, Quality::Enhanced).with_note(format!(
+                        "ReplayGain {} {db:+.1} dB in 64-bit float",
+                        match cfg.loudness {
+                            Loudness::Album => "album",
+                            _ => "track",
+                        }
+                    )),
                 );
                 cur = fbits;
             }
@@ -799,6 +852,44 @@ mod tests {
             ..Default::default()
         };
         assert!(Plan::negotiate(src, &OutputCaps::unlimited(), &bad).is_err());
+    }
+
+    #[test]
+    fn loudness_applies_replaygain_only_when_asked() {
+        let src = AudioFormat::pcm(44_100, 16, 2);
+        let rg = pm_zones::ReplayGain {
+            track_db: Some(-7.5),
+            album_db: Some(-6.0),
+        };
+        let plan = Plan::negotiate_for(
+            src,
+            &OutputCaps::unlimited(),
+            &PipelineConfig::default(),
+            Some(rg),
+        )
+        .unwrap();
+        assert!(plan.is_bit_perfect(), "off by default");
+        let cfg = PipelineConfig {
+            loudness: Loudness::Album,
+            ..Default::default()
+        };
+        let mut plan = Plan::negotiate_for(src, &OutputCaps::unlimited(), &cfg, Some(rg)).unwrap();
+        let st = &plan.signal_path().stages[1];
+        assert_eq!(st.name, "loudness");
+        assert_eq!(st.quality, Quality::Enhanced);
+        assert!(st.note.as_deref().unwrap().contains("album -6.0 dB"));
+        // A full-scale sample comes out ~6 dB lower.
+        let out = plan
+            .process(AudioBlock::pcm_i32(src, vec![32767, 32767]))
+            .unwrap();
+        if let Samples::PcmI32(v) = out.samples {
+            assert!((v[0] as f64 / 32767.0 - 0.501).abs() < 0.01, "{v:?}");
+        } else {
+            panic!();
+        }
+        // No tags → no stage, still bit-perfect.
+        let plan = Plan::negotiate_for(src, &OutputCaps::unlimited(), &cfg, None).unwrap();
+        assert!(plan.is_bit_perfect());
     }
 
     #[test]

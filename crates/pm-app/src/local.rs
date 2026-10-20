@@ -6,7 +6,7 @@
 
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_client::NodeClient;
-use pm_model::{AudioFormat, OutputCaps};
+use pm_model::OutputCaps;
 use pm_zones::{
     outputs::NullOutput, FrameSource, Output, Processor, QueueItem, SourceError, SourceFactory, Zone, ZoneId,
 };
@@ -82,7 +82,7 @@ struct RemoteTracks {
 }
 
 impl RemoteTracks {
-    fn fetch(&self, id: i64, uri: &str) -> Result<PathBuf, SourceError> {
+    fn fetch(&self, id: i64, uri: &str) -> Result<(PathBuf, pm_zones::ReplayGain), SourceError> {
         let client = self
             .client
             .read()
@@ -128,7 +128,13 @@ impl RemoteTracks {
                     reason: e.to_string(),
                 })?;
         }
-        Ok(path)
+        Ok((
+            path,
+            pm_zones::ReplayGain {
+                track_db: track.replaygain_track_gain_db,
+                album_db: track.replaygain_album_gain_db,
+            },
+        ))
     }
 }
 
@@ -141,22 +147,26 @@ impl SourceFactory for RemoteTracks {
             uri: item.uri.clone(),
             reason: "malformed track id".into(),
         })?;
-        let path = self.fetch(id, &item.uri)?;
+        let (path, gain) = self.fetch(id, &item.uri)?;
         let mut local = QueueItem::new(path.to_string_lossy());
         local.id = item.id;
-        self.files.open(&local)
+        let inner = self.files.open(&local)?;
+        Ok(Box::new(pm_zones::WithReplayGain { inner, gain }))
     }
 
     fn plan(
         &self,
-        source: AudioFormat,
+        src: &dyn FrameSource,
         caps: &OutputCaps,
         _output: &pm_zones::OutputId,
     ) -> Result<Box<dyn Processor>, SourceError> {
+        let source = src.format();
         let cfg = self.cfg.read().expect("cfg lock").clone();
-        let plan = pm_audio::Plan::negotiate(source, caps, &cfg).map_err(|e| SourceError::Negotiate {
-            format: source,
-            reason: e.to_string(),
+        let plan = pm_audio::Plan::negotiate_for(source, caps, &cfg, src.replay_gain()).map_err(|e| {
+            SourceError::Negotiate {
+                format: source,
+                reason: e.to_string(),
+            }
         })?;
         Ok(Box::new(plan))
     }

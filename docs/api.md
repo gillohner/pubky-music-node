@@ -19,7 +19,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
 | POST | `/v1/zones/{id}/volume` | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
 | PUT | `/v1/zones/{id}/repeat` | `{repeat: off\|all\|one}` | 204 |
-| GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, dither, dsd_mode, resample, eq: [{kind, freq_hz, gain_db, q, enabled}]}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
+| GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, dither, dsd_mode, resample, loudness: off\|track\|album, eq: [{kind, freq_hz, gain_db, q, enabled}]}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
 | GET | `/v1/library/stats` | | `LibraryStats` |
 | GET | `/v1/library/tracks` | `?after=<id>&limit=` | `{tracks}` |
 | GET | `/v1/library/tracks/{id}` | | `Track` |

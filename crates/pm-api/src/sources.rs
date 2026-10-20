@@ -4,7 +4,7 @@
 
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_library::Library;
-use pm_model::{AudioFormat, OutputCaps, TrackId};
+use pm_model::{OutputCaps, TrackId};
 use pm_zones::{FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -120,19 +120,29 @@ impl SourceFactory for NodeSources {
             })?;
         let mut file_item = QueueItem::new(track.file.path.to_string_lossy());
         file_item.id = item.id;
-        self.files.open(&file_item)
+        let inner = self.files.open(&file_item)?;
+        Ok(Box::new(pm_zones::WithReplayGain {
+            inner,
+            gain: pm_zones::ReplayGain {
+                track_db: track.replaygain_track_gain_db,
+                album_db: track.replaygain_album_gain_db,
+            },
+        }))
     }
 
     fn plan(
         &self,
-        source: AudioFormat,
+        src: &dyn FrameSource,
         caps: &OutputCaps,
         output: &OutputId,
     ) -> Result<Box<dyn Processor>, SourceError> {
+        let source = src.format();
         let cfg = self.dsp_for(output);
-        let plan = pm_audio::Plan::negotiate(source, caps, &cfg).map_err(|e| SourceError::Negotiate {
-            format: source,
-            reason: e.to_string(),
+        let plan = pm_audio::Plan::negotiate_for(source, caps, &cfg, src.replay_gain()).map_err(|e| {
+            SourceError::Negotiate {
+                format: source,
+                reason: e.to_string(),
+            }
         })?;
         Ok(Box::new(plan))
     }

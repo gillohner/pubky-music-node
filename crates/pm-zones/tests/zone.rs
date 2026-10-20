@@ -133,10 +133,11 @@ impl SourceFactory for Factory {
 
     fn plan(
         &self,
-        source: AudioFormat,
+        src: &dyn FrameSource,
         caps: &OutputCaps,
         _output: &OutputId,
     ) -> Result<Box<dyn Processor>, SourceError> {
+        let source = src.format();
         if !caps.accepts(&source) {
             return Err(SourceError::Negotiate {
                 format: source,

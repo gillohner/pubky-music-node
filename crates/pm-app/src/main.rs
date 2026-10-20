@@ -1533,6 +1533,15 @@ impl App {
                             cfg.volume_db = (v != 0.0).then_some(v);
                         }
                         ui.end_row();
+                        ui.label("Loudness (ReplayGain)");
+                        egui::ComboBox::from_id_salt("loudness")
+                            .selected_text(format!("{:?}", cfg.loudness))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut cfg.loudness, pm_audio::Loudness::Off, "Off");
+                                ui.selectable_value(&mut cfg.loudness, pm_audio::Loudness::Track, "Track");
+                                ui.selectable_value(&mut cfg.loudness, pm_audio::Loudness::Album, "Album");
+                            });
+                        ui.end_row();
                         ui.label("Resample when needed");
                         ui.checkbox(&mut cfg.resample, "");
                         ui.end_row();

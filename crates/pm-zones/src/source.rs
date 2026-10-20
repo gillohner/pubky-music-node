@@ -22,6 +22,42 @@ pub enum SourceError {
     Negotiate { format: AudioFormat, reason: String },
 }
 
+/// ReplayGain values from the track's tags, in dB (applied by the
+/// pipeline's `loudness` stage when enabled).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReplayGain {
+    pub track_db: Option<f32>,
+    pub album_db: Option<f32>,
+}
+
+/// A source with ReplayGain attached (the opener knows the tags, the
+/// decoder does not).
+pub struct WithReplayGain {
+    pub inner: Box<dyn FrameSource>,
+    pub gain: ReplayGain,
+}
+
+impl FrameSource for WithReplayGain {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.inner.duration_ms()
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        self.inner.next_block()
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        self.inner.seek_ms(ms)
+    }
+    fn finalize(&mut self) -> Option<bool> {
+        self.inner.finalize()
+    }
+    fn replay_gain(&self) -> Option<ReplayGain> {
+        Some(self.gain)
+    }
+}
+
 /// One decoded track. Methods block (file I/O); the zone calls them from its
 /// audio thread.
 pub trait FrameSource: Send {
@@ -35,6 +71,10 @@ pub trait FrameSource: Send {
     /// Codec verification once the end was reached (FLAC MD5); `None` when
     /// the codec has none.
     fn finalize(&mut self) -> Option<bool> {
+        None
+    }
+    /// ReplayGain from the track's tags, when known.
+    fn replay_gain(&self) -> Option<ReplayGain> {
         None
     }
 }
@@ -55,10 +95,11 @@ pub trait Processor: Send {
 /// Opens queue items and plans chains. Shared by every zone of a node.
 pub trait SourceFactory: Send + Sync {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError>;
-    /// Plan the chain for `output` (per-zone DSP keys on it).
+    /// Plan the chain from `source` to `output` (per-zone DSP keys on the
+    /// output; the source supplies its format and ReplayGain).
     fn plan(
         &self,
-        source: AudioFormat,
+        source: &dyn FrameSource,
         caps: &OutputCaps,
         output: &crate::sink::OutputId,
     ) -> Result<Box<dyn Processor>, SourceError>;

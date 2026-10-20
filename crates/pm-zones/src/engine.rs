@@ -368,7 +368,7 @@ impl Engine {
         let source = self.factory.open(item)?;
         let proc = self
             .factory
-            .plan(source.format(), self.output.caps(), &self.output.id())?;
+            .plan(source.as_ref(), self.output.caps(), &self.output.id())?;
         Ok((source, proc))
     }
 
