@@ -543,3 +543,11 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 @media (max-width: 720px) { .idrow { grid-template-columns: 1fr; } }
 
 .reading { margin: 4px 0 10px; }
+
+/* Queue drag to reorder. */
+.qgrip { cursor: grab; touch-action: none; user-select: none; color: var(--muted); letter-spacing: -3px; padding: 6px 6px 6px 2px; font-size: 14px; line-height: 1; border-radius: 6px; }
+.qgrip:hover, .qgrip:focus-visible { color: var(--fg); background: var(--surface-2); outline: none; }
+.qdrag-active, .qdrag-active * { cursor: grabbing !important; user-select: none; }
+.list.queue .list-row { position: relative; }
+.qdrag-active .list.queue .list-row:not(.qdragging) { transition: transform 0.15s var(--ease); }
+.list.queue .list-row.qdragging { z-index: 5; background: var(--surface-3); box-shadow: var(--shadow); border-radius: var(--radius-sm); transition: none; }

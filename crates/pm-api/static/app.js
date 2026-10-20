@@ -1282,23 +1282,64 @@
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && !isBrowser() && zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).length ? `<button class="btn" id="qtransfer" title="Move this queue and position to another zone">${icon('zone')} Transfer…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${fmt(it.duration_ms)}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${fmt(it.duration_ms)}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
-          const qedit = async (i, op) => {
+          const qedit = async (i, op, to) => {
             if (isBrowser()) {
-              const bq = state.browserQueue; const j = op === 'up' ? i - 1 : op === 'down' ? i + 1 : null;
+              const bq = state.browserQueue; const j = op === 'up' ? i - 1 : op === 'down' ? i + 1 : op === 'to' ? to : null;
               if (op === 'rm') { bq.splice(i, 1); if (state.browserIndex === i) browserPlay(Math.min(i, bq.length - 1)); else if (state.browserIndex > i) state.browserIndex--; }
-              else if (j != null && j >= 0 && j < bq.length) { const [it] = bq.splice(i, 1); bq.splice(j, 0, it); if (state.browserIndex === i) state.browserIndex = j; else if (state.browserIndex === j) state.browserIndex = i; }
+              else if (j != null && j >= 0 && j < bq.length && j !== i) {
+                const [it] = bq.splice(i, 1); bq.splice(j, 0, it);
+                // The playing item keeps playing wherever it moves to.
+                const c = state.browserIndex;
+                if (c === i) state.browserIndex = j; else if (i < c && c <= j) state.browserIndex = c - 1; else if (j <= c && c < i) state.browserIndex = c + 1;
+              }
               render(); return;
             }
             const it = q[i]; if (!it) return;
             try {
               if (op === 'rm') await api('DELETE', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`);
-              else await api('PUT', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`, { to_index: op === 'up' ? i - 1 : i + 1 });
+              else { const j = op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return; await api('PUT', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`, { to_index: j }); }
               refreshQueue();
             } catch (e) { toast(e.message, 'error'); }
           };
           $$('[data-qup]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qup), 'up'));
+          // Drag to reorder: pointer events, so mouse, touch and pen all work. The row follows the pointer,
+          // a line shows where it lands, and the list scrolls near its edges.
+          $$('[data-qgrip]', main).forEach((g) => {
+            g.onkeydown = (e) => { const i = Number(g.dataset.qgrip); if (e.altKey && e.key === 'ArrowUp' && i > 0) { e.preventDefault(); qedit(i, 'to', i - 1); } if (e.altKey && e.key === 'ArrowDown' && i < q.length - 1) { e.preventDefault(); qedit(i, 'to', i + 1); } };
+            g.onpointerdown = (e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              const from = Number(g.dataset.qgrip);
+              const rows = $$('.list.queue .list-row', main); const row = rows[from]; if (!row) return;
+              g.setPointerCapture(e.pointerId);
+              const startY = e.clientY; const startScroll = main.scrollTop; let to = from; let lastY = e.clientY; let raf = null;
+              const rest = rows.map((r) => { const b = r.getBoundingClientRect(); return b.top + b.height / 2; });
+              row.classList.add('qdragging'); document.body.classList.add('qdrag-active');
+              const place = () => {
+                const dy = lastY - startY + (main.scrollTop - startScroll);
+                row.style.transform = `translateY(${dy}px)`;
+                const mid = row.getBoundingClientRect().top + row.offsetHeight / 2;
+                to = from;
+                rows.forEach((r, k) => { if (k === from) return; const c = rest[k] - (main.scrollTop - startScroll); if (k < from && mid < c) to = Math.min(to, k); if (k > from && mid > c) to = Math.max(to, k); });
+                // The rows in between slide aside, so the gap shows where the row lands.
+                const h = row.offsetHeight;
+                rows.forEach((r, k) => { if (k === from) return; const shift = to > from && k > from && k <= to ? -h : to < from && k >= to && k < from ? h : 0; r.style.transform = shift ? `translateY(${shift}px)` : ''; });
+              };
+              const scrollLoop = () => { const b = main.getBoundingClientRect(); const edge = 48; if (lastY < b.top + edge) main.scrollTop -= 10; else if (lastY > b.bottom - edge) main.scrollTop += 10; place(); raf = requestAnimationFrame(scrollLoop); };
+              raf = requestAnimationFrame(scrollLoop);
+              g.onpointermove = (ev) => { lastY = ev.clientY; place(); };
+              const end = (commit) => {
+                cancelAnimationFrame(raf); g.onpointermove = null; g.onpointerup = null; g.onpointercancel = null;
+                row.classList.remove('qdragging'); row.style.transform = ''; document.body.classList.remove('qdrag-active');
+                rows.forEach((r) => { r.style.transform = ''; });
+                if (commit && to !== from) qedit(from, 'to', to);
+              };
+              g.onpointerup = () => end(true);
+              g.onpointercancel = () => end(false);
+            };
+          });
           $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
           $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
           const qr = $('#qradio'); if (qr) qr.onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: !(z && z.radio) }); toast(z && z.radio ? 'Radio off' : 'Radio on: similar music follows the queue'); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; render(); } catch (e) { toast(e.message, 'error'); } };
