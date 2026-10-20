@@ -85,6 +85,9 @@ pub struct NodeState {
     pub caa_base: std::sync::RwLock<String>,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
+    /// Shared async HTTP client for upstream lookups, rebuilt when the contact
+    /// (and so the User-Agent) changes: `(contact, client)`.
+    http: Mutex<Option<(String, reqwest::Client)>>,
     scanning: Mutex<bool>,
 }
 
@@ -146,6 +149,7 @@ impl NodeState {
             pulls: Mutex::new(HashMap::new()),
             caa_base: std::sync::RwLock::new("https://coverartarchive.org".into()),
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
+            http: Mutex::new(None),
             scanning: Mutex::new(false),
         })
     }
@@ -280,6 +284,35 @@ impl NodeState {
     /// The contact used in outbound User-Agent strings (empty when none is set).
     pub fn contact(&self) -> String {
         self.contact.read().expect("contact lock").clone()
+    }
+
+    /// The User-Agent for upstream services: `pubky-music-node/<version> (<contact>)`.
+    pub fn user_agent(&self) -> String {
+        let contact = self.contact();
+        if contact.is_empty() {
+            format!("pubky-music-node/{}", env!("CARGO_PKG_VERSION"))
+        } else {
+            format!("pubky-music-node/{} ({contact})", env!("CARGO_PKG_VERSION"))
+        }
+    }
+
+    /// An async HTTP client carrying the current User-Agent (20 s timeout);
+    /// cached until the contact changes.
+    pub fn http_client(&self) -> reqwest::Client {
+        let ua = self.user_agent();
+        let mut slot = self.http.lock().expect("http client lock");
+        if let Some((key, c)) = slot.as_ref() {
+            if *key == ua {
+                return c.clone();
+            }
+        }
+        let c = reqwest::Client::builder()
+            .user_agent(ua.clone())
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .expect("http client");
+        *slot = Some((ua, c.clone()));
+        c
     }
 
     pub fn discovery(&self) -> Option<Arc<pm_pubky::Discovery>> {

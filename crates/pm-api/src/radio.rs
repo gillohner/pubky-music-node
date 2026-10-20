@@ -149,21 +149,8 @@ pub struct Stations {
     pub stations: Vec<Station>,
 }
 
-fn directory_client(s: &NodeState) -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let contact = s.contact();
-    CLIENT.get_or_init(move || {
-        let ua = if contact.is_empty() || contact == "unknown" {
-            format!("pubky-music-node/{}", env!("CARGO_PKG_VERSION"))
-        } else {
-            format!("pubky-music-node/{} ({contact})", env!("CARGO_PKG_VERSION"))
-        };
-        reqwest::Client::builder()
-            .user_agent(ua)
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("http client")
-    })
+fn directory_client(s: &NodeState) -> reqwest::Client {
+    s.http_client()
 }
 
 /// `GET /v1/radio/search?q=&tag=&country=&limit=`: the directory, most voted first.

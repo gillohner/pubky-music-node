@@ -10,7 +10,6 @@ use crate::types::ArtistInfo;
 use pm_model::Mbid;
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::Duration;
 
 const HIT_TTL_SECS: i64 = 30 * 24 * 3600;
 const MISS_TTL_SECS: i64 = 7 * 24 * 3600;
@@ -36,22 +35,7 @@ impl Default for InfoBases {
 }
 
 fn client(s: &NodeState) -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let contact = s.contact();
-    CLIENT
-        .get_or_init(move || {
-            let ua = if contact.is_empty() || contact == "unknown" {
-                format!("pubky-music-node/{}", env!("CARGO_PKG_VERSION"))
-            } else {
-                format!("pubky-music-node/{} ({contact})", env!("CARGO_PKG_VERSION"))
-            };
-            reqwest::Client::builder()
-                .user_agent(ua)
-                .timeout(Duration::from_secs(20))
-                .build()
-                .expect("http client")
-        })
-        .clone()
+    s.http_client()
 }
 
 fn in_flight() -> &'static Mutex<HashSet<i64>> {
