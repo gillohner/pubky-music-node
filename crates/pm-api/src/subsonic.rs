@@ -686,7 +686,17 @@ async fn dispatch(
             let kind = p.get("type").map(String::as_str).unwrap_or("alphabeticalByName");
             let lib = s.library.lock().expect("library poisoned");
             let mut albums = match kind {
-                "newest" | "recent" | "frequent" => lib.recent_albums(offset, size)?,
+                "newest" => lib.recent_albums(offset, size)?,
+                "recent" => lib
+                    .recently_played_albums(offset + size)?
+                    .into_iter()
+                    .skip(offset as usize)
+                    .collect(),
+                "frequent" => lib
+                    .most_played_albums(offset + size)?
+                    .into_iter()
+                    .skip(offset as usize)
+                    .collect(),
                 "random" => {
                     let mut all = lib.list_albums(None, 5000)?;
                     let seed = std::time::SystemTime::now()
@@ -857,7 +867,28 @@ async fn dispatch(
         "setRating" | "savePlayQueue" => {}
         "getPlayQueue" => {}
         "getNowPlaying" => {
-            m.insert("nowPlaying".into(), json!({"entry": []}));
+            // What the node's zones are playing, when it is a library track.
+            let lib = s.library.lock().expect("library poisoned");
+            let mut entries = Vec::new();
+            for z in s.zones.list() {
+                let Some(np) = z.now_playing else { continue };
+                let Some(id) = np
+                    .item
+                    .uri
+                    .strip_prefix(crate::sources::TRACK_SCHEME)
+                    .and_then(|v| v.parse::<i64>().ok())
+                else {
+                    continue;
+                };
+                if let Some(t) = lib.get_track(TrackId(id))? {
+                    let mut e = song_json(&t);
+                    e["username"] = json!(s.subsonic_user);
+                    e["playerName"] = json!(z.name);
+                    e["minutesAgo"] = json!(0);
+                    entries.push(e);
+                }
+            }
+            m.insert("nowPlaying".into(), json!({"entry": entries}));
         }
         "getLyrics" => {
             m.insert("lyrics".into(), json!({}));
@@ -1002,6 +1033,10 @@ async fn dispatch(
                 let t = lib
                     .get_track(TrackId(id))?
                     .ok_or_else(|| SubErr::not_found("Song not found"))?;
+                // The client played it itself: it goes into the play history like
+                // the app's local zone or the browser, under the client's name.
+                let client = p.get("c").cloned().unwrap_or_else(|| "subsonic".into());
+                let _ = lib.record_play(TrackId(id), Some(&format!("subsonic:{client}")));
                 if let Some(uri) = t.publishable_uri() {
                     let d = DescribedTrack {
                         title: t.title.clone(),
