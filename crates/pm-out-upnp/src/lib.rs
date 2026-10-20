@@ -182,9 +182,16 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
         }
     }
     if locations.is_empty() {
-        return Err(UpnpError::Other(format!(
-            "{dest} did not answer a unicast M-SEARCH; check the address, that the device is on, and that UDP 1900 is allowed between the subnets"
-        )));
+        return match tcp_fallback(dest.ip()) {
+            Some(Ok(r)) => Ok(vec![r]),
+            Some(Err(open_port)) => Err(UpnpError::Other(format!(
+                "{dest} ignored a unicast M-SEARCH but answers TCP on port {open_port}, so the device is reachable; enter its UPnP description URL instead (the Linn app / Kazoo shows it under the device's details, or try http://{}:{open_port}/description.xml in a browser)",
+                dest.ip()
+            ))),
+            None => Err(UpnpError::Other(format!(
+                "{dest} did not answer a unicast M-SEARCH and no TCP port answered either: the device is off, or the firewall between the subnets blocks this node from reaching it (allow UDP 1900 and TCP from this node to the device, and TCP 7788 back)"
+            ))),
+        };
     }
     let mut out: Vec<Renderer> = Vec::new();
     for loc in locations {
@@ -195,6 +202,43 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
         }
     }
     Ok(out)
+}
+
+/// Ports renderers commonly serve their description on (Linn/OpenHome 55178,
+/// plain UPnP stacks, Sonos 1400, BluOS 11000, HEOS/Denon 60006, WiiM 49152).
+const DESCRIPTION_PORTS: [u16; 9] = [55178, 49152, 49153, 1400, 8080, 8200, 11000, 60006, 80];
+const DESCRIPTION_PATHS: [&str; 8] = [
+    "/description.xml",
+    "/Ds/device.xml",
+    "/device.xml",
+    "/rootDesc.xml",
+    "/xml/device_description.xml",
+    "/upnp/desc.xml",
+    "/dmr/description.xml",
+    "/MediaRenderer/desc.xml",
+];
+
+/// When unicast SSDP gets no answer: find an open TCP port and try the usual
+/// description paths there. `Some(Ok)` found a renderer, `Some(Err(port))`
+/// only proved the device is reachable, `None` nothing answered.
+fn tcp_fallback(ip: std::net::IpAddr) -> Option<Result<Renderer, u16>> {
+    tcp_fallback_on(ip, &DESCRIPTION_PORTS)
+}
+
+fn tcp_fallback_on(ip: std::net::IpAddr, ports: &[u16]) -> Option<Result<Renderer, u16>> {
+    let mut open = None;
+    for &port in ports {
+        let addr = SocketAddr::new(ip, port);
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(700)).is_ok() {
+            open.get_or_insert(port);
+            for path in DESCRIPTION_PATHS {
+                if let Ok(Some(r)) = describe(&format!("http://{addr}{path}")) {
+                    return Some(Ok(r));
+                }
+            }
+        }
+    }
+    open.map(Err)
 }
 
 /// The `friendlyName` of any device description (not only renderers).
@@ -435,6 +479,33 @@ mod tests {
         ));
         let err = probe_address("127.0.0.1:1", Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
+        // A reachable TCP port with a description behind it is found without SSDP.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let req = String::from_utf8_lossy(&buf);
+                let (status, body) = if req.starts_with("GET /Ds/device.xml") {
+                    ("200 OK", DESC)
+                } else {
+                    ("404 Not Found", "")
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let r = match tcp_fallback_on(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), &[port]) {
+            Some(Ok(r)) => r,
+            other => panic!("expected a renderer, got {other:?}"),
+        };
+        assert_eq!(r.friendly_name, "Living Room DSM");
     }
 
     #[test]
