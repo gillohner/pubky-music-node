@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pubky Music</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f0f14; color: #ececf1; font: 15px/1.5 system-ui, sans-serif; }
+  main { width: min(440px, 90vw); }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  p { color: #a7a7b4; margin: 0 0 18px; }
+  button { font: inherit; padding: 12px 18px; border-radius: 12px; border: 0; background: #7c6cff; color: #fff; font-weight: 600; cursor: pointer; width: 100%; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  details { margin-top: 22px; color: #a7a7b4; }
+  input { width: 100%; box-sizing: border-box; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2a36; background: #181822; color: inherit; margin: 6px 0 10px; }
+  .out { margin-top: 16px; color: #c9c9d6; word-break: break-all; }
+  .out a { color: #b5aaff; }
+  .err { color: #ff8f8f; }
+</style></head>
+<body><main>
+  <h1>Pubky Music</h1>
+  <p>Sign in with Pubky Ring. The app finds your node and connects by itself.</p>
+  <button id="ring">Sign in with Pubky Ring</button>
+  <div class="out" id="out"></div>
+  <details><summary>Or connect by address</summary>
+    <label>Node URL<input id="url" placeholder="http://192.168.1.10:7788"></label>
+    <label>API token<input id="tok" type="password"></label>
+    <button id="manual">Connect</button>
+  </details>
+</main>
+<script>
+  const send = (m) => window.ipc.postMessage(JSON.stringify(m));
+  const out = document.getElementById('out');
+  const ring = document.getElementById('ring');
+  ring.onclick = () => { ring.disabled = true; out.textContent = 'Starting…'; send({ cmd: 'ring' }); };
+  document.getElementById('manual').onclick = () => send({ cmd: 'manual', node_url: document.getElementById('url').value.trim(), token: document.getElementById('tok').value.trim() });
+  window.pmRingUrl = (url) => { out.innerHTML = `<p>Open this in Pubky Ring on your phone, or paste it into Ring:</p><p><a href="${url}">${url}</a></p><p>Waiting for approval…</p>`; };
+  window.pmFailed = (e) => { ring.disabled = false; out.innerHTML = `<p class="err">${e.replace(/</g, '&lt;')}</p>`; };
+</script>
+</body></html>

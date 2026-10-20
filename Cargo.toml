@@ -18,6 +18,8 @@ members = [
     "crates/pm-out-slimproto",
     "crates/pm-out-cast",
 ]
+# The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
+exclude = ["crates/pm-desktop"]
 
 [workspace.package]
 version = "0.1.0"
