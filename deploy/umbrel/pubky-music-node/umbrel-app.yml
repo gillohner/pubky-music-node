@@ -31,10 +31,13 @@ path: /
 defaultUsername: ""
 defaultPassword: ""
 releaseNotes: >-
-  Web UI redesign with Home, Favourites, Genres, Radio and a Now Playing
-  screen; group zones and a DSP editor; playlist import from M3U, CSV and
-  Roon exports; tags, reviews and favourites synced to the homeserver; artist
-  portraits and biographies; folders and the upstream contact settable from
-  Settings.
+  Zones overview, queue tools (shuffle, save as playlist, transfer between
+  zones, library radio, sleep timer), lyrics with follow-along, Focus by file
+  quality with format badges, new releases from your artists, backups from
+  Settings, homeserver private files, Subsonic jukebox control and lyrics,
+  an installable web UI for phones, and multi-arch images (amd64, arm64).
+  Earlier: Home, Favourites, Genres, Radio, Now Playing with the signal path;
+  group zones and a DSP editor; playlist import from M3U, CSV and Roon
+  exports; tags, reviews and favourites synced to the homeserver.
 submitter: Pubky Music
 submission: https://github.com/gillohner/pubky-music-node
