@@ -183,6 +183,46 @@ pub struct Favourites {
     pub uris: Vec<String>,
 }
 
+/// A tag on a canonical URL or a library object (one target field), with its label.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TagRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagEntry {
+    pub uri: String,
+    pub label: String,
+    /// Microseconds.
+    pub created_at: i64,
+    /// Pushed to the homeserver.
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Tags {
+    /// The canonical URL the list is for; `None` for "all of mine".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    pub tags: Vec<TagEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagChanged {
+    pub uri: String,
+    pub label: String,
+    pub tagged: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FavouriteChanged {
     pub uri: String,

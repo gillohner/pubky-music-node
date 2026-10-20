@@ -13,6 +13,7 @@ use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pm_pubky::schemas::post::TYPE_PLAYLIST;
 use pm_pubky::{Favourite, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
+use pubky_app_specs::traits::HasIdPath;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +190,51 @@ impl PubkySync {
                     report.pulled += 1;
                 }
             }
+        }
+
+        // Tags: public PubkyAppTags, pushed and pulled the same way.
+        let pending = library.lock().expect("library poisoned").unsynced_tags()?;
+        for row in pending {
+            let path = pubky_app_specs::PubkyAppTag::create_path(&row.id);
+            if row.deleted {
+                match self.homeserver.delete(&self.session, &path).await {
+                    Ok(()) => report.deleted += 1,
+                    Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => report.deleted += 1,
+                    Err(e) => {
+                        report.errors.push(format!("delete {path}: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                let tag = pubky_app_specs::PubkyAppTag {
+                    uri: row.uri.clone(),
+                    label: row.label.clone(),
+                    created_at: row.created_at,
+                };
+                if let Err(e) = self.homeserver.write_object(&self.session, &path, &tag).await {
+                    report.errors.push(format!("write {path}: {e}"));
+                    continue;
+                }
+                report.pushed += 1;
+            }
+            library
+                .lock()
+                .expect("library poisoned")
+                .mark_tag_synced(&row.id, now_micros())?;
+        }
+        match self.homeserver.read_music_tags(&self.z32).await {
+            Ok(remote_tags) => {
+                let lib = library.lock().expect("library poisoned");
+                for (path, t) in remote_tags {
+                    let id = path.rsplit('/').next().unwrap_or("").to_string();
+                    if lib.tag_by_id(&id)?.is_none() {
+                        lib.add_tag(&id, &t.uri, &t.label, t.created_at)?;
+                        lib.mark_tag_synced(&id, now_micros())?;
+                        report.pulled += 1;
+                    }
+                }
+            }
+            Err(e) => report.errors.push(format!("reading tags: {e}")),
         }
 
         // Pull what the homeserver has that we do not (or has newer).

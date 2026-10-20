@@ -19,6 +19,7 @@ pub mod sources;
 pub mod state;
 pub mod subsonic;
 pub mod sync;
+pub mod tags;
 pub mod types;
 pub mod watch;
 
@@ -125,6 +126,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .put(favourites::put)
                 .delete(favourites::delete),
         )
+        .route("/tags", get(tags::list).put(tags::put).delete(tags::delete))
         .route(
             "/playlists/{id}",
             get(playlists::get)

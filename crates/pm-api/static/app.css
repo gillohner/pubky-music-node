@@ -387,3 +387,13 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---- tags ---- */
+.tagrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.chip.tag { padding: 0; overflow: hidden; }
+.chip.tag .chiplink { background: none; border: 0; color: var(--fg-2); padding: 5px 4px 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.chip.tag .chiplink:hover { color: var(--accent-strong); }
+.chip.tag .chipx { background: none; border: 0; color: var(--muted); padding: 5px 9px 5px 4px; cursor: pointer; font: inherit; font-size: 13px; line-height: 1; }
+.chip.tag .chipx:hover { color: var(--bad); }
+.taginput { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12px; width: 130px; }
+.taginput:focus { border-color: var(--accent); outline: none; }

@@ -20,6 +20,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, include_str!("migrations/0004_settings.sql")),
     (5, include_str!("migrations/0005_plays.sql")),
     (6, include_str!("migrations/0006_favourites.sql")),
+    (7, include_str!("migrations/0007_tags.sql")),
 ];
 
 pub struct Library {
@@ -52,6 +53,18 @@ pub struct ArtistSummary {
 pub struct FavouriteRow {
     pub id: String,
     pub uri: String,
+    /// Microseconds.
+    pub created_at: i64,
+    pub synced_at: Option<i64>,
+    pub deleted: bool,
+}
+
+/// One of the user's own tags (a v1 PubkyAppTag) as stored locally.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TagRow {
+    pub id: String,
+    pub uri: String,
+    pub label: String,
     /// Microseconds.
     pub created_at: i64,
     pub synced_at: Option<i64>,
@@ -521,6 +534,94 @@ impl Library {
             params![id, at_micros],
         )?;
         Ok(())
+    }
+
+    // ----- tags -------------------------------------------------------------
+
+    /// Add (or revive) a tag; idempotent on `(uri, label)`.
+    pub fn add_tag(&self, id: &str, uri: &str, label: &str, created_at: i64) -> Result<TagRow> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tags(id, uri, label, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, ?4, NULL, 0)
+             ON CONFLICT(uri, label) DO UPDATE SET deleted = 0,
+                 synced_at = CASE WHEN tags.deleted = 1 THEN NULL ELSE tags.synced_at END",
+            params![id, uri, label, created_at],
+        )?;
+        conn.query_row(
+            "SELECT id, uri, label, created_at, synced_at, deleted FROM tags WHERE uri = ?1 AND label = ?2",
+            params![uri, label],
+            row_to_tag,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Tombstone a tag until the remote delete succeeds. `false` when unknown.
+    pub fn remove_tag(&self, uri: &str, label: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE tags SET deleted = 1, synced_at = NULL WHERE uri = ?1 AND label = ?2 AND deleted = 0",
+            params![uri, label],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Live tags, newest first; for one URI when given.
+    pub fn list_tags(&self, uri: Option<&str>) -> Result<Vec<TagRow>> {
+        let conn = self.lock();
+        let v = match uri {
+            Some(u) => {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, uri, label, created_at, synced_at, deleted FROM tags WHERE deleted = 0 AND uri = ?1 ORDER BY created_at DESC",
+                )?;
+                let v = stmt
+                    .query_map(params![u], row_to_tag)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                v
+            }
+            None => {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, uri, label, created_at, synced_at, deleted FROM tags WHERE deleted = 0 ORDER BY created_at DESC",
+                )?;
+                let v = stmt
+                    .query_map([], row_to_tag)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                v
+            }
+        };
+        Ok(v)
+    }
+
+    pub fn unsynced_tags(&self) -> Result<Vec<TagRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, uri, label, created_at, synced_at, deleted FROM tags WHERE synced_at IS NULL ORDER BY created_at",
+        )?;
+        let v = stmt
+            .query_map([], row_to_tag)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Mark pushed; a pushed tombstone is purged.
+    pub fn mark_tag_synced(&self, id: &str, at_micros: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM tags WHERE id = ?1 AND deleted = 1", params![id])?;
+        conn.execute(
+            "UPDATE tags SET synced_at = ?2 WHERE id = ?1",
+            params![id, at_micros],
+        )?;
+        Ok(())
+    }
+
+    pub fn tag_by_id(&self, id: &str) -> Result<Option<TagRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, uri, label, created_at, synced_at, deleted FROM tags WHERE id = ?1",
+            params![id],
+            row_to_tag,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// The album with this release MBID, if any.
@@ -1146,6 +1247,17 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
     Ok(track)
 }
 
+fn row_to_tag(r: &Row<'_>) -> rusqlite::Result<TagRow> {
+    Ok(TagRow {
+        id: r.get(0)?,
+        uri: r.get(1)?,
+        label: r.get(2)?,
+        created_at: r.get(3)?,
+        synced_at: r.get(4)?,
+        deleted: r.get::<_, i64>(5)? != 0,
+    })
+}
+
 fn row_to_favourite(r: &Row<'_>) -> rusqlite::Result<FavouriteRow> {
     Ok(FavouriteRow {
         id: r.get(0)?,
@@ -1245,7 +1357,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 6);
+        assert_eq!(lib.schema_version().unwrap(), 7);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -1440,5 +1552,42 @@ mod play_history_tests {
             .unwrap()
             .unwrap();
         assert_eq!(artist.name, "Daft Punk");
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn tags_lifecycle() {
+        let lib = Library::open_in_memory().unwrap();
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let t = lib.add_tag("t1", uri, "disco", 1_000).unwrap();
+        assert_eq!(t.label, "disco");
+        lib.add_tag("t2", uri, "funk", 2_000).unwrap();
+        lib.add_tag(
+            "t3",
+            "https://musicbrainz.org/release/833f00e1-781f-4edd-90e4-e52712618862",
+            "disco",
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(lib.list_tags(Some(uri)).unwrap().len(), 2);
+        assert_eq!(lib.list_tags(None).unwrap().len(), 3);
+        assert_eq!(lib.unsynced_tags().unwrap().len(), 3);
+        lib.mark_tag_synced("t1", 5_000).unwrap();
+        let again = lib.add_tag("t1", uri, "disco", 9_000).unwrap();
+        assert_eq!(again.synced_at, Some(5_000), "re-adding keeps the sync state");
+        assert!(lib.remove_tag(uri, "disco").unwrap());
+        assert!(!lib.remove_tag(uri, "disco").unwrap());
+        assert_eq!(lib.list_tags(Some(uri)).unwrap().len(), 1);
+        let pending = lib.unsynced_tags().unwrap();
+        assert!(pending.iter().any(|t| t.id == "t1" && t.deleted));
+        lib.mark_tag_synced("t1", 6_000).unwrap();
+        assert!(
+            lib.tag_by_id("t1").unwrap().is_none(),
+            "pushed tombstones are purged"
+        );
     }
 }

@@ -192,6 +192,25 @@ impl NodeHomeserver {
         Ok(out)
     }
 
+    /// A user's public tags on music URLs: `(path, tag)`; other tags skipped.
+    pub async fn read_music_tags(
+        &self,
+        user_z32: &str,
+    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        let dir = format!("{}pubky.app/tags/", Visibility::Public.prefix());
+        let mut out = Vec::new();
+        for path in self.list_dir(&user, &dir, Visibility::Public, None).await? {
+            let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
+            match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
+                Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.push((path, t)),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(%path, error = %e, "skipping invalid tag"),
+            }
+        }
+        Ok(out)
+    }
+
     /// Another user's public playlists.
     pub async fn read_playlists_of(
         &self,

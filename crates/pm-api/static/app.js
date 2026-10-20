@@ -393,6 +393,13 @@
     }, { once: false });
   };
   const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}</div></button>`;
+  const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"><span class="muted small">Public pubky.app tags on the MusicBrainz URL; Discover reads them back via Pinakes.</span></div>`;
+  const bindTagRow = (ref) => {
+    const add = $('#tagadd'); if (!add) return;
+    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
+    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
+    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+  };
   const albumGrid = (albums) => `<div class="grid">${albums.map(tile).join('')}</div>`;
   const strip = (title, albums, more) => (!albums || !albums.length) ? '' : `<section class="section"><div class="section-head"><h3>${esc(title)}</h3>${more ? `<button class="link" data-more="${more}">See all</button>` : ''}</div><div class="strip">${albums.map(tile).join('')}</div></section>`;
   const bindTiles = () => {
@@ -469,6 +476,7 @@
           const [albums, tr] = await Promise.all([albumsAll(), api('GET', `/library/albums/${id}/tracks`)]);
           if (state.view !== 'album') return;
           const a = albums.find((x) => x.id === id) || (tr.tracks[0] && tr.tracks[0].album) || { id, title: 'Album' };
+          const myTags = a.release_mbid ? (await api('GET', `/tags?album_id=${id}`).catch(() => ({ tags: [] }))).tags : [];
           const tracks = tr.tracks;
           const total = tracks.reduce((s, t) => s + (t.duration_ms || 0), 0);
           const relUrl = a.release_mbid ? 'https://musicbrainz.org/release/' + a.release_mbid : null;
@@ -479,7 +487,9 @@
               <div class="sub">${esc(a.album_artist || artists(tracks[0] || {}))}</div>
               <div class="facts">${[a.year, `${tracks.length} tracks`, fmtLong(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div>
               <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
+              ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
             </div></div>` + trackRows(tracks, { showAlbum: false, numbers: 'track', key: 'album' });
+          bindTagRow({ album_id: id });
           lists.album = tracks;
           $('#playall').onclick = () => playTracks(tracks, true);
           $('#nextall').onclick = () => playTracks(tracks, false, 'next');
@@ -499,7 +509,9 @@
           if (state.view !== 'artist') return;
           const mbUrl = d.artist.mbid ? 'https://musicbrainz.org/artist/' + d.artist.mbid : null;
           const fav = mbUrl && state.favUris.has(mbUrl);
-          main.innerHTML = backBtn('artists', 'Artists') + `<div class="page-head"><div><div class="eyebrow">Artist</div><h1>${esc(d.artist.name)}</h1><div class="muted">${d.artist.albums} albums · ${d.artist.tracks} tracks</div></div><div class="actions"><button class="btn primary" id="artplay">${icon('play')} Play all</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${mbUrl ? '' : 'disabled'} title="${mbUrl ? '' : 'No MusicBrainz artist id yet'}">${icon(fav ? 'heart-fill' : 'heart')} Favourite</button></div></div>` + albumGrid(d.albums);
+          const myTags = mbUrl ? (await api('GET', `/tags?artist_id=${d.artist.id}`).catch(() => ({ tags: [] }))).tags : [];
+          main.innerHTML = backBtn('artists', 'Artists') + `<div class="page-head"><div><div class="eyebrow">Artist</div><h1>${esc(d.artist.name)}</h1><div class="muted">${d.artist.albums} albums · ${d.artist.tracks} tracks</div>${mbUrl ? tagRow(myTags, { artist_id: d.artist.id }) : ''}</div><div class="actions"><button class="btn primary" id="artplay">${icon('play')} Play all</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${mbUrl ? '' : 'disabled'} title="${mbUrl ? '' : 'No MusicBrainz artist id yet'}">${icon(fav ? 'heart-fill' : 'heart')} Favourite</button></div></div>` + albumGrid(d.albums);
+          bindTagRow({ artist_id: d.artist.id });
           $('#artplay').onclick = async () => { try { const r = await api('GET', `/library/artists/${state.viewArg}/tracks`); playTracks(r.tracks, true); } catch (er) { toast(er.message, 'error'); } };
           $('#heart').onclick = async () => { try { await setFavourite({ artist_id: d.artist.id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
           break;
@@ -573,11 +585,12 @@
         }
         case 'discover': {
           loading();
+          const tag = state.viewArg && state.viewArg.tag;
           let page;
-          try { page = await api('GET', '/discover/trends?window=7d&limit=40'); }
+          try { page = await api('GET', tag ? `/discover/tag/${encodeURIComponent(tag)}?limit=40` : '/discover/trends?window=7d&limit=40'); }
           catch (e) { main.innerHTML = pageHead('Discover') + `<div class="notice warn">${esc(e.message)}</div><p class="muted">Discover reads trending music from Pinakes. Set <code>contact</code> in the node's config so the request carries a contact address.</p>`; break; }
           if (state.view !== 'discover') return;
-          main.innerHTML = pageHead('Discover', 'trending this week via Pinakes')
+          main.innerHTML = (tag ? backBtn('discover', 'Trending') : '') + pageHead(tag ? `#${tag}` : 'Discover', tag ? 'tagged on Pubky, via Pinakes' : 'trending this week via Pinakes')
             + (page.facets.length ? `<div class="chips">${page.facets.slice(0, 30).map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : '')
             + (page.items.length ? `<div class="list">${page.items.map((it, i) => `<div class="list-row"><div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div><div class="grow"><div class="name">${esc(it.title || (it.in_library && it.in_library.title) || it.uri)}</div><div class="sub">${esc(it.artist || '')}${it.taggers != null ? ` · ${it.taggers} taggers` : ''}</div></div>${it.in_library ? `<button class="btn sm" data-dplay="${i}">${icon('play')} In library</button>` : '<span class="pill">not in library</span>'}<a class="icon-btn" href="${esc(it.uri)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></div>`).join('')}</div>` : emptyState('compass', 'Nothing trending yet', 'Pinakes has not indexed music tags for this window.'));
           $$('[data-dplay]', main).forEach((b) => b.onclick = () => playTracks([page.items[Number(b.dataset.dplay)].in_library], true));

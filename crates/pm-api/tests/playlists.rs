@@ -394,4 +394,90 @@ async fn playlist_lifecycle() {
         .as_array()
         .unwrap()
         .is_empty());
+
+    // Tags: labels are normalized like pubky.app, idempotent per (uri, label),
+    // refused for objects without a canonical identity or over-long labels.
+    let (st, t) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"track_id": tagged_id, "label": " Disco "})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["label"], "disco");
+    assert_eq!(t["tagged"], true);
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"track_id": tagged_id, "label": "disco"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"track_id": tagged_id, "label": "funk"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, e) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"track_id": tagged_id, "label": "x".repeat(40)})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"track_id": tagged_id, "label": ""})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    if let Some(u) = untagged {
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/tags",
+            Some(serde_json::json!({"track_id": u["id"], "label": "disco"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let (st, mine) = call(&app, "GET", &format!("/v1/tags?track_id={tagged_id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{mine}");
+    assert_eq!(mine["uri"], uri);
+    let labels: Vec<&str> = mine["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels.len(), 2);
+    assert!(labels.contains(&"disco") && labels.contains(&"funk"));
+    assert_eq!(mine["tags"][0]["synced"], false, "no homeserver in this test");
+    let (st, all) = call(&app, "GET", "/v1/tags", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(all["tags"].as_array().unwrap().len(), 2);
+    let (st, gone) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/tags?track_id={tagged_id}&label=Disco"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{gone}");
+    assert_eq!(gone["tagged"], false);
+    let (_, mine) = call(&app, "GET", &format!("/v1/tags?uri={}", urlencoding(&uri)), None).await;
+    assert_eq!(mine["tags"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["tags"][0]["label"], "funk");
+}
+
+fn urlencoding(s: &str) -> String {
+    s.replace(':', "%3A").replace('/', "%2F")
 }

@@ -14,6 +14,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0008](0008-remote-access-position.md) | Remote access step one: the node publishes its address privately on the homeserver; Noise transport deferred |
 | [0009](0009-group-sync.md) | Grouped outputs stay in time by sample slip; a `sync` stage keeps the signal path honest |
 | [0010](0010-favourites-as-bookmarks.md) | Favourites are v1 `PubkyAppBookmark`s of canonical music URLs, private by default |
+| [0011](0011-tags-are-public.md) | Tags are public v1 `PubkyAppTag`s on canonical URLs, written only on explicit action |
 
 Open (handoff §11), not yet decided: live Pubky transport / relay for M5; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

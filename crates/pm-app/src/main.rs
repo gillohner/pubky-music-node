@@ -98,6 +98,9 @@ struct App {
     albums: Vec<Album>,
     home: Option<pm_api::types::HomePage>,
     favourites: Option<pm_api::types::Favourites>,
+    /// My tags per canonical URL (album and artist pages).
+    tags: HashMap<String, Vec<pm_api::types::TagEntry>>,
+    tag_input: String,
     radio_query: String,
     radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
     radio_searching: bool,
@@ -170,6 +173,8 @@ impl App {
             albums: Vec::new(),
             home: None,
             favourites: None,
+            tags: HashMap::new(),
+            tag_input: String::new(),
             radio_query: String::new(),
             radio_results: None,
             radio_searching: false,
@@ -254,6 +259,11 @@ impl App {
                     self.radio_results = Some((q, r));
                 }
                 Msg::Stations(st) => self.stations = st,
+                Msg::Tags(t) => {
+                    if let Some(uri) = t.uri.clone() {
+                        self.tags.insert(uri, t.tags);
+                    }
+                }
                 Msg::Favourites(f) => {
                     self.fav_uris = f.uris.iter().cloned().collect();
                     self.remember_tracks(f.tracks.iter());
@@ -312,6 +322,10 @@ impl App {
                     self.discover = Some((kind, *page));
                 }
                 Msg::Artist(d) => {
+                    if d.artist.mbid.is_some() {
+                        self.backend
+                            .send(Cmd::LoadTags(FavouriteRef::artist(d.artist.id)));
+                    }
                     self.artist_details.insert(d.artist.id, *d);
                 }
                 Msg::Playlists(p) => self.playlists = p,
@@ -480,7 +494,77 @@ impl App {
         if !self.album_tracks.contains_key(&id) {
             self.backend.send(Cmd::LoadAlbumTracks(id));
         }
+        if self
+            .albums
+            .iter()
+            .any(|a| a.id == Some(id) && a.release_mbid.is_some())
+        {
+            self.backend.send(Cmd::LoadTags(FavouriteRef::album(id)));
+        }
         self.view = View::Album(id);
+    }
+
+    /// Tag chips for an object plus an "Add a tag" field. Objects without a
+    /// canonical identity show nothing: a tag needs a URL to point at.
+    fn tag_row(&mut self, ui: &mut egui::Ui, uri: Option<pm_model::MusicUri>, what: FavouriteRef) {
+        let Some(uri) = uri else {
+            return;
+        };
+        let url = uri.to_url();
+        let tags = self.tags.get(&url).cloned().unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new("Tags")
+                    .size(12.0)
+                    .strong()
+                    .color(theme::MUTED),
+            );
+            for t in &tags {
+                let chip = egui::Button::new(
+                    egui::RichText::new(format!("#{}  ✕", t.label))
+                        .size(12.0)
+                        .color(theme::FG_2),
+                )
+                .fill(theme::SURFACE_2)
+                .stroke(egui::Stroke::new(1.0, theme::LINE))
+                .corner_radius(egui::CornerRadius::same(12));
+                if ui
+                    .add(chip)
+                    .on_hover_text(if t.synced {
+                        "Public on your homeserver · click to remove"
+                    } else {
+                        "Not pushed yet · click to remove"
+                    })
+                    .clicked()
+                {
+                    self.backend.send(Cmd::SetTag {
+                        what: what.clone(),
+                        label: t.label.clone(),
+                        on: false,
+                    });
+                }
+            }
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.tag_input)
+                    .hint_text("Add a tag…")
+                    .desired_width(140.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if enter && !self.tag_input.trim().is_empty() {
+                self.backend.send(Cmd::SetTag {
+                    what: what.clone(),
+                    label: self.tag_input.trim().to_string(),
+                    on: true,
+                });
+                self.tag_input.clear();
+            }
+        });
+        ui.small(
+            egui::RichText::new(
+                "Tags are public pubky.app tags on the canonical MusicBrainz URL; Discover reads them back through Pinakes.",
+            )
+            .weak(),
+        );
     }
 
     fn play_tracks(&mut self, tracks: &[Track], replace: bool, at: QueueAt) {
@@ -1214,6 +1298,14 @@ impl App {
                         FavouriteRef::album(id),
                     );
                 });
+                ui.add_space(6.0);
+                self.tag_row(
+                    ui,
+                    album
+                        .release_mbid
+                        .map(|mbid| pm_model::MusicUri::Release { mbid }),
+                    FavouriteRef::album(id),
+                );
             });
         });
         ui.add_space(10.0);
@@ -1385,6 +1477,11 @@ impl App {
             );
         });
         ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
+        self.tag_row(
+            ui,
+            d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),
+            FavouriteRef::artist(id),
+        );
         ui.add_space(8.0);
         let tile = 168.0;
         let gap = 14.0;

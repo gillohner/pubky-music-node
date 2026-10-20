@@ -506,6 +506,62 @@ impl NodeClient {
         self.send(reqwest::Method::POST, "radio/play", Some(&req)).await
     }
 
+    // ---- tags ----
+
+    /// My tags on one object (`Some(r)`) or all of them (`None`).
+    pub async fn tags(&self, r: Option<&FavouriteRef>) -> Result<Tags> {
+        let mut q: Vec<(&str, String)> = Vec::new();
+        if let Some(r) = r {
+            if let Some(u) = &r.uri {
+                q.push(("uri", u.clone()));
+            }
+            if let Some(i) = r.track_id {
+                q.push(("track_id", i.to_string()));
+            }
+            if let Some(i) = r.album_id {
+                q.push(("album_id", i.to_string()));
+            }
+            if let Some(i) = r.artist_id {
+                q.push(("artist_id", i.to_string()));
+            }
+        }
+        self.get("tags", &q).await
+    }
+
+    /// Add or remove one tag label on an object.
+    pub async fn set_tag(&self, r: &FavouriteRef, label: &str, on: bool) -> Result<TagChanged> {
+        let req = TagRef {
+            uri: r.uri.clone(),
+            track_id: r.track_id,
+            album_id: r.album_id,
+            artist_id: r.artist_id,
+            label: Some(label.to_string()),
+        };
+        if on {
+            self.send(reqwest::Method::PUT, "tags", Some(&req)).await
+        } else {
+            let mut url = self.url("tags");
+            {
+                let mut q = url.query_pairs_mut();
+                if let Some(u) = &req.uri {
+                    q.append_pair("uri", u);
+                }
+                if let Some(i) = req.track_id {
+                    q.append_pair("track_id", &i.to_string());
+                }
+                if let Some(i) = req.album_id {
+                    q.append_pair("album_id", &i.to_string());
+                }
+                if let Some(i) = req.artist_id {
+                    q.append_pair("artist_id", &i.to_string());
+                }
+                q.append_pair("label", label);
+            }
+            let resp = self.authed(self.http.delete(url)).send().await?;
+            Self::finish(resp).await
+        }
+    }
+
     // ---- favourites ----
 
     pub async fn favourites(&self) -> Result<Favourites> {

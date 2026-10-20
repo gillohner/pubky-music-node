@@ -3,7 +3,7 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
-    Favourites, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
+    Favourites, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Tags, TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -36,6 +36,12 @@ pub enum Cmd {
     },
     SetFavourite {
         what: FavouriteRef,
+        on: bool,
+    },
+    LoadTags(FavouriteRef),
+    SetTag {
+        what: FavouriteRef,
+        label: String,
         on: bool,
     },
     /// A play on this computer's own zone, for the node's history.
@@ -131,6 +137,7 @@ pub enum Msg {
     Albums(Vec<Album>),
     Home(Box<HomePage>),
     Favourites(Box<Favourites>),
+    Tags(Box<Tags>),
     RadioResults(String, Vec<RadioStation>),
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
@@ -332,6 +339,16 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::DeleteStation(id) => out.send(Msg::Stations(c.delete_station(&id).await?)),
         Cmd::PlayStation { zone, station } => {
             c.play_station(&zone, &station).await?;
+        }
+        Cmd::LoadTags(what) => out.send(Msg::Tags(Box::new(c.tags(Some(&what)).await?))),
+        Cmd::SetTag { what, label, on } => {
+            let r = c.set_tag(&what, &label, on).await?;
+            out.send(Msg::Notice(if r.tagged {
+                format!("Tagged #{}", r.label)
+            } else {
+                format!("Removed #{}", r.label)
+            }));
+            out.send(Msg::Tags(Box::new(c.tags(Some(&what)).await?)));
         }
         Cmd::SetFavourite { what, on } => {
             let r = c.set_favourite(&what, on).await?;
