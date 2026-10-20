@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 1b·6 · Copy to my homeserver</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 1b·6 · "Copy to my homeserver" (Settings › Library).</b> Uploads go to <code>/priv/pubky.music/files/</code> only (audio is never public), content-addressed by BLAKE3 so duplicates upload once, resumable and throttled. A private manifest maps each file to its identity, so another node signed in with the same Pubky sees the library. The copy becomes a source: "Homeserver", preferred after local files. Folder names and sizes are examples.</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span><span class="crumbs">Settings › Library › Copy to my homeserver</span></div>
+<div class="two">
+<div>
+  <h2 style="margin-top:0">What to copy</h2>
+  <div class="row" style="gap:8px; margin-bottom:8px; flex-wrap:wrap"><span class="scope"><button class="on">Albums</button><button>Folders</button></span><button class="btn sm">Select everything identified (212 albums)</button></div>
+  <div class="list">
+    <div class="check"><input type="checkbox" checked><span class="cover"></span><div><div class="name">A Night at the Opera</div><div class="sub">Queen · 12 FLAC 24/96 · 1.1 GB</div></div><span class="muted small">identified</span></div>
+    <div class="check"><input type="checkbox" checked><span class="cover"></span><div><div class="name">Sheer Heart Attack</div><div class="sub">Queen · 13 FLAC 16/44.1 · 410 MB</div></div><span class="muted small">already there</span></div>
+    <div class="check"><input type="checkbox"><span class="cover"></span><div><div class="name">Raop</div><div class="sub">CRO · 14 FLAC 16/44.1 · 420 MB</div></div><span class="muted small">3 not identified</span></div>
+    <div class="check"><input type="checkbox" checked><span class="cover"></span><div><div class="name">/music/Bootlegs/1986-07-12 Wembley</div><div class="sub">folder · 22 files · 1.8 GB</div></div><span class="muted small">folder</span></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="row" style="justify-content:space-between"><b>Homeserver space</b><span class="muted small">pubky…zswn37</span></div>
+    <div class="bar" style="margin:8px 0"><span style="width:38%"></span></div>
+    <div class="small">38 GB of 100 GB used · this copy adds <b>2.9 GB</b> (410 MB already there, skipped)</div>
+    <label class="row small" style="gap:8px; margin-top:10px">Upload speed limit <select class="input" style="padding:3px 8px"><option>No limit</option><option selected>20 Mbit/s</option><option>5 Mbit/s</option></select></label>
+  </div>
+  <div class="row" style="gap:8px; margin-top:12px"><button class="btn primary">Copy 3 items</button><span class="private">🔒 Private: only you, on any device signed in with your Pubky</span></div>
+</div>
+<div>
+  <h2 style="margin-top:0">Copying</h2>
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><b>A Night at the Opera</b><span class="small muted">7 of 12 · 640 MB of 1.1 GB</span></div>
+    <div class="bar" style="margin:8px 0"><span style="width:58%"></span></div>
+    <div class="row" style="justify-content:space-between"><b>1986-07-12 Wembley</b><span class="small muted">waiting</span></div>
+    <div class="bar" style="margin:8px 0"><span style="width:0%"></span></div>
+    <div class="row small muted" style="justify-content:space-between"><span>18 Mbit/s · about 20 min left · resumes after a restart</span><span><a>Pause</a> · <a>Cancel</a></span></div>
+  </div>
+  <h2>The copy as a source</h2>
+  <div class="list">
+    <div class="list-row"><span class="no">11</span><span class="cover"></span><div><div class="name">Bohemian Rhapsody</div><div class="sub">Queen · A Night at the Opera</div></div><span class="chip"><span class="mark" data-s="local"></span>This node · FLAC 24/96</span><span class="dur">5:55</span><button class="icon-btn">⋯</button></div>
+    <div class="list-row"><span class="no">11</span><span class="cover"></span><div><div class="name">Bohemian Rhapsody</div><div class="sub">on your laptop's node (no local file)</div></div><span class="chip"><span class="mark solid" data-s="archive"></span>Homeserver · FLAC 24/96</span><span class="dur">5:55</span><button class="icon-btn">⋯</button></div>
+  </div>
+  <p class="muted small">Play-from order gains a row: <b>This node's files › Homeserver › TIDAL › Qobuz › Spotify</b>. "Remove from homeserver" is on each album's ⋯ menu.</p>
+</div>
+</div>
+</div><script src="ux.js"></script></body></html>

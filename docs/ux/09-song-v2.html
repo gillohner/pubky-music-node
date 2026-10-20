@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 1b·4 · Song page v2</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 1b·4 · the song page v2 (Bohemian Rhapsody).</b> Phase 1's item page plus credits (MusicBrainz recording relations: producers, engineers, instruments; the composer comes from the work), the Wikipedia summary, and "Appears on" (25 releases on MusicBrainz). The tag panel shows the <b>scope switch</b>: 🌐 Everywhere = tags on the song (all its versions, aggregated by the node), ▣ This version = tags on exactly the TIDAL link you came from. No lyrics (licensing).</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span><span class="crumbs">‹ <a class="lnk">A Night at the Opera</a></span></div>
+<div class="header">
+  <img class="cover lg" src="https://resources.tidal.com/images/93df7b69/9743/49bd/949a/e115007f7b93/640x640.jpg" alt="">
+  <div class="meta">
+    <div class="muted small">SONG</div>
+    <h1 style="font-size:32px">Bohemian Rhapsody</h1>
+    <div class="by"><a class="lnk">Queen</a> · <a class="lnk">A Night at the Opera</a> · 1975 · 5:55</div>
+    <div class="actions"><button class="btn primary">▶ Play</button><button class="btn">⤼ Play next</button><button class="btn">＋ Playlist</button><button class="btn">✎ Review</button><button class="btn ghost">⋯</button></div>
+    <div class="playsfrom" style="margin-top:12px"><span class="mark solid" data-s="local"></span><div><b>This node · FLAC 24/96</b> <span class="muted small">· bit-perfect</span></div><button class="btn sm" style="margin-left:auto">Change…</button></div>
+  </div>
+</div>
+<div class="two" style="margin-top:6px">
+<div>
+  <h3>Tags on Pubky</h3>
+  <div class="card" style="position:relative">
+    <div class="row" style="justify-content:space-between; flex-wrap:wrap; gap:8px">
+      <span class="scope" role="tablist" aria-label="Tag scope"><button class="on" role="tab" title="The song itself, every version">🌐 Everywhere (12)</button><button role="tab" title="Only tidal.com/track/534050211">▣ This version (3)</button></span>
+      <span class="muted small" style="border-bottom:1px dotted var(--muted)">where from?</span>
+    </div>
+    <div class="breakdown" style="position:static; width:auto; margin-top:10px; box-shadow:none">
+      <div><span>On the song (MusicBrainz)</span><b>8</b></div>
+      <div><span>TIDAL 534050211 (this version)</span><b>3</b></div>
+      <div><span>Spotify 2OBofMJx…</span><b>1</b></div>
+      <div class="muted small" style="margin-top:4px">The node adds up tags across the song's versions (Pinakes group + Nexus per link).</div>
+    </div>
+    <div class="chips" style="margin-top:12px"><span class="tagchip">rock <span class="n">7</span></span><span class="tagchip">opera <span class="n">3</span></span><span class="tagchip">classic <span class="n">2</span></span><span class="tagchip">music <span class="n">1</span></span><span class="tagchip">tidal <span class="n">1</span></span></div>
+    <div style="margin-top:12px"><input class="input" placeholder="Add a tag…" style="width:220px"> <button class="btn sm primary">Add</button></div>
+    <div class="small muted" style="margin-top:6px">Tags on the song show wherever it's played.</div>
+    <label class="row small" style="gap:6px; margin-top:6px"><input type="checkbox"> Only this version (TIDAL 534050211), e.g. "2011 remaster", "best master"</label>
+    <div class="private" style="margin-top:6px">🔒 On your own file, "only this version" tags are private notes on this node.</div>
+    <div style="margin-top:10px"><div class="who"><span class="av">pk</span>pubky…ncfqp <span class="fr">you follow</span><span class="muted small">rock, opera · 2 h ago</span></div><div class="who"><span class="av">a7</span>pubky…a7k2m<span class="muted small">rock · yesterday</span></div></div>
+  </div>
+  <h3>Posts about this song · 🌐 Everywhere</h3>
+  <div class="card"><div class="who"><span class="av">pk</span><b>pubky…ncfqp</b> <span class="stars" style="font-size:13px">★★★★★</span><span class="muted small">· about the song</span></div><p style="margin:4px 0 0">The 2011 remaster is the one. <span class="muted small">(example)</span></p></div>
+</div>
+<div>
+  <h3>About <span class="src">Wikipedia</span></h3>
+  <div class="card"><p style="margin:0">"Bohemian Rhapsody" is a song by British rock band Queen from their fourth studio album, A Night at the Opera. The lead single from the album, it is a suite composed of five main elements: an introduction, a ballad, an opera, a hard rock segment, and a reflective coda…</p><p class="small" style="margin:8px 0 0"><a>Read on Wikipedia ↗</a></p></div>
+  <h3>Credits <span class="src">MusicBrainz</span></h3>
+  <table class="facts">
+    <tr><td>Written by</td><td><a class="lnk">Freddie Mercury</a> <span class="src">work</span></td></tr>
+    <tr><td>Produced by</td><td><a class="lnk">Roy Thomas Baker</a>, <a class="lnk">Queen</a></td></tr>
+    <tr><td>Engineers</td><td><a class="lnk">Mike Stone</a>, <a class="lnk">Kris Fredriksson</a></td></tr>
+    <tr><td>Performers</td><td><a class="lnk">Freddie Mercury</a>, <a class="lnk">Brian May</a>, <a class="lnk">Roger Taylor</a>, <a class="lnk">John Deacon</a></td></tr>
+    <tr><td>ISRC</td><td>GBUM71029604 <span class="muted">+6</span></td></tr>
+  </table>
+  <h3>Appears on <span class="src">MusicBrainz · 25 releases</span></h3>
+  <div class="list">
+    <div class="list-row"><span class="no"></span><img class="cover" src="https://resources.tidal.com/images/93df7b69/9743/49bd/949a/e115007f7b93/640x640.jpg" alt=""><div><div class="name"><a class="lnk">A Night at the Opera</a></div><div class="sub">Album · 1975</div></div><span></span><span></span><button class="icon-btn">›</button></div>
+    <div class="list-row"><span class="no"></span><span class="cover"></span><div><div class="name"><a class="lnk">Bohemian Rhapsody</a></div><div class="sub">Single · 1975</div></div><span></span><span></span><button class="icon-btn">›</button></div>
+    <div class="list-row"><span class="no"></span><span class="cover"></span><div><div class="name"><a class="lnk">Greatest Hits</a></div><div class="sub">Compilation · 1981</div></div><span></span><span></span><button class="icon-btn">›</button></div>
+  </div>
+</div>
+</div>
+<h3>Versions</h3>
+<p class="muted small">Unchanged from phase 1: "Same recording elsewhere", then "Other masters and releases" (approved as two lists).</p>
+</div><script src="ux.js"></script></body></html>

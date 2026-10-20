@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 1b·5 · Post and review composer</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 1b·5 · the post/review composer.</b> "About" defaults to the song (Everywhere: the canonical MusicBrainz URL). The picker shows the versions you can address instead. A review is the music kind <code>review</code> (rating 1–10 shown as five stars with halves, text) in <code>/pub/music/v1/posts/</code>; a plain post is a social v1 <code>post</code> with <code>embed</code> = the URL (plan step 3).</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span><span class="crumbs">Bohemian Rhapsody › Review</span></div>
+<div style="display:grid; place-items:center; padding:20px 0">
+<div class="composer" style="position:relative">
+  <div class="row" style="justify-content:space-between"><b>Write about…</b><span class="scope"><button class="on">★ Review</button><button>✎ Post</button></span></div>
+  <div style="margin:12px 0 8px" class="row"><span class="muted small">About:</span><span class="about">🌐 Bohemian Rhapsody <span class="muted">(the song)</span> ▾</span></div>
+  <div class="menu" style="position:relative; margin:0 0 12px; box-shadow:none">
+    <div class="head">Write about</div>
+    <div class="mi focus">🌐 The song · every version<span class="k">musicbrainz.org/recording/b1a9…</span></div>
+    <div class="mi">💿 The album · A Night at the Opera<span class="k">release group</span></div>
+    <div class="mi">👥 The artist · Queen</div>
+    <div class="sep"></div>
+    <div class="head">Only this version</div>
+    <div class="mi"><span class="mark" data-s="tidal"></span>TIDAL 534050211 · 2011 remaster</div>
+    <div class="mi"><span class="mark" data-s="spotify"></span>Spotify 2OBofMJx…</div>
+    <div class="mi"><span class="mark" data-s="local"></span>Your file · FLAC 24/96<span class="k">🔒 private note</span></div>
+  </div>
+  <div class="row" style="gap:10px"><span class="stars">★★★★½</span><span class="muted small">9 / 10</span></div>
+  <textarea style="margin-top:10px">Still gives me chills at the "Galileo" part.</textarea>
+  <div class="row" style="justify-content:space-between; margin-top:10px; flex-wrap:wrap; gap:8px">
+    <span class="private">🌐 Public on Pubky · shows on the song for everyone</span>
+    <span class="row" style="gap:8px"><button class="btn">Cancel</button><button class="btn primary">Publish</button></span>
+  </div>
+</div>
+</div>
+</div><script src="ux.js"></script></body></html>

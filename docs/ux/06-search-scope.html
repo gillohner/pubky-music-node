@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 1b·1 · Search with scope</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 1b·1 · search results with the scope control.</b> The owner's query "cro bad chick", live on this node (TIDAL, Deezer; Spotify answers 403 for now). <b>Everywhere</b> = the song itself, one row per song across services and Pubky; <b>My library</b> = your files, your homeserver copies, your providers' favourites. Every title, artist and album is a link to its page. Today TIDAL returns two "CRO" artist pages; with identity (MusicBrainz b2ea6506…) they are one artist with two versions.</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">cro bad chick</span></div>
+<div class="row" style="flex-wrap:wrap; gap:10px; margin-bottom:10px">
+  <span class="scope" role="tablist" aria-label="Search scope"><button class="on" role="tab">🌐 Everywhere</button><button role="tab">▣ My library</button></span>
+  <span class="muted small">Narrow:</span>
+  <span class="chips"><span class="metachip">Local</span><span class="metachip">Homeserver</span><span class="metachip" style="outline:1px solid var(--accent)">TIDAL ✓</span><span class="metachip" style="outline:1px solid var(--accent)">Deezer ✓</span><span class="metachip">Spotify</span><span class="metachip">On Pubky</span></span>
+</div>
+<p class="muted small" style="margin:0 0 12px">Everywhere: the song itself, from all your services and Pubky. One row per song; marks show where it is.</p>
+<h3>Top result</h3>
+<div class="card row" style="gap:16px; align-items:center">
+  <img class="portrait" style="width:84px;height:84px" src="https://resources.tidal.com/images/78b74bf1/fab5/4b60/b22b/37174d67324d/750x750.jpg" alt="">
+  <div><div style="font-size:20px;font-weight:700"><a class="lnk">CRO</a></div><div class="muted small">Artist · German rapper · born 1990 · <span class="src">MusicBrainz</span></div><div class="marks" style="margin-top:6px"><span class="mark" data-s="tidal" title="2 pages on TIDAL"></span><span class="mark" data-s="deezer"></span><span class="mark" data-s="spotify"></span><span class="muted small">same artist on 3 services</span></div></div>
+  <button class="btn primary" style="margin-left:auto">▶ Play</button>
+</div>
+<h3>Songs</h3>
+<div class="list">
+  <div class="list-row"><span class="no">1</span><img class="cover" src="https://resources.tidal.com/images/13aad13d/e8ff/4176/b5aa/065139beabab/640x640.jpg" alt=""><div><div class="name"><a class="lnk">Bad Chick</a></div><div class="sub"><a class="lnk">CRO</a> · <a class="lnk">Bad Chick</a> · 2012 · same recording on 3 services</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL</span><span class="dur">3:22</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">2</span><span class="cover"></span><div><div class="name"><a class="lnk">Bad Chick (MTV Unplugged)</a></div><div class="sub"><a class="lnk">CRO</a> · <a class="lnk">MTV Unplugged</a> · 2015 · another version of the song</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL</span><span class="dur">3:47</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">3</span><span class="cover"></span><div><div class="name"><a class="lnk">Bad Chick (Instrumental)</a></div><div class="sub"><a class="lnk">CRO</a> · 2012</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL</span><span class="dur">3:22</span><button class="icon-btn">⋯</button></div>
+</div>
+<h3>Albums</h3>
+<div class="grid"><div class="tile"><img class="art" src="https://resources.tidal.com/images/13aad13d/e8ff/4176/b5aa/065139beabab/640x640.jpg" alt=""><div class="t"><a class="lnk">Bad Chick</a></div><div class="a"><a class="lnk">CRO</a> · Single · 2012</div></div><div class="tile"><span class="art"></span><div class="t"><a class="lnk">Raop</a></div><div class="a"><a class="lnk">CRO</a> · Album · 2012</div></div></div>
+<h3>On Pubky</h3>
+<p class="muted small">Nobody on Pubky has tagged "Bad Chick" yet. <a>Tag it</a> and it shows here for everyone.</p>
+</div><script src="ux.js"></script></body></html>

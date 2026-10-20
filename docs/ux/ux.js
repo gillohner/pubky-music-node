@@ -20,3 +20,4 @@ document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('cl
   const t = document.getElementById(b.dataset.toggle);
   if (t) t.hidden = !t.hidden;
 }));
+document.querySelectorAll('.scope').forEach((g) => g.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; g.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); }));
