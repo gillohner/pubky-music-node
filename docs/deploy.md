@@ -37,7 +37,12 @@ go into the native app and into Subsonic clients. The image is published on GHCR
 must be public (or the NAS needs registry credentials) for the pull to succeed. The container runs
 as uid 1000, so the data dataset must be writable by that user; the music dataset is read-only.
 Using the form instead: Repository `ghcr.io/gillohner/pubky-music-node`, Tag `edge` (no tag in
-the repository field), the `PM_*` variables, port 7788 → 7788, and the two storage mounts.
+the repository field), the `PM_*` variables, and the two storage mounts. Turn **Host Network** on:
+UPnP/OpenHome renderers (Linn, Naim, …), Chromecast and endpoints are found by multicast and
+fetch audio from the node, neither of which crosses Docker's bridge network; with host networking
+no port mapping is needed and the UI is on port 7788. Set `PM_PUBLIC_URL` to
+`http://<nas-ip>:7788` so devices get a reachable address. The entrypoint writes `/data/node.toml`
+only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for one restart.
 
 ## Umbrel
 

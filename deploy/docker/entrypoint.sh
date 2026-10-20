@@ -7,6 +7,8 @@
 #   PM_CONTACT   email or URL for outbound User-Agent strings (optional here; it can also be
 #                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers
+#   PM_PUBLIC_URL  how devices reach this node (http://<host-ip>:7788); renderers and endpoints
+#                fetch audio from it, so set it when the container is not on the host network
 #   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
 #   PM_TIDAL_SCOPES   scopes to request at sign-in (default: all the node can use; must be enabled on the app)
 set -eu
@@ -31,6 +33,7 @@ folders = [${folders%, }]
 listen = "${PM_LISTEN:-0.0.0.0:7788}"
 token = "${PM_TOKEN:-}"
 name = "${PM_NAME:-Pubky Music Node}"
+public_url = "${PM_PUBLIC_URL:-}"
 
 [tidal]
 client_id = "${PM_TIDAL_CLIENT_ID:-}"
