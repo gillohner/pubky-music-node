@@ -70,3 +70,32 @@ This replaces the earlier version of this file. Real answers from the build that
    service URL.
 2. Cards: `POST /v1/resources/lookup` (≤500 links) or `GET /v1/resources/by-uri`. Escape all text.
 3. Limits: 120 requests/min per IP on the public API.
+
+## Node side (2026-10-20, after the merge)
+
+What this repository does with each item of the steward's note:
+
+- **`also_on`, one link per service, tagged first:** `pm_pubky::pinakes::AlsoOn` (`id`, `derived`, `via`,
+  `is_tagged()`); cards keep the one-per-service list, `ResourceDetail::also_on()` the full one. Shown as
+  "Versions" on library albums and tracks and as "Play on…" rows on Discover items, tagged links first
+  (`pm-api/src/discover.rs::also_on_rows`); TIDAL and Deezer rows carry a queue URI.
+- **Only TIDAL page ISRCs are keys:** the node never derives a canonical URI from a Bandcamp or SoundCloud
+  ISRC; its own canonical order stays MusicBrainz recording URL, then `https://musicbrainz.org/isrc/<ISRC>`
+  from the file's tags, then the service URL (ADR 0001).
+- **`key=` search:** `SearchQuery::key`, `Discovery::tagged_anywhere`; Versions ask Pinakes by
+  `mbid:` / `isrc:` / `upc:` because Pinakes has no card for a MusicBrainz URL itself (verified live).
+- **Charts:** `SearchQuery::trending(type, window)`, `Discovery::trending_of`, `GET /v1/discover/charts`.
+- **Conflict rule (a group never holds two MBIDs or Q-ids):** nothing to implement; the node never merges
+  groups itself and joins only on the exact ids Pinakes returns (`group.id`, `facts.mbid`).
+- **Batched lookups:** `PinakesClient::lookup` already sends `POST /v1/resources/lookup` in chunks of
+  `LOOKUP_CHUNK` (≤ 500 links), under the client-side 120 requests/min budget.
+- **`base_url` for a MusicBrainz replica:** this project runs no MusicBrainz replica; the node itself calls
+  musicbrainz.org at ≤ 1 request/s with the owner's contact. Pinakes should stay on musicbrainz.org. If a
+  replica is ever deployed next to the node, its `/ws/2` URL goes to the steward and into
+  `[also_on.sources.musicbrainz] base_url` on their side; nothing changes in this repository.
+- **`maybe_same` on event cards:** `Card::maybe_same` / `Details::maybe_same` (parsed, not yet shown: the
+  node has no events view).
+- **Matching the owner's own library:** `POST /v1/tags/bulk` (Settings → Pubky → "Tag my whole library on
+  Pubky") writes one v1 `PubkyAppTag` per identified track on its canonical MusicBrainz URL; Pinakes then
+  joins each to its group. Everything the node writes stays on the v1 specs: bookmarks for favourites
+  (ADR 0010), tags (ADR 0011), posts with custom content for playlists, reviews and activity (ADR 0006).
