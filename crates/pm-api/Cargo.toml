@@ -16,6 +16,7 @@ pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+blake3 = { workspace = true }
 notify = "8"
 futures-util = { workspace = true }
 serde = { workspace = true }

@@ -234,4 +234,85 @@ impl NodeHomeserver {
         session.storage().delete(path).await?;
         Ok(())
     }
+
+    // ---- private files (audio the user keeps on their homeserver) ----
+
+    /// Upload bytes to a private path (`/priv/…`). Audio never goes under
+    /// `/pub/` (constraint 2); this refuses public paths outright.
+    pub async fn upload_private(
+        &self,
+        session: &PubkySession,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), HomeserverError> {
+        if !path.starts_with(PRIVATE_FILES_DIR) {
+            return Err(HomeserverError::Transport(format!(
+                "refusing to upload audio outside {PRIVATE_FILES_DIR}: {path}"
+            )));
+        }
+        session.storage().put(path, bytes).await?;
+        Ok(())
+    }
+
+    /// Every file under the private files folder, with size when the
+    /// homeserver reports it.
+    pub async fn list_private_files(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Vec<RemoteFile>, HomeserverError> {
+        let storage = session.storage();
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut b = storage.list(PRIVATE_FILES_DIR)?.limit(LIST_LIMIT).shallow(true);
+            if let Some(c) = &cursor {
+                b = b.cursor(c);
+            }
+            let page = b.send().await?;
+            let n = page.len();
+            cursor = page.last().map(|e| e.to_pubky_url());
+            for e in page {
+                let path = e.path.to_string();
+                let size = storage
+                    .stats(path.as_str())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.content_length);
+                out.push(RemoteFile { path, size });
+            }
+            if n < LIST_LIMIT as usize {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn download_private(
+        &self,
+        session: &PubkySession,
+        path: &str,
+    ) -> Result<Vec<u8>, HomeserverError> {
+        let resp = session.storage().get(path).await?;
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| HomeserverError::Transport(e.to_string()))
+    }
+}
+
+/// Where the user's own audio files live on the homeserver: private, never `/pub/`.
+pub const PRIVATE_FILES_DIR: &str = "/priv/pubky.music/files/";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteFile {
+    /// Owner-relative path, e.g. `/priv/pubky.music/files/<hash>-<name>`.
+    pub path: String,
+    pub size: Option<u64>,
+}
+
+impl RemoteFile {
+    pub fn name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
 }

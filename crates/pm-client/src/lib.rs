@@ -400,6 +400,19 @@ impl NodeClient {
         self.get("pubky", &[]).await
     }
 
+    pub async fn pubky_files(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>> {
+        self.get("pubky/files", &[]).await
+    }
+
+    pub async fn pubky_upload(&self, req: &UploadFile) -> Result<UploadedFile> {
+        self.send(reqwest::Method::POST, "pubky/files", Some(req)).await
+    }
+
+    pub async fn pubky_mirror(&self) -> Result<MirrorReport> {
+        self.send::<MirrorReport, ()>(reqwest::Method::POST, "pubky/files/mirror", None)
+            .await
+    }
+
     pub async fn pubky_sync(&self) -> Result<SyncReport> {
         self.send::<SyncReport, ()>(reqwest::Method::POST, "pubky/sync", None)
             .await

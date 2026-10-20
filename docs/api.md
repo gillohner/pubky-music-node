@@ -36,6 +36,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / POST | `/v1/activity` | POST: `{track: {title, artist?, album?, uri?}, source, duration_ms?}` | plays as private activity posts; 422 when nothing canonical resolves |
 | GET | `/v1/pubky` | | `{user, unsynced}` |
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
+| GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |
+| POST | `/v1/pubky/files/mirror` | | download missing files into the node's mirror folder and scan it: `{fetched, present, bytes, errors}` |
 | GET | `/v1/events` | WebSocket | first `{"type":"snapshot","zones":[...]}`, then `zone` (full state), `zone_event`, `zone_removed`, `library_changed` |
 
 Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private

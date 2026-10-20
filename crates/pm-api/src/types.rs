@@ -289,3 +289,30 @@ pub struct ImportedPlaylist {
     pub imported: usize,
     pub unresolved: Vec<DescribedTrack>,
 }
+
+// ---- private files on the homeserver ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UploadFile {
+    /// A library track to upload.
+    #[serde(default)]
+    pub track_id: Option<i64>,
+    /// Or a path on the node.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadedFile {
+    pub path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MirrorReport {
+    pub fetched: usize,
+    pub present: usize,
+    pub bytes: u64,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}

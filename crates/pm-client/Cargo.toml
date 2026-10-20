@@ -11,6 +11,7 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-api = { workspace = true }
 pm-library = { workspace = true }
+pm-pubky = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

@@ -10,6 +10,7 @@
 //! by pubkey (M5) wraps this API rather than replacing it.
 
 pub mod activity;
+pub mod files;
 pub mod playlists;
 pub mod sources;
 pub mod state;
@@ -118,6 +119,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlists/{id}/play", post(playlists::play))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
+        .route("/pubky/files", get(files::list).post(files::upload))
+        .route("/pubky/files/mirror", post(files::mirror))
         .route("/events", get(events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
@@ -603,6 +606,7 @@ mod tests {
                 db_path: db,
                 scan_folders: vec![dir.join("music")],
                 art_dir: dir.join("art"),
+                mirror_dir: dir.join("homeserver"),
                 pipeline: PipelineConfig::default(),
                 token: token.map(str::to_string),
             },

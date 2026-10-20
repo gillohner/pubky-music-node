@@ -32,6 +32,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             db_path: db.clone(),
             scan_folders: vec![],
             art_dir: dir.join("art"),
+            mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
             token: None,
         },
@@ -144,4 +145,47 @@ async fn playlists_round_trip_through_the_private_folder() {
         .await
         .unwrap();
     assert!(private.is_empty());
+
+    // Private files: upload a WAV, list it, mirror it into node B's folder.
+    let wav = dir.path().join("song.wav");
+    {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        for i in 0..800 {
+            w.write_sample((i % 100) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+    let bytes = std::fs::read(&wav).unwrap();
+    let remote = format!(
+        "{}{}",
+        pm_pubky::homeserver::PRIVATE_FILES_DIR,
+        pm_api::files::remote_name(&bytes, &wav)
+    );
+    sync_a.upload_private(&remote, bytes.clone()).await.unwrap();
+    let listed = sync_a.list_private_files().await.unwrap();
+    assert!(listed.iter().any(|f| f.path == remote), "{listed:?}");
+    let mirror = dir.path().join("mirror-b");
+    let r = pm_api::files::mirror_into(&sync_b, &mirror).await.unwrap();
+    assert_eq!(r.fetched, 1, "{r:?}");
+    assert_eq!(
+        std::fs::read(mirror.join(remote.rsplit('/').next().unwrap())).unwrap(),
+        bytes
+    );
+    let r = pm_api::files::mirror_into(&sync_b, &mirror).await.unwrap();
+    assert_eq!((r.fetched, r.present), (0, 1));
+    // Public listing must not see it.
+    assert!(pubky
+        .public_storage()
+        .list((&PublicKey::try_from(z32.as_str()).unwrap(), "/pub/pubky.music/"))
+        .unwrap()
+        .send()
+        .await
+        .map(|v| v.is_empty())
+        .unwrap_or(true));
 }

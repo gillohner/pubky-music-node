@@ -3554,6 +3554,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "futures-util",
  "hound",
  "http-body-util",
@@ -3621,6 +3622,7 @@ dependencies = [
  "pm-audio",
  "pm-library",
  "pm-model",
+ "pm-pubky",
  "pm-zones",
  "reqwest",
  "serde",

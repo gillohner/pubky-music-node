@@ -19,6 +19,8 @@ pub struct NodeSettings {
     pub scan_folders: Vec<PathBuf>,
     /// Where extracted cover art is written.
     pub art_dir: PathBuf,
+    /// Where files from the homeserver's private storage are mirrored (a library folder).
+    pub mirror_dir: PathBuf,
     pub pipeline: PipelineConfig,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
@@ -32,6 +34,7 @@ pub struct NodeState {
     pub db_path: PathBuf,
     pub scan_folders: Vec<PathBuf>,
     pub art_dir: PathBuf,
+    pub mirror_dir: PathBuf,
     pub outputs: OutputRegistry,
     pub zones: Zones,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
@@ -56,6 +59,7 @@ impl NodeState {
             db_path: settings.db_path,
             scan_folders: settings.scan_folders,
             art_dir: settings.art_dir,
+            mirror_dir: settings.mirror_dir,
             outputs,
             zones: Zones::new(sources),
             token: settings.token,

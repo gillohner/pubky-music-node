@@ -58,6 +58,18 @@ impl PubkySync {
         &self.session
     }
 
+    pub async fn list_private_files(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, SyncError> {
+        Ok(self.homeserver.list_private_files(&self.session).await?)
+    }
+
+    pub async fn upload_private(&self, path: &str, bytes: Vec<u8>) -> Result<(), SyncError> {
+        Ok(self.homeserver.upload_private(&self.session, path, bytes).await?)
+    }
+
+    pub async fn download_private(&self, path: &str) -> Result<Vec<u8>, SyncError> {
+        Ok(self.homeserver.download_private(&self.session, path).await?)
+    }
+
     /// The signed-in user's raw z32 key.
     pub fn z32(&self) -> &str {
         &self.z32

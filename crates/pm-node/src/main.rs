@@ -58,6 +58,12 @@ enum Cmd {
     },
     /// Scan folders into the library (configured folders when none given).
     Scan { folders: Vec<PathBuf> },
+    /// Upload audio files to the user's private homeserver storage
+    /// (`pubky.session_secret_file` must be set).
+    Upload {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Library counts.
     Stats,
     /// List tracks.
@@ -144,6 +150,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             db_path,
             scan_folders: cfg.library.folders.clone(),
             art_dir: cfg.data_dir.join("art"),
+            mirror_dir: cfg.data_dir.join("homeserver"),
             pipeline: pm_audio::PipelineConfig::default(),
             token,
         },
@@ -183,6 +190,34 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
         }
     }
     pm_api::serve(state, &cfg.api.listen).await
+}
+
+async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
+    let file = cfg
+        .pubky
+        .session_secret_file
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("set `pubky.session_secret_file` in the node config"))?;
+    let secret = std::fs::read_to_string(file)?;
+    let sync = pm_api::sync::PubkySync::connect(cfg.pubky.network, &secret).await?;
+    println!("signed in as {}", sync.z32());
+    for f in files {
+        anyhow::ensure!(
+            pm_library::tags::is_supported(f),
+            "{} is not a supported audio file",
+            f.display()
+        );
+        let bytes = std::fs::read(f)?;
+        let remote = format!(
+            "{}{}",
+            pm_pubky::homeserver::PRIVATE_FILES_DIR,
+            pm_api::files::remote_name(&bytes, f)
+        );
+        let size = bytes.len();
+        sync.upload_private(&remote, bytes).await?;
+        println!("{} -> {remote} ({size} bytes)", f.display());
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -225,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{to}: volume {db:+.1} dB");
         }
         Cmd::Scan { folders } => library::scan(&cfg, &folders)?,
+        Cmd::Upload { files } => upload(&cfg, &files).await?,
         Cmd::Stats => library::stats(&cfg)?,
         Cmd::Tracks { limit } => library::tracks(&cfg, limit)?,
         Cmd::Search { query, limit } => library::search(&cfg, &query, limit)?,
