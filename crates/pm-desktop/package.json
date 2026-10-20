@@ -1,0 +1,11 @@
+{
+  "name": "pm-desktop",
+  "private": true,
+  "description": "Pins the Tauri CLI for this crate; the Android Gradle build calls `npm run tauri`.",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

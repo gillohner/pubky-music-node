@@ -26,12 +26,13 @@ Linux). The wry shell's `~/.config/pubky-music/desktop.json` is read once if pre
 
 ## Bundles
 
-The release workflow builds them; locally (slow, release mode):
+The release workflow builds them (`docs/RELEASING.md`). The Tauri CLI is pinned in
+`package.json`; locally (slow, release mode):
 
 ```sh
-npx @tauri-apps/cli@2.12.1 build --bundles deb       # or appimage, dmg, msi, nsis
-npx @tauri-apps/cli@2.12.1 android build --apk       # needs the Android SDK and NDK
+npm ci
+npx tauri build --bundles deb       # or appimage, dmg, msi, nsis
+npx tauri android init && npx tauri android build --apk   # needs the Android SDK and NDK
 ```
 
-Icons in `icons/` come from `crates/pm-api/static/icon.svg`
-(`npx @tauri-apps/cli@2.12.1 icon ../pm-api/static/icon.svg`).
+Icons in `icons/` come from `crates/pm-api/static/icon.svg` (`npx tauri icon ../pm-api/static/icon.svg`).

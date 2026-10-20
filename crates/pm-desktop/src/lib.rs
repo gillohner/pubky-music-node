@@ -48,6 +48,12 @@ impl AppState {
     }
 }
 
+/// Links that would open a second window (`target="_blank"`, a
+/// cross-origin `window.open`) become plain navigations, which the
+/// navigation guard sends to the system browser. WebKitGTK does not always
+/// raise a new-window request for them, and Android never does.
+const EXTERNAL_LINKS_JS: &str = "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[target=_blank]');if(a&&a.href&&!e.defaultPrevented){e.preventDefault();location.assign(a.href);}});var wo=window.open;window.open=function(u){try{var x=new URL(u,location.href);if(x.origin!==location.origin){location.assign(x.href);return null;}}catch(e){}return wo.apply(window,arguments);};";
+
 /// Run before every page: the node's page gets the token in the
 /// localStorage key the web UI reads (only on the node's origin), and every
 /// page can see it runs inside the app.
@@ -56,7 +62,7 @@ fn init_script(s: Option<&Settings>) -> String {
         .and_then(|s| Some((s.origin()?, s.token.clone())))
         .unwrap_or_default();
     format!(
-        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};}})();",
+        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};{EXTERNAL_LINKS_JS}}})();",
         o = serde_json::to_string(&origin).unwrap_or_default(),
         t = serde_json::to_string(&token).unwrap_or_default(),
         v = serde_json::to_string(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
@@ -83,6 +89,7 @@ fn is_app_page(u: &url::Url) -> bool {
 /// (an "Open on …" link, a streaming service's sign-in) opens in the
 /// system browser.
 fn allow_navigation(app: &AppHandle, current: &Arc<Mutex<Option<Settings>>>, u: &url::Url) -> bool {
+    tracing::debug!(url = %u, "navigation");
     if is_app_page(u) {
         return true;
     }
@@ -300,6 +307,20 @@ pub fn run() {
                 });
             #[cfg(desktop)]
             {
+                // `target="_blank"` and `window.open` (every "Open on …" link
+                // in the UI): the system browser, never a second app window.
+                // Android has no such request; its WebView navigates instead,
+                // which the navigation guard above handles.
+                let handle = app.handle().clone();
+                builder = builder.on_new_window(move |u, _features| {
+                    tracing::debug!(url = %u, "new window requested");
+                    if matches!(u.scheme(), "http" | "https" | "mailto") {
+                        if let Err(e) = handle.opener().open_url(u.as_str(), None::<&str>) {
+                            tracing::warn!(url = %u, "cannot open externally: {e}");
+                        }
+                    }
+                    tauri::webview::NewWindowResponse::Deny
+                });
                 builder = builder
                     .title("Pubky Music")
                     .inner_size(1280.0, 840.0)
