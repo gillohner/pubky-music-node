@@ -3337,6 +3337,32 @@ impl App {
             }
         });
         ui.add_space(14.0);
+        ui.label(egui::RichText::new("Subsonic jukebox").strong().size(16.0));
+        ui.small(
+            egui::RichText::new(
+                "The zone that Subsonic clients (Symfonium, Feishin…) drive with their jukebox control.",
+            )
+            .weak(),
+        );
+        let current = self.node_settings.as_ref().and_then(|v| v.jukebox_zone.clone());
+        let mut choice = current.clone();
+        egui::ComboBox::from_id_salt("jukebox-zone")
+            .selected_text(match &current {
+                Some(id) => self.zone_name(id),
+                None => "First zone by name".to_string(),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut choice, None, "First zone by name");
+                let mut ids: Vec<&String> = self.zones.keys().collect();
+                ids.sort();
+                for id in ids {
+                    ui.selectable_value(&mut choice, Some(id.clone()), self.zone_name(id));
+                }
+            });
+        if choice != current {
+            self.backend.send(Cmd::SetJukeboxZone(choice));
+        }
+        ui.add_space(14.0);
         ui.label(egui::RichText::new("Library folders").strong().size(16.0));
         ui.small(
             egui::RichText::new(

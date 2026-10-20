@@ -1077,9 +1077,18 @@ async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool
 }
 
 fn settings_view(s: &NodeState) -> NodeSettingsView {
+    let jukebox_zone = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(subsonic::JUKEBOX_ZONE_KEY)
+        .ok()
+        .flatten()
+        .filter(|z| !z.is_empty());
     NodeSettingsView {
         contact: s.contact(),
         discovery: s.discovery().is_some(),
+        jukebox_zone,
     }
 }
 
@@ -1095,6 +1104,15 @@ async fn update_node_settings(
 ) -> ApiResult<NodeSettingsView> {
     if let Some(c) = req.contact {
         s.set_contact(&c).map_err(ApiError::bad_request)?;
+    }
+    if let Some(z) = req.jukebox_zone {
+        if !z.is_empty() {
+            zone_of(&s, &z)?;
+        }
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(subsonic::JUKEBOX_ZONE_KEY, &z)?;
     }
     Ok(Json(settings_view(&s)))
 }
@@ -2267,6 +2285,42 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_jukebox_zone_is_a_node_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (_, v) = call(&app, "GET", "/v1/node/settings", None).await;
+        assert!(v.get("jukebox_zone").is_none());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"jukebox_zone": "nope"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"jukebox_zone": zid})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["jukebox_zone"], zid);
+        let (_, v) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"jukebox_zone": ""})),
+        )
+        .await;
+        assert!(v.get("jukebox_zone").is_none());
     }
 
     #[tokio::test]

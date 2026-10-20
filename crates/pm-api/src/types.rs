@@ -349,12 +349,18 @@ pub struct NodeSettingsView {
     /// Pinakes/Nexus discovery is available.
     #[serde(default)]
     pub discovery: bool,
+    /// The zone Subsonic clients drive through `jukeboxControl` (none = first by name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jukebox_zone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeSettingsUpdate {
     #[serde(default)]
     pub contact: Option<String>,
+    /// Zone id for Subsonic jukebox control; an empty string clears the choice.
+    #[serde(default)]
+    pub jukebox_zone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

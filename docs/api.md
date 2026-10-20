@@ -9,7 +9,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 
 | Method | Path | Body / query | Returns |
 | :-- | :-- | :-- | :-- |
-| GET / PUT | `/v1/node/settings` | PUT: `{contact}` | `{contact, discovery}`; the contact (email or URL, never a code-host link) is saved in the library and turns Pinakes/Nexus discovery on without a restart; 400 when invalid |
+| GET / PUT | `/v1/node/settings` (`jukebox_zone` picks the zone Subsonic jukebox calls drive; empty clears it) | PUT: `{contact}` | `{contact, discovery}`; the contact (email or URL, never a code-host link) is saved in the library and turns Pinakes/Nexus discovery on without a restart; 400 when invalid |
 | GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning` |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
 | POST | `/v1/outputs/rescan` | | discover again (local devices, endpoints); new outputs get zones; returns the list |

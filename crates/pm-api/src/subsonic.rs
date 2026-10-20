@@ -533,8 +533,11 @@ fn multi(p: &Params, key: &str) -> Vec<String> {
 
 /// The zone a Subsonic client's jukebox drives: `?zone=` picks (and
 /// remembers) one; otherwise the remembered one, else the first by name.
+/// Settings key holding the zone id Subsonic jukebox calls drive.
+pub(crate) const JUKEBOX_ZONE_KEY: &str = "subsonic.jukebox_zone";
+
 fn jukebox_zone(s: &NodeState, p: &Params) -> Result<Arc<pm_zones::Zone>, SubErr> {
-    const KEY: &str = "subsonic.jukebox_zone";
+    const KEY: &str = JUKEBOX_ZONE_KEY;
     let lib = s.library.lock().expect("library poisoned");
     if let Some(z) = p.get("zone").filter(|z| !z.is_empty()) {
         let zone = s

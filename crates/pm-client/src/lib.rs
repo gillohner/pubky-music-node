@@ -140,12 +140,26 @@ impl NodeClient {
     }
 
     /// Set the node's contact (email or URL) for upstream services.
+    /// The zone Subsonic clients drive through jukebox control (`None` clears it).
+    pub async fn set_jukebox_zone(&self, zone: Option<&str>) -> Result<NodeSettingsView> {
+        self.send(
+            reqwest::Method::PUT,
+            "node/settings",
+            Some(&NodeSettingsUpdate {
+                contact: None,
+                jukebox_zone: Some(zone.unwrap_or("").to_string()),
+            }),
+        )
+        .await
+    }
+
     pub async fn set_contact(&self, contact: &str) -> Result<NodeSettingsView> {
         self.send(
             reqwest::Method::PUT,
             "node/settings",
             Some(&NodeSettingsUpdate {
                 contact: Some(contact.to_string()),
+                jukebox_zone: None,
             }),
         )
         .await

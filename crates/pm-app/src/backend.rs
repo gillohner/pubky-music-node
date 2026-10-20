@@ -185,6 +185,7 @@ pub enum Cmd {
     /// Private files on the homeserver, an upload of one library track, and
     /// a mirror of the remote files into the node.
     PubkyFiles,
+    SetJukeboxZone(Option<String>),
     PubkyUpload(i64),
     PubkyMirror,
     LoadDsp(String),
@@ -582,6 +583,10 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadFolders => out.send(Msg::Folders(c.folders().await?)),
         Cmd::LoadNodeSettings => out.send(Msg::NodeSettings(c.node_settings().await?)),
+        Cmd::SetJukeboxZone(zone) => {
+            let v = c.set_jukebox_zone(zone.as_deref()).await?;
+            out.send(Msg::NodeSettings(v));
+        }
         Cmd::SetContact(contact) => {
             let v = c.set_contact(&contact).await?;
             out.send(Msg::Notice("Contact saved; Discover is on".into()));
