@@ -23,13 +23,13 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE | `/v1/zones/{id}/queue` | | 204 (stops and clears) |
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
-| POST | `/v1/zones/{id}/volume` | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
+| POST | `/v1/zones/{id}/volume` (absolute dB requests are capped at the zone's `max_volume_db` from its DSP settings) | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
 | GET / PUT | `/v1/zones/{id}/sleep` | PUT: `{seconds}` or `{seconds: null}` | `{ends_at_ms?, remaining_ms?}`; sleep timer: the zone pauses when it fires; one timer per zone, a new PUT replaces it |
 | POST | `/v1/zones/{id}/transfer` | `{to}` | the target's `ZoneState`; moves the queue, the playing item and its position, repeat and radio to zone `to` (paused stays paused); the source ends up stopped and empty; 400 for an empty queue or the same zone |
 | POST | `/v1/zones/{id}/shuffle` | | 204; shuffles the items after the current one (all items when nothing plays) |
 | PUT | `/v1/zones/{id}/radio` | `{on}` | library radio: when the queue ends (repeat off), the node appends up to 10 tracks similar to the last one (same genres, then same artists, then anything) and keeps playing; the flag is in `ZoneState.radio` and survives restarts |
 | PUT | `/v1/zones/{id}/repeat` | `{repeat: off\|all\|one}` | 204 |
-| GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, dither, dsd_mode, resample, loudness: off\|track\|album, eq: [{kind, freq_hz, gain_db, q, enabled}], convolution?: {path, gain_db, enabled}, crossfeed?: {level_db, cutoff_hz, delay_us, enabled}}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
+| GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, max_volume_db? (volume limit; caps volume_db and every volume request), dither, dsd_mode, resample, loudness: off\|track\|album, eq: [{kind, freq_hz, gain_db, q, enabled}], convolution?: {path, gain_db, enabled}, crossfeed?: {level_db, cutoff_hz, delay_us, enabled}}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
 | GET | `/v1/library/stats` | | `LibraryStats` |
 | GET | `/v1/library/tracks` | `?after=<id>&limit=` | `{tracks}` |
 | GET | `/v1/backup` | | a consistent SQLite snapshot of the library database (`application/vnd.sqlite3`, attachment `pubky-music-<date>.db`); `pm-node restore <file>` brings it back |

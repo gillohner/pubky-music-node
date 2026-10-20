@@ -3388,6 +3388,16 @@ impl App {
                             cfg.volume_db = (v != 0.0).then_some(v);
                         }
                         ui.end_row();
+                        ui.label("Volume limit")
+                            .on_hover_text("Every volume request for this zone is capped here");
+                        let mut m = cfg.max_volume_db.unwrap_or(0.0);
+                        if ui
+                            .add(egui::Slider::new(&mut m, -60.0..=0.0).suffix(" dB"))
+                            .changed()
+                        {
+                            cfg.max_volume_db = (m != 0.0).then_some(m);
+                        }
+                        ui.end_row();
                         ui.label("Loudness (ReplayGain)");
                         egui::ComboBox::from_id_salt("loudness")
                             .selected_text(format!("{:?}", cfg.loudness))

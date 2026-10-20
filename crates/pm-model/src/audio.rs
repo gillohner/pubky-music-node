@@ -159,9 +159,10 @@ pub enum VolumeKind {
     Incremental,
 }
 
-/// A volume request against an output.
+/// A volume request against an output. JSON: `{"db": -20.0}`,
+/// `{"percent": 50}`, `"up"`, `"down"`, `{"mute": true}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum Volume {
     Db(f32),
     Percent(u8),
@@ -327,5 +328,28 @@ mod tests {
         let json = serde_json::to_string(&caps).unwrap();
         let back: OutputCaps = serde_json::from_str(&json).unwrap();
         assert_eq!(caps, back);
+    }
+}
+
+#[cfg(test)]
+mod volume_json {
+    use super::Volume;
+
+    #[test]
+    fn volume_requests_use_the_documented_shape() {
+        assert_eq!(
+            serde_json::to_string(&Volume::Db(-20.0)).unwrap(),
+            r#"{"db":-20.0}"#
+        );
+        assert_eq!(serde_json::to_string(&Volume::Up).unwrap(), r#""up""#);
+        assert_eq!(
+            serde_json::to_string(&Volume::Mute(true)).unwrap(),
+            r#"{"mute":true}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Volume>(r#"{"percent":50}"#).unwrap(),
+            Volume::Percent(50)
+        );
+        assert_eq!(serde_json::from_str::<Volume>(r#""down""#).unwrap(), Volume::Down);
     }
 }

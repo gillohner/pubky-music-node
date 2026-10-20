@@ -44,6 +44,9 @@ pub struct PipelineConfig {
     pub headroom_db: Option<f32>,
     /// Software volume in dB, only for outputs without hardware volume.
     pub volume_db: Option<f32>,
+    /// Volume limit in dB (Roon's "volume limit"): the node clamps every
+    /// volume request for this zone, hardware or software, to at most this.
+    pub max_volume_db: Option<f32>,
     /// TPDF dither whenever the bit depth is reduced. Default on.
     pub dither: bool,
     pub dsd_mode: DsdMode,
@@ -103,6 +106,7 @@ impl Default for PipelineConfig {
         Self {
             headroom_db: None,
             volume_db: None,
+            max_volume_db: None,
             dither: true,
             dsd_mode: DsdMode::Auto,
             resample: true,

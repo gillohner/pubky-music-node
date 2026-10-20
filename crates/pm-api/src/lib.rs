@@ -543,8 +543,19 @@ async fn volume(
     Path(id): Path<String>,
     Json(body): Json<SetVolume>,
 ) -> Result<StatusCode, ApiError> {
-    zone_of(&s, &id)?.set_volume(body.volume).await?;
+    let zone = zone_of(&s, &id)?;
+    // A zone's volume limit (DSP settings) caps absolute requests.
+    let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
+    zone.set_volume(cap_volume(body.volume, limit)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Apply a zone's volume limit to an absolute dB request.
+fn cap_volume(v: pm_model::Volume, limit: Option<f32>) -> pm_model::Volume {
+    match (v, limit) {
+        (pm_model::Volume::Db(db), Some(max)) if db > max => pm_model::Volume::Db(max),
+        (v, _) => v,
+    }
 }
 
 async fn repeat(
@@ -705,6 +716,15 @@ async fn dsp_put(
     }
     if cfg.volume_db.is_some_and(|d| !(-90.0..=0.0).contains(&d)) {
         return Err(ApiError::bad_request("volume_db must be between -90 and 0"));
+    }
+    if cfg.max_volume_db.is_some_and(|d| !(-90.0..=0.0).contains(&d)) {
+        return Err(ApiError::bad_request("max_volume_db must be between -90 and 0"));
+    }
+    let mut cfg = cfg;
+    if let (Some(v), Some(max)) = (cfg.volume_db, cfg.max_volume_db) {
+        if v > max {
+            cfg.volume_db = Some(max);
+        }
     }
     s.sources.set_dsp(&zone.output().id(), Some(cfg.clone()))?;
     Ok(Json(cfg))
@@ -1407,7 +1427,12 @@ mod tests {
         let json = if bytes.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_slice(&bytes).unwrap()
+            serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "{method} {uri}: {status}: not JSON ({e}): {}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            })
         };
         (status, json)
     }
@@ -2175,6 +2200,49 @@ mod tests {
         call(&app, "GET", "/v1/library/new-releases", None).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), before);
+    }
+
+    #[tokio::test]
+    async fn a_volume_limit_caps_the_dsp_volume_and_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/dsp"),
+            Some(serde_json::json!({"max_volume_db": 3.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, cfg) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/dsp"),
+            Some(serde_json::json!({"max_volume_db": -20.0, "volume_db": -6.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{cfg}");
+        assert_eq!(cfg["volume_db"], -20.0, "software volume is capped at the limit");
+        let (_, cfg) = call(&app, "GET", &format!("/v1/zones/{zid}/dsp"), None).await;
+        assert_eq!(cfg["max_volume_db"], -20.0);
+        // Requests are capped before they reach the output.
+        use pm_model::Volume;
+        assert_eq!(cap_volume(Volume::Db(-3.0), Some(-20.0)), Volume::Db(-20.0));
+        assert_eq!(cap_volume(Volume::Db(-30.0), Some(-20.0)), Volume::Db(-30.0));
+        assert_eq!(cap_volume(Volume::Db(-3.0), None), Volume::Db(-3.0));
+        assert_eq!(cap_volume(Volume::Up, Some(-20.0)), Volume::Up);
+        // The null output has no volume control at all: the request is refused as before.
+        let (st, body) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/volume"),
+            Some(serde_json::json!({"volume": {"db": -3.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[tokio::test]
