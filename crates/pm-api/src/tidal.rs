@@ -229,10 +229,22 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
 }
 
 fn load_user_from(lib: &pm_library::Library) -> Option<UserSession> {
-    lib.get_setting(USER_KEY)
+    let mut u: UserSession = lib
+        .get_setting(USER_KEY)
         .ok()
         .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
+        .and_then(|j| serde_json::from_str(&j).ok())?;
+    // Sessions stored before these fields existed: fill them from the token's claims.
+    if u.country.is_none() || u.access_tier.is_none() {
+        let claims = jwt_claims(&u.access_token);
+        if u.country.is_none() {
+            u.country = claims["cc"].as_str().map(str::to_string);
+        }
+        if u.access_tier.is_none() {
+            u.access_tier = claims["at"].as_str().map(str::to_string);
+        }
+    }
+    Some(u)
 }
 
 pub(crate) fn load_user(s: &NodeState) -> Option<UserSession> {
@@ -354,28 +366,51 @@ async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result
     };
     let token = bearer(s).await?;
     let q: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let resp = s
-        .http_client()
-        .get(&url)
-        .bearer_auth(token)
-        .header(reqwest::header::ACCEPT, ACCEPT)
-        .query(&q)
-        .send()
-        .await
-        .map_err(upstream)?;
-    let status = resp.status();
-    if status == StatusCode::NOT_FOUND {
-        return Err(ApiError::not_found(format!("tidal: nothing at {path}")));
+    for attempt in 0..3 {
+        let mut req = s
+            .http_client()
+            .get(&url)
+            .bearer_auth(&token)
+            .header(reqwest::header::ACCEPT, ACCEPT);
+        if !q.is_empty() {
+            req = req.query(&q);
+        }
+        let resp = req.send().await.map_err(upstream)?;
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(ApiError::not_found(format!("tidal: nothing at {path}")));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS && attempt < 2 {
+            let wait = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1 + attempt);
+            tracing::debug!(%url, wait, "tidal rate limit, retrying");
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            continue;
+        }
+        let text = resp.text().await.map_err(upstream)?;
+        let v: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(upstream(format!(
+                    "{path} answered {status} with a body that is not JSON ({e}): {}",
+                    text.chars().take(160).collect::<String>()
+                )))
+            }
+        };
+        if !status.is_success() {
+            let detail = v["errors"][0]["detail"]
+                .as_str()
+                .or(v["errors"][0]["code"].as_str())
+                .unwrap_or("");
+            return Err(upstream(format!("{path} answered {status}: {detail}")));
+        }
+        return Ok(v);
     }
-    let v: Value = resp.json().await.map_err(upstream)?;
-    if !status.is_success() {
-        let detail = v["errors"][0]["detail"]
-            .as_str()
-            .or(v["errors"][0]["code"].as_str())
-            .unwrap_or("");
-        return Err(upstream(format!("{path} answered {status}: {detail}")));
-    }
-    Ok(v)
+    Err(upstream(format!("{path}: rate limited")))
 }
 
 // ---- JSON:API helpers ----

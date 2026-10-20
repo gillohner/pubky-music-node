@@ -6,7 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 - TIDAL through the official API: catalogue search, albums and tracks in the Sources view, sign-in
   with OAuth 2 + PKCE from either UI, playback of `tidal:track:` URIs through stream manifests and
-  HLS segments (FLAC when the subscription allows; DRM refused; previews logged); the signed-in
+  HLS segments (FLAC; verified live: the THIRD_PARTY developer tier gets 30 s previews until TIDAL
+  raises the app's access tier, which the Sources page now says); the signed-in
   user's collection and playlists listed on the Sources page and importable as favourites and
   private Pubky playlists (ISRC where TIDAL has one). Config `[tidal]` or `PM_TIDAL_*`.
 - Zones that could play nothing now say the last open error.
