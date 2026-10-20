@@ -59,6 +59,8 @@ pub struct NodeSettings {
     pub slimproto_port: u16,
     /// Where a Pubky Ring sign-in stores the session secret (also read at start).
     pub session_secret_path: Option<PathBuf>,
+    /// TIDAL developer app credentials; empty = TIDAL not offered.
+    pub tidal: crate::tidal::TidalCredentials,
 }
 
 pub struct NodeState {
@@ -109,6 +111,11 @@ pub struct NodeState {
     pub archive_base: std::sync::RwLock<String>,
     /// Audius discovery node; empty = resolve through api.audius.co.
     pub audius_base: std::sync::RwLock<String>,
+    /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock).
+    pub tidal: std::sync::RwLock<crate::tidal::TidalCredentials>,
+    pub tidal_base: std::sync::RwLock<String>,
+    pub tidal_auth_base: std::sync::RwLock<String>,
+    pub tidal_login_base: std::sync::RwLock<String>,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -178,6 +185,10 @@ impl NodeState {
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
+            tidal: std::sync::RwLock::new(settings.tidal.clone()),
+            tidal_base: std::sync::RwLock::new("https://openapi.tidal.com/v2".into()),
+            tidal_auth_base: std::sync::RwLock::new("https://auth.tidal.com".into()),
+            tidal_login_base: std::sync::RwLock::new("https://login.tidal.com".into()),
             http: Mutex::new(None),
             scanning: Mutex::new(false),
         })

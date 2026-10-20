@@ -51,6 +51,7 @@ async fn pull_stream_is_the_exact_pcm() {
             cast: false,
             slimproto_port: 0,
             session_secret_path: None,
+            tidal: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

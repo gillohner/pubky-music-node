@@ -28,7 +28,11 @@ pub struct InternetArchive;
 
 #[async_trait::async_trait]
 impl StreamingService for InternetArchive {
-    fn info(&self) -> SourceInfo {
+    fn id(&self) -> &'static str {
+        SOURCE_ID
+    }
+
+    fn info(&self, _s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "Internet Archive".into(),

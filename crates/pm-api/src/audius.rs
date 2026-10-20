@@ -121,7 +121,11 @@ pub struct Audius;
 
 #[async_trait::async_trait]
 impl StreamingService for Audius {
-    fn info(&self) -> SourceInfo {
+    fn id(&self) -> &'static str {
+        SOURCE_ID
+    }
+
+    fn info(&self, _s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "Audius".into(),

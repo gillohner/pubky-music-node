@@ -25,6 +25,9 @@ axum = { workspace = true }
 blake3 = { workspace = true }
 md-5 = "0.10"
 hex = "0.4"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
 time = { workspace = true }
 url = { workspace = true }
 notify = "8"

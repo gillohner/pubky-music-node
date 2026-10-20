@@ -7,6 +7,7 @@
 #   PM_CONTACT   email or URL for outbound User-Agent strings (optional here; it can also be
 #                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers
+#   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"
 CONF="${PM_CONFIG:-$DATA_DIR/node.toml}"
@@ -29,6 +30,10 @@ folders = [${folders%, }]
 listen = "${PM_LISTEN:-0.0.0.0:7788}"
 token = "${PM_TOKEN:-}"
 name = "${PM_NAME:-Pubky Music Node}"
+
+[tidal]
+client_id = "${PM_TIDAL_CLIENT_ID:-}"
+client_secret = "${PM_TIDAL_CLIENT_SECRET:-}"
 TOML
 fi
 if [ -z "${PM_TOKEN:-}" ] && [ "${PM_LISTEN:-0.0.0.0:7788}" != "127.0.0.1:7788" ]; then

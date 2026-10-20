@@ -16,6 +16,15 @@ pub struct NodeConfig {
     pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
     pub outputs: OutputsConfig,
+    /// TIDAL developer app credentials (developer.tidal.com); empty = TIDAL off.
+    pub tidal: TidalConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TidalConfig {
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +63,7 @@ impl Default for NodeConfig {
             pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
             outputs: OutputsConfig::default(),
+            tidal: TidalConfig::default(),
         }
     }
 }

@@ -187,6 +187,10 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
             session_secret_path: Some(session_secret_path(cfg)),
+            tidal: pm_api::tidal::TidalCredentials {
+                client_id: cfg.tidal.client_id.clone(),
+                client_secret: cfg.tidal.client_secret.clone(),
+            },
         },
         lib,
         registry,

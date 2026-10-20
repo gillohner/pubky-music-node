@@ -27,6 +27,7 @@ pub mod streaming;
 pub mod subsonic;
 pub mod sync;
 pub mod tags;
+pub mod tidal;
 pub mod types;
 pub mod watch;
 
@@ -175,6 +176,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources", get(streaming::list))
         .route("/sources/{source}/search", get(streaming::search))
         .route("/sources/{source}/items/{id}", get(streaming::item))
+        .route("/sources/tidal/login", get(tidal::login))
+        .route("/sources/tidal/status", get(tidal::status))
+        .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/radio/search", get(radio::search))
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
@@ -196,6 +200,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         .nest("/v1", v1)
+        // OAuth redirect target: the browser arrives without a bearer token.
+        .merge(
+            Router::new()
+                .route("/tidal/callback", get(tidal::callback))
+                .with_state(state.clone()),
+        )
         .merge(subsonic::router(state))
 }
 
@@ -1440,6 +1450,7 @@ mod tests {
                 cast: false,
                 slimproto_port: 0,
                 session_secret_path: None,
+                tidal: Default::default(),
             },
             lib,
             outputs,
@@ -2321,6 +2332,173 @@ mod tests {
         )
         .await;
         assert!(v.get("jukebox_zone").is_none());
+    }
+
+    #[tokio::test]
+    async fn tidal_searches_signs_in_and_lists_albums() {
+        use axum::extract::RawQuery;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let tokens2 = tokens.clone();
+        let album = serde_json::json!({"id": "20115556", "type": "albums", "attributes": {"title": "Random Access Memories", "releaseDate": "2013-05-17", "mediaTags": ["LOSSLESS"]},
+            "relationships": {"artists": {"data": [{"id": "3996", "type": "artists"}]}, "coverArt": {"data": [{"id": "art1", "type": "artworks"}]},
+                              "items": {"data": [{"id": "20115564", "type": "tracks", "meta": {"trackNumber": 8, "volumeNumber": 1}}, {"id": "20115557", "type": "tracks", "meta": {"trackNumber": 1, "volumeNumber": 1}}]}}});
+        let artist =
+            serde_json::json!({"id": "3996", "type": "artists", "attributes": {"name": "Daft Punk"}});
+        let art = serde_json::json!({"id": "art1", "type": "artworks", "attributes": {"files": [{"href": "https://img/160.jpg", "meta": {"width": 160, "height": 160}}, {"href": "https://img/640.jpg", "meta": {"width": 640, "height": 640}}]}});
+        let track = |id: &str, title: &str| {
+            serde_json::json!({"id": id, "type": "tracks", "attributes": {"title": title, "isrc": "USQX91300108", "duration": "PT6M9S", "mediaTags": ["HIRES_LOSSLESS"]},
+            "relationships": {"artists": {"data": [{"id": "3996", "type": "artists"}]}, "albums": {"data": [{"id": "20115556", "type": "albums"}]}}})
+        };
+        let (t1, t2) = (
+            track("20115564", "Get Lucky"),
+            track("20115557", "Give Life Back to Music"),
+        );
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post(move |body: String| {
+                    let tokens = tokens2.clone();
+                    async move {
+                        let grant = body.split('&').find(|p| p.starts_with("grant_type=")).unwrap_or("").to_string();
+                        tokens.lock().unwrap().push(body.clone());
+                        if grant.ends_with("client_credentials") {
+                            Json(serde_json::json!({"access_token": "app-token", "expires_in": 14400, "token_type": "Bearer"}))
+                        } else {
+                            assert!(body.contains("code_verifier="), "{body}");
+                            assert!(body.contains("code=the-code"), "{body}");
+                            Json(serde_json::json!({"access_token": "user-token", "refresh_token": "refresh-1", "expires_in": 3600, "user_id": 4242, "scope": "playback collection.read"}))
+                        }
+                    }
+                }),
+            )
+            .route("/users/{id}", get(|| async { Json(serde_json::json!({"data": {"id": "4242", "type": "users", "attributes": {"country": "DE"}}})) }))
+            .route(
+                "/searchResults",
+                get({
+                    let (album, t1) = (album.clone(), t1.clone());
+                    move |RawQuery(q): RawQuery| {
+                        let (album, t1) = (album.clone(), t1.clone());
+                        async move {
+                            let q = q.unwrap_or_default();
+                            assert!(q.contains("filter%5Bquery%5D=daft+punk") || q.contains("filter%5Bquery%5D=daft%20punk"), "{q}");
+                            if q.contains("include=albums") {
+                                Json(serde_json::json!({"data": [{"id": "s", "type": "searchResults", "relationships": {"albums": {"data": [{"id": "20115556", "type": "albums"}]}}}], "included": [album]}))
+                            } else {
+                                Json(serde_json::json!({"data": [{"id": "s", "type": "searchResults", "relationships": {"tracks": {"data": [{"id": "20115564", "type": "tracks"}]}}}], "included": [t1]}))
+                            }
+                        }
+                    }
+                }),
+            )
+            .route("/albums", get({ let (album, artist, art) = (album.clone(), artist.clone(), art.clone()); move || async move { Json(serde_json::json!({"data": [album], "included": [artist, art]})) } }))
+            .route("/albums/{id}", get({ let (album, artist, art, t1, t2) = (album.clone(), artist.clone(), art.clone(), t1.clone(), t2.clone()); move || async move { Json(serde_json::json!({"data": album, "included": [artist, art, t1, t2]})) } }))
+            .route("/tracks", get({ let (t1, artist, album) = (t1.clone(), artist.clone(), album.clone()); move || async move { Json(serde_json::json!({"data": [t1], "included": [artist, album]})) } }))
+            .route("/tracks/{id}", get({ let (t1, artist, album, art) = (t1.clone(), artist.clone(), album.clone(), art.clone()); move || async move { Json(serde_json::json!({"data": t1, "included": [artist, album, art]})) } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.tidal_base.write().unwrap() = base.clone();
+        *s.tidal_auth_base.write().unwrap() = base.clone();
+        *s.tidal_login_base.write().unwrap() = base.clone();
+        let app = router(s.clone());
+        // Not configured: the source says so and login refuses.
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let tidal = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "tidal")
+            .unwrap();
+        assert!(tidal["status"].as_str().unwrap().starts_with("not configured"));
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        *s.tidal.write().unwrap() = tidal::TidalCredentials {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+        };
+        // Search with the app token: albums carry artists and art, tracks carry artists.
+        let (st, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/tidal/search?q=daft%20punk&limit=10",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["kind"], "album");
+        assert_eq!(items[0]["creator"], "Daft Punk");
+        assert_eq!(items[0]["image"], "https://img/640.jpg");
+        assert_eq!(items[0]["url"], "https://tidal.com/browse/album/20115556");
+        assert_eq!(items[1]["kind"], "track");
+        assert_eq!(items[1]["title"], "Get Lucky");
+        assert_eq!(items[1]["creator"], "Daft Punk");
+        assert!(tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|b| b.contains("client_credentials")));
+        // An album item lists its tracks in order with hi-res labels and tidal: URIs.
+        let (st, it) = call(&app, "GET", "/v1/sources/tidal/items/album:20115556", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(it["title"], "Random Access Memories");
+        assert_eq!(it["creator"], "Daft Punk");
+        assert_eq!(it["year"], 2013);
+        let tracks = it["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0]["track_no"], 8);
+        assert_eq!(tracks[0]["url"], "tidal:track:20115564");
+        assert_eq!(tracks[0]["duration_ms"], 369_000);
+        assert_eq!(tracks[0]["format"], "FLAC hi-res (TIDAL)");
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/items/nope", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Sign-in: the login URL carries PKCE, the callback exchanges the code and stores the user.
+        let (st, l) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let url = url::Url::parse(l["url"].as_str().unwrap()).unwrap();
+        let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert!(q["scope"].contains("playback"));
+        assert!(q["redirect_uri"].ends_with("/tidal/callback"));
+        let state_param = q["state"].clone();
+        let req = Request::builder()
+            .uri(format!("/tidal/callback?code=the-code&state={state_param}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "callback redirects");
+        assert_eq!(resp.headers().get("location").unwrap(), "/?tidal=signed_in");
+        let (_, stv) = call(&app, "GET", "/v1/sources/tidal/status", None).await;
+        assert_eq!(stv["signed_in"], true, "{stv}");
+        assert_eq!(stv["user_id"], "4242");
+        assert_eq!(stv["country"], "DE");
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let tidal = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "tidal")
+            .unwrap();
+        assert_eq!(tidal["status"], "ready");
+        // A stale state is refused; sign-out forgets the tokens.
+        let req = Request::builder()
+            .uri("/tidal/callback?code=x&state=unknown")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("/?tidal=error"));
+        let (_, stv) = call(&app, "DELETE", "/v1/sources/tidal/session", None).await;
+        assert_eq!(stv["signed_in"], false);
     }
 
     #[tokio::test]

@@ -384,6 +384,8 @@
     render();
   };
   $$('.nav-item').forEach((b) => b.onclick = () => setView(b.dataset.view));
+  // Back from TIDAL's sign-in page.
+  { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast('TIDAL signed in'); setView('sources', { source: 'tidal' }); } else toast('TIDAL sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
   let searchTimer = null;
@@ -842,11 +844,17 @@
           }
           const results = state.sourceResults && state.sourceResults.source === cur.id ? state.sourceResults : { q: '', items: [] };
           const tabs = `<div class="chips tabs">${srcs.map((x) => `<button class="chip ${x.id === cur.id ? 'on' : ''}" data-src="${esc(x.id)}">${esc(x.name)}</button>`).join('')}</div>`;
-          main.innerHTML = pageHead('Sources', 'streaming without an account') + tabs
-            + `<p class="muted small">${esc(cur.description)}</p>`
+          let tidal = null; if (cur.id === 'tidal') { try { tidal = await api('GET', '/sources/tidal/status'); } catch { tidal = null; } if (state.view !== 'sources') return; }
+          const account = cur.id !== 'tidal' ? '' : !tidal || !tidal.configured ? `<div class="notice">TIDAL needs the developer app's client id and secret in the node config (<code>[tidal]</code>) or the <code>PM_TIDAL_*</code> variables in Docker.</div>`
+            : tidal.signed_in ? `<div class="toolbar"><span class="pill ok">Signed in${tidal.user_id ? ' · user ' + esc(tidal.user_id) : ''}${tidal.country ? ' · ' + esc(tidal.country) : ''}</span><button class="btn ghost" id="tidalout">Sign out</button></div>`
+            : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Connect TIDAL</button><span class="muted small">Opens TIDAL's sign-in; the app must list <code>${esc(tidal.redirect_uri)}</code> as a redirect URI. Search works without signing in; playback and your collection need it.</span></div>`;
+          main.innerHTML = pageHead('Sources', cur.id === 'tidal' ? 'your subscription, one account on this node' : 'streaming without an account') + tabs
+            + `<p class="muted small">${esc(cur.description)}</p>` + account
             + `<div class="toolbar"><input class="input" id="sq" placeholder="Search ${esc(cur.name)}…" value="${esc(results.q)}" style="width:360px"><button class="btn primary" id="ssearch">${icon('search')} Search</button><span class="muted small">Streams play on any zone; lossy formats show as Lossy in the signal path.</span></div>`
             + (results.q ? `<section class="section"><div class="section-head"><h3>Results for “${esc(results.q)}”</h3></div>${results.items.length ? `<div class="list">${results.items.map((h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}"><div class="avatar" style="background:hsl(${hue(h.title)} 35% 28%);overflow:hidden">${h.image ? `<img src="${esc(h.image)}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : esc(initials(h.title))}</div><div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year, h.kind === 'track' ? 'track' : '', h.downloads != null ? h.downloads + (h.kind === 'track' ? ' plays' : ' downloads') : ''].filter(Boolean).join(' · '))}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : '<p class="muted">Nothing matched.</p>'}</section>` : emptyState('archive', `Search ${cur.name}`, cur.description || 'Results come from the source and stream straight to your zones.'));
           $$('[data-src]', main).forEach((b) => b.onclick = () => { state.sourceResults = null; setView('sources', { source: b.dataset.src }); });
+          const ti = $('#tidalin'); if (ti) ti.onclick = async () => { try { const r = await api('GET', '/sources/tidal/login'); const w2 = window.open(r.url, '_blank', 'noopener'); if (!w2) location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); } };
+          const to = $('#tidalout'); if (to) to.onclick = async () => { try { await api('DELETE', '/sources/tidal/session'); toast('TIDAL signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           const doSearch = async () => { const q = $('#sq').value.trim(); if (!q) return; $('#ssearch').disabled = true; try { const r = await api('GET', `/sources/${encodeURIComponent(cur.id)}/search?limit=40&q=` + encodeURIComponent(q)); state.sourceResults = { source: cur.id, q, items: r.items }; state.viewArg = { source: cur.id }; render(); } catch (e) { toast(e.message, 'error'); $('#ssearch').disabled = false; } };
           $('#ssearch').onclick = doSearch; $('#sq').onkeydown = (e) => { if (e.key === 'Enter') doSearch(); };
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: cur.id, id: b.dataset.sitem }));

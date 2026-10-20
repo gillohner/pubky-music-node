@@ -52,6 +52,7 @@ async fn client_round_trip() {
             cast: false,
             slimproto_port: 0,
             session_secret_path: None,
+            tidal: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,

@@ -42,6 +42,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             cast: false,
             slimproto_port: 0,
             session_secret_path: None,
+            tidal: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),
