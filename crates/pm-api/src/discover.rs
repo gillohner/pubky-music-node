@@ -29,7 +29,7 @@ fn item(lib: &Library, d: &DiscoveredItem) -> DiscoverItem {
     DiscoverItem {
         uri: d.uri.to_url(),
         title: d.card.name.clone(),
-        artist: d.card.artist.clone(),
+        artist: d.card.artist_hint(),
         description: d.card.description.clone(),
         image: d.card.image.clone(),
         taggers: d.taggers,
@@ -46,6 +46,74 @@ fn page(lib: &Library, facets: Vec<pm_pubky::pinakes::TagFacet>, items: &[Discov
 
 fn upstream(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, e.to_string())
+}
+
+/// A service page as a queue URI the node can play: TIDAL and Deezer tracks.
+pub(crate) fn playable_uri(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("listen.");
+    let segs: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let after = |key: &str| {
+        segs.iter()
+            .position(|s| *s == key)
+            .and_then(|i| segs.get(i + 1))
+            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .map(|id| id.to_string())
+    };
+    match host {
+        "tidal.com" => after("track").map(|id| crate::tidal::track_uri(&id)),
+        "deezer.com" => after("track").map(|id| crate::deezer::track_uri(&id)),
+        _ => None,
+    }
+}
+
+/// Pinakes's `also_on` for a canonical URL as "Versions" rows: every service
+/// that has the same recording or release, tagged links first, with a queue
+/// URI when the node can stream it (TIDAL, Deezer). Empty without a contact
+/// or when Pinakes has not seen the URL. Cached a day.
+pub(crate) async fn also_on_versions(s: &NodeState, url: &str, cache_key: &str) -> Vec<Version> {
+    let Some(d) = s.discovery() else {
+        return Vec::new();
+    };
+    if let Some(v) = crate::tidal::cache_get_ttl(s, cache_key, 24 * 3600) {
+        return v;
+    }
+    let out: Vec<Version> = match d.resource_for(url).await {
+        Ok(Some(r)) => {
+            let mut links: Vec<&pm_pubky::pinakes::AlsoOn> = r.also_on().iter().collect();
+            links.sort_by_key(|a| !a.is_tagged());
+            links
+                .into_iter()
+                .map(|a| {
+                    let site = a.site.clone().unwrap_or_else(|| "link".into());
+                    Version {
+                        source: site.to_lowercase().replace(' ', "-"),
+                        id: a.id.clone().unwrap_or_default(),
+                        label: if a.is_tagged() {
+                            format!("{site} · tagged on Pubky")
+                        } else {
+                            format!(
+                                "{site} · via {}",
+                                a.via.clone().unwrap_or_else(|| "Pinakes".into())
+                            )
+                        },
+                        url: a.uri.clone(),
+                        uri: playable_uri(&a.uri),
+                    }
+                })
+                .collect()
+        }
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::debug!(%url, "also_on: {e}");
+            return Vec::new();
+        }
+    };
+    crate::tidal::cache_put(s, cache_key, &out);
+    out
 }
 
 /// `GET /v1/discover/uri?uri=|track_id=|album_id=|artist_id=`: the Pubky

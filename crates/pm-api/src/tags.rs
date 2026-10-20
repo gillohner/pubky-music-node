@@ -85,6 +85,73 @@ pub(crate) async fn put(State(s): State<Arc<NodeState>>, Json(r): Json<TagRef>) 
     }))
 }
 
+/// `POST /v1/tags/bulk {label, album_id?|artist_id?}`: tag every track in
+/// scope that has a publishable identity. One `PubkyAppTag` per canonical
+/// URL, pushed by the sync; Pinakes then joins each to its group across
+/// services (`also_on`). An explicit action, never automatic (ADR 0011).
+pub(crate) async fn bulk(State(s): State<Arc<NodeState>>, Json(r): Json<BulkTag>) -> ApiResult<BulkTagged> {
+    let probe = PubkyAppTag::new(
+        "https://musicbrainz.org/recording/00000000-0000-0000-0000-000000000000".into(),
+        r.label.clone(),
+    );
+    probe
+        .validate(Some(&probe.create_id()))
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let label = probe.label.clone();
+    let mut out = BulkTagged {
+        label: label.clone(),
+        ..Default::default()
+    };
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let tracks: Vec<pm_model::Track> = if let Some(a) = r.album_id {
+            lib.album_tracks(a)?
+        } else if let Some(ar) = r.artist_id {
+            lib.artist_tracks(ar)?
+        } else {
+            let mut v = Vec::new();
+            let mut after = None;
+            loop {
+                let page = lib.list_tracks(after, 1000)?;
+                if page.is_empty() {
+                    break;
+                }
+                after = page.last().and_then(|t| t.id);
+                v.extend(page);
+            }
+            v
+        };
+        let existing: std::collections::HashSet<String> = lib
+            .list_tags(None)?
+            .into_iter()
+            .filter(|t| t.label == label)
+            .map(|t| t.uri)
+            .collect();
+        let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in tracks {
+            let Some(uri) = t.publishable_uri() else {
+                out.skipped_no_identity += 1;
+                continue;
+            };
+            let url = uri.to_url();
+            if !done.insert(url.clone()) {
+                continue;
+            }
+            if existing.contains(&url) {
+                out.already += 1;
+                continue;
+            }
+            let (tag, id) = make_tag(uri, &label)?;
+            lib.add_tag(&id, &tag.uri, &tag.label, tag.created_at)?;
+            out.tagged += 1;
+        }
+    }
+    if out.tagged > 0 {
+        s.notify_library();
+    }
+    Ok(Json(out))
+}
+
 /// `DELETE /v1/tags?...&label=`.
 pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,

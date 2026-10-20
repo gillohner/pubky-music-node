@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- **Pinakes music step** folded in (steward note 2026-10-20, fixtures from pubky/pinakes#21): cards carry `details.facts` (MBID, ISRCs, UPC, artist type, duration), one `also_on` link per service with tagged links first, `maybe_same` on event cards, `key=` search and trending charts by type. Library album and track **Versions** now list every service Pinakes knows for them (Spotify, Apple Music, YouTube, Bandcamp…), tagged links first; TIDAL and Deezer ones are playable. Discover rows show the artist from the card.
+- **Tag my whole library on Pubky** (Settings → Pubky; `POST /v1/tags/bulk`): one v1 PubkyAppTag per identified track, so Pinakes matches your own songs across services.
 - Fixed: seeking in the browser zone restarted library tracks from 0:00, because `/v1/library/tracks/{id}/file` ignored byte ranges; it now answers 206 with `Accept-Ranges` (shared with the TIDAL proxy).
 - **Add renderer by address** (Settings → Outputs; `POST /v1/outputs/upnp`): a Linn or other renderer on another subnet/VLAN is added by IP (unicast SSDP) or description URL and remembered across restarts.
 - TIDAL sign-in behind a reverse proxy without `public_url`: the redirect URI now follows the request's host and forwarded scheme instead of the listen address.

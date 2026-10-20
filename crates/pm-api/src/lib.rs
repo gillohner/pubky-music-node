@@ -160,6 +160,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .delete(favourites::delete),
         )
         .route("/tags", get(tags::list).put(tags::put).delete(tags::delete))
+        .route("/tags/bulk", post(tags::bulk))
         .route(
             "/reviews",
             get(reviews::list).put(reviews::put).delete(reviews::delete),
@@ -976,7 +977,22 @@ async fn backup(State(s): State<Arc<NodeState>>) -> Result<axum::response::Respo
         .into_response())
 }
 
-/// Where else a library track streams from (TIDAL and Deezer by ISRC); empty when nothing is known.
+/// Add Pinakes's links after the direct lookups, skipping pages already
+/// listed (same URL) and services the node already answered for.
+fn merge_versions(out: &mut Vec<Version>, extra: Vec<Version>) {
+    for v in extra {
+        let dup = out.iter().any(|o| {
+            o.url.trim_end_matches('/') == v.url.trim_end_matches('/')
+                || (o.source == v.source && matches!(o.source.as_str(), "tidal" | "deezer"))
+        });
+        if !dup {
+            out.push(v);
+        }
+    }
+}
+
+/// Where else a library track streams from (TIDAL and Deezer by ISRC, then
+/// every service Pinakes lists for it); empty when nothing is known.
 async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
     let track = s
         .library
@@ -984,12 +1000,21 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let (t, d) = tokio::join!(
+    let canonical = track.publishable_uri().map(|u| u.to_url());
+    let key = format!("pinakes.version.track.{id}");
+    let (t, d, p) = tokio::join!(
         tidal::track_versions(&s, &track),
-        deezer::track_versions(&s, &track)
+        deezer::track_versions(&s, &track),
+        async {
+            match canonical {
+                Some(url) => discover::also_on_versions(&s, &url, &key).await,
+                None => Vec::new(),
+            }
+        }
     );
     let mut out = t.unwrap_or_default();
     out.extend(d.unwrap_or_default());
+    merge_versions(&mut out, p);
     Ok(Json(out))
 }
 
@@ -1001,12 +1026,30 @@ async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_album(id)?
         .ok_or_else(|| ApiError::not_found(format!("no album {id}")))?;
-    let (t, d) = tokio::join!(
+    let canonical = album
+        .release_mbid
+        .as_ref()
+        .map(|m| pm_model::MusicUri::Release { mbid: *m }.to_url())
+        .or_else(|| {
+            album
+                .release_group_mbid
+                .as_ref()
+                .map(|m| pm_model::MusicUri::ReleaseGroup { mbid: *m }.to_url())
+        });
+    let key = format!("pinakes.version.album.{id}");
+    let (t, d, p) = tokio::join!(
         tidal::album_versions(&s, &album),
-        deezer::album_versions(&s, &album)
+        deezer::album_versions(&s, &album),
+        async {
+            match canonical {
+                Some(url) => discover::also_on_versions(&s, &url, &key).await,
+                None => Vec::new(),
+            }
+        }
     );
     let mut out = t.unwrap_or_default();
     out.extend(d.unwrap_or_default());
+    merge_versions(&mut out, p);
     Ok(Json(out))
 }
 
@@ -1654,6 +1697,14 @@ mod tests {
     }
 
     async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
+        state_with(dir, token, Default::default()).await
+    }
+
+    async fn state_with(
+        dir: &std::path::Path,
+        token: Option<&str>,
+        pubky: pm_pubky::config::PmPubkyConfig,
+    ) -> Arc<NodeState> {
         let db = dir.join("lib.sqlite");
         let lib = Library::open(&db).unwrap();
         let outputs = OutputRegistry::new();
@@ -1669,7 +1720,7 @@ mod tests {
                 pipeline: PipelineConfig::default(),
                 token: token.map(str::to_string),
                 subsonic_user: "pubky".into(),
-                pubky: Default::default(),
+                pubky,
                 public_url: "http://127.0.0.1:7788".into(),
                 upnp: false,
                 cast: false,
@@ -2827,6 +2878,126 @@ mod tests {
         assert_eq!(left.as_array().unwrap().len(), 0);
     }
 
+    /// Pinakes's `also_on` joins the Versions list: every service that has
+    /// the same recording, tagged links first, Deezer playable as a preview.
+    #[tokio::test]
+    async fn versions_include_pinakes_also_on_links() {
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/card-tidal-track-bohemian.json"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        let mock = Router::new().route(
+            "/v1/resources/by-uri",
+            get(
+                move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let fixture = fixture.clone();
+                    let seen = seen2.clone();
+                    async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(q.get("uri").cloned().unwrap_or_default());
+                        ([(header::CONTENT_TYPE, "application/json")], fixture)
+                    }
+                },
+            ),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+            let t = pm_model::Track {
+                id: None,
+                title: "Bohemian Rhapsody".into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: "Queen".into(),
+                    mbid: None,
+                }],
+                album: None,
+                track_no: Some(11),
+                disc_no: None,
+                duration_ms: Some(355_000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join("bo.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(355_000),
+                },
+                recording_mbid: Some(mbid),
+                isrc: None,
+                acoustid: None,
+                canonical: Some((
+                    pm_model::MusicUri::Recording { mbid },
+                    pm_model::Confidence::TaggedMbid,
+                )),
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            lib.upsert_track(&t).unwrap().0
+        };
+        let app = router(s.clone());
+        let (st, v) = call(&app, "GET", &format!("/v1/library/tracks/{tid}/versions"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"]
+        );
+        let sources: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["source"].as_str().unwrap())
+            .collect();
+        assert!(
+            sources.contains(&"spotify") && sources.contains(&"youtube") && sources.contains(&"deezer"),
+            "{v}"
+        );
+        assert!(
+            sources.contains(&"tidal"),
+            "another TIDAL page is still a version"
+        );
+        let deezer = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["source"] == "deezer")
+            .unwrap();
+        assert_eq!(deezer["uri"], "deezer:track:4329888262");
+        assert!(deezer["label"].as_str().unwrap().contains("tagged on Pubky"));
+        let derived = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["label"].as_str().unwrap().contains("via musicbrainz"))
+            .count();
+        assert_eq!(derived, 1);
+        assert!(v
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["source"] != "spotify" || x["uri"].is_null()));
+        // Cached: a second read does not ask Pinakes again.
+        let _ = call(&app, "GET", &format!("/v1/library/tracks/{tid}/versions"), None).await;
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
     /// Browsers seek by asking for byte ranges; the library file endpoint
     /// must answer 206 with Accept-Ranges or a seek restarts the track.
     #[tokio::test]
@@ -2892,6 +3063,91 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["redirect_uri"], "https://music.example/tidal/callback");
+    }
+
+    /// One label on every identified track; the sync publishes each as a
+    /// v1 PubkyAppTag on its canonical MusicBrainz URL, which Pinakes joins.
+    #[tokio::test]
+    async fn bulk_tagging_covers_identified_tracks_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410); // no identity
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        {
+            let lib = s.library.lock().unwrap();
+            let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+            let t = pm_model::Track {
+                id: None,
+                title: "Bohemian Rhapsody".into(),
+                artists: vec![],
+                album: None,
+                track_no: None,
+                disc_no: None,
+                duration_ms: None,
+                file: pm_model::AudioFile {
+                    path: dir.path().join("bo.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: None,
+                },
+                recording_mbid: Some(mbid),
+                isrc: None,
+                acoustid: None,
+                canonical: Some((
+                    pm_model::MusicUri::Recording { mbid },
+                    pm_model::Confidence::TaggedMbid,
+                )),
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            lib.upsert_track(&t).unwrap();
+        }
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/tags/bulk",
+            Some(serde_json::json!({"label": " Library "})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["label"], "library");
+        assert_eq!(r["tagged"], 1);
+        assert_eq!(r["skipped_no_identity"], 1);
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/tags/bulk",
+            Some(serde_json::json!({"label": "library"})),
+        )
+        .await;
+        assert_eq!(r["tagged"], 0);
+        assert_eq!(r["already"], 1);
+        let (_, tags) = call(&app, "GET", "/v1/tags", None).await;
+        assert_eq!(
+            tags["tags"][0]["uri"],
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
+        );
+        assert_eq!(tags["tags"][0]["synced"], false);
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/tags/bulk",
+            Some(serde_json::json!({"label": ""})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
     }
 
     #[tokio::test]

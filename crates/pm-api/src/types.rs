@@ -281,6 +281,27 @@ pub struct TagRef {
     pub label: Option<String>,
 }
 
+/// `POST /v1/tags/bulk`: one label on every track in scope.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BulkTag {
+    pub label: String,
+    /// Scope: one album, one artist, or the whole library when both are absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BulkTagged {
+    pub label: String,
+    /// Tracks that now carry the tag (new ones; already-tagged ones count under `already`).
+    pub tagged: u64,
+    pub already: u64,
+    /// Tracks without a publishable identity (no MusicBrainz id or ISRC); Pinakes cannot match them.
+    pub skipped_no_identity: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TagEntry {
     pub uri: String,

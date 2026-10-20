@@ -1474,10 +1474,14 @@ pub(crate) async fn import_playlist(
 // ---- versions: where a library album or track streams from on TIDAL ----
 
 pub(crate) fn cache_get(s: &NodeState, key: &str) -> Option<Vec<Version>> {
+    cache_get_ttl(s, key, 7 * 24 * 3600)
+}
+
+pub(crate) fn cache_get_ttl(s: &NodeState, key: &str, ttl_secs: i64) -> Option<Vec<Version>> {
     let lib = s.library.lock().expect("library poisoned");
     let j = lib.get_setting(key).ok().flatten()?;
     let (at, v): (i64, Vec<Version>) = serde_json::from_str(&j).ok()?;
-    (now_unix() - at < 7 * 24 * 3600).then_some(v)
+    (now_unix() - at < ttl_secs).then_some(v)
 }
 
 pub(crate) fn cache_put(s: &NodeState, key: &str, v: &[Version]) {
