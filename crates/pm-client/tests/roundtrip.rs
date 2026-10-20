@@ -95,24 +95,26 @@ async fn client_round_trip() {
     let zones = c.zones().await.unwrap();
     let zid = zones[0].id.0.clone();
     c.play_tracks(&zid, vec![id]).await.unwrap();
-    // The event stream reports the zone playing and then stopping.
-    let mut saw_playing = false;
-    let mut saw_stopped_after = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && !saw_stopped_after {
+    // Zone events are not coalesced (unlike the state watch): expect the
+    // track to start and the zone to stop, in that order.
+    let mut started = false;
+    let mut stopped_after = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && !stopped_after {
         match tokio::time::timeout_at(deadline, events.next()).await {
-            Ok(Some(Ok(ApiEvent::Zone { state }))) if state.id.0 == zid => {
-                if state.transport == Transport::Playing {
-                    saw_playing = true;
-                } else if saw_playing && state.transport == Transport::Stopped {
-                    saw_stopped_after = true;
-                }
-            }
+            Ok(Some(Ok(ApiEvent::ZoneEvent { zone, event }))) if zone.0 == zid => match event {
+                pm_zones::ZoneEvent::TrackStarted { .. } => started = true,
+                pm_zones::ZoneEvent::Stopped if started => stopped_after = true,
+                _ => {}
+            },
             Ok(Some(Ok(_))) => {}
             _ => break,
         }
     }
-    assert!(saw_playing && saw_stopped_after);
+    assert!(
+        started && stopped_after,
+        "started={started} stopped_after={stopped_after}"
+    );
     let q = c.queue(&zid).await.unwrap();
     assert_eq!(q[0].title.as_deref(), Some("song"));
     let st = c.transport(&zid, TransportAction::Stop).await.unwrap();
