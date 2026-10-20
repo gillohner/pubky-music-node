@@ -14,6 +14,8 @@ path = "src/main.rs"
 default = []
 # Play through this machine's ALSA `hw:` devices (needs libasound).
 alsa = ["dep:pm-out-local", "pm-out-local/alsa"]
+# Play through the operating system's default output (CoreAudio, WASAPI, ALSA shared mode).
+cpal = ["dep:pm-out-local", "pm-out-local/cpal"]
 
 [dependencies]
 pm-model = { workspace = true }

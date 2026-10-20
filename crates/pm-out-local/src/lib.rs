@@ -1,8 +1,11 @@
 //! Local outputs: the USB DAC or HDMI port on the node itself.
 //!
 //! Handoff §4 names three bit-perfect backends: ALSA `hw:` on Linux, WASAPI
-//! exclusive on Windows and CoreAudio hog/integer mode on macOS. Only ALSA is
-//! written so far, behind the `alsa` cargo feature.
+//! exclusive on Windows and CoreAudio hog/integer mode on macOS. ALSA is
+//! written (feature `alsa`); for Windows and macOS a shared-mode backend
+//! through `cpal` exists (feature `cpal`) so the controller plays locally
+//! there, with its ceiling shown honestly as lossless-up-to, not bit-perfect;
+//! the exclusive/hog-mode backends are still to come.
 //!
 //! **Verification status:** the `alsa` feature is built and tested on a FiiO
 //! KA17 (M1 hardware acceptance): bit-perfect PCM to the DAC, byte-identical
@@ -12,6 +15,12 @@
 
 #[cfg(feature = "alsa")]
 pub mod alsa;
+
+/// Shared-mode output through the operating system (CoreAudio, WASAPI, ALSA
+/// via `cpal`): lossless up to the device rate, not bit-perfect, for the
+/// native controller on desktops. Behind the `cpal` feature.
+#[cfg(feature = "cpal")]
+pub mod cpal_out;
 
 /// Device names this crate will open. `plughw:` and `default` go through
 /// ALSA's conversion plugins, which silently resample and dither; refusing

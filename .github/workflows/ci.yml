@@ -25,6 +25,8 @@ jobs:
       - run: cargo test --workspace
       # The ALSA output only compiles with libasound; its unit tests need no hardware.
       - run: cargo clippy -p pm-node -p pm-out-local -p pm-app -p pm-endpoint --all-targets --features alsa -- -D warnings
+      # The cross-platform output compiles on Linux too (cpal uses ALSA there).
+      - run: cargo clippy -p pm-out-local -p pm-app --all-targets --features cpal -- -D warnings
       - run: cargo test -p pm-out-local --features alsa
       - run: cargo doc --workspace --no-deps
         env:

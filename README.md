@@ -82,8 +82,9 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 
 The release workflow builds `pm-app` (the native controller), `pm-node` and `pm-endpoint` for
 Linux x86_64 (with ALSA), Windows x86_64 and macOS arm64 as artifacts and attaches them to every
-`v*` release; the Linux build is the one that plays locally, the others control nodes and play
-through endpoints or the browser. Images for amd64 and arm64 are on GHCR.
+`v*` release. The Linux build plays bit-perfect through ALSA; the Windows and macOS builds play
+through CoreAudio or WASAPI in shared mode (shown as lossless-up-to, not bit-perfect) and control
+nodes. Images for amd64 and arm64 are on GHCR.
 
 ## Build
 

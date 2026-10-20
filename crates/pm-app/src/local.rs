@@ -60,11 +60,18 @@ impl LocalPlayer {
     }
 }
 
-/// Pick this machine's output: the first ALSA `hw:` device, else null.
+/// Pick this machine's output: the first ALSA `hw:` device (bit-perfect),
+/// else the system's default output through cpal (shared mode), else null.
 fn local_output() -> Arc<dyn Output> {
     #[cfg(feature = "alsa")]
     {
         if let Some(out) = pm_out_local::alsa::AlsaOutput::enumerate().into_iter().next() {
+            return Arc::new(out);
+        }
+    }
+    #[cfg(feature = "cpal")]
+    {
+        if let Some(out) = pm_out_local::cpal_out::CpalOutput::default_device() {
             return Arc::new(out);
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-local"
-description = "Bit-perfect local outputs for the Pubky Music Node: ALSA hw: (Linux); WASAPI exclusive and CoreAudio hog mode to follow"
+description = "Local outputs for the Pubky Music Node: bit-perfect ALSA hw: (Linux), and a shared-mode cpal backend (CoreAudio, WASAPI) for desktops"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ default = []
 # Needs libasound2-dev at build time. Off by default so the workspace builds on machines
 # without ALSA headers (this one); enable on the node: `--features pm-out-local/alsa`.
 alsa = ["dep:alsa"]
+# Cross-platform shared-mode output (CoreAudio, WASAPI, ALSA) for desktops; not bit-perfect.
+cpal = ["dep:cpal"]
 
 [dependencies]
 pm-model = { workspace = true }
@@ -19,3 +21,4 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 alsa = { version = "0.9", optional = true }
+cpal = { version = "0.15", optional = true }

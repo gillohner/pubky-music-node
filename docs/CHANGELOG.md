@@ -4,7 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
-- Release builds of the native controller, node and endpoint for Linux, Windows and macOS.
+- Release builds of the native controller, node and endpoint for Linux, Windows and macOS; the
+  Windows and macOS controllers play locally through CoreAudio / WASAPI (shared mode, `cpal`).
 - TrueNAS SCALE: a ready compose file (`deploy/truenas/`) and deployment notes.
 - The TIDAL browser proxy serves whole tracks with a known length and byte ranges, so the
   browser zone shows the real length and seeks, pauses and resumes like a file.

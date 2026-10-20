@@ -54,8 +54,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
   # Native controller (pm-app), node and endpoint for the desktops people run
-  # them on. Linux gets ALSA playback; Windows and macOS builds control nodes
-  # and play through the browser or endpoints until a local output exists there.
+  # them on. Linux gets bit-perfect ALSA playback; Windows and macOS play
+  # through CoreAudio / WASAPI in shared mode (cpal) and control nodes.
   binaries:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.binaries }}
     strategy:
@@ -68,11 +68,11 @@ jobs:
             ext: ""
           - os: windows-latest
             name: windows-x86_64
-            features: ""
+            features: --features pm-app/cpal
             ext: .exe
           - os: macos-latest
             name: macos-arm64
-            features: ""
+            features: --features pm-app/cpal
             ext: ""
     runs-on: ${{ matrix.os }}
     steps:
