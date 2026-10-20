@@ -1450,6 +1450,11 @@ impl App {
                 if ui.add(theme::secondary("Add to queue")).clicked() {
                     self.play_archive(&item, 0, false);
                 }
+                self.heart(
+                    ui,
+                    pm_model::MusicUri::parse(&item.url).ok(),
+                    FavouriteRef::uri(&item.url),
+                );
                 ui.hyperlink_to("archive.org ↗", &item.url);
                 if let Some(l) = &item.licence {
                     ui.hyperlink_to("licence", l);

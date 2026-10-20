@@ -51,7 +51,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |
 | POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |
 | DELETE | `/v1/playlists/{id}/items/{index}` | | `PlaylistDetail` |
-| POST | `/v1/playlists/{id}/play` | `{zone, replace?}` | `{queued, missing}` |
+| POST | `/v1/playlists/{id}/play` (entries that are Internet Archive file URLs stream directly; other unresolved entries are reported as `missing`) | `{zone, replace?}` | `{queued, missing}` |
 | GET | `/v1/favourites` | | `{tracks, albums, artists, other: [url], uris: [url]}`: hearts joined to the library (ADR 0010) |
 | PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`; 422 when the object has no MusicBrainz id or ISRC |
 | DELETE | `/v1/favourites` | `?uri=` or `?track_id=` / `?album_id=` / `?artist_id=` | `{uri, favourite: false}` |

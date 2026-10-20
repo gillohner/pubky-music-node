@@ -62,7 +62,7 @@ Common fields: `type` (one of the three below) and `v` (currently `1`; readers r
 | `description` | optional, ≤ 500 |
 | `image` | optional, ≤ 200, `pubky`, `http` or `https` URL |
 | `items` | ≤ 500; order is the curator's order |
-| `items[].uri` | a canonical music URL (ADR 0001): MusicBrainz recording / release / release-group / artist, the ISRC fallback, or a service's canonical track/album/artist URL. Normalized by the writer; `music:` is rejected |
+| `items[].uri` | a canonical music URL (ADR 0001): MusicBrainz recording / release / release-group / artist, the ISRC fallback, or a service's canonical track/album/artist URL (including `archive.org/details/<item>` and `archive.org/download/<item>/<file>`). Normalized by the writer; `music:` is rejected |
 | `items[].added_at`, `created_at`, `updated_at` | microseconds; `updated_at` bumps on every edit |
 
 ### `pubky.music/review`

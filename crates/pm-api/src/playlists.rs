@@ -304,7 +304,11 @@ pub(crate) async fn play(
         for it in &p.items {
             match resolve(&lib, it).and_then(|t| NodeSources::item_for(&t)) {
                 Some(q) => items.push(q),
-                None => missing.push(it.uri.clone()),
+                // Streamable service links play directly (Internet Archive files).
+                None => match stream_item(&it.uri) {
+                    Some(q) => items.push(q),
+                    None => missing.push(it.uri.clone()),
+                },
             }
         }
         (items, missing)
@@ -326,4 +330,67 @@ pub(crate) async fn play(
         zone.play_index(0);
     }
     Ok(Json(PlayedPlaylist { queued, missing }))
+}
+
+/// A queue item for a playlist entry that is a directly streamable service
+/// file (today: `archive.org/download/<item>/<file>`), with the file name as
+/// its title and the item as its album.
+pub(crate) fn stream_item(uri: &str) -> Option<pm_zones::QueueItem> {
+    let link = match pm_model::MusicUri::parse(uri).ok()? {
+        pm_model::MusicUri::Service(l) => l,
+        _ => return None,
+    };
+    if link.service != pm_model::ids::Service::InternetArchive
+        || link.kind != pm_model::ids::ServiceLinkKind::Track
+    {
+        return None;
+    }
+    let file = link.url.rsplit('/').next().unwrap_or("");
+    let title = percent_decode(file)
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| file.to_string())
+        .replace('_', " ");
+    let mut q = pm_zones::QueueItem::new(link.url.clone());
+    q.title = Some(title);
+    q.album = link.id.clone();
+    q.artist = Some("Internet Archive".into());
+    Some(q)
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod stream_item_tests {
+    use super::stream_item;
+
+    #[test]
+    fn archive_files_become_queue_items() {
+        let q = stream_item("https://archive.org/download/cornellgem/1.%20Minglewood%20Blues.mp3").unwrap();
+        assert_eq!(q.title.as_deref(), Some("1. Minglewood Blues"));
+        assert_eq!(q.album.as_deref(), Some("cornellgem"));
+        assert!(
+            stream_item("https://archive.org/details/cornellgem").is_none(),
+            "items are not playable as one file"
+        );
+        assert!(
+            stream_item("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69").is_none()
+        );
+    }
 }

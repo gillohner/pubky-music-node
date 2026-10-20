@@ -426,9 +426,18 @@
     menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
     setTimeout(() => document.addEventListener('click', (e) => { if (!menuEl.contains(e.target)) closeMenu(); }, { once: true }), 0);
   };
-  const addToPlaylist = async (playlistId, tracks) => {
-    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, { track_ids: tracks.map((t) => t.id) }); toast(tracks.length === 1 ? 'Added to playlist' : `${tracks.length} tracks added to playlist`); }
+  const addToPlaylist = async (playlistId, tracks, uris) => {
+    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast(n === 1 ? 'Added to playlist' : `${n} tracks added to playlist`); }
     catch (e) { toast(e.message, 'error'); }
+  };
+  // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
+  const uriMenu = async (anchor, uris, name) => {
+    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    showMenu(anchor, [
+      { title: 'Add to playlist' },
+      ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, [], uris) })),
+      { label: 'New playlist…', icon: 'plus', run: async () => { try { await api('POST', '/playlists', { name, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } } },
+    ]);
   };
   const trackMenu = async (anchor, tracks) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
@@ -703,10 +712,12 @@
             }
             try { await api('POST', `/zones/${state.zone}/queue`, { items, replace, play: replace, at: 'end' }); toast(replace ? 'Playing from the Internet Archive' : 'Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
           };
-          main.innerHTML = backBtn('archive', 'Internet Archive') + `<div class="page-head"><div><div class="eyebrow">Internet Archive</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, it.tracks.length + ' tracks'].filter(Boolean).join(' · '))} · <a href="${esc(it.url)}" target="_blank" rel="noopener">archive.org</a>${it.licence ? ` · <a href="${esc(it.licence)}" target="_blank" rel="noopener">licence</a>` : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button></div></div>`
+          main.innerHTML = backBtn('archive', 'Internet Archive') + `<div class="page-head"><div><div class="eyebrow">Internet Archive</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, it.tracks.length + ' tracks'].filter(Boolean).join(' · '))} · <a href="${esc(it.url)}" target="_blank" rel="noopener">archive.org</a>${it.licence ? ` · <a href="${esc(it.licence)}" target="_blank" rel="noopener">licence</a>` : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button><button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button></div></div>`
             + (it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : '')
             + `<div class="tracks">${it.tracks.map((t, i) => `<div class="track compact" data-i="${i}"><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue">${icon('plus')}</button></div></div>`).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
+          $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
+          $('#aheart').onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;

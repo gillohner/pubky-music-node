@@ -147,6 +147,8 @@ pub enum Service {
     SoundCloud,
     Bandcamp,
     Audiomack,
+    /// archive.org items (Live Music Archive, netlabels, public domain).
+    InternetArchive,
 }
 
 impl Service {
@@ -163,6 +165,7 @@ impl Service {
             Service::Beatport => "beatport",
             Service::SoundCloud => "soundcloud",
             Service::Bandcamp => "bandcamp",
+            Service::InternetArchive => "internet-archive",
             Service::Audiomack => "audiomack",
         }
     }
@@ -384,6 +387,7 @@ mod service {
             "beatport.com" => beatport(segs),
             "soundcloud.com" | "m.soundcloud.com" | "on.soundcloud.com" => soundcloud(segs),
             "audiomack.com" => audiomack(segs),
+            "archive.org" | "www.archive.org" => archive(segs),
             h if h.starts_with("music.amazon.") => amazon(url, host, segs),
             h if h.ends_with(".bandcamp.com") => bandcamp(host, segs),
             _ => None,
@@ -757,6 +761,32 @@ mod service {
         }
     }
 
+    /// `archive.org/details/<item>` is the item (an album-like thing);
+    /// `archive.org/download/<item>/<file>` is one playable file (a track).
+    fn archive(segs: &[&str]) -> Option<ServiceLink> {
+        let ok_id = |id: &str| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        match segs {
+            ["details", id, ..] if ok_id(id) => link(
+                Service::InternetArchive,
+                ServiceLinkKind::Album,
+                Some(id),
+                format!("https://archive.org/details/{id}"),
+            ),
+            ["download", id, file] if ok_id(id) && !file.is_empty() => link(
+                Service::InternetArchive,
+                ServiceLinkKind::Track,
+                Some(id),
+                format!("https://archive.org/download/{id}/{file}"),
+            ),
+            _ => None,
+        }
+    }
+
     fn audiomack(segs: &[&str]) -> Option<ServiceLink> {
         match segs {
             [artist, "song", slug, ..] => link(
@@ -846,6 +876,26 @@ mod tests {
     fn upc() {
         assert_eq!(Upc::parse("0 60254 71795 5").unwrap().as_str(), "060254717955");
         assert!(Upc::parse("abc").is_err());
+    }
+
+    #[test]
+    fn internet_archive_links() {
+        let item = svc("https://archive.org/details/gd1977-05-08.sbd.hicks.4982.sbeok.shnf?x=1");
+        assert_eq!(item.service, Service::InternetArchive);
+        assert_eq!(item.kind, ServiceLinkKind::Album);
+        assert_eq!(
+            item.url,
+            "https://archive.org/details/gd1977-05-08.sbd.hicks.4982.sbeok.shnf"
+        );
+        let file = svc("https://archive.org/download/cornellgem/1.%20Minglewood%20Blues.mp3");
+        assert_eq!(file.kind, ServiceLinkKind::Track);
+        assert_eq!(file.id.as_deref(), Some("cornellgem"));
+        assert_eq!(
+            file.url,
+            "https://archive.org/download/cornellgem/1.%20Minglewood%20Blues.mp3"
+        );
+        assert!(MusicUri::parse("https://archive.org/search?query=x").is_err());
+        assert_eq!(Service::InternetArchive.label(), "internet-archive");
     }
 
     fn svc(url: &str) -> ServiceLink {
