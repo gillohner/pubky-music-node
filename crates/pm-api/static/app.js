@@ -522,8 +522,9 @@
             + strip('Recently played', h.recently_played)
             + strip('Most played albums', h.most_played_albums)
             + (most.length ? `<section class="section"><div class="section-head"><h3>Most played tracks</h3></div>${trackRows(most, { key: 'most' })}</section>` : '')
-            + `<section class="section"><div class="section-head"><h3>History</h3></div>${h.history.length ? `<div class="list">${h.history.map((p) => `<div class="list-row"><div class="avatar" style="background:hsl(${hue(p.track.title)} 35% 28%)">${esc(initials(p.track.title))}</div><div class="grow"><div class="name">${esc(p.track.title)}</div><div class="sub">${esc(artists(p.track))}</div></div><span class="muted small">${esc((state.zones[p.zone] || {}).name || (p.zone === 'browser' ? 'This browser' : p.zone) || '')} · ${ago(p.played_at)}</span></div>`).join('')}</div>` : `<p class="muted">Nothing played yet. Plays on every zone show up here.</p>`}</section>`;
+            + `<section class="section"><div class="section-head"><h3>History</h3></div>${h.history.length ? `<div class="list">${h.history.map((p, i) => `<div class="list-row"><button class="icon-btn" data-hplay="${i}" title="Play">${icon('play')}</button><div class="avatar" style="background:hsl(${hue(p.track.title)} 35% 28%)">${esc(initials(p.track.title))}</div><div class="grow"><div class="name">${esc(p.track.title)}</div><div class="sub">${esc(artists(p.track))}</div></div><span class="muted small">${esc((state.zones[p.zone] || {}).name || (p.zone === 'browser' ? 'This browser' : p.zone) || '')} · ${ago(p.played_at)}</span></div>`).join('')}</div>` : `<p class="muted">Nothing played yet. Plays on every zone show up here.</p>`}</section>`;
           lists.most = most;
+          $$('[data-hplay]', main).forEach((b) => b.onclick = () => playTracks([h.history[Number(b.dataset.hplay)].track], true));
           break;
         }
         case 'favourites': {
