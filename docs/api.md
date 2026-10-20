@@ -1,5 +1,8 @@
 # Native API (`/v1`)
 
+The node also serves a built-in browser controller at `/` (one static page over this API: browse,
+search, play to any zone or in the browser itself, queue, playlists, discover, settings).
+
 HTTP + WebSocket served by `pm-node serve` on `[api] listen` (default `127.0.0.1:7788`).
 Set `[api] token` to require `Authorization: Bearer <token>` (or `?token=` on the WebSocket).
 Without a token, keep the listener on localhost. Remote access by pubkey (M5) wraps this API.

@@ -8,7 +8,7 @@ implemented with automated tests but not yet exercised outside this repository's
 | M0 | Workspace, `Output` trait, null/WAV outputs, CI | verified | |
 | M1 | Library + local bit-perfect playback | verified | FiiO KA17: 16/44.1, 24/96, 24/192 bit-perfect, `snd-aloop` byte-identical (PR #1). Native DSD silent on that DAC, cause open. |
 | M2 | Endpoint daemon, own protocol, gapless, groups | built | `pm-stream`/`pm-endpoint`/`pm-out-net` (ADR 0007), mDNS, loopback test bit-exact. Groups: fan-out with latency pre-roll and drift reporting (no correction). Needs a Pi run and a two-endpoint sync measurement. |
-| M3 | Native API + minimal client | built | `/v1` HTTP + WebSocket; `pm-app` (egui) with browse, search, queue, zones, volume, signal path, playlists, discover, DSP. Never run on a display by its author: `docs/LAPTOP-TEST-PROMPT.md`. |
+| M3 | Native API + minimal client | built | `/v1` HTTP + WebSocket; a built-in web UI at `/`; `pm-app` (egui) with browse, search, queue, zones, volume, signal path, playlists, discover, DSP. Never run on a display by its author: `docs/LAPTOP-TEST-PROMPT.md`. |
 | M4 | OpenSubsonic | built | XML and JSON; ID3 browsing, search, stream with ranges, cover art, playlists, scrobble. Needs a client run (Symfonium, Feishin, Amperfy). |
 | M5 | Remote access by pubkey | partial | Node publishes its address privately on the homeserver; app finds it from a session secret (ADR 0008). No Pubky live transport or relay exists yet; wire stays HTTPS. |
 | M6 | OpenHome / UPnP (Linn DSM) | not started | |

@@ -134,7 +134,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/events", get(events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state.clone());
-    Router::new().nest("/v1", v1).merge(subsonic::router(state))
+    Router::new()
+        .route("/", get(web_ui))
+        .route("/app", get(web_ui))
+        .route("/app/", get(web_ui))
+        .nest("/v1", v1)
+        .merge(subsonic::router(state))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -170,6 +175,21 @@ async fn auth(
         }
     }
     next.run(req).await
+}
+
+// ---- web UI ----
+
+/// The built-in browser controller: one static page over `/v1`. It asks for
+/// the token itself, so the page is served without auth.
+async fn web_ui() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/index.html"),
+    )
+        .into_response()
 }
 
 // ---- handlers: node ----
@@ -817,6 +837,25 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(z["transport"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn web_ui_is_served_without_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s);
+        for path in ["/", "/app", "/app/"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            assert!(std::str::from_utf8(&body)
+                .unwrap()
+                .contains("<title>Pubky Music</title>"));
+        }
     }
 
     #[tokio::test]

@@ -14,9 +14,10 @@ description: >-
   Pubky Music app on your laptop or phone, which can also play your library
   locally through its own DAC.
 
-  Set the API token in the app settings on first start and point the Pubky
-  Music controller at this node's address with that token. Plug a USB DAC into
-  the Umbrel box to play directly from it.
+  Open the app to get the built-in browser controller (enter the API token
+  once), or point the native Pubky Music app or any OpenSubsonic client at this
+  node's address with that token. Plug a USB DAC into the Umbrel box to play
+  directly from it.
 developer: Pubky Music
 website: https://github.com/gillohner/pubky-music-node
 dependencies: []
@@ -24,7 +25,7 @@ repo: https://github.com/gillohner/pubky-music-node
 support: https://github.com/gillohner/pubky-music-node/issues
 port: 7788
 gallery: []
-path: /v1/info
+path: /
 defaultUsername: ""
 defaultPassword: ""
 releaseNotes: >-
