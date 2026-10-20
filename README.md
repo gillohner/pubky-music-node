@@ -1,44 +1,71 @@
 # Pubky Music Node
 
-A Pubky node that bundles a Pubky homeserver with a music core delivering Roon-level audio
-quality: it serves the household's library to phones, desktop, web and TV, drives DACs and
-streamers bit-perfect, and keeps the social layer (tags, playlists, follows, listening activity)
-on Pubky, indexed by Pinakes.
+A self-hosted music server and player built on Pubky: the household's library served to desktop,
+web, phones and streamers with Roon-class care for the audio path, and the social layer (tags,
+playlists, favourites, reviews, listening activity) kept on your Pubky homeserver as v1
+`pubky-app-specs` objects, indexed by Pinakes.
 
 The implementor handoff is the plan; `docs/PINAKES-CONTEXT.md` is its §12 and overrides §8 where
-they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.md`.
+they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.md`; the HTTP API in
+`docs/api.md`; deployment (bare metal, Docker, Umbrel) in `docs/deploy.md`.
+
+## What it does today
+
+**Library.** Scans folders (local disks, network shares, anything mounted), reads tags including
+MusicBrainz ids, ISRC, ReplayGain, embedded art and genres, keeps everything in SQLite with
+full-text search, watches folders for changes, and can add or remove folders from the UI. Covers
+come from the files, a `cover.jpg`, or the Cover Art Archive; artist pages get a portrait and a
+biography from Wikidata and Wikipedia. Play history, Home (recently added and played, most played),
+favourites, genres, and search across tracks, albums, artists and genres.
+
+**Playback.** FLAC, ALAC, WAV, AIFF, DSF/DFF (native DSD or DoP), MP3, AAC and Vorbis. Bit-perfect
+by default: every conversion is a named stage with a quality level in the signal path. Zones with
+gapless playback, queues that survive restarts, grouping with drift correction, and a per-zone DSP
+chain (parametric EQ, convolution, crossfeed, ReplayGain, headroom, volume, dither, resampling only
+when an output needs it). Internet radio by URL with ICY titles, a radio-browser.info directory and
+saved stations.
+
+**Outputs.** Local ALSA devices on the node, `pm-endpoint` daemons on other machines (own protocol,
+ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, and any browser.
+
+**Controllers.** A built-in web UI at `/` (phone-friendly, keyboard shortcuts, Now Playing with the
+signal path), a native Rust app (`pm-app`, egui) that also plays through the computer it runs on, an
+OpenSubsonic server for Symfonium, Feishin, Amperfy and friends, and a `/v1` API with a WebSocket
+event stream for anything else.
+
+**Pubky.** Sign in with Pubky Ring. Playlists, reviews and listening activity are private v1
+`PubkyAppPost`s with a JSON envelope (ADR 0006), favourites are private v1 bookmarks (ADR 0010),
+tags are public v1 `PubkyAppTag`s written only on your action (ADR 0011); all of it syncs with the
+homeserver and comes back on a fresh node. Audio can be uploaded to the homeserver's private
+storage, never under `/pub/`. Discover reads trending music and tags through Pinakes and shows what
+Pubky knows about each album.
+
+**Migration.** `pm-node import-playlist <file>` (also in both UIs) imports M3U/M3U8, CSV and Roon's
+Excel export, matching by path, file name, then title and artist, and lists what did not match.
+`sidecars/roon-bridge` scrobbles Roon playback and imports Roon playlists through the official
+Extension API (not yet run against a Core).
+
+Not there yet: subscription streaming services (blocked on accounts and API terms; the source
+factory is the plug point), AirPlay 2, a live Pubky transport for remote access (the node publishes
+its address privately on the homeserver instead, ADR 0008). Hardware runs beyond the FiiO KA17 are
+pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 
 ## Workspace
 
-| Crate | Handoff §5.1 | Status |
-| :-- | :-- | :-- |
-| `pm-model` | shared types: formats, caps, signal path, canonical IDs, library entities | M0 done |
-| `pm-zones` | `Output` / `AudioSink` traits, registry, null and WAV outputs; zone engine (queue, transport, gapless, position, events) | M0 done; zone engine done (single output; groups at M2) |
-| `pm-audio` | decode (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path, sample-rate conversion when an output needs it (shown as `Lossy`) | M1 done; M8 started (SRC) |
-| `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
-| `pm-pubky` | music objects as v1 `PubkyAppPost` envelopes (private folder by default, ADR 0006), Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
-| `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |
-| `pm-api` | native `/v1` HTTP + WebSocket API, OpenSubsonic `/rest`, built-in web UI at `/` (`docs/api.md`) | M3 server side done; M4 server side done (client runs pending) |
-| `pm-client` | Rust client for `/v1` (HTTP + event stream) | done |
-| `pm-app` | native controller and player (egui): Roon-style browse, queue, transport, signal path; plays locally through its own DAC | first cut, needs a desktop to run |
-| `pm-stream` | node ↔ endpoint wire protocol (ADR 0007): endpoint-paced push, no conversion | done |
-| `pm-endpoint` | the endpoint daemon ("our RoonBridge"): local outputs over `pm-stream`, mDNS advertised | loopback bit-exact; Pi test pending |
-| `pm-out-net` | node-side `Output` for endpoints, mDNS discovery | done |
-| `pm-out-upnp` | UPnP AV / OpenHome renderers: SSDP, AVTransport, RenderingControl over a pull WAV stream | built; needs a real renderer |
-| `pm-out-slimproto` | Slimproto server for Squeezebox / squeezelite players over a pull WAV stream | built; needs a real player (`squeezelite -s <node>`) |
-| `pm-out-cast` | Chromecast sender: Cast v2 over TLS, default media receiver playing the pull stream | built; needs a real device |
-| `pm-node` | the binary: CLI plus `serve` (API, one zone per output incl. endpoints) | CLI and daemon |
-
-Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
-Internet radio: any `http(s)://` stream plays on any zone (search radio-browser.info from the Radio screen,
-save stations); lossy streams are shown as Lossy. Migration: `pm-node import-playlist <file>` (also the app's Playlists screen and the web UI) takes
-M3U/M3U8, CSV and Roon's Excel export (Roon → select tracks or a playlist → Export → Excel) and
-matches entries to the library by path, file name, then title and artist, listing what it could not
-match. Roon: `sidecars/roon-bridge` scrobbles Roon playback to the node and imports Roon playlists through
-the official Extension API (untested against a Core so far).
-
-Not started: `pm-sources`, `pm-out-airplay`, `pm-remote` (transport half), 
-`pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.
+| Crate | What it is |
+| :-- | :-- |
+| `pm-model` | shared types: formats, caps, signal path, canonical IDs, library entities |
+| `pm-zones` | `Output` / `AudioSink` traits, registry, zone engine, queues, groups, pull streams, null and WAV outputs |
+| `pm-audio` | decoding (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path, HTTP media sources |
+| `pm-library` | scanning, tags, SQLite (FTS5), MusicBrainz matching, playlist file import, history, favourites, tags, genres |
+| `pm-pubky` | v1 social objects, homeserver I/O, Pinakes and Nexus clients, discovery |
+| `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) |
+| `pm-api` | `/v1` HTTP + WebSocket API, OpenSubsonic `/rest`, the web UI, radio, sync, art fetching |
+| `pm-client` | Rust client for `/v1` |
+| `pm-app` | native controller and player (egui) |
+| `pm-stream`, `pm-endpoint`, `pm-out-net` | the endpoint protocol, daemon and node-side output |
+| `pm-out-upnp`, `pm-out-slimproto`, `pm-out-cast` | UPnP/OpenHome, Squeezebox and Chromecast outputs |
+| `pm-node` | the binary: CLI plus `serve` |
 
 ## Build
 
@@ -49,6 +76,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 PM_TESTNET=1 cargo test -p pm-api --test testnet_sync
 # on the node, with ALSA headers installed:
 cargo build -p pm-node --features alsa
+# headless check of the web UI against a running node (needs `npm install jsdom` somewhere):
+node tools/ui-smoke.js <api token>
 ```
 
 Builds are non-incremental with line-table debug info (`.cargo/config.toml`) to keep the shared
@@ -64,22 +93,25 @@ pm-node play 01.flac 02.flac --to alsa:hw:1,0  # one zone, gapless join when for
 pm-node play some.flac --to null --volume-db=-6   # shows the float path and dither stages
 pm-node -c node.toml scan /music            # SQLite library with FTS5 search
 pm-node -c node.toml search "daft punk"
+pm-node -c node.toml import-playlist roon-export.xlsx
 pm-node resolve https://open.spotify.com/track/<id>   # MusicBrainz URL relations
 pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001)
 pm-node discover trends                     # live Pinakes facets and music cards
-pm-node -c node.toml serve                  # API + zones; then: cargo run -p pm-app (PM_NODE, PM_TOKEN)
+pm-node -c node.toml serve                  # API, web UI at /, one zone per output
 pm-node -c node.toml login                  # sign in with Pubky Ring (QR), stores the session secret
 pm-node -c node.toml upload a.flac b.flac   # to the homeserver's private storage (needs a session)
 pm-endpoint --name "Kitchen Pi"            # on another machine; the node finds it over mDNS
+cargo run -p pm-app                         # native app (PM_NODE, PM_TOKEN)
 ```
 
 ## Upstream etiquette
 
 Every outbound request carries `pubky-music-node/<version> (<contact>)`; the node refuses to
-start network commands without a `contact` (email or URL, never a code-host link). MusicBrainz
-is called at most once per second; for real catalogue use run a local MusicBrainz replica on the
-node (later milestone). Pinakes allows 120 requests per minute per IP, so batch through
-`POST /v1/resources/lookup`. The Pinakes owner's answers are in `docs/PINAKES-ANSWERS.md`.
+start network commands without a `contact` (email or URL, never a code-host link), and Discover
+stays off until one is set. MusicBrainz is called at most once per second; artist info and cover
+art are fetched once per object and cached. Pinakes allows 120 requests per minute per IP, so
+batch through `POST /v1/resources/lookup`. The Pinakes owner's answers are in
+`docs/PINAKES-ANSWERS.md`.
 
 ## Hard constraints (handoff §2)
 
