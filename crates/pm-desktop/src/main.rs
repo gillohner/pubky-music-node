@@ -68,6 +68,13 @@ fn init_script(s: &Settings) -> String {
 const CONNECT_PAGE: &str = include_str!("connect.html");
 
 fn main() -> anyhow::Result<()> {
+    // WebKitGTK's DMA-BUF renderer crashes the web process on some Linux
+    // GPU stacks (NVIDIA, some Wayland compositors); the software path is
+    // reliable and fast enough for this UI. An explicit setting wins.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();

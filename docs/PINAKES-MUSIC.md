@@ -89,10 +89,11 @@ What this repository does with each item of the steward's note:
   groups itself and joins only on the exact ids Pinakes returns (`group.id`, `facts.mbid`).
 - **Batched lookups:** `PinakesClient::lookup` already sends `POST /v1/resources/lookup` in chunks of
   `LOOKUP_CHUNK` (≤ 500 links), under the client-side 120 requests/min budget.
-- **`base_url` for a MusicBrainz replica:** this project runs no MusicBrainz replica; the node itself calls
-  musicbrainz.org at ≤ 1 request/s with the owner's contact. Pinakes should stay on musicbrainz.org. If a
-  replica is ever deployed next to the node, its `/ws/2` URL goes to the steward and into
-  `[also_on.sources.musicbrainz] base_url` on their side; nothing changes in this repository.
+- **`base_url` for a MusicBrainz replica:** the node offers a caching proxy instead of a full replica:
+  `GET https://<node>/mb/ws/2/<path>` forwards to musicbrainz.org with the owner's contact, one request per
+  second, answers cached for a week (`pm-api/src/mbproxy.rs`). Pinakes can set
+  `[also_on.sources.musicbrainz] base_url = "https://pubky-music.riginode.xyz/mb/ws/2"` and its lookups
+  then share the node's cache and budget. A real replica would plug in at the same URL later.
 - **`maybe_same` on event cards:** `Card::maybe_same` / `Details::maybe_same` (parsed, not yet shown: the
   node has no events view).
 - **Matching the owner's own library:** `POST /v1/tags/bulk` (Settings → Pubky → "Tag my whole library on

@@ -13,6 +13,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning` |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
 | GET | `/v1/outputs/discovery` | | `{upnp: [{from, location, server?, friendly_name?, renderer, output}], cast: [{id, friendly_name, addr}], public_url, local_address?, notes, upnp_enabled, cast_enabled, saved_addresses}`: a 3 s network scan (`?quick=1` skips the scan and only reports configuration) with plain-language findings (no multicast answers, unusable public URL, devices that are not renderers) |
+| GET | `/mb/ws/2/{path}?…` | | no token: a MusicBrainz `/ws/2` caching proxy (one upstream request per second, answers cached a week, the node's contact in the User-Agent); for Pinakes's `[also_on.sources.musicbrainz] base_url = "https://<node>/mb/ws/2"`; 412 until the node has a contact |
 | POST | `/v1/node/settings/backup` | | write the owner's settings (contact, folders, TIDAL session, renderers, jukebox zone, DSP) to `/priv/pubky.music/settings.json`; also done after every sync |
 | POST | `/v1/node/settings/restore` | | bring them back from the homeserver onto this node (missing values only); done by itself on a fresh node after the first sign-in |
 | POST | `/v1/auth/pubky/start` | | no token needed: starts a Pubky Ring sign-in for a controller or browser; `{id, url, owner}`; 412 until the node itself has a Pubky session |

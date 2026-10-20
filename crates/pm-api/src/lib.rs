@@ -19,6 +19,7 @@ pub mod discover;
 pub mod favourites;
 pub mod files;
 pub mod hls;
+pub mod mbproxy;
 pub mod new_releases;
 pub mod playlists;
 pub mod radio;
@@ -230,6 +231,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/tidal/callback", get(tidal::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                // MusicBrainz caching proxy for Pinakes and the owner's tools.
+                .route("/mb/ws/2/{*path}", get(mbproxy::forward))
                 .with_state(state.clone()),
         )
         .merge(subsonic::router(state))
@@ -3333,6 +3336,36 @@ mod tests {
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
+    }
+
+    #[tokio::test]
+    async fn the_musicbrainz_proxy_needs_a_contact_and_rejects_bad_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mb/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        s.set_contact("test@example.org").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mb/ws/2/..%2Fetc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
