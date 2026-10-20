@@ -2463,6 +2463,7 @@ mod tests {
         s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "cid".into(),
             client_secret: "sec".into(),
+            scopes: String::new(),
         };
         // Search with the app token: albums carry artists and art, tracks carry artists.
         let (st, r) = call(
@@ -2633,6 +2634,7 @@ mod tests {
             ep.creds = tidal::TidalCredentials {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
+                scopes: String::new(),
             };
         }
         s.library

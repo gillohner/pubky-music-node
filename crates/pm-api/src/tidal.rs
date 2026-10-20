@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex};
 
 pub const SOURCE_ID: &str = "tidal";
 const USER_KEY: &str = "tidal.user";
-const SCOPES: &str =
+/// Scopes requested at sign-in when the config names none. The app must have
+/// every requested scope enabled in the TIDAL developer dashboard, or the
+/// login page fails before showing anything.
+pub const DEFAULT_SCOPES: &str =
     "user.read collection.read collection.write playlists.read playlists.write playback entitlements.read search.read";
 const ACCEPT: &str = "application/vnd.api+json";
 
@@ -30,11 +33,22 @@ const ACCEPT: &str = "application/vnd.api+json";
 pub struct TidalCredentials {
     pub client_id: String,
     pub client_secret: String,
+    /// Space-separated OAuth scopes to request; empty = [`DEFAULT_SCOPES`].
+    pub scopes: String,
 }
 
 impl TidalCredentials {
     pub fn configured(&self) -> bool {
         !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+    }
+
+    pub fn scopes(&self) -> String {
+        let s = self.scopes.split_whitespace().collect::<Vec<_>>().join(" ");
+        if s.is_empty() {
+            DEFAULT_SCOPES.to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -92,6 +106,9 @@ pub struct TidalStatus {
     pub expires_at: Option<i64>,
     /// Where TIDAL must be allowed to redirect to (register it on the developer app).
     pub redirect_uri: String,
+    /// Scopes the sign-in asks for; every one must be enabled on the developer app.
+    #[serde(default)]
+    pub requested_scopes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -745,7 +762,7 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<LoginUrl
         .append_pair("response_type", "code")
         .append_pair("client_id", &c.client_id)
         .append_pair("redirect_uri", &redirect_uri(&s))
-        .append_pair("scope", SCOPES)
+        .append_pair("scope", &c.scopes())
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &challenge)
         .append_pair("state", &state);
@@ -835,6 +852,7 @@ pub(crate) fn status_view(s: &NodeState) -> TidalStatus {
         scope: u.as_ref().map(|u| u.scope.clone()),
         expires_at: u.as_ref().map(|u| u.expires_at),
         redirect_uri: redirect_uri(s),
+        requested_scopes: creds(s).scopes(),
     }
 }
 

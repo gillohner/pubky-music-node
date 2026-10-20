@@ -25,6 +25,10 @@ pub struct NodeConfig {
 pub struct TidalConfig {
     pub client_id: String,
     pub client_secret: String,
+    /// Space-separated OAuth scopes to request at sign-in; empty = the node's default
+    /// (user.read collection.read collection.write playlists.read playlists.write playback
+    /// entitlements.read search.read). Every scope must be enabled on the developer app.
+    pub scopes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

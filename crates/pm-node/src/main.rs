@@ -190,6 +190,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             tidal: pm_api::tidal::TidalCredentials {
                 client_id: cfg.tidal.client_id.clone(),
                 client_secret: cfg.tidal.client_secret.clone(),
+                scopes: cfg.tidal.scopes.clone(),
             },
         },
         lib,

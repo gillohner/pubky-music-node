@@ -8,6 +8,7 @@
 #                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers
 #   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
+#   PM_TIDAL_SCOPES   scopes to request at sign-in (default: all the node can use; must be enabled on the app)
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"
 CONF="${PM_CONFIG:-$DATA_DIR/node.toml}"
@@ -34,6 +35,7 @@ name = "${PM_NAME:-Pubky Music Node}"
 [tidal]
 client_id = "${PM_TIDAL_CLIENT_ID:-}"
 client_secret = "${PM_TIDAL_CLIENT_SECRET:-}"
+scopes = "${PM_TIDAL_SCOPES:-}"
 TOML
 fi
 if [ -z "${PM_TOKEN:-}" ] && [ "${PM_LISTEN:-0.0.0.0:7788}" != "127.0.0.1:7788" ]; then
