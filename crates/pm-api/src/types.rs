@@ -112,6 +112,35 @@ pub struct Tracks {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Limit {
+    pub limit: Option<u32>,
+}
+
+/// A play reported by a client that plays by itself (the native app's local zone).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordPlay {
+    pub track_id: i64,
+    #[serde(default)]
+    pub zone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct History {
+    pub plays: Vec<pm_library::PlayEntry>,
+}
+
+/// What the Home screen shows: the Roon-style landing page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomePage {
+    pub recently_added: Vec<Album>,
+    pub recently_played: Vec<Album>,
+    pub most_played_albums: Vec<Album>,
+    pub most_played: Vec<pm_library::PlayedTrack>,
+    pub history: Vec<pm_library::PlayEntry>,
+    pub stats: pm_library::LibraryStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanRequest {
     /// Folders to scan; the configured ones when empty.
     #[serde(default)]

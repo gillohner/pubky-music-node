@@ -139,10 +139,14 @@ impl NodeState {
         let events = self.events.clone();
         let mut ev_rx = zone.subscribe();
         let id = zone.id().clone();
+        let library = self.library.clone();
         tokio::spawn(async move {
             loop {
                 match ev_rx.recv().await {
                     Ok(event) => {
+                        if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
+                            record_play(&library, &id, &item.uri);
+                        }
                         let _ = events.send(ApiEvent::ZoneEvent {
                             zone: id.clone(),
                             event,
@@ -421,5 +425,19 @@ impl NodeState {
 
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
+    }
+}
+
+/// Library tracks (`track:<id>`) go into the play history; other URIs do not.
+fn record_play(library: &Mutex<Library>, zone: &ZoneId, uri: &str) {
+    let Some(id) = uri
+        .strip_prefix(crate::sources::TRACK_SCHEME)
+        .and_then(|s| s.parse::<i64>().ok())
+    else {
+        return;
+    };
+    let lib = library.lock().expect("library poisoned");
+    if let Err(e) = lib.record_play(pm_model::TrackId(id), Some(zone.0.as_str())) {
+        tracing::warn!(error = %e, track = id, "recording play");
     }
 }

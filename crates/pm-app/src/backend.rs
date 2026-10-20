@@ -2,8 +2,8 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, Info, PlaylistDetail,
-    PlaylistSummary, QueueAt, TransportAction,
+    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, HomePage, Info,
+    PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
 };
 use pm_client::NodeClient;
 use pm_model::{Album, Track, Volume};
@@ -23,6 +23,9 @@ pub enum Cmd {
         secret: String,
     },
     Refresh,
+    LoadHome,
+    /// A play on this computer's own zone, for the node's history.
+    RecordPlay(i64),
     LoadAlbums,
     LoadAlbumTracks(i64),
     LoadTracks,
@@ -110,6 +113,7 @@ pub enum Msg {
     ZoneRemoved(ZoneId),
     Outputs(Vec<OutputInfo>),
     Albums(Vec<Album>),
+    Home(Box<HomePage>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
     SearchResults(String, Vec<Track>),
@@ -270,6 +274,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
         c.zones().await.map(Msg::Zones),
         c.outputs().await.map(Msg::Outputs),
         c.albums(None, 500).await.map(Msg::Albums),
+        c.home(12).await.map(|h| Msg::Home(Box::new(h))),
         c.playlists().await.map(Msg::Playlists),
     ] {
         match r {
@@ -287,6 +292,8 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             initial_load(&c, out).await;
         }
         Cmd::LoadAlbums => out.send(Msg::Albums(c.albums(None, 500).await?)),
+        Cmd::LoadHome => out.send(Msg::Home(Box::new(c.home(12).await?))),
+        Cmd::RecordPlay(id) => c.record_play(id, Some("local")).await?,
         Cmd::LoadAlbumTracks(id) => out.send(Msg::AlbumTracks(id, c.album_tracks(id).await?)),
         Cmd::LoadTracks => out.send(Msg::Tracks(c.tracks(None, 1000).await?)),
         Cmd::Search(q) => {

@@ -62,6 +62,8 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum View {
+    Home,
+    NowPlaying,
     Albums,
     Album(i64),
     Artists,
@@ -91,6 +93,13 @@ struct App {
     zones: BTreeMap<String, ZoneState>,
     outputs: Vec<pm_zones::OutputInfo>,
     albums: Vec<Album>,
+    home: Option<pm_api::types::HomePage>,
+    /// Tracks the app has seen, by library id, to find covers for queue items.
+    known_tracks: HashMap<i64, Track>,
+    /// Last local-zone item reported to the node's history (queue item id, uri).
+    last_local_play: Option<(u64, String)>,
+    /// Where to return from the Now Playing screen.
+    prev_view: Option<View>,
     album_tracks: HashMap<i64, Vec<Track>>,
     tracks: Vec<Track>,
     search: String,
@@ -151,6 +160,10 @@ impl App {
             zones: BTreeMap::new(),
             outputs: Vec::new(),
             albums: Vec::new(),
+            home: None,
+            known_tracks: HashMap::new(),
+            last_local_play: None,
+            prev_view: None,
             album_tracks: HashMap::new(),
             tracks: Vec::new(),
             search: String::new(),
@@ -174,7 +187,7 @@ impl App {
             new_playlist_name: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
-            view: View::Albums,
+            view: View::Home,
             show_path: false,
             volume_db: -20.0,
             status: None,
@@ -221,17 +234,30 @@ impl App {
                 }
                 Msg::Outputs(o) => self.outputs = o,
                 Msg::Albums(a) => self.albums = a,
+                Msg::Home(h) => {
+                    self.remember_tracks(h.most_played.iter().map(|p| &p.track));
+                    self.remember_tracks(h.history.iter().map(|p| &p.track));
+                    self.home = Some(*h);
+                }
                 Msg::AlbumTracks(id, t) => {
+                    self.remember_tracks(t.iter());
                     self.album_tracks.insert(id, t);
                 }
-                Msg::Tracks(t) => self.tracks = t,
-                Msg::SearchResults(q, t) => self.results = Some((q, t)),
+                Msg::Tracks(t) => {
+                    self.remember_tracks(t.iter());
+                    self.tracks = t;
+                }
+                Msg::SearchResults(q, t) => {
+                    self.remember_tracks(t.iter());
+                    self.results = Some((q, t));
+                }
                 Msg::Queue(z, q) => {
                     self.queues.insert(z, q);
                 }
                 Msg::LibraryChanged => {
                     self.scanning = false;
                     self.backend.send(Cmd::LoadAlbums);
+                    self.backend.send(Cmd::LoadHome);
                     if self.view == View::Tracks {
                         self.backend.send(Cmd::LoadTracks);
                     }
@@ -320,7 +346,82 @@ impl App {
         }
     }
 
+    fn remember_tracks<'a>(&mut self, tracks: impl Iterator<Item = &'a Track>) {
+        for t in tracks {
+            if let Some(id) = t.id {
+                self.known_tracks.insert(id.0, t.clone());
+            }
+        }
+    }
+
+    /// The album a queue item belongs to: by its library id when the app
+    /// has seen the track, else by album title and artist.
+    fn album_of_item(&self, item: &QueueItem) -> Option<Album> {
+        if let Some(t) = item
+            .uri
+            .strip_prefix("track:")
+            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|id| self.known_tracks.get(&id))
+        {
+            if let Some(a) = &t.album {
+                if let Some(found) = self.albums.iter().find(|x| x.id == a.id) {
+                    return Some(found.clone());
+                }
+                return Some(a.clone());
+            }
+        }
+        let title = item.album.as_deref()?;
+        self.albums
+            .iter()
+            .find(|a| {
+                a.title == title
+                    && (a.album_artist.is_none() || a.album_artist.as_deref() == item.artist.as_deref())
+            })
+            .or_else(|| self.albums.iter().find(|a| a.title == title))
+            .cloned()
+    }
+
+    /// The local zone plays by itself; tell the node when a library track starts.
+    fn report_local_play(&mut self) {
+        let state = self.local.zone.state();
+        let Some(np) = state.now_playing else {
+            return;
+        };
+        let key = (np.item.id, np.item.uri.clone());
+        if self.last_local_play.as_ref() == Some(&key) {
+            return;
+        }
+        self.last_local_play = Some(key);
+        if let Some(id) = np
+            .item
+            .uri
+            .strip_prefix("track:")
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            self.backend.send(Cmd::RecordPlay(id));
+        }
+    }
+
+    fn open_now_playing(&mut self) {
+        if self.view != View::NowPlaying {
+            self.prev_view = Some(self.view.clone());
+            self.view = View::NowPlaying;
+        }
+    }
+
+    fn close_now_playing(&mut self) {
+        self.view = self.prev_view.take().unwrap_or(View::Home);
+    }
+
+    fn open_album(&mut self, id: i64) {
+        if !self.album_tracks.contains_key(&id) {
+            self.backend.send(Cmd::LoadAlbumTracks(id));
+        }
+        self.view = View::Album(id);
+    }
+
     fn play_tracks(&mut self, tracks: &[Track], replace: bool, at: QueueAt) {
+        self.remember_tracks(tracks.iter());
         let ids: Vec<i64> = tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
         if ids.is_empty() {
             return;
@@ -424,6 +525,7 @@ impl App {
         ui.add_space(10.0);
         ui.label(egui::RichText::new("LIBRARY").small().weak());
         for (label, view) in [
+            ("Home", View::Home),
             ("Albums", View::Albums),
             ("Artists", View::Artists),
             ("Tracks", View::Tracks),
@@ -442,6 +544,9 @@ impl App {
                 }
                 if view == View::Artists {
                     self.backend.send(Cmd::LoadArtists);
+                }
+                if view == View::Home {
+                    self.backend.send(Cmd::LoadHome);
                 }
                 self.view = view;
             }
@@ -529,6 +634,8 @@ impl App {
 
     fn content(&mut self, ui: &mut egui::Ui) {
         match self.view.clone() {
+            View::Home => self.home_view(ui),
+            View::NowPlaying => self.now_playing_view(ui),
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
@@ -558,6 +665,213 @@ impl App {
         }
     }
 
+    fn home_view(&mut self, ui: &mut egui::Ui) {
+        let Some(home) = self.home.clone() else {
+            if matches!(self.conn, Conn::Connected(_)) {
+                ui.weak("Loading…");
+            } else {
+                ui.weak("Connect to a node from Settings to see your library here.");
+            }
+            return;
+        };
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Home");
+                ui.weak(format!(
+                    "{} albums · {} tracks · {} artists",
+                    home.stats.albums, home.stats.tracks, home.stats.artists
+                ));
+            });
+            if home.stats.tracks == 0 {
+                ui.add_space(8.0);
+                ui.weak("The library is empty. Add folders to the node config and run a scan from Settings.");
+                return;
+            }
+            if !home.recently_added.is_empty() {
+                self.album_row(ui, "Recently added", &home.recently_added, Some(View::Albums));
+            }
+            if !home.recently_played.is_empty() {
+                self.album_row(ui, "Recently played", &home.recently_played, None);
+            }
+            if !home.most_played_albums.is_empty() {
+                self.album_row(ui, "Most played albums", &home.most_played_albums, None);
+            }
+            if !home.most_played.is_empty() {
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new("Most played tracks").strong().size(16.0));
+                let tracks: Vec<Track> = home.most_played.iter().map(|p| p.track.clone()).collect();
+                self.track_table(ui, &tracks, true);
+            }
+            if !home.history.is_empty() {
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new("History").strong().size(16.0));
+                egui::Grid::new("history")
+                    .num_columns(4)
+                    .spacing([16.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let mut to_play = None;
+                        for p in &home.history {
+                            if ui.small_button("▶").clicked() {
+                                to_play = Some(p.track.clone());
+                            }
+                            ui.label(&p.track.title);
+                            ui.weak(
+                                p.track
+                                    .artists
+                                    .iter()
+                                    .map(|a| a.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            );
+                            ui.weak(format!(
+                                "{} · {}",
+                                self.zone_name(p.zone.as_deref().unwrap_or("")),
+                                fmt_ago(p.played_at)
+                            ));
+                            ui.end_row();
+                        }
+                        if let Some(t) = to_play {
+                            self.play_tracks(&[t], true, QueueAt::End);
+                        }
+                    });
+            } else {
+                ui.add_space(14.0);
+                ui.weak("Nothing played yet. Plays on every zone show up here.");
+            }
+        });
+    }
+
+    /// One horizontally scrolling row of album tiles with a heading.
+    fn album_row(&mut self, ui: &mut egui::Ui, title: &str, albums: &[Album], more: Option<View>) {
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(title).strong().size(16.0));
+            if let Some(v) = more {
+                if ui.small_button("All").clicked() {
+                    self.view = v;
+                }
+            }
+        });
+        let mut clicked = None;
+        egui::ScrollArea::horizontal()
+            .id_salt(title)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for a in albums {
+                        let tex = self.cover(a.id);
+                        if album_tile(ui, a, 148.0, tex.as_ref()).clicked() {
+                            clicked = a.id;
+                        }
+                    }
+                });
+            });
+        if let Some(id) = clicked {
+            self.open_album(id);
+        }
+    }
+
+    /// Roon-style full-screen view of the current track: large art, the
+    /// signal path, and what comes next.
+    fn now_playing_view(&mut self, ui: &mut egui::Ui) {
+        let zone = self.current_zone();
+        ui.horizontal(|ui| {
+            if ui.button("‹ Back").clicked() {
+                self.close_now_playing();
+            }
+            ui.weak(format!("Now playing on {}", self.zone_name(&self.settings.zone)));
+        });
+        let Some(np) = zone.now_playing.clone() else {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| ui.weak("Nothing playing on this zone."));
+            return;
+        };
+        let album = self.album_of_item(&np.item);
+        let tex = album.as_ref().and_then(|a| self.cover(a.id));
+        let title = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+        let queue = self.queue_items();
+        let up_next: Vec<QueueItem> = queue
+            .iter()
+            .skip_while(|i| i.id != np.item.id)
+            .skip(1)
+            .take(6)
+            .cloned()
+            .collect();
+        let avail = ui.available_size();
+        let art_size = (avail.y - 40.0).min(avail.x * 0.45).clamp(160.0, 560.0);
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(art_size, art_size), egui::Sense::click());
+            match tex {
+                Some(t) => paint_texture(ui.painter(), rect, &t, false),
+                None => paint_art(ui.painter(), rect, &title, false),
+            }
+            if let Some(a) = &album {
+                if resp
+                    .on_hover_text("Open album")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    if let Some(id) = a.id {
+                        self.open_album(id);
+                    }
+                }
+            }
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.add_space(art_size * 0.08);
+                ui.label(egui::RichText::new(&title).strong().size(28.0));
+                ui.label(egui::RichText::new(np.item.artist.clone().unwrap_or_default()).size(18.0));
+                let album_line = match (&np.item.album, album.as_ref().and_then(|a| a.year)) {
+                    (Some(a), Some(y)) => format!("{a} · {y}"),
+                    (Some(a), None) => a.clone(),
+                    _ => String::new(),
+                };
+                ui.weak(album_line);
+                ui.add_space(10.0);
+                let (pos, dur) = (np.position_ms, np.duration_ms.unwrap_or(0));
+                let mut p = pos as f64;
+                let slider = egui::Slider::new(&mut p, 0.0..=dur.max(1) as f64)
+                    .show_value(false)
+                    .trailing_fill(true);
+                let r = ui.add_sized([ui.available_width().min(520.0), 18.0], slider);
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    self.transport(TransportAction::Seek {
+                        position_ms: p as u64,
+                    });
+                }
+                ui.weak(format!("{} / {}", fmt_duration(pos), fmt_duration(dur)));
+                ui.add_space(14.0);
+                let headline = np.signal_path.headline();
+                let (label, color) = match headline {
+                    Quality::BitPerfect => ("Bit-perfect", egui::Color32::from_rgb(120, 90, 220)),
+                    Quality::Enhanced => ("Enhanced", egui::Color32::from_rgb(90, 160, 220)),
+                    Quality::Lossless => ("Lossless", egui::Color32::from_rgb(90, 200, 120)),
+                    Quality::Lossy => ("Lossy", egui::Color32::from_rgb(230, 170, 60)),
+                };
+                ui.horizontal(|ui| {
+                    ui.colored_label(color, "●");
+                    ui.label(egui::RichText::new(label).strong());
+                    ui.weak(format!("{} → {}", np.source_format, np.output_format));
+                });
+                egui::CollapsingHeader::new("Signal path")
+                    .default_open(true)
+                    .show(ui, |ui| signal_path_ui(ui, &np.signal_path, &zone));
+                if !up_next.is_empty() {
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("Up next").strong());
+                    for it in &up_next {
+                        ui.horizontal(|ui| {
+                            ui.label(it.title.clone().unwrap_or_else(|| it.uri.clone()));
+                            ui.weak(it.artist.clone().unwrap_or_default());
+                        });
+                    }
+                }
+            });
+        });
+    }
+
     fn albums_view(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Albums");
@@ -585,10 +899,7 @@ impl App {
                 ui.add_space(gap - 6.0);
             }
             if let Some(id) = clicked {
-                if !self.album_tracks.contains_key(&id) {
-                    self.backend.send(Cmd::LoadAlbumTracks(id));
-                }
-                self.view = View::Album(id);
+                self.open_album(id);
             }
         });
     }
@@ -1365,21 +1676,40 @@ impl App {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     if let Some(np) = &np {
-                        art_square(
-                            ui,
-                            &np.item.title.clone().unwrap_or_else(|| np.item.uri.clone()),
-                            56.0,
-                        );
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(
-                                    np.item.title.clone().unwrap_or_else(|| np.item.uri.clone()),
-                                )
-                                .strong(),
-                            );
-                            ui.weak(np.item.artist.clone().unwrap_or_default());
-                            ui.small(egui::RichText::new(np.item.album.clone().unwrap_or_default()).weak());
-                        });
+                        let album = self.album_of_item(&np.item);
+                        let tex = album.as_ref().and_then(|a| self.cover(a.id));
+                        let title = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::click());
+                        match tex {
+                            Some(t) => paint_texture(ui.painter(), rect, &t, resp.hovered()),
+                            None => paint_art(ui.painter(), rect, &title, resp.hovered()),
+                        }
+                        let open = resp
+                            .on_hover_text("Now playing")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked();
+                        let open = ui
+                            .vertical(|ui| {
+                                let r = ui.add(
+                                    egui::Label::new(egui::RichText::new(&title).strong())
+                                        .sense(egui::Sense::click()),
+                                );
+                                ui.weak(np.item.artist.clone().unwrap_or_default());
+                                ui.small(
+                                    egui::RichText::new(np.item.album.clone().unwrap_or_default()).weak(),
+                                );
+                                r.clicked()
+                            })
+                            .inner
+                            || open;
+                        if open {
+                            if self.view == View::NowPlaying {
+                                self.close_now_playing();
+                            } else {
+                                self.open_now_playing();
+                            }
+                        }
                     } else {
                         ui.weak("Nothing playing");
                     }
@@ -1771,6 +2101,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_backend();
+        self.report_local_play();
         let zone = self.current_zone();
         if zone.transport == Transport::Playing {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -1796,6 +2127,9 @@ impl eframe::App for App {
             }
             if q {
                 self.show_queue = !self.show_queue;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) && self.view == View::NowPlaying {
+                self.close_now_playing();
             }
         }
         egui::Panel::left("nav")
@@ -1984,6 +2318,24 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
+    }
+}
+
+/// "3 min ago", "2 h ago", "4 d ago" from a unix timestamp.
+fn fmt_ago(unix: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(unix);
+    let s = (now - unix).max(0);
+    if s < 60 {
+        "just now".into()
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3600)
+    } else {
+        format!("{} d ago", s / 86_400)
     }
 }
 

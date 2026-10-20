@@ -19,6 +19,8 @@
   main { grid-area:main; overflow:auto; padding:16px; }
   footer { grid-area:bar; background:var(--panel); display:grid; grid-template-columns:1fr 1.2fr 1fr; align-items:center; padding:8px 16px; gap:10px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:14px; }
+  .strip { display:flex; gap:14px; overflow-x:auto; padding-bottom:8px; }
+  .strip .tile { flex:0 0 150px; }
   .tile { cursor:pointer; }
   .art { width:100%; aspect-ratio:1; border-radius:6px; background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:40px; color:#ffffffbb; overflow:hidden; }
   .art img { width:100%; height:100%; object-fit:cover; display:block; }
@@ -48,6 +50,7 @@
 <nav>
   <h1>Pubky Music</h1>
   <div class="sec">LIBRARY</div>
+  <button data-view="home">Home</button>
   <button data-view="albums">Albums</button>
   <button data-view="artists">Artists</button>
   <button data-view="tracks">Tracks</button>
@@ -97,7 +100,7 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  const state = { token: localStorage.getItem('pm.token') || '', zones: {}, zone: localStorage.getItem('pm.zone') || '', view: 'albums', albums: [], artists: [], playlists: [], queue: [], info: null, ws: null, browserQueue: [], browserIndex: -1 };
+  const state = { token: localStorage.getItem('pm.token') || '', zones: {}, zone: localStorage.getItem('pm.zone') || '', view: 'home', albums: [], artists: [], playlists: [], queue: [], info: null, ws: null, browserQueue: [], browserIndex: -1 };
   const BROWSER = 'browser';
   const api = async (method, path, body) => {
     const r = await fetch('/v1' + path, { method, headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -129,7 +132,7 @@
   // Browser zone: plays the original files through <audio>; the browser decodes, so no signal path claims.
   const audio = $('#browser');
   const browserState = () => { const it = state.browserQueue[state.browserIndex]; return { id: BROWSER, name: 'This browser', transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing', queue_index: state.browserIndex, now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (audio.duration || 0) * 1000, signal_path: null } : null }; };
-  const browserPlay = (i) => { const it = state.browserQueue[i]; if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; } state.browserIndex = i; audio.src = `/v1/library/tracks/${it.track_id}/file${state.token ? '?token=' + encodeURIComponent(state.token) : ''}`; audio.play().catch((e) => toast('browser playback: ' + e.message)); renderBar(); };
+  const browserPlay = (i) => { const it = state.browserQueue[i]; if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; } state.browserIndex = i; audio.src = `/v1/library/tracks/${it.track_id}/file${state.token ? '?token=' + encodeURIComponent(state.token) : ''}`; audio.play().catch((e) => toast('browser playback: ' + e.message)); api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {}); renderBar(); };
   audio.addEventListener('ended', () => browserPlay(state.browserIndex + 1));
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
 
@@ -202,6 +205,14 @@
   const render = async () => {
     try {
       switch (state.view) {
+        case 'home': {
+          const h = await api('GET', '/library/home?limit=12');
+          const ago = (t) => { const s = Math.max(0, Math.floor(Date.now() / 1000) - t); return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`; };
+          const strip = (title, albums) => albums.length ? `<h3>${title}</h3><div class="strip">${albums.map((a) => `<div class="tile" data-album="${a.id}">${art(a.id, a.title)}<div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}</div></div>`).join('')}</div>` : '';
+          const most = h.most_played.map((p) => p.track);
+          main.innerHTML = `<h2>Home <span class="muted">${h.stats.albums} albums · ${h.stats.tracks} tracks</span></h2>` + (h.stats.tracks ? strip('Recently added', h.recently_added) + strip('Recently played', h.recently_played) + strip('Most played albums', h.most_played_albums) + (most.length ? '<h3>Most played tracks</h3>' + trackTable(most, true) : '') + (h.history.length ? `<h3>History</h3><table><tbody>${h.history.map((p) => `<tr><td>${esc(p.track.title)}</td><td class="muted">${esc(p.track.artists.map((a) => a.name).join(', '))}</td><td class="muted">${esc((state.zones[p.zone] || {}).name || p.zone || '')} · ${ago(p.played_at)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nothing played yet. Plays on every zone show up here.</p>') : '<p class="muted">The library is empty. Scan a folder from Settings.</p>');
+          bindAlbums(); bindTracks(most); break;
+        }
         case 'albums': { if (!state.albums.length) state.albums = await api('GET', '/library/albums?limit=1000'); main.innerHTML = `<h2>Albums <span class="muted">${state.albums.length}</span></h2>` + (state.albums.length ? albumGrid(state.albums) : '<p class="muted">No albums yet. Scan a folder from Settings.</p>'); bindAlbums(); break; }
         case 'album': { const id = state.viewArg; const a = state.albums.find((x) => x.id === id) || (await api('GET', '/library/albums?limit=1000')).find((x) => x.id === id); const tracks = (await api('GET', `/library/albums/${id}/tracks`)).tracks; const total = tracks.reduce((s, t) => s + (t.duration_ms || 0), 0); main.innerHTML = `<button class="btn" id="back">‹ Albums</button><div class="row" style="margin:12px 0;align-items:flex-start"><div style="width:180px;flex:none">${art(id, a.title)}</div><div><h2 style="margin:0">${esc(a.title)}</h2><div>${esc(a.album_artist || '')}</div><div class="muted">${[a.year, tracks.length + ' tracks', fmt(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div><div class="row" style="margin-top:10px"><button class="btn primary" id="playall">▶ Play album</button><button class="btn" id="addall">Add to queue</button></div></div></div>` + trackTable(tracks, false); $('#back').onclick = () => setView('albums'); $('#playall').onclick = () => playTracks(tracks, true); $('#addall').onclick = () => playTracks(tracks, false, 'end'); bindTracks(tracks); break; }
         case 'artists': { state.artists = await api('GET', '/library/artists'); main.innerHTML = `<h2>Artists <span class="muted">${state.artists.length}</span></h2><table><tbody>${state.artists.map((a) => `<tr><td><a href="#" data-artist="${a.id}">${esc(a.name)}</a></td><td class="muted">${a.albums} albums</td><td class="muted">${a.tracks} tracks</td></tr>`).join('')}</tbody></table>`; main.querySelectorAll('[data-artist]').forEach((el) => el.onclick = (e) => { e.preventDefault(); setView('artist', Number(el.dataset.artist)); }); break; }

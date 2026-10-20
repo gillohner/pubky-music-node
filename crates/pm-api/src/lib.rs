@@ -109,6 +109,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/albums", get(albums))
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/albums/{id}/cover", get(album_cover))
+        .route("/library/history", get(history).post(record_play))
+        .route("/library/home", get(home))
         .route("/library/folders", get(folders))
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
@@ -617,6 +619,37 @@ async fn album_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> A
     Ok(Json(Tracks { tracks }))
 }
 
+async fn history(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<History> {
+    let limit = p.limit.unwrap_or(100).min(1000);
+    let plays = s.library.lock().expect("library poisoned").history(limit)?;
+    Ok(Json(History { plays }))
+}
+
+/// Clients that play by themselves (the native app's local zone, a browser)
+/// report their plays here; node zones are recorded automatically.
+async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay>) -> ApiResult<History> {
+    let lib = s.library.lock().expect("library poisoned");
+    if lib.get_track(TrackId(req.track_id))?.is_none() {
+        return Err(ApiError::not_found(format!("track {}", req.track_id)));
+    }
+    lib.record_play(TrackId(req.track_id), req.zone.as_deref())?;
+    let plays = lib.history(1)?;
+    Ok(Json(History { plays }))
+}
+
+async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<HomePage> {
+    let limit = p.limit.unwrap_or(12).min(100);
+    let lib = s.library.lock().expect("library poisoned");
+    Ok(Json(HomePage {
+        recently_added: lib.recent_albums(0, limit)?,
+        recently_played: lib.recently_played_albums(limit)?,
+        most_played_albums: lib.most_played_albums(limit)?,
+        most_played: lib.most_played_tracks(limit)?,
+        history: lib.history(limit)?,
+        stats: lib.stats()?,
+    }))
+}
+
 async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool)>> {
     let f = s
         .library
@@ -970,6 +1003,45 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(q[0]["uri"], format!("track:{id}"));
         assert_eq!(q[0]["title"], "one");
+
+        // The play was recorded by the zone event hook; a client can add its own.
+        let mut recorded = false;
+        for _ in 0..200 {
+            let (_, h) = call(&app, "GET", "/v1/library/history", None).await;
+            if !h["plays"].as_array().unwrap().is_empty() {
+                assert_eq!(h["plays"][0]["track"]["id"], id);
+                assert_eq!(h["plays"][0]["zone"], zid);
+                recorded = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(recorded, "node zone play not recorded");
+        let (st, h) = call(
+            &app,
+            "POST",
+            "/v1/library/history",
+            Some(serde_json::json!({"track_id": id, "zone": "local"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{h}");
+        assert_eq!(h["plays"][0]["zone"], "local");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/library/history",
+            Some(serde_json::json!({"track_id": 999_999})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(home["history"].as_array().unwrap().len(), 2);
+        assert_eq!(home["most_played"][0]["plays"], 2);
+        assert_eq!(
+            home["recently_added"].as_array().unwrap().len(),
+            home["stats"]["albums"]
+        );
 
         // Unknown track and unknown zone are 404s.
         let (st, _) = call(

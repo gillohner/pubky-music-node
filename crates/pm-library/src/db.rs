@@ -17,6 +17,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("migrations/0002_music_posts.sql")),
     (3, include_str!("migrations/0003_album_art.sql")),
     (4, include_str!("migrations/0004_settings.sql")),
+    (5, include_str!("migrations/0005_plays.sql")),
 ];
 
 pub struct Library {
@@ -42,6 +43,23 @@ pub struct ArtistSummary {
     pub mbid: Option<Mbid>,
     pub albums: u64,
     pub tracks: u64,
+}
+
+/// One entry of the play history.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlayEntry {
+    pub id: i64,
+    pub track: Track,
+    pub zone: Option<String>,
+    pub played_at: i64,
+}
+
+/// A track with how often it was played.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlayedTrack {
+    pub track: Track,
+    pub plays: u64,
+    pub last_played_at: i64,
 }
 
 /// Where an album's cover lives on disk.
@@ -418,6 +436,116 @@ impl Library {
         v.into_iter().collect()
     }
 
+    /// Record that `track` started playing on `zone`; returns the entry id.
+    pub fn record_play(&self, track: TrackId, zone: Option<&str>) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO plays(track_id, zone, played_at) VALUES (?1, ?2, ?3)",
+            params![track.0, zone, now_unix()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Newest plays first.
+    pub fn history(&self, limit: u32) -> Result<Vec<PlayEntry>> {
+        let conn = self.lock();
+        let sql = format!(
+            "{} JOIN plays p ON p.track_id = t.id ORDER BY p.played_at DESC, p.id DESC LIMIT ?1",
+            track_select_with("p.id, p.zone, p.played_at")
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows: Vec<(RawTrack, i64, Option<String>, i64)> = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok((
+                    row_to_track_raw(r)?,
+                    r.get(TRACK_COLUMNS)?,
+                    r.get(TRACK_COLUMNS + 1)?,
+                    r.get(TRACK_COLUMNS + 2)?,
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        rows.into_iter()
+            .map(|(raw, id, zone, played_at)| {
+                Ok(PlayEntry {
+                    id,
+                    track: finish_track(&conn, raw)?,
+                    zone,
+                    played_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Tracks by play count, most played first.
+    pub fn most_played_tracks(&self, limit: u32) -> Result<Vec<PlayedTrack>> {
+        let conn = self.lock();
+        let sql = format!(
+            "{} JOIN (SELECT track_id, COUNT(*) AS n, MAX(played_at) AS last FROM plays GROUP BY track_id) p
+             ON p.track_id = t.id ORDER BY p.n DESC, p.last DESC LIMIT ?1",
+            track_select_with("p.n, p.last")
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows: Vec<(RawTrack, i64, i64)> = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok((
+                    row_to_track_raw(r)?,
+                    r.get(TRACK_COLUMNS)?,
+                    r.get(TRACK_COLUMNS + 1)?,
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        rows.into_iter()
+            .map(|(raw, n, last)| {
+                Ok(PlayedTrack {
+                    track: finish_track(&conn, raw)?,
+                    plays: n.max(0) as u64,
+                    last_played_at: last,
+                })
+            })
+            .collect()
+    }
+
+    /// Albums whose tracks played most recently, newest first.
+    pub fn recently_played_albums(&self, limit: u32) -> Result<Vec<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+             FROM albums al JOIN (SELECT t.album_id AS album_id, MAX(p.played_at) AS last FROM plays p
+                 JOIN tracks t ON t.id = p.track_id WHERE t.album_id IS NOT NULL GROUP BY t.album_id) r
+             ON r.album_id = al.id ORDER BY r.last DESC LIMIT ?1",
+        )?;
+        let v = stmt
+            .query_map(params![limit as i64], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
+    }
+
+    /// Albums by total plays of their tracks, most played first.
+    pub fn most_played_albums(&self, limit: u32) -> Result<Vec<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+             FROM albums al JOIN (SELECT t.album_id AS album_id, COUNT(*) AS n, MAX(p.played_at) AS last FROM plays p
+                 JOIN tracks t ON t.id = p.track_id WHERE t.album_id IS NOT NULL GROUP BY t.album_id) r
+             ON r.album_id = al.id ORDER BY r.n DESC, r.last DESC LIMIT ?1",
+        )?;
+        let v = stmt
+            .query_map(params![limit as i64], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
+    }
+
+    /// Plays of one track.
+    pub fn play_count(&self, track: TrackId) -> Result<u64> {
+        let conn = self.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM plays WHERE track_id = ?1",
+            params![track.0],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
     pub fn search_albums(&self, query: &str, limit: u32) -> Result<Vec<Album>> {
         let like = format!("%{}%", query.trim());
         let conn = self.lock();
@@ -681,6 +809,14 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     JOIN files fi ON fi.track_id = t.id
     LEFT JOIN albums al ON al.id = t.album_id";
 
+/// Number of columns `TRACK_SELECT` yields (track 14, file 9, album 8).
+const TRACK_COLUMNS: usize = 31;
+
+/// `TRACK_SELECT` with extra columns appended to the select list.
+fn track_select_with(extra: &str) -> String {
+    TRACK_SELECT.replacen("\n    FROM tracks t", &format!(", {extra}\n    FROM tracks t"), 1)
+}
+
 struct RawTrack {
     track: Track,
     strings: RawStrings,
@@ -858,12 +994,12 @@ fn row_to_album(r: &Row<'_>) -> rusqlite::Result<Result<Album>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
 
-    const MB: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+    pub(crate) const MB: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
 
-    fn sample_track(path: &str, title: &str) -> Track {
+    pub(crate) fn sample_track(path: &str, title: &str) -> Track {
         Track {
             id: None,
             title: title.into(),
@@ -906,11 +1042,17 @@ mod tests {
             replaygain_album_gain_db: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{sample_track, MB};
+    use super::*;
 
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 4);
+        assert_eq!(lib.schema_version().unwrap(), 5);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -1026,5 +1168,42 @@ mod tests {
         assert_eq!(fts_query("daft punk"), "\"daft\"* \"punk\"*");
         assert_eq!(fts_query("  \"quoted\" "), "\"quoted\"*");
         assert_eq!(fts_query(""), "");
+    }
+}
+
+#[cfg(test)]
+mod play_history_tests {
+    use super::tests_support::sample_track;
+    use super::*;
+
+    #[test]
+    fn plays_feed_history_and_counts() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
+        let b = lib.upsert_track(&sample_track("/m/b.flac", "B")).unwrap();
+        assert!(lib.history(10).unwrap().is_empty());
+        assert!(lib.recently_played_albums(10).unwrap().is_empty());
+        lib.record_play(a, Some("zone-1")).unwrap();
+        lib.record_play(b, None).unwrap();
+        lib.record_play(a, Some("zone-1")).unwrap();
+        let h = lib.history(10).unwrap();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].track.id, Some(a));
+        assert_eq!(h[0].zone.as_deref(), Some("zone-1"));
+        assert_eq!(h[1].track.id, Some(b));
+        assert_eq!(h[1].zone, None);
+        assert_eq!(lib.history(1).unwrap().len(), 1);
+        let most = lib.most_played_tracks(10).unwrap();
+        assert_eq!(most[0].track.id, Some(a));
+        assert_eq!(most[0].plays, 2);
+        assert_eq!(most[1].plays, 1);
+        assert_eq!(lib.play_count(a).unwrap(), 2);
+        let albums = lib.recently_played_albums(10).unwrap();
+        assert_eq!(albums.len(), 1, "both tracks share one album");
+        assert_eq!(albums[0].title, "Random Access Memories");
+        assert_eq!(lib.most_played_albums(10).unwrap().len(), 1);
+        // Removing the track removes its plays.
+        assert!(lib.remove_track(a).unwrap());
+        assert_eq!(lib.history(10).unwrap().len(), 1);
     }
 }

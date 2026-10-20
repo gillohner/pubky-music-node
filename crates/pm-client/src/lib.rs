@@ -294,6 +294,30 @@ impl NodeClient {
         self.get(&format!("library/tracks/{id}"), &[]).await
     }
 
+    /// Newest plays first, across all zones.
+    pub async fn history(&self, limit: u32) -> Result<Vec<pm_library::PlayEntry>> {
+        Ok(self
+            .get::<History>("library/history", &[("limit", limit.to_string())])
+            .await?
+            .plays)
+    }
+
+    /// Report a play made by this client itself (a local zone).
+    pub async fn record_play(&self, track_id: i64, zone: Option<&str>) -> Result<()> {
+        let req = RecordPlay {
+            track_id,
+            zone: zone.map(str::to_string),
+        };
+        self.send::<History, _>(reqwest::Method::POST, "library/history", Some(&req))
+            .await?;
+        Ok(())
+    }
+
+    /// The Home screen: recently added and played albums, most played, history.
+    pub async fn home(&self, limit: u32) -> Result<HomePage> {
+        self.get("library/home", &[("limit", limit.to_string())]).await
+    }
+
     pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<Track>> {
         Ok(self
             .get::<Tracks>(
