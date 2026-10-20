@@ -2408,7 +2408,7 @@ mod tests {
             .route(
                 "/userCollectionTracks/{uid}/relationships/items",
                 get(|Path(uid): Path<String>| async move {
-                    assert_eq!(uid, "4242");
+                    assert_eq!(uid, "me");
                     Json(serde_json::json!({"data": [{"id": "20115564", "type": "tracks"}]}))
                 }),
             )

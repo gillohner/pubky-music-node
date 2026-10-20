@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 pub const SOURCE_ID: &str = "tidal";
 const USER_KEY: &str = "tidal.user";
+const PLAYBACK_LIMIT_KEY: &str = "tidal.playback_limit";
 /// Scopes requested at sign-in when the config names none. The app must have
 /// every requested scope enabled in the TIDAL developer dashboard, or the
 /// login page fails before showing anything.
@@ -89,6 +90,10 @@ pub struct UserSession {
     pub country: Option<String>,
     #[serde(default)]
     pub scope: String,
+    /// Developer access tier TIDAL stamps into the token (`THIRD_PARTY`, `PARTNER`, …);
+    /// the THIRD_PARTY tier gets 30 s previews instead of full tracks.
+    #[serde(default)]
+    pub access_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,6 +114,12 @@ pub struct TidalStatus {
     /// Scopes the sign-in asks for; every one must be enabled on the developer app.
     #[serde(default)]
     pub requested_scopes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_tier: Option<String>,
+    /// What the last stream manifest said when it was not a full track
+    /// (e.g. `FULL_REQUIRES_HIGHER_ACCESS_TIER`): previews only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_limit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +250,16 @@ fn store_user(s: &NodeState, u: Option<&UserSession>) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The claims of the access token (a JWT): `uid`, `cc` (country), `at` (access tier).
+fn jwt_claims(access_token: &str) -> Value {
+    access_token
+        .split('.')
+        .nth(1)
+        .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
+}
+
 /// The user's id from the token reply, or from the JWT's `uid` claim.
 fn user_id_from(v: &Value, access_token: &str) -> Option<String> {
     if let Some(id) = v["user_id"].as_i64() {
@@ -247,11 +268,7 @@ fn user_id_from(v: &Value, access_token: &str) -> Option<String> {
     if let Some(id) = v["user_id"].as_str() {
         return Some(id.to_string());
     }
-    let payload = access_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let claims = jwt_claims(access_token);
     claims["uid"]
         .as_i64()
         .map(|i| i.to_string())
@@ -263,14 +280,22 @@ fn session_from(v: &Value, previous: Option<&UserSession>) -> Result<UserSession
         .as_str()
         .ok_or_else(|| upstream("no access_token in the token reply"))?
         .to_string();
+    let claims = jwt_claims(&access_token);
     Ok(UserSession {
+        access_tier: claims["at"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| previous.and_then(|p| p.access_tier.clone())),
         user_id: user_id_from(v, &access_token).or_else(|| previous.and_then(|p| p.user_id.clone())),
         refresh_token: v["refresh_token"]
             .as_str()
             .map(str::to_string)
             .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
         expires_at: now_unix() + v["expires_in"].as_i64().unwrap_or(3600),
-        country: previous.and_then(|p| p.country.clone()),
+        country: claims["cc"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| previous.and_then(|p| p.country.clone())),
         scope: v["scope"]
             .as_str()
             .map(str::to_string)
@@ -853,6 +878,14 @@ pub(crate) fn status_view(s: &NodeState) -> TidalStatus {
         expires_at: u.as_ref().map(|u| u.expires_at),
         redirect_uri: redirect_uri(s),
         requested_scopes: creds(s).scopes(),
+        access_tier: u.as_ref().and_then(|u| u.access_tier.clone()),
+        playback_limit: s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(PLAYBACK_LIMIT_KEY)
+            .ok()
+            .flatten(),
     }
 }
 
@@ -1012,16 +1045,17 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
 
 /// `GET /v1/sources/tidal/collection`: the user's favourite tracks and albums.
 pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<TidalCollection> {
-    let uid = user_id_of(&signed_in_user(&s)?)?;
+    signed_in_user(&s)?;
+    // The collection resources take `me` for the signed-in user.
     let track_ids = relationship_ids(
         &s,
-        &format!("/userCollectionTracks/{uid}/relationships/items"),
+        "/userCollectionTracks/me/relationships/items",
         &[("sort", "-addedAt".into())],
     )
     .await?;
     let album_ids = relationship_ids(
         &s,
-        &format!("/userCollectionAlbums/{uid}/relationships/items"),
+        "/userCollectionAlbums/me/relationships/items",
         &[("sort", "-addedAt".into())],
     )
     .await?;
@@ -1033,19 +1067,9 @@ pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<Tid
 /// `POST /v1/sources/tidal/collection/import`: the collection as node
 /// favourites (ISRC where TIDAL has one, else the TIDAL link; ADR 0010).
 pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiResult<ImportReport> {
-    let uid = user_id_of(&signed_in_user(&s)?)?;
-    let track_ids = relationship_ids(
-        &s,
-        &format!("/userCollectionTracks/{uid}/relationships/items"),
-        &[],
-    )
-    .await?;
-    let album_ids = relationship_ids(
-        &s,
-        &format!("/userCollectionAlbums/{uid}/relationships/items"),
-        &[],
-    )
-    .await?;
+    signed_in_user(&s)?;
+    let track_ids = relationship_ids(&s, "/userCollectionTracks/me/relationships/items", &[]).await?;
+    let album_ids = relationship_ids(&s, "/userCollectionAlbums/me/relationships/items", &[]).await?;
     let (_, docs) = track_hits(&s, &track_ids).await?;
     let mut report = ImportReport::default();
     let lib = s.library.lock().expect("library poisoned");
@@ -1305,12 +1329,21 @@ pub(crate) fn open_track_blocking(
             "TIDAL serves this track DRM-protected; bit-perfect playback is not possible".into(),
         ));
     }
-    if m.presentation != "FULL" {
+    let limit = if m.presentation == "FULL" {
+        None
+    } else {
         tracing::warn!(
             track = id,
             reason = ?m.preview_reason,
             "TIDAL serves a preview, not the full track"
         );
+        Some(m.preview_reason.clone().unwrap_or_else(|| m.presentation.clone()))
+    };
+    if let Ok(lib) = library.lock() {
+        let _ = match &limit {
+            Some(r) => lib.set_setting(PLAYBACK_LIMIT_KEY, r),
+            None => lib.delete_setting(PLAYBACK_LIMIT_KEY).map(|_| ()),
+        };
     }
     tracing::info!(track = id, formats = ?m.formats, presentation = %m.presentation, "TIDAL manifest");
     let reader = crate::hls::HlsReader::open(client, &m.uri).map_err(err)?;
