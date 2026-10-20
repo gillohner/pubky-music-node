@@ -48,6 +48,10 @@ C3. Web UI extras: the Zones page (sidebar) must show every zone with transport 
    phone, "Add to Home Screen" installs the UI. In Symfonium (or any Subsonic client with
    jukebox mode), pick the KA17 zone under Settings → Subsonic jukebox and confirm the client's
    jukebox plays through the node.
+C4. TIDAL (needs `[tidal]` credentials in node.toml and the app's redirect URI registered): on the
+   Sources page pick TIDAL, search, open an album, Connect TIDAL and finish the sign-in in the
+   browser. Then play a track to the KA17 zone: report the signal path (FLAC expected; say if it
+   is a preview or refused as DRM), and try Import as favourites and one playlist import.
 D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
    127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96

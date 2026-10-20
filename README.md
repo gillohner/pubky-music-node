@@ -29,7 +29,10 @@ chain (parametric EQ, convolution, crossfeed, ReplayGain, headroom, volume, dith
 when an output needs it). Internet radio by URL with ICY titles, a radio-browser.info directory and
 saved stations, and two account-free streaming sources behind one `StreamingService` interface: the
 Internet Archive's audio collections (live recordings, netlabels, public domain) and Audius
-(independent artists). Subscription services plug in at the same point once accounts and terms exist.
+(independent artists). TIDAL plugs in through its official API: catalogue search and albums with the
+node's developer credentials, one user signed in with OAuth for playback (stream manifests over HLS,
+FLAC where the subscription allows) and for the collection and playlists, which import as favourites
+and Pubky playlists by ISRC. Other subscription services plug in at the same point.
 
 **Outputs.** Local ALSA devices on the node, `pm-endpoint` daemons on other machines (own protocol,
 ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, and any browser.
@@ -53,8 +56,8 @@ Excel export, matching by path, file name, then title and artist, and lists what
 `sidecars/roon-bridge` scrobbles Roon playback and imports Roon playlists through the official
 Extension API (not yet run against a Core).
 
-Not there yet: subscription streaming services (blocked on accounts and API terms; the source
-factory is the plug point, and `docs/STREAMING-PROVIDERS.md` lists what each provider needs), AirPlay 2, a live Pubky transport for remote access (the node publishes
+Not there yet: Qobuz, Deezer, Spotify and Apple Music (`docs/STREAMING-PROVIDERS.md` lists what each
+needs; the TIDAL module is the template), AirPlay 2, a live Pubky transport for remote access (the node publishes
 its address privately on the homeserver instead, ADR 0008). Hardware runs beyond the FiiO KA17 are
 pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 
