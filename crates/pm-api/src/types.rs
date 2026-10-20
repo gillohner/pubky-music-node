@@ -87,6 +87,15 @@ pub struct SetVolume {
     pub volume: Volume,
 }
 
+/// Move playback from one zone to another (Roon's "Transfer"): the queue,
+/// current item and position, repeat and radio go with it; the source stops
+/// and empties.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferRequest {
+    /// Target zone id.
+    pub to: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRadio {
     pub on: bool,

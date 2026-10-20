@@ -85,6 +85,10 @@ pub enum Cmd {
     },
     ClearQueue(String),
     ShuffleQueue(String),
+    Transfer {
+        zone: String,
+        to: String,
+    },
     /// Save a queue as a playlist: a node zone's queue, or the local
     /// player's queue given as URIs.
     SaveQueueAsPlaylist {
@@ -506,6 +510,14 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::ClearQueue(z) => {
             c.clear_queue(&z).await?;
             out.send(Msg::Queue(z, vec![]));
+        }
+        Cmd::Transfer { zone, to } => {
+            let st = c.transfer(&zone, &to).await?;
+            out.send(Msg::Notice(format!("moved playback to {}", st.name)));
+            out.send(Msg::Zone(Box::new(st)));
+            let q = c.queue(&zone).await?;
+            out.send(Msg::Queue(zone, q));
+            out.send(Msg::Zones(c.zones().await?));
         }
         Cmd::ShuffleQueue(z) => {
             c.shuffle_queue(&z).await?;

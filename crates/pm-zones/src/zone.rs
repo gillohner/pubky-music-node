@@ -308,6 +308,24 @@ impl Zone {
         self.output.set_volume(v).await
     }
 
+    /// Wait until every command sent so far was handled, whatever the
+    /// transport ended up as; returns the state published after that.
+    pub async fn wait_acked(&self) -> ZoneState {
+        let want = self.seq.load(Ordering::SeqCst);
+        let mut rx = self.state.clone();
+        loop {
+            {
+                let s = rx.borrow_and_update();
+                if s.acked >= want {
+                    return s.clone();
+                }
+            }
+            if rx.changed().await.is_err() {
+                return self.state();
+            }
+        }
+    }
+
     /// Wait until every command sent so far was handled and the zone is
     /// stopped (end of queue, explicit stop, or error).
     pub async fn wait_stopped(&self) -> ZoneState {

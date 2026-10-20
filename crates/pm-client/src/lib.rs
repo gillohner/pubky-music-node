@@ -286,6 +286,16 @@ impl NodeClient {
     }
 
     /// Keep the zone playing with similar library tracks after the last item.
+    /// Move playback (queue, position, repeat, radio) from `zone` to `to`.
+    pub async fn transfer(&self, zone: &str, to: &str) -> Result<ZoneState> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("zones/{zone}/transfer"),
+            Some(&TransferRequest { to: to.to_string() }),
+        )
+        .await
+    }
+
     /// Shuffle the upcoming queue items; the playing one stays.
     pub async fn shuffle_queue(&self, zone: &str) -> Result<()> {
         self.send::<(), ()>(reqwest::Method::POST, &format!("zones/{zone}/shuffle"), None)

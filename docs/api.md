@@ -24,6 +24,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
 | POST | `/v1/zones/{id}/volume` | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
+| POST | `/v1/zones/{id}/transfer` | `{to}` | the target's `ZoneState`; moves the queue, the playing item and its position, repeat and radio to zone `to` (paused stays paused); the source ends up stopped and empty; 400 for an empty queue or the same zone |
 | POST | `/v1/zones/{id}/shuffle` | | 204; shuffles the items after the current one (all items when nothing plays) |
 | PUT | `/v1/zones/{id}/radio` | `{on}` | library radio: when the queue ends (repeat off), the node appends up to 10 tracks similar to the last one (same genres, then same artists, then anything) and keeps playing; the flag is in `ZoneState.radio` and survives restarts |
 | PUT | `/v1/zones/{id}/repeat` | `{repeat: off\|all\|one}` | 204 |

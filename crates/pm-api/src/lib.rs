@@ -109,6 +109,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/shuffle", post(shuffle_queue))
+        .route("/zones/{id}/transfer", post(transfer))
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
@@ -550,6 +551,69 @@ async fn shuffle_queue(
 ) -> Result<StatusCode, ApiError> {
     zone_of(&s, &id)?.shuffle_upcoming();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Move the queue and playback position to another zone. The target stops
+/// whatever it was doing; the source is left stopped and empty.
+async fn transfer(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<TransferRequest>,
+) -> ApiResult<ZoneState> {
+    if body.to == id {
+        return Err(ApiError::bad_request("cannot transfer a zone to itself"));
+    }
+    let from = zone_of(&s, &id)?;
+    let to = zone_of(&s, &body.to)?;
+    let st = from.state();
+    if st.queue.is_empty() {
+        return Err(ApiError::bad_request("nothing to transfer: the queue is empty"));
+    }
+    let index = st
+        .now_playing
+        .as_ref()
+        .map(|n| n.index)
+        .or(st.queue_index)
+        .filter(|i| *i < st.queue.len());
+    let position_ms = st.now_playing.as_ref().map(|n| n.position_ms).unwrap_or(0);
+    from.stop();
+    from.clear();
+    to.stop();
+    to.clear();
+    to.set_repeat(st.repeat);
+    to.set_radio(st.radio);
+    let mut events = to.subscribe();
+    to.enqueue(st.queue, Insert::End);
+    if let (Some(i), true) = (index, st.transport != pm_zones::Transport::Stopped) {
+        to.play_index(i);
+        // Seeking needs the track open; wait for it (bounded) before resuming where it was.
+        let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
+                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if started {
+            if position_ms > 1_000 {
+                to.seek_ms(position_ms);
+            }
+            if st.transport == pm_zones::Transport::Paused {
+                to.pause();
+            }
+        }
+    }
+    let settle = std::time::Duration::from_secs(5);
+    let _ = tokio::time::timeout(settle, from.wait_acked()).await;
+    Ok(Json(
+        tokio::time::timeout(settle, to.wait_acked())
+            .await
+            .unwrap_or_else(|_| to.state()),
+    ))
 }
 
 // ---- handlers: DSP per zone ----
@@ -1782,6 +1846,100 @@ mod tests {
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
         let (_, pls) = call(&app, "GET", "/v1/playlists", None).await;
         assert_eq!(pls.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn playback_transfers_between_zones() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("long.wav");
+        write_wav(&wav, 44_100 * 30);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let out = Arc::new(pm_zones::outputs::WavFileOutput::new(dir.path().join("sink.wav")));
+        s.outputs.register(out.clone());
+        let target = s.create_zone("Target", out);
+        let tid = target.id().to_string();
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|z| z["id"].as_str().unwrap().to_string())
+            .find(|z| *z != tid)
+            .unwrap();
+        let items: Vec<_> = (0..3)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "all"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": 1})),
+        )
+        .await;
+        let source = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        for _ in 0..500 {
+            if source.state().now_playing.as_ref().map(|n| n.index) == Some(1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // The null output does not pace, so pause right away to hold a position.
+        source.pause();
+        for _ in 0..500 {
+            if source.state().transport == pm_zones::Transport::Paused {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transfer"),
+            Some(serde_json::json!({"to": zid})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transfer"),
+            Some(serde_json::json!({"to": tid})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["id"], tid);
+        assert_eq!(z["queue"].as_array().unwrap().len(), 3);
+        assert_eq!(z["queue"][1]["title"], "t1");
+        assert_eq!(z["repeat"], "all");
+        assert_eq!(z["now_playing"]["index"], 1);
+        assert_eq!(z["transport"], "paused");
+        let src = source.state();
+        assert!(src.queue.is_empty());
+        assert_eq!(src.transport, pm_zones::Transport::Stopped);
+        // Nothing left to move.
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transfer"),
+            Some(serde_json::json!({"to": tid})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

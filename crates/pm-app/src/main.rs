@@ -2500,6 +2500,28 @@ impl App {
                     self.backend.send(Cmd::ShuffleQueue(self.settings.zone.clone()));
                 }
             }
+            if !self.is_local() && !items.is_empty() && self.zones.len() > 1 {
+                let here = self.settings.zone.clone();
+                let others: Vec<(String, String)> = self
+                    .zones
+                    .iter()
+                    .filter(|(id, _)| **id != here)
+                    .map(|(id, z)| (id.clone(), z.name.clone()))
+                    .collect();
+                ui.menu_button("Transfer to…", |ui| {
+                    for (id, name) in others {
+                        if ui.button(name).clicked() {
+                            self.backend.send(Cmd::Transfer {
+                                zone: here.clone(),
+                                to: id.clone(),
+                            });
+                            self.settings.zone = id;
+                            self.refresh_queue();
+                            ui.close();
+                        }
+                    }
+                });
+            }
             if ui
                 .add_enabled(!items.is_empty(), egui::Button::new("Save as playlist"))
                 .on_hover_text("A new private playlist from this queue")
