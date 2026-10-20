@@ -560,6 +560,28 @@ pub struct ArtistDetail {
     pub albums: Vec<Album>,
 }
 
+/// What open sources know about an artist (see `artist_info`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ArtistInfo {
+    /// Opening paragraph of the English Wikipedia article.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+    /// A portrait is cached; fetch it from `/v1/library/artists/{id}/image`.
+    #[serde(default)]
+    pub image: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wikipedia: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wikidata: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    /// Why there is nothing (no id, lookup running, nothing found).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenreDetail {
     pub genre: pm_library::GenreSummary,

@@ -391,6 +391,16 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .card.genre { border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform 0.15s var(--ease), border-color 0.15s var(--ease); }
 .card.genre:hover { transform: translateY(-2px); border-color: var(--line-strong); }
 
+/* ---- artist hero ---- */
+.artist-hero { display: flex; gap: 24px; align-items: flex-start; margin-bottom: 8px; }
+.artist-hero .grow { flex: 1; min-width: 0; }
+.portrait { width: 140px; height: 140px; border-radius: 50%; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 40px; color: rgba(255,255,255,0.85); box-shadow: var(--shadow); }
+.portrait img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.bio { color: var(--fg-2); max-width: 72ch; margin-top: 12px; line-height: 1.55; }
+.artist-hero a { color: var(--fg-2); }
+.artist-hero a:hover { color: var(--accent-strong); }
+@media (max-width: 720px) { .artist-hero { flex-direction: column; } .portrait { width: 110px; height: 110px; } }
+
 /* ---- reviews ---- */
 .reviewrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
 .stars { display: inline-flex; gap: 2px; }

@@ -349,6 +349,29 @@ impl NodeClient {
         self.get(&format!("library/artists/{id}"), &[]).await
     }
 
+    pub async fn artist_info(&self, id: i64) -> Result<ArtistInfo> {
+        self.get(&format!("library/artists/{id}/info"), &[]).await
+    }
+
+    /// The cached portrait, `None` when there is none.
+    pub async fn artist_image(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let resp = self
+            .authed(self.http.get(self.url(&format!("library/artists/{id}/image"))))
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ClientError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(Some(resp.bytes().await?.to_vec()))
+    }
+
     pub async fn artist_tracks(&self, id: i64) -> Result<Vec<Track>> {
         Ok(self
             .get::<Tracks>(&format!("library/artists/{id}/tracks"), &[])

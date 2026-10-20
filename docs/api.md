@@ -32,6 +32,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
+| GET | `/v1/library/artists/{id}/info` | | `{bio?, image, wikipedia?, wikidata?, musicbrainz?, homepage?, note?}` from MusicBrainz → Wikidata → Wikipedia by the artist's MBID, fetched once and cached for 30 days (misses 7) |
+| GET | `/v1/library/artists/{id}/image` | | the cached portrait (Wikimedia Commons); 404 when none |
 | GET | `/v1/library/genres` | | `[{id, name, tracks, albums}]` from the files' genre tags (several per track when the tag lists several) |
 | GET | `/v1/library/genres/{id}` | | `{genre, albums, tracks}` |
 | GET | `/v1/library/albums` | `?after=&limit=` | `Album[]` |

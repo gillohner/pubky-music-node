@@ -130,6 +130,7 @@ struct App {
     artists: Vec<pm_library::ArtistSummary>,
     genres: Vec<pm_library::GenreSummary>,
     genre_details: HashMap<i64, pm_api::types::GenreDetail>,
+    artist_infos: HashMap<i64, (pm_api::types::ArtistInfo, Option<egui::TextureHandle>)>,
     artist_details: HashMap<i64, ArtistDetail>,
     discover_kind: DiscoverKind,
     discover: Option<(DiscoverKind, DiscoverPage)>,
@@ -206,6 +207,7 @@ impl App {
             artists: Vec::new(),
             genres: Vec::new(),
             genre_details: HashMap::new(),
+            artist_infos: HashMap::new(),
             artist_details: HashMap::new(),
             discover_kind: DiscoverKind::Trends,
             discover: None,
@@ -326,6 +328,17 @@ impl App {
                 }
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
+                Msg::ArtistInfo(id, info, img) => {
+                    let tex = img.map(|(w, h, rgba)| {
+                        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                        self.cover_ctx.load_texture(
+                            format!("artist-{id}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    self.artist_infos.insert(id, (*info, tex));
+                }
                 Msg::Genre(d) => {
                     self.remember_tracks(d.tracks.iter());
                     self.genre_details.insert(d.genre.id, *d);
@@ -351,6 +364,9 @@ impl App {
                     if d.artist.mbid.is_some() {
                         self.backend
                             .send(Cmd::LoadTags(FavouriteRef::artist(d.artist.id)));
+                    }
+                    if !self.artist_infos.contains_key(&d.artist.id) {
+                        self.backend.send(Cmd::LoadArtistInfo(d.artist.id));
                     }
                     self.artist_details.insert(d.artist.id, *d);
                 }
@@ -1725,15 +1741,70 @@ impl App {
             return;
         };
         ui.add_space(6.0);
+        let info = self.artist_infos.get(&id).cloned();
         ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new(&d.artist.name).size(26.0).strong());
-            self.heart(
-                ui,
-                d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),
-                FavouriteRef::artist(id),
-            );
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 120.0), egui::Sense::hover());
+            match info.as_ref().and_then(|(_, t)| t.clone()) {
+                Some(t) => {
+                    let img = egui::Image::from_texture(egui::load::SizedTexture::new(t.id(), rect.size()))
+                        .corner_radius(egui::CornerRadius::same(60));
+                    ui.put(rect, img);
+                }
+                None => {
+                    ui.painter().circle_filled(rect.center(), 60.0, theme::SURFACE_3);
+                    let initials: String = d
+                        .artist
+                        .name
+                        .split_whitespace()
+                        .filter_map(|w| w.chars().next())
+                        .take(2)
+                        .collect::<String>()
+                        .to_uppercase();
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        initials,
+                        egui::FontId::proportional(36.0),
+                        theme::FG_2,
+                    );
+                }
+            }
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.add_space(14.0);
+                theme::eyebrow(ui, "Artist");
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new(&d.artist.name).size(28.0).strong());
+                    self.heart(
+                        ui,
+                        d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),
+                        FavouriteRef::artist(id),
+                    );
+                });
+                ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
+                if let Some((i, _)) = info.as_ref() {
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, url) in [
+                            ("Wikipedia", &i.wikipedia),
+                            ("MusicBrainz", &i.musicbrainz),
+                            ("Homepage", &i.homepage),
+                        ] {
+                            if let Some(u) = url {
+                                ui.hyperlink_to(label, u);
+                            }
+                        }
+                    });
+                }
+            });
         });
-        ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
+        if let Some((i, _)) = info.as_ref() {
+            if let Some(bio) = &i.bio {
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(egui::RichText::new(bio).color(theme::FG_2)).wrap());
+            } else if let Some(n) = &i.note {
+                ui.small(egui::RichText::new(n).weak());
+            }
+        }
         self.tag_row(
             ui,
             d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),

@@ -44,6 +44,10 @@ fn write_wav(path: &std::path::Path, title: &str, mbid: Option<&str>) {
             description: "MusicBrainz Album Id".into(),
             value: MB2.into(),
         });
+        t.add_frame(id3::frame::ExtendedText {
+            description: "MusicBrainz Artist Id".into(),
+            value: MB.into(),
+        });
         t.add_frame(id3::frame::Picture {
             mime_type: "image/png".into(),
             picture_type: id3::frame::PictureType::CoverFront,
@@ -754,4 +758,141 @@ async fn covers_fall_back_to_the_cover_art_archive() {
     let art = s.library.lock().unwrap().album_art(id).unwrap().unwrap();
     assert_eq!(art.source, "coverartarchive");
     assert!(art.file.starts_with(dir.path().join("art")));
+}
+
+/// Artist pages pull a portrait and a biography through MusicBrainz →
+/// Wikidata → Wikipedia (all mocked here), once, then from the cache.
+#[tokio::test]
+async fn artist_info_comes_from_open_sources_and_is_cached() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = hits.clone();
+    let count = move || {
+        h.fetch_add(1, Ordering::SeqCst);
+    };
+    let (c1, c2, c3, c4) = (count.clone(), count.clone(), count.clone(), count.clone());
+    let mock = axum::Router::new()
+        .route(
+            "/ws/2/artist/{mbid}",
+            axum::routing::get(move || {
+                c1();
+                async {
+                    axum::Json(serde_json::json!({"relations": [
+                        {"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q1"}},
+                        {"type": "official homepage", "url": {"resource": "https://daftpunk.example"}}]}))
+                }
+            }),
+        )
+        .route(
+            "/wiki/Special:EntityData/{q}",
+            axum::routing::get(move || {
+                c2();
+                async {
+                    axum::Json(serde_json::json!({"entities": {"Q1": {
+                        "claims": {"P18": [{"mainsnak": {"datavalue": {"value": "Daft Punk 2013.jpg"}}}]},
+                        "sitelinks": {"enwiki": {"title": "Daft Punk"}}}}}))
+                }
+            }),
+        )
+        .route(
+            "/api/rest_v1/page/summary/{title}",
+            axum::routing::get(move || {
+                c3();
+                async {
+                    axum::Json(
+                        serde_json::json!({"extract": "Daft Punk were a French electronic music duo.",
+                        "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/Daft_Punk"}}}),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/wiki/Special:FilePath/{file}",
+            axum::routing::get(move || {
+                c4();
+                async { ([("content-type", "image/jpeg")], b"\xFF\xD8fake-jpeg".to_vec()) }
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("a.wav"), "Get Lucky", Some(MB));
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    {
+        let base = format!("http://127.0.0.1:{port}");
+        let mut b = s.info_bases.write().unwrap();
+        b.musicbrainz = base.clone();
+        b.wikidata = base.clone();
+        b.wikipedia = base.clone();
+        b.commons = base;
+    }
+    let app = router(s.clone());
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, artists) = call(&app, "GET", "/v1/library/artists", None).await;
+    let artist = artists
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "Tester")
+        .unwrap();
+    assert_eq!(artist["mbid"], MB);
+    let id = artist["id"].as_i64().unwrap();
+    for _ in 0..2 {
+        let (st, info) = call(&app, "GET", &format!("/v1/library/artists/{id}/info"), None).await;
+        assert_eq!(st, StatusCode::OK, "{info}");
+        assert_eq!(info["bio"], "Daft Punk were a French electronic music duo.");
+        assert_eq!(info["image"], true);
+        assert_eq!(info["homepage"], "https://daftpunk.example");
+        assert_eq!(info["wikipedia"], "https://en.wikipedia.org/wiki/Daft_Punk");
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        4,
+        "four upstream calls, then the cache"
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/library/artists/{id}/image"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    let (st, _) = call(&app, "GET", "/v1/library/artists/999/info", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

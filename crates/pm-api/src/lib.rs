@@ -11,6 +11,7 @@
 
 pub mod activity;
 pub mod art;
+pub mod artist_info;
 pub mod discover;
 pub mod favourites;
 pub mod files;
@@ -111,6 +112,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
+        .route("/library/artists/{id}/info", get(artist_info_handler))
+        .route("/library/artists/{id}/image", get(artist_image))
         .route("/library/genres", get(genres))
         .route("/library/genres/{id}", get(genre))
         .route("/library/albums", get(albums))
@@ -668,6 +671,47 @@ async fn artist(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
         .ok_or_else(|| ApiError::not_found(format!("no artist {id}")))?;
     let albums = lib.artist_albums(id)?;
     Ok(Json(ArtistDetail { artist, albums }))
+}
+
+/// Biography, links and whether a portrait is cached (fetched on first request).
+async fn artist_info_handler(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<ArtistInfo> {
+    if s.library
+        .lock()
+        .expect("library poisoned")
+        .get_artist(id)?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!("no artist {id}")));
+    }
+    Ok(Json(artist_info::artist_info(&s, id).await?))
+}
+
+async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let path = artist_info::image_path(&s, id);
+    if !path.is_file() {
+        // The first request may have to fetch it.
+        let info = artist_info::artist_info(&s, id).await?;
+        if !info.image {
+            return Err(ApiError::not_found(format!("no portrait for artist {id}")));
+        }
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))?;
+    let mime = match bytes.get(..4) {
+        Some([0x89, b'P', b'N', b'G']) => "image/png",
+        Some([b'R', b'I', b'F', b'F']) => "image/webp",
+        Some([b'G', b'I', b'F', _]) => "image/gif",
+        _ => "image/jpeg",
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
