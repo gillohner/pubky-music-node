@@ -63,6 +63,95 @@ pub fn discover(timeout: Duration) -> Result<Vec<Renderer>, UpnpError> {
     Ok(out)
 }
 
+/// One SSDP answer, for diagnostics: who answered, what it claims to be,
+/// and what its description says when it can be fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsdpAnswer {
+    pub from: String,
+    pub location: String,
+    pub server: Option<String>,
+    pub st: Option<String>,
+    pub usn: Option<String>,
+    /// Friendly name from the description, when it could be fetched.
+    pub friendly_name: Option<String>,
+    /// Whether the description is a renderer with an AVTransport service.
+    pub renderer: bool,
+}
+
+/// Ask every UPnP device on the network (`ssdp:all`) and describe what
+/// answers: shows whether multicast works at all, which devices exist,
+/// and which of them are renderers the node can use.
+pub fn ssdp_probe(timeout: Duration) -> Result<Vec<SsdpAnswer>, UpnpError> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+    let mx = timeout.as_secs().clamp(1, 5);
+    let msg = format!(
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: ssdp:all\r\n\r\n"
+    );
+    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
+    for _ in 0..2 {
+        socket.send_to(msg.as_bytes(), dest)?;
+    }
+    let deadline = Instant::now() + timeout;
+    let mut found: Vec<SsdpAnswer> = Vec::new();
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buf) {
+            Ok((n, from)) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                let Some(location) = header(&text, "LOCATION") else {
+                    continue;
+                };
+                if found.iter().any(|a| a.location.eq_ignore_ascii_case(&location)) {
+                    continue;
+                }
+                found.push(SsdpAnswer {
+                    from: from.to_string(),
+                    location,
+                    server: header(&text, "SERVER"),
+                    st: header(&text, "ST"),
+                    usn: header(&text, "USN"),
+                    friendly_name: None,
+                    renderer: false,
+                });
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    for a in &mut found {
+        match describe(&a.location) {
+            Ok(Some(r)) => {
+                a.friendly_name = Some(r.friendly_name);
+                a.renderer = true;
+            }
+            Ok(None) => a.friendly_name = friendly_name_of(&a.location),
+            Err(_) => {}
+        }
+    }
+    Ok(found)
+}
+
+/// The `friendlyName` of any device description (not only renderers).
+fn friendly_name_of(location: &str) -> Option<String> {
+    let text = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?
+        .get(location)
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+    let start = text.find("<friendlyName>")? + "<friendlyName>".len();
+    let end = text[start..].find("</friendlyName>")? + start;
+    Some(text[start..end].trim().to_string())
+}
+
 /// Raw SSDP: the LOCATION headers of every MediaRenderer that answers.
 pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;

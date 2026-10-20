@@ -12,6 +12,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT | `/v1/node/settings` (`jukebox_zone` picks the zone Subsonic jukebox calls drive; empty clears it) | PUT: `{contact}` | `{contact, discovery}`; the contact (email or URL, never a code-host link) is saved in the library and turns Pinakes/Nexus discovery on without a restart; 400 when invalid |
 | GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning` |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
+| GET | `/v1/outputs/discovery` | | `{upnp: [{from, location, server?, friendly_name?, renderer, output}], cast: [{id, friendly_name, addr}], public_url, local_address?, notes, upnp_enabled, cast_enabled}`: a 3 s network scan with plain-language findings (no multicast answers, unusable public URL, devices that are not renderers) |
 | POST | `/v1/outputs/rescan` | | discover again (local devices, endpoints); new outputs get zones; returns the list |
 | POST | `/v1/outputs/pull` | `{name}` | (UPnP/OpenHome renderers found by SSDP and Cast devices found by mDNS get one of these automatically (`upnp-<udn>`, `cast-<id>`) and appear as outputs `upnp:<udn>` / `cast:<id>` with zones; `[outputs] upnp`, `[outputs] cast`, `[api] public_url`) |
 | POST | `/v1/outputs/pull` | `{name}` | a pull output and its zone `Stream <name>`; renderers, browsers or scripts fetch `GET /v1/outputs/pull/{name}/stream.wav` (live WAV of the zone's post-DSP output; the listener paces the zone; 408 when nothing plays) |

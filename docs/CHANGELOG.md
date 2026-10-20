@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- Settings → Outputs gained **Scan the network** (`GET /v1/outputs/discovery`): every UPnP device that answers `ssdp:all`, whether it is a MediaRenderer, Cast devices, and plain-language findings when nothing answers (Docker bridge: use host networking), when a device is not a renderer (OpenHome-only Linn), or when `public_url` points at 0.0.0.0/localhost.
 - Release builds of the native controller, node and endpoint for Linux, Windows and macOS; the
   Windows and macOS controllers play locally through CoreAudio / WASAPI (shared mode, `cpal`).
 - TrueNAS SCALE: a ready compose file (`deploy/truenas/`) and deployment notes.

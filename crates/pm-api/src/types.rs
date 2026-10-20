@@ -458,6 +458,44 @@ pub struct PlaylistDetail {
     pub tracks: Vec<Option<Track>>,
 }
 
+/// What a network scan found, to explain why a device is (not) an output.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoveryReport {
+    /// Every UPnP device that answered SSDP, renderer or not.
+    pub upnp: Vec<DiscoveredUpnp>,
+    /// Chromecast / Google Cast devices seen over mDNS.
+    pub cast: Vec<DiscoveredCast>,
+    /// The address devices would fetch audio from (`public_url`).
+    pub public_url: String,
+    /// The node's own route-facing address, as a hint for `public_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_address: Option<String>,
+    /// Plain-language findings (no answers at all, public URL unusable, …).
+    pub notes: Vec<String>,
+    pub upnp_enabled: bool,
+    pub cast_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredUpnp {
+    pub from: String,
+    pub location: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    pub renderer: bool,
+    /// Already an output of this node.
+    pub output: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredCast {
+    pub id: String,
+    pub friendly_name: String,
+    pub addr: String,
+}
+
 /// A release group MusicBrainz lists for one of the library's artists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewRelease {

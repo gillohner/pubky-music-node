@@ -98,6 +98,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/outputs", get(outputs))
         .route("/outputs/rescan", post(rescan_outputs))
+        .route("/outputs/discovery", get(discovery_report))
         .route("/outputs/pull", post(create_pull))
         .route("/outputs/pull/{name}/stream.wav", get(pull_stream))
         .route("/zones", get(zones).post(create_zone))
@@ -395,6 +396,83 @@ async fn pull_stream(
 
 /// Discover outputs again (local devices, endpoints over mDNS and configured
 /// addresses); new ones get a zone. Returns the full list.
+/// `GET /v1/outputs/discovery`: scan the network and explain what was found,
+/// for setups where a renderer does not show up (Docker bridge, VLANs).
+async fn discovery_report(State(s): State<Arc<NodeState>>) -> ApiResult<DiscoveryReport> {
+    let st = s.clone();
+    let (upnp, cast) = tokio::task::spawn_blocking(move || {
+        let upnp = if st.upnp {
+            pm_out_upnp::ssdp_probe(std::time::Duration::from_secs(3)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cast = if st.cast {
+            pm_out_cast::discover(std::time::Duration::from_millis(1500))
+        } else {
+            Vec::new()
+        };
+        (upnp, cast)
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let outputs = s.outputs.list();
+    let have = |loc: &str| {
+        outputs
+            .iter()
+            .any(|o| o.id.0.contains(loc) || o.name.contains(loc))
+    };
+    let local_address = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|u| u.connect("1.1.1.1:80").map(|_| u))
+        .and_then(|u| u.local_addr())
+        .ok()
+        .map(|a| a.ip().to_string());
+    let mut notes = Vec::new();
+    if !s.upnp && !s.cast {
+        notes.push("UPnP and Cast discovery are both off in the node config.".into());
+    }
+    if s.upnp && upnp.is_empty() {
+        notes.push("No UPnP device answered at all: multicast is not reaching this node. In Docker, run the container on the host network; on a VLAN, SSDP must be relayed.".into());
+    } else if s.upnp && !upnp.iter().any(|a| a.renderer) {
+        notes.push("Devices answered, but none describes itself as a MediaRenderer with AVTransport. OpenHome-only players (some Linn models) need the UPnP AV service enabled, or are reached through another renderer front-end.".into());
+    }
+    if s.public_url.contains("0.0.0.0")
+        || s.public_url.contains("127.0.0.1")
+        || s.public_url.contains("localhost")
+    {
+        notes.push(format!(
+            "public_url is {}, which renderers cannot reach; set [api] public_url (PM_PUBLIC_URL) to http://{}:7788.",
+            s.public_url,
+            local_address.as_deref().unwrap_or("<node ip>")
+        ));
+    }
+    Ok(Json(DiscoveryReport {
+        upnp: upnp
+            .into_iter()
+            .map(|a| DiscoveredUpnp {
+                output: have(&a.location),
+                from: a.from,
+                location: a.location,
+                server: a.server,
+                friendly_name: a.friendly_name,
+                renderer: a.renderer,
+            })
+            .collect(),
+        cast: cast
+            .into_iter()
+            .map(|d| DiscoveredCast {
+                id: d.id,
+                friendly_name: d.friendly_name,
+                addr: d.addr.to_string(),
+            })
+            .collect(),
+        public_url: s.public_url.clone(),
+        local_address,
+        notes,
+        upnp_enabled: s.upnp,
+        cast_enabled: s.cast,
+    }))
+}
+
 async fn rescan_outputs(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<OutputInfo>> {
     let st = s.clone();
     let new = tokio::task::spawn_blocking(move || st.rescan_outputs())
@@ -2337,6 +2415,26 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_discovery_report_explains_an_empty_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s);
+        let (st, v) = call(&app, "GET", "/v1/outputs/discovery", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["upnp_enabled"], false);
+        assert_eq!(v["upnp"].as_array().unwrap().len(), 0);
+        assert_eq!(v["public_url"], "http://127.0.0.1:7788");
+        let notes: Vec<String> = serde_json::from_value(v["notes"].clone()).unwrap();
+        assert!(notes.iter().any(|n| n.contains("both off")), "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("public_url is http://127.0.0.1:7788")),
+            "{notes:?}"
+        );
     }
 
     #[tokio::test]
