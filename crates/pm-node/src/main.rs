@@ -230,6 +230,19 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                     tracing::info!(user = %sync.z32(), "Pubky session restored");
                     let sync = std::sync::Arc::new(sync);
                     state.set_sync(Some(sync.clone()));
+                    // Republish the node record: the address, token or version may
+                    // have changed since the sign-in that first wrote it (ADR 0008).
+                    if let Err(e) = sync
+                        .publish_node(
+                            &state.name,
+                            &state.public_url,
+                            state.token.as_deref(),
+                            &state.version,
+                        )
+                        .await
+                    {
+                        tracing::warn!("publishing the node record failed: {e}");
+                    }
                     match sync.sync(&state.library).await {
                         Ok(r) => tracing::info!(
                             pushed = r.pushed,
