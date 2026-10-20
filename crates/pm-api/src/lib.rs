@@ -180,6 +180,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/login", get(tidal::login))
         .route("/sources/tidal/status", get(tidal::status))
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
+        .route("/sources/tidal/collection", get(tidal::collection))
+        .route("/sources/tidal/collection/import", post(tidal::import_collection))
+        .route("/sources/tidal/playlists", get(tidal::playlists))
+        .route(
+            "/sources/tidal/playlists/{id}/import",
+            post(tidal::import_playlist),
+        )
         .route("/radio/search", get(radio::search))
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
@@ -2397,7 +2404,40 @@ mod tests {
             .route("/albums", get({ let (album, artist, art) = (album.clone(), artist.clone(), art.clone()); move || async move { Json(serde_json::json!({"data": [album], "included": [artist, art]})) } }))
             .route("/albums/{id}", get({ let (album, artist, art, t1, t2) = (album.clone(), artist.clone(), art.clone(), t1.clone(), t2.clone()); move || async move { Json(serde_json::json!({"data": album, "included": [artist, art, t1, t2]})) } }))
             .route("/tracks", get({ let (t1, artist, album) = (t1.clone(), artist.clone(), album.clone()); move || async move { Json(serde_json::json!({"data": [t1], "included": [artist, album]})) } }))
-            .route("/tracks/{id}", get({ let (t1, artist, album, art) = (t1.clone(), artist.clone(), album.clone(), art.clone()); move || async move { Json(serde_json::json!({"data": t1, "included": [artist, album, art]})) } }));
+            .route("/tracks/{id}", get({ let (t1, artist, album, art) = (t1.clone(), artist.clone(), album.clone(), art.clone()); move || async move { Json(serde_json::json!({"data": t1, "included": [artist, album, art]})) } }))
+            .route(
+                "/userCollectionTracks/{uid}/relationships/items",
+                get(|Path(uid): Path<String>| async move {
+                    assert_eq!(uid, "4242");
+                    Json(serde_json::json!({"data": [{"id": "20115564", "type": "tracks"}]}))
+                }),
+            )
+            .route(
+                "/userCollectionAlbums/{uid}/relationships/items",
+                get(|| async { Json(serde_json::json!({"data": [{"id": "20115556", "type": "albums"}]})) }),
+            )
+            .route(
+                "/playlists",
+                get(|RawQuery(q): RawQuery| async move {
+                    assert!(q.unwrap_or_default().contains("owners.id%5D=4242"), "owner filter");
+                    Json(serde_json::json!({"data": [{"id": "pl-1", "type": "playlists", "attributes": {"name": "Road trip", "description": "", "numberOfTrackItems": 2}}]}))
+                }),
+            )
+            .route(
+                "/playlists/{id}",
+                get(|| async { Json(serde_json::json!({"data": {"id": "pl-1", "type": "playlists", "attributes": {"name": "Road trip"}}})) }),
+            )
+            .route(
+                "/playlists/{id}/relationships/items",
+                get({
+                    let (t1, t2) = (t1.clone(), t2.clone());
+                    move || async move {
+                        let mut t2 = t2.clone();
+                        t2["attributes"]["isrc"] = serde_json::Value::Null;
+                        Json(serde_json::json!({"data": [{"id": "20115564", "type": "tracks"}, {"id": "20115557", "type": "tracks"}, {"id": "v1", "type": "videos"}], "included": [t1, t2]}))
+                    }
+                }),
+            );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
 
         let dir = tempfile::tempdir().unwrap();
@@ -2488,6 +2528,46 @@ mod tests {
             .find(|x| x["id"] == "tidal")
             .unwrap();
         assert_eq!(tidal["status"], "ready");
+        // Signed in: the collection lists, and imports land as favourites and a Pubky playlist.
+        let (st, c) = call(&app, "GET", "/v1/sources/tidal/collection", None).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        assert_eq!(c["tracks"][0]["title"], "Get Lucky");
+        assert_eq!(c["albums"][0]["creator"], "Daft Punk");
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/collection/import", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["imported"], 2);
+        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        let uris: Vec<&str> = favs["uris"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|u| u.as_str())
+            .collect();
+        assert!(
+            uris.contains(&"https://musicbrainz.org/isrc/USQX91300108"),
+            "{uris:?}"
+        );
+        assert!(
+            uris.iter().any(|u| u.contains("tidal.com/album/20115556")),
+            "{uris:?}"
+        );
+        let (st, pls) = call(&app, "GET", "/v1/sources/tidal/playlists", None).await;
+        assert_eq!(st, StatusCode::OK, "{pls}");
+        assert_eq!(pls[0]["name"], "Road trip");
+        assert_eq!(pls[0]["items"], 2);
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/playlists/pl-1/import", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            r["imported"], 2,
+            "ISRC for one, the TIDAL link for the other; the video is skipped"
+        );
+        assert_eq!(r["skipped"], 1);
+        let items = r["playlist"]["playlist"]["items"].as_array().unwrap();
+        assert_eq!(items[0]["uri"], "https://musicbrainz.org/isrc/USQX91300108");
+        assert!(items[1]["uri"]
+            .as_str()
+            .unwrap()
+            .contains("tidal.com/track/20115557"));
         // A stale state is refused; sign-out forgets the tokens.
         let req = Request::builder()
             .uri("/tidal/callback?code=x&state=unknown")
@@ -2503,6 +2583,8 @@ mod tests {
             .starts_with("/?tidal=error"));
         let (_, stv) = call(&app, "DELETE", "/v1/sources/tidal/session", None).await;
         assert_eq!(stv["signed_in"], false);
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/collection", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
     }
 
     #[tokio::test]

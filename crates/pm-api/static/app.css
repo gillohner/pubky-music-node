@@ -481,3 +481,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .list.compact { margin-top: 8px; }
 .list.compact .list-row { padding: 6px 10px; min-height: 0; }
 .page-head .count[data-filtered]:not([data-filtered=''])::after { content: ' · ' attr(data-filtered); color: var(--accent-strong); }
+.list-row .thumb { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; flex: none; background: var(--surface-3); margin-right: 10px; }

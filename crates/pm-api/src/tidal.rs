@@ -849,6 +849,316 @@ pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<TidalSt
     Ok(Json(status_view(&s)))
 }
 
+// ---- the user's collection and playlists ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TidalCollection {
+    pub tracks: Vec<SourceHit>,
+    pub albums: Vec<SourceHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TidalPlaylist {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub items: u64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImportReport {
+    /// Entries that became canonical URIs (ISRC, else the TIDAL link).
+    pub imported: usize,
+    pub skipped: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlist: Option<PlaylistDetail>,
+}
+
+fn signed_in_user(s: &NodeState) -> Result<UserSession, ApiError> {
+    load_user(s).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "sign in to TIDAL on the Sources page first",
+        )
+    })
+}
+
+fn user_id_of(u: &UserSession) -> Result<String, ApiError> {
+    u.user_id.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "the TIDAL session has no user id; sign in again",
+        )
+    })
+}
+
+/// Resource ids of a paged to-many relationship, following `links.next`.
+async fn relationship_ids(
+    s: &NodeState,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Vec<String>, ApiError> {
+    let mut ids = Vec::new();
+    let mut page = get_json(s, path, query).await?;
+    for _ in 0..50 {
+        ids.extend(
+            page["data"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d["id"].as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
+        let Some(next) = page["links"]["next"].as_str().map(str::to_string) else {
+            break;
+        };
+        page = get_json(s, &next, &[]).await?;
+    }
+    Ok(ids)
+}
+
+/// The canonical identity of a TIDAL track: its ISRC, else the TIDAL link.
+pub(crate) fn canonical_track(track: &Value) -> Option<pm_model::MusicUri> {
+    let id = track["id"].as_str()?;
+    if let Some(isrc) = track["attributes"]["isrc"].as_str() {
+        if let Ok(isrc) = pm_model::Isrc::parse(isrc) {
+            return Some(pm_model::MusicUri::Isrc { isrc });
+        }
+    }
+    pm_model::MusicUri::parse(&tidal_url("track", id)).ok()
+}
+
+async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Vec<Value>), ApiError> {
+    let mut hits = Vec::new();
+    let mut docs = Vec::new();
+    for chunk in ids.chunks(20) {
+        let detail = tracks_by_ids(s, chunk).await?;
+        let dinc = included(&detail);
+        for t in detail["data"].as_array().cloned().unwrap_or_default() {
+            let id = t["id"].as_str().unwrap_or("").to_string();
+            let artists = names(&dinc, &t, "artists", "artists");
+            let album = rel_ids(&t, "albums")
+                .into_iter()
+                .next()
+                .and_then(|(aid, _)| dinc.get(&("albums".to_string(), aid)).copied());
+            hits.push(SourceHit {
+                id: format!("track:{id}"),
+                title: t["attributes"]["title"].as_str().unwrap_or("").to_string(),
+                creator: (!artists.is_empty()).then(|| artists.join(", ")),
+                year: album.and_then(|a| year_of(a["attributes"]["releaseDate"].as_str())),
+                downloads: None,
+                image: album.and_then(|a| artwork_url(&dinc, a)),
+                kind: "track".into(),
+                url: tidal_url("track", &id),
+            });
+            docs.push(t);
+        }
+    }
+    Ok((hits, docs))
+}
+
+async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, ApiError> {
+    let mut hits = Vec::new();
+    for chunk in ids.chunks(20) {
+        let mut q: Vec<(&str, String)> = vec![
+            ("countryCode", country(s)),
+            ("include", "artists".into()),
+            ("include", "coverArt".into()),
+        ];
+        for id in chunk {
+            q.push(("filter[id]", id.clone()));
+        }
+        let detail = get_json(s, "/albums", &q).await?;
+        let dinc = included(&detail);
+        for a in detail["data"].as_array().cloned().unwrap_or_default() {
+            let id = a["id"].as_str().unwrap_or("").to_string();
+            let artists = names(&dinc, &a, "artists", "artists");
+            hits.push(SourceHit {
+                id: format!("album:{id}"),
+                title: a["attributes"]["title"].as_str().unwrap_or("").to_string(),
+                creator: (!artists.is_empty()).then(|| artists.join(", ")),
+                year: year_of(a["attributes"]["releaseDate"].as_str()),
+                downloads: None,
+                image: artwork_url(&dinc, &a),
+                kind: "album".into(),
+                url: tidal_url("album", &id),
+            });
+        }
+    }
+    Ok(hits)
+}
+
+/// `GET /v1/sources/tidal/collection`: the user's favourite tracks and albums.
+pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<TidalCollection> {
+    let uid = user_id_of(&signed_in_user(&s)?)?;
+    let track_ids = relationship_ids(
+        &s,
+        &format!("/userCollectionTracks/{uid}/relationships/items"),
+        &[("sort", "-addedAt".into())],
+    )
+    .await?;
+    let album_ids = relationship_ids(
+        &s,
+        &format!("/userCollectionAlbums/{uid}/relationships/items"),
+        &[("sort", "-addedAt".into())],
+    )
+    .await?;
+    let (tracks, _) = track_hits(&s, &track_ids).await?;
+    let albums = album_hits(&s, &album_ids).await?;
+    Ok(Json(TidalCollection { tracks, albums }))
+}
+
+/// `POST /v1/sources/tidal/collection/import`: the collection as node
+/// favourites (ISRC where TIDAL has one, else the TIDAL link; ADR 0010).
+pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiResult<ImportReport> {
+    let uid = user_id_of(&signed_in_user(&s)?)?;
+    let track_ids = relationship_ids(
+        &s,
+        &format!("/userCollectionTracks/{uid}/relationships/items"),
+        &[],
+    )
+    .await?;
+    let album_ids = relationship_ids(
+        &s,
+        &format!("/userCollectionAlbums/{uid}/relationships/items"),
+        &[],
+    )
+    .await?;
+    let (_, docs) = track_hits(&s, &track_ids).await?;
+    let mut report = ImportReport::default();
+    let lib = s.library.lock().expect("library poisoned");
+    for t in &docs {
+        match canonical_track(t) {
+            Some(uri) => {
+                crate::favourites::add(&lib, uri)?;
+                report.imported += 1;
+            }
+            None => report.skipped += 1,
+        }
+    }
+    for id in &album_ids {
+        match pm_model::MusicUri::parse(&tidal_url("album", id)) {
+            Ok(uri) => {
+                crate::favourites::add(&lib, uri)?;
+                report.imported += 1;
+            }
+            Err(_) => report.skipped += 1,
+        }
+    }
+    drop(lib);
+    s.notify_library();
+    Ok(Json(report))
+}
+
+/// `GET /v1/sources/tidal/playlists`: playlists the user owns.
+pub(crate) async fn playlists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<TidalPlaylist>> {
+    let uid = user_id_of(&signed_in_user(&s)?)?;
+    let mut out = Vec::new();
+    let mut page = get_json(
+        &s,
+        "/playlists",
+        &[("countryCode", country(&s)), ("filter[owners.id]", uid)],
+    )
+    .await?;
+    for _ in 0..50 {
+        for p in page["data"].as_array().cloned().unwrap_or_default() {
+            let id = p["id"].as_str().unwrap_or("").to_string();
+            let a = &p["attributes"];
+            out.push(TidalPlaylist {
+                url: tidal_url("playlist", &id),
+                name: a["name"].as_str().unwrap_or("").to_string(),
+                description: a["description"]
+                    .as_str()
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
+                items: a["numberOfTrackItems"]
+                    .as_u64()
+                    .or(a["numberOfItems"].as_u64())
+                    .unwrap_or(0),
+                id,
+            });
+        }
+        let Some(next) = page["links"]["next"].as_str().map(str::to_string) else {
+            break;
+        };
+        page = get_json(&s, &next, &[]).await?;
+    }
+    Ok(Json(out))
+}
+
+/// `POST /v1/sources/tidal/playlists/{id}/import`: a TIDAL playlist as a
+/// private Pubky playlist of canonical URIs (ADR 0006).
+pub(crate) async fn import_playlist(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<ImportReport> {
+    signed_in_user(&s)?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(ApiError::bad_request("bad TIDAL playlist id"));
+    }
+    let head = get_json(&s, &format!("/playlists/{id}"), &[("countryCode", country(&s))]).await?;
+    let name = head["data"]["attributes"]["name"]
+        .as_str()
+        .unwrap_or("TIDAL playlist")
+        .to_string();
+    let description = head["data"]["attributes"]["description"]
+        .as_str()
+        .filter(|d| !d.is_empty())
+        .map(str::to_string);
+    let mut uris = Vec::new();
+    let mut skipped = 0usize;
+    let mut page = get_json(
+        &s,
+        &format!("/playlists/{id}/relationships/items"),
+        &[("countryCode", country(&s)), ("include", "items".into())],
+    )
+    .await?;
+    for _ in 0..50 {
+        let inc = included(&page);
+        for d in page["data"].as_array().cloned().unwrap_or_default() {
+            let key = (
+                d["type"].as_str().unwrap_or("").to_string(),
+                d["id"].as_str().unwrap_or("").to_string(),
+            );
+            match inc.get(&key).and_then(|t| canonical_track(t)) {
+                Some(u) => uris.push(u.to_url()),
+                None => skipped += 1,
+            }
+        }
+        let Some(next) = page["links"]["next"].as_str().map(str::to_string) else {
+            break;
+        };
+        page = get_json(&s, &next, &[("include", "items".into())]).await?;
+    }
+    if uris.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "none of the playlist's items could be identified",
+        ));
+    }
+    let imported = uris.len();
+    let Json(detail) = crate::playlists::create(
+        State(s.clone()),
+        Json(CreatePlaylist {
+            name,
+            description,
+            image: None,
+            uris,
+            track_ids: Vec::new(),
+        }),
+    )
+    .await?;
+    Ok(Json(ImportReport {
+        imported,
+        skipped,
+        playlist: Some(detail),
+    }))
+}
+
 // ---- playback (audio thread, blocking) ----
 
 pub const TRACK_URI_PREFIX: &str = "tidal:track:";
