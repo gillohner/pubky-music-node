@@ -221,10 +221,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         .nest("/v1", v1)
-        // OAuth redirect target: the browser arrives without a bearer token.
+        // Reached without a bearer token: the OAuth redirect target and the
+        // Pubky Ring sign-in that hands the token out.
         .merge(
             Router::new()
                 .route("/tidal/callback", get(tidal::callback))
+                .route("/v1/auth/pubky/start", post(controller_login_start))
+                .route("/v1/auth/pubky/poll", get(controller_login_poll))
                 .with_state(state.clone()),
         )
         .merge(subsonic::router(state))
@@ -1525,6 +1528,90 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
     Ok(Json(LoginStarted { url }))
+}
+
+const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// `POST /v1/auth/pubky/start`: a controller or browser asks to sign in with
+/// Pubky Ring. Only the node's owner (the identity the node itself is signed
+/// in as) is accepted; approval hands out the API token, so nothing is typed
+/// or pasted. 412 until the node has a Pubky session.
+async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<ControllerLoginStarted> {
+    let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "the node is not signed in to Pubky yet: sign it in once (Settings → Pubky, or `pm-node login`)",
+        ));
+    };
+    let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let flow = hs
+        .start_login_with(
+            "pubky-music-controller",
+            pm_pubky::homeserver::CONTROLLER_CAPABILITIES,
+        )
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let url = flow.url().to_string();
+    let id = tidal::random_urlsafe(24);
+    let mut logins = s.controller_logins.lock().await;
+    logins.retain(|_, (_, at)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    logins.insert(id.clone(), (flow, std::time::Instant::now()));
+    Ok(Json(ControllerLoginStarted { id, url, owner }))
+}
+
+/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with
+/// the API token when the approver is the owner; `denied` otherwise.
+async fn controller_login_poll(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<ControllerLoginStatus> {
+    let id = q.get("id").cloned().unwrap_or_default();
+    let mut logins = s.controller_logins.lock().await;
+    let Some((flow, at)) = logins.get(&id) else {
+        return Ok(Json(ControllerLoginStatus {
+            status: "expired".into(),
+            token: None,
+            user: None,
+        }));
+    };
+    if at.elapsed() > CONTROLLER_LOGIN_TTL {
+        logins.remove(&id);
+        return Ok(Json(ControllerLoginStatus {
+            status: "expired".into(),
+            token: None,
+            user: None,
+        }));
+    }
+    match flow.poll().await {
+        Ok(None) => Ok(Json(ControllerLoginStatus {
+            status: "pending".into(),
+            token: None,
+            user: None,
+        })),
+        Ok(Some(session)) => {
+            logins.remove(&id);
+            let who = session.public_key().to_string();
+            let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
+            if who != owner {
+                tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
+                return Ok(Json(ControllerLoginStatus {
+                    status: "denied".into(),
+                    token: None,
+                    user: Some(who),
+                }));
+            }
+            tracing::info!(%who, "controller signed in with Pubky Ring");
+            Ok(Json(ControllerLoginStatus {
+                status: "ok".into(),
+                token: s.token.clone(),
+                user: Some(who),
+            }))
+        }
+        Err(e) => {
+            logins.remove(&id);
+            Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))
+        }
+    }
 }
 
 /// Poll the sign-in. When approved: the session is kept, its secret written
@@ -3155,6 +3242,30 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    }
+
+    /// Controllers sign in with Pubky Ring; without a node session there is
+    /// no owner to compare against, so the node says so instead of starting.
+    #[tokio::test]
+    async fn controller_sign_in_needs_the_node_signed_in_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("t0k")).await;
+        let app = router(s);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/pubky/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["status"], "expired");
     }
 
     #[tokio::test]

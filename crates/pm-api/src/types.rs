@@ -1026,6 +1026,28 @@ pub struct LoginStarted {
     pub url: String,
 }
 
+/// `POST /v1/auth/pubky/start`: a controller or browser sign-in with Pubky Ring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerLoginStarted {
+    pub id: String,
+    /// `pubkyauth://…` to scan or open in Pubky Ring.
+    pub url: String,
+    /// Who must approve: the node's owner (z32 public key).
+    pub owner: String,
+}
+
+/// `GET /v1/auth/pubky/poll?id=`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerLoginStatus {
+    /// `pending`, `ok`, `denied` (another identity approved), `expired`.
+    pub status: String,
+    /// The API token, once the owner approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginStatus {
     /// `none`, `pending` or `signed_in`.

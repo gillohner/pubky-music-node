@@ -446,9 +446,23 @@ pub struct LoginFlow {
 /// What the node asks for: its own private folders and pubky.app posts/tags.
 pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw";
 
+/// What a controller asks for: read access to the user's public pubky.app
+/// data only, enough to prove who is signing in. The node never keeps this
+/// session.
+pub const CONTROLLER_CAPABILITIES: &str = "/pub/pubky.app/:r";
+
 impl NodeHomeserver {
     pub fn start_login(&self, client_id: &str) -> Result<LoginFlow, HomeserverError> {
-        let caps = LOGIN_CAPABILITIES
+        self.start_login_with(client_id, LOGIN_CAPABILITIES)
+    }
+
+    /// A sign-in asking for `capabilities` (see [`CONTROLLER_CAPABILITIES`]).
+    pub fn start_login_with(
+        &self,
+        client_id: &str,
+        capabilities: &str,
+    ) -> Result<LoginFlow, HomeserverError> {
+        let caps = capabilities
             .parse::<pubky::Capabilities>()
             .map_err(|e| HomeserverError::Transport(e.to_string()))?;
         let client_id =

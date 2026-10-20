@@ -101,9 +101,15 @@
 <dialog id="login" class="dialog">
   <form method="dialog">
     <h2>Connect to your node</h2>
-    <p class="muted">Paste the API token from the node's <code>node.toml</code>. It stays in this browser.</p>
+    <div id="ringbox">
+      <p class="muted">Sign in with Pubky Ring: the node checks that it is you and connects this browser by itself.</p>
+      <div class="dialog-actions"><button class="btn primary" type="button" id="ringstart">Sign in with Pubky Ring</button></div>
+      <div id="ringout" class="muted small"></div>
+    </div>
+    <details style="margin-top:12px"><summary class="muted small">Or paste the API token</summary>
+    <p class="muted small">From the node's <code>node.toml</code> (<code>PM_TOKEN</code> in Docker). It stays in this browser.</p>
     <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off"></label>
-    <div class="dialog-actions"><button class="btn primary" value="ok">Connect</button></div>
+    <div class="dialog-actions"><button class="btn primary" value="ok">Connect</button></div></details>
   </form>
 </dialog>
 

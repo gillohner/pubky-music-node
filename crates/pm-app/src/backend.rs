@@ -16,6 +16,9 @@ use tokio::sync::{mpsc, watch};
 
 #[derive(Debug)]
 pub enum Cmd {
+    /// Sign in with Pubky Ring from this app: the node's address and token
+    /// come from the owner's homeserver, nothing is typed.
+    RingConnect,
     Connect {
         base: String,
         token: String,
@@ -218,6 +221,10 @@ pub enum DiscoverKind {
 pub enum Msg {
     Connecting,
     Connected(Info),
+    /// A Ring sign-in started by this app (not by the node): show the QR, do not poll the node.
+    RingLoginUrl(String),
+    /// The app's Ring sign-in ended: `Ok` resolved the node (address, token), `Err` says why not.
+    RingDone(Result<(), String>),
     /// The node's address and token as resolved through the homeserver.
     ResolvedNode(String, String),
     ConnectFailed(String),
@@ -354,6 +361,13 @@ async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, out: Emitter, shared: Arc<R
     let mut generation = 0u64;
     while let Some(cmd) = cmds.recv().await {
         let resolved = match &cmd {
+            Cmd::RingConnect => {
+                let out2 = out.clone();
+                tokio::spawn(async move {
+                    out2.send(Msg::RingDone(ring_connect(&out2).await));
+                });
+                None
+            }
             Cmd::ConnectViaPubky { secret } => {
                 out.send(Msg::Connecting);
                 match pm_client::connect_via_pubky(pm_pubky::Network::Mainnet, secret).await {
@@ -430,9 +444,36 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
     }
 }
 
+/// Sign in with Pubky Ring here, then read the owner's node record from the
+/// homeserver and hand the address and token to the UI. The session asks for
+/// read access to the node's private folder only and is dropped afterwards.
+async fn ring_connect(out: &Emitter) -> Result<(), String> {
+    let hs =
+        pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
+    let flow = hs
+        .start_login_with("pubky-music-controller", "/priv/pubky.music/:r")
+        .map_err(|e| e.to_string())?;
+    out.send(Msg::RingLoginUrl(flow.url().to_string()));
+    let session = flow.await_approval().await.map_err(|e| e.to_string())?;
+    let record = hs
+        .read_node_record(&session)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "this identity has no node yet: sign the node in once (Settings → Pubky on its web page)"
+                .to_string()
+        })?;
+    out.send(Msg::Notice(format!(
+        "found node “{}” at {}",
+        record.name, record.api_url
+    )));
+    out.send(Msg::ResolvedNode(record.api_url.clone(), record.token.clone()));
+    Ok(())
+}
+
 async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()> {
     match cmd {
-        Cmd::Connect { .. } | Cmd::ConnectViaPubky { .. } => {}
+        Cmd::Connect { .. } | Cmd::ConnectViaPubky { .. } | Cmd::RingConnect => {}
         Cmd::Refresh => {
             out.send(Msg::Connected(c.info().await?));
             initial_load(&c, out).await;

@@ -91,6 +91,10 @@ pub struct NodeState {
     pub contact: std::sync::RwLock<String>,
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
+    /// Controller sign-ins in progress: id → (flow, started).
+    pub controller_logins: tokio::sync::Mutex<
+        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant)>,
+    >,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: broadcast::Sender<ApiEvent>,
@@ -189,6 +193,7 @@ impl NodeState {
             discovery: std::sync::RwLock::new(discovery),
             contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
+            controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),

@@ -164,6 +164,8 @@ struct App {
     tidal_status: Option<pm_api::tidal::TidalStatus>,
     /// Opened in the system browser on the next frame (TIDAL sign-in).
     pending_open_url: Option<String>,
+    /// The open Ring window belongs to this app's own sign-in (no node polling).
+    ring_login: bool,
     tidal_poll_at: Option<Instant>,
     /// The signed-in user's TIDAL collection and playlists, once loaded.
     tidal_mine: Option<(pm_api::tidal::TidalCollection, Vec<pm_api::tidal::TidalPlaylist>)>,
@@ -275,6 +277,7 @@ impl App {
             focus_search: false,
             tidal_status: None,
             pending_open_url: None,
+            ring_login: false,
             tidal_poll_at: None,
             tidal_mine: None,
             album_versions: HashMap::new(),
@@ -488,7 +491,24 @@ impl App {
                 }
                 Msg::PubkyLoginUrl(url) => {
                     let tex = qr_texture(&self.cover_ctx, &url);
+                    self.ring_login = false;
                     self.login = Some((url, tex, std::time::Instant::now()));
+                }
+                Msg::RingLoginUrl(url) => {
+                    let tex = qr_texture(&self.cover_ctx, &url);
+                    self.ring_login = true;
+                    self.login = Some((url, tex, std::time::Instant::now()));
+                }
+                Msg::RingDone(r) => {
+                    self.login = None;
+                    self.ring_login = false;
+                    match r {
+                        Ok(()) => {
+                            self.toast("Signed in with Pubky Ring; connecting to your node");
+                            self.connect();
+                        }
+                        Err(e) => self.conn = Conn::Failed(format!("Pubky Ring: {e}")),
+                    }
                 }
                 Msg::PubkyLoginDone(user) => {
                     self.login = None;
@@ -3545,6 +3565,15 @@ impl App {
                 ui.end_row();
             });
         ui.horizontal(|ui| {
+            if ui
+                .add(theme::primary("Sign in with Pubky Ring"))
+                .on_hover_text(
+                    "Approve in Pubky Ring; the app finds your node and its token through your homeserver",
+                )
+                .clicked()
+            {
+                self.backend.send(Cmd::RingConnect);
+            }
             if ui.button("Connect").clicked() {
                 self.connect();
             }
@@ -4226,7 +4255,7 @@ impl App {
         let Some((url, tex, last_poll)) = self.login.as_mut() else {
             return;
         };
-        if last_poll.elapsed() >= Duration::from_secs(2) {
+        if !self.ring_login && last_poll.elapsed() >= Duration::from_secs(2) {
             *last_poll = std::time::Instant::now();
             self.backend.send(Cmd::PubkyLoginPoll);
         }

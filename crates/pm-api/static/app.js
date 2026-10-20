@@ -95,6 +95,26 @@
   };
 
   const login = () => { const d = $('#login'); if (!d.open) { $('#tok').value = state.token; d.showModal(); } };
+  // Pubky Ring sign-in: the node starts a flow, we show the link (and a QR when the device has a camera elsewhere), poll until the owner approves, and keep the token it hands out.
+  let ringPoll = null;
+  $('#ringstart').onclick = async () => {
+    const out = $('#ringout'); $('#ringstart').disabled = true; out.innerHTML = 'Starting…';
+    try {
+      const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json(); if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      out.innerHTML = `<p>Open this in Pubky Ring on your phone, or paste it into Ring: <a href="${esc(j.url)}">${esc(j.url.slice(0, 48))}…</a></p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p>`;
+      clearInterval(ringPoll);
+      ringPoll = setInterval(async () => {
+        try {
+          const p = await (await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(j.id)}`)).json();
+          if (p.status === 'pending') return;
+          clearInterval(ringPoll); $('#ringstart').disabled = false;
+          if (p.status === 'ok') { state.token = p.token || ''; localStorage.setItem('pm.token', state.token); $('#login').close(); toast('Connected with Pubky Ring'); connect(); }
+          else if (p.status === 'denied') out.innerHTML = `<p class="warn">That was a different Pubky identity (${esc((p.user || '').slice(0, 12))}…). Only the node's owner can connect.</p>`;
+          else out.innerHTML = '<p class="warn">The sign-in expired. Try again.</p>';
+        } catch (e) { clearInterval(ringPoll); $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+      }, 2000);
+    } catch (e) { $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+  };
   $('#login form').addEventListener('submit', () => {
     state.token = $('#tok').value.trim();
     localStorage.setItem('pm.token', state.token);

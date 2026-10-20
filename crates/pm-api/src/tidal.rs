@@ -916,7 +916,7 @@ impl StreamingService for Tidal {
 
 // ---- sign-in ----
 
-fn random_urlsafe(bytes: usize) -> String {
+pub(crate) fn random_urlsafe(bytes: usize) -> String {
     use rand::RngCore;
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
