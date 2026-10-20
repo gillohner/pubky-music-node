@@ -77,6 +77,22 @@ model and MAC, plays the zone's post-DSP PCM as a WAV stream it fetches from `[a
 takes volume through its own digital gain. Players on the same subnet also find the node through
 the discovery responder.
 
+## Where the music can live
+
+The node scans folders; anything the operating system can mount is a folder.
+
+| Source | How |
+| :-- | :-- |
+| Local disks, USB drives | add the folder in Settings or `[library] folders` |
+| NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
+| Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
+| Downloads from another app (Umbrel, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
+| Your Pubky homeserver | `pm-node upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; `POST /v1/pubky/files/mirror` (and start-up) pulls them into `data_dir/homeserver`, which is scanned like any folder |
+| Streams | internet radio and the Internet Archive need no storage at all |
+
+Scans read tags, embedded art and MusicBrainz ids; tag with Picard first and favourites, tags,
+reviews and playlists can refer to the music by its canonical identity.
+
 ## Adding music after the node is running
 
 Folders can be added from the web UI or the app (Settings → Library folders) as well as in
