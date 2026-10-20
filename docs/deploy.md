@@ -7,7 +7,7 @@ One binary, three shapes. The homeserver is always a separate Pubky service the 
 ```sh
 sudo apt install libasound2-dev          # build only
 cargo build --release -p pm-node --features alsa
-pm-node config > node.toml               # edit: data_dir, contact, [library] folders, [api] token
+pm-node config > node.toml               # edit: data_dir, [api] token (contact and folders can also be set later in Settings)
 pm-node -c node.toml scan
 pm-node -c node.toml serve               # API on [api] listen, one zone per ALSA hw: device
 ```

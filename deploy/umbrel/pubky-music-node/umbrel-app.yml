@@ -6,18 +6,20 @@ version: "0.1.0"
 tagline: Bit-perfect music server and zones, built on Pubky
 icon: https://raw.githubusercontent.com/gillohner/pubky-music-node/main/deploy/umbrel/pubky-music-node/icon.svg
 description: >-
-  A self-hosted music core in the spirit of Roon: scans your music folders
-  (local, mounted shares, or anything another app downloads into them), keeps
-  a library with MusicBrainz identities, and plays bit-perfect to a USB DAC on
-  the Umbrel box or to network zones. Playlists and social features live on
-  your Pubky homeserver; discovery comes from Pinakes. Control it with the
-  Pubky Music app on your laptop or phone, which can also play your library
-  locally through its own DAC.
+  A self-hosted music server in the spirit of Roon, built on Pubky. It scans
+  your music folders (local, mounted shares, or anything another app downloads
+  into them), keeps a library with MusicBrainz identities, cover art, artist
+  biographies and genres, and plays bit-perfect to a USB DAC on the Umbrel box,
+  to network endpoints, UPnP/OpenHome renderers, Squeezebox players and
+  Chromecast, with a signal path that shows every conversion. Zones can be
+  grouped and get their own DSP (EQ, convolution, crossfeed, ReplayGain).
+  Internet radio with live titles. Playlists, favourites, reviews and tags live
+  on your Pubky homeserver as v1 objects; discovery comes from Pinakes.
 
-  Open the app to get the built-in browser controller (enter the API token
-  once), or point the native Pubky Music app or any OpenSubsonic client at this
-  node's address with that token. Plug a USB DAC into the Umbrel box to play
-  directly from it.
+  Open the app for the built-in web controller (enter the API token once, then
+  add a library folder and the upstream contact from Settings), or point the
+  native Pubky Music app or any OpenSubsonic client (Symfonium, Feishin,
+  Amperfy) at this node's address with that token.
 developer: Pubky Music
 website: https://github.com/gillohner/pubky-music-node
 dependencies: []
@@ -29,7 +31,10 @@ path: /
 defaultUsername: ""
 defaultPassword: ""
 releaseNotes: >-
-  First release: library scanning, bit-perfect ALSA playback, zones with
-  gapless queues, the /v1 control API.
+  Web UI redesign with Home, Favourites, Genres, Radio and a Now Playing
+  screen; group zones and a DSP editor; playlist import from M3U, CSV and
+  Roon exports; tags, reviews and favourites synced to the homeserver; artist
+  portraits and biographies; folders and the upstream contact settable from
+  Settings.
 submitter: Pubky Music
 submission: https://github.com/gillohner/pubky-music-node
