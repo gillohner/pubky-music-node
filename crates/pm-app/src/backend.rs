@@ -84,6 +84,7 @@ pub enum Cmd {
         replace: bool,
     },
     ClearQueue(String),
+    ShuffleQueue(String),
     RemoveItem {
         zone: String,
         item: u64,
@@ -499,6 +500,11 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::ClearQueue(z) => {
             c.clear_queue(&z).await?;
             out.send(Msg::Queue(z, vec![]));
+        }
+        Cmd::ShuffleQueue(z) => {
+            c.shuffle_queue(&z).await?;
+            let q = c.queue(&z).await?;
+            out.send(Msg::Queue(z, q));
         }
         Cmd::RemoveItem { zone, item } => {
             c.remove_item(&zone, item).await?;

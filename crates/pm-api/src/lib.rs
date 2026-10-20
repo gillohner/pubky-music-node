@@ -108,6 +108,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
+        .route("/zones/{id}/shuffle", post(shuffle_queue))
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
@@ -538,6 +539,15 @@ async fn radio(
     Json(body): Json<SetRadio>,
 ) -> Result<StatusCode, ApiError> {
     zone_of(&s, &id)?.set_radio(body.on);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Shuffle the upcoming part of the queue; the playing item is untouched.
+async fn shuffle_queue(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    zone_of(&s, &id)?.shuffle_upcoming();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1713,6 +1723,72 @@ mod tests {
 
     /// Library radio: with the flag on, a zone that runs out of queue gets
     /// similar tracks appended and keeps playing.
+    #[tokio::test]
+    async fn shuffle_reorders_only_the_upcoming_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..8)
+            .map(|_| serde_json::json!({"uri": wav.to_string_lossy()}))
+            .collect();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Loop the third item so the "current" index holds still on the null output.
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "one"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": 2})),
+        )
+        .await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        for _ in 0..500 {
+            if zone.state().queue_index == Some(2) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(zone.state().queue_index, Some(2));
+        // The playing item and the two before it must stay put.
+        let before: Vec<u64> = zone.queue().iter().map(|i| i.id).collect();
+        let mut changed = false;
+        for _ in 0..5 {
+            let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/shuffle"), None).await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            let after: Vec<u64> = zone.queue().iter().map(|i| i.id).collect();
+            assert_eq!(&after[..3], &before[..3]);
+            let mut rest = after[3..].to_vec();
+            rest.sort_unstable();
+            assert_eq!(rest, before[3..]);
+            if after[3..] != before[3..] {
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "five shuffles of five items never moved anything");
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(z["queue_index"], 2);
+        let (st, _) = call(&app, "POST", "/v1/zones/nope/shuffle", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn library_radio_continues_after_the_last_track() {
         let dir = tempfile::tempdir().unwrap();

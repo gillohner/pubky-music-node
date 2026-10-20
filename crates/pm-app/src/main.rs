@@ -2489,6 +2489,17 @@ impl App {
                     self.backend.send(Cmd::ClearQueue(self.settings.zone.clone()));
                 }
             }
+            if ui
+                .add_enabled(items.len() > 1, egui::Button::new("Shuffle"))
+                .on_hover_text("Shuffle what comes next; the playing track stays")
+                .clicked()
+            {
+                if self.is_local() {
+                    self.local.zone.shuffle_upcoming();
+                } else {
+                    self.backend.send(Cmd::ShuffleQueue(self.settings.zone.clone()));
+                }
+            }
             let mut repeat = zone.repeat;
             egui::ComboBox::from_id_salt("repeat")
                 .selected_text(match repeat {

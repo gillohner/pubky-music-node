@@ -201,6 +201,28 @@ impl Queue {
         true
     }
 
+    /// Shuffle the items after the current one (all items when nothing is
+    /// current) with a Fisher–Yates pass driven by `seed`. The current item
+    /// and everything already played stay where they are. Returns whether
+    /// the order could change at all (at least two upcoming items).
+    pub fn shuffle_upcoming(&mut self, seed: u64) -> bool {
+        let start = self.current.map(|c| c + 1).unwrap_or(0).min(self.items.len());
+        let upcoming = &mut self.items[start..];
+        if upcoming.len() < 2 {
+            return false;
+        }
+        let mut x = seed | 1;
+        for i in (1..upcoming.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let j = (x % (i as u64 + 1)) as usize;
+            upcoming.swap(i, j);
+        }
+        self.version += 1;
+        true
+    }
+
     pub fn clear(&mut self) {
         if !self.items.is_empty() || self.current.is_some() {
             self.items.clear();
@@ -304,6 +326,28 @@ mod tests {
         assert!(q.move_item(1, 10));
         assert_eq!(q.items()[2].uri, "t0");
         assert_eq!(q.current_index(), Some(0));
+    }
+
+    #[test]
+    fn shuffle_only_touches_upcoming_items() {
+        let mut eight = q(8);
+        eight.set_current(Some(2));
+        let before: Vec<u64> = eight.items().iter().map(|i| i.id).collect();
+        let v = eight.version();
+        assert!(eight.shuffle_upcoming(0x9e37_79b9));
+        assert!(eight.version() > v);
+        let after: Vec<u64> = eight.items().iter().map(|i| i.id).collect();
+        assert_eq!(&after[..3], &before[..3]);
+        assert_eq!(eight.current_index(), Some(2));
+        let mut rest = after[3..].to_vec();
+        rest.sort_unstable();
+        assert_eq!(rest, before[3..]);
+        assert_ne!(&after[3..], &before[3..], "8 choose 5 should move something");
+        // Nothing current: everything shuffles; one item: nothing to do.
+        let mut all = q(5);
+        assert!(all.shuffle_upcoming(7));
+        let mut one = q(1);
+        assert!(!one.shuffle_upcoming(7));
     }
 
     #[test]

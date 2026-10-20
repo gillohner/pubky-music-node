@@ -286,6 +286,12 @@ impl NodeClient {
     }
 
     /// Keep the zone playing with similar library tracks after the last item.
+    /// Shuffle the upcoming queue items; the playing one stays.
+    pub async fn shuffle_queue(&self, zone: &str) -> Result<()> {
+        self.send::<(), ()>(reqwest::Method::POST, &format!("zones/{zone}/shuffle"), None)
+            .await
+    }
+
     pub async fn set_radio(&self, zone: &str, on: bool) -> Result<()> {
         self.send(
             reqwest::Method::PUT,

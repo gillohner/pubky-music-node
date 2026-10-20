@@ -81,6 +81,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (adds.length >= 2) { adds[0].click(); await sleep(200); adds[1].click(); await sleep(200); }
   w.document.querySelector('.nav-item[data-view="queue"]').click(); await sleep(700);
   const before = w.document.querySelectorAll('.list.queue .list-row').length;
+  const shuffle = w.document.querySelector('#qshuffle'); if (shuffle) { shuffle.click(); await sleep(300); }
+  if (w.document.querySelectorAll('.list.queue .list-row').length !== before) errors.push('shuffle changed the queue length');
   const down = w.document.querySelector('[data-qdown="0"]'); if (down) { down.click(); await sleep(400); }
   const rm = w.document.querySelector('[data-qrm="0"]'); if (rm) { rm.click(); await sleep(400); }
   const after = w.document.querySelectorAll('.list.queue .list-row').length;

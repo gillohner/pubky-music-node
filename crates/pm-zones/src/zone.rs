@@ -241,6 +241,15 @@ impl Zone {
         self.with_queue(|q| q.clear())
     }
 
+    /// Shuffle the upcoming items; the current one keeps playing.
+    pub fn shuffle_upcoming(&self) -> bool {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x5eed);
+        self.with_queue(|q| q.shuffle_upcoming(seed))
+    }
+
     pub fn set_repeat(&self, r: Repeat) {
         self.with_queue(|q| q.set_repeat(r))
     }
