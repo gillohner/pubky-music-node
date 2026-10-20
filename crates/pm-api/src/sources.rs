@@ -113,8 +113,91 @@ fn http_client() -> &'static reqwest::blocking::Client {
     })
 }
 
-/// `Read` over a blocking response, `Send + Sync` for symphonia.
-struct HttpBody(std::sync::Mutex<reqwest::blocking::Response>);
+/// How long a live stream may go silent before the track ends with an error
+/// instead of the zone waiting forever.
+const STREAM_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reads the body on its own thread and hands chunks over a bounded channel,
+/// so the audio thread's reads can time out (`STREAM_STALL`). The reader
+/// thread ends when the receiver is dropped.
+struct TimeoutReader {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    at: usize,
+    stall: std::time::Duration,
+    done: bool,
+}
+
+impl TimeoutReader {
+    fn new(mut inner: Box<dyn std::io::Read + Send>, stall: std::time::Duration) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(64);
+        std::thread::Builder::new()
+            .name("http-stream".into())
+            .spawn(move || {
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    let msg = match inner.read(&mut buf) {
+                        Ok(0) => Ok(Vec::new()),
+                        Ok(n) => Ok(buf[..n].to_vec()),
+                        Err(e) => Err(e),
+                    };
+                    let end = matches!(&msg, Ok(v) if v.is_empty()) || msg.is_err();
+                    if tx.send(msg).is_err() || end {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn http-stream thread");
+        Self {
+            rx,
+            pending: Vec::new(),
+            at: 0,
+            stall,
+            done: false,
+        }
+    }
+}
+
+impl std::io::Read for TimeoutReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.at >= self.pending.len() {
+            if self.done {
+                return Ok(0);
+            }
+            match self.rx.recv_timeout(self.stall) {
+                Ok(Ok(chunk)) if chunk.is_empty() => {
+                    self.done = true;
+                    return Ok(0);
+                }
+                Ok(Ok(chunk)) => {
+                    self.pending = chunk;
+                    self.at = 0;
+                }
+                Ok(Err(e)) => {
+                    self.done = true;
+                    return Err(e);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("stream sent nothing for {} s", self.stall.as_secs()),
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.done = true;
+                    return Ok(0);
+                }
+            }
+        }
+        let n = buf.len().min(self.pending.len() - self.at);
+        buf[..n].copy_from_slice(&self.pending[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// `Read` over the stream body, `Send + Sync` for symphonia.
+struct HttpBody(std::sync::Mutex<TimeoutReader>);
 
 impl std::io::Read for HttpBody {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -344,7 +427,10 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .filter(|n| *n > 0);
             let title: SharedTitle = Arc::new(Mutex::new(None));
-            let body = HttpBody(std::sync::Mutex::new(resp));
+            let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(
+                Box::new(resp),
+                STREAM_STALL,
+            )));
             let inner = match metaint {
                 Some(n) => {
                     let media =
@@ -459,6 +545,44 @@ mod tests {
         assert_eq!(ext_for_mime("text/html"), None);
         assert_eq!(ext_for_url("http://x/stream.AAC?x=1"), Some("aac"));
         assert_eq!(ext_for_url("http://x/live"), None);
+    }
+
+    #[test]
+    fn stalled_streams_time_out_instead_of_hanging() {
+        use std::io::Read;
+        /// Two chunks, then silence forever.
+        struct Stalling(u8);
+        impl Read for Stalling {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 < 2 {
+                    self.0 += 1;
+                    buf[..3].copy_from_slice(b"abc");
+                    return Ok(3);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                Ok(0)
+            }
+        }
+        let mut r = TimeoutReader::new(Box::new(Stalling(0)), std::time::Duration::from_millis(200));
+        let mut all = Vec::new();
+        let mut buf = [0u8; 2];
+        let err = loop {
+            match r.read(&mut buf) {
+                Ok(0) => panic!("should not end cleanly"),
+                Ok(n) => all.extend_from_slice(&buf[..n]),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(all, b"abcabc");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        // A clean end is a clean end.
+        let mut r = TimeoutReader::new(
+            Box::new(std::io::Cursor::new(b"xyz".to_vec())),
+            std::time::Duration::from_secs(5),
+        );
+        let mut out = String::new();
+        r.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "xyz");
     }
 
     #[test]
