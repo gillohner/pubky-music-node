@@ -5,7 +5,8 @@
 //   npm install jsdom@24            (anywhere; then run from that directory)
 //   node /path/to/tools/ui-smoke.js <api token> [http://127.0.0.1:7788] [repo root]
 
-const { JSDOM, VirtualConsole } = require('jsdom');
+// jsdom is resolved from the current directory, so the repo needs no node_modules.
+const { JSDOM, VirtualConsole } = require(require.resolve('jsdom', { paths: [process.cwd(), __dirname] }));
 const fs = require('fs');
 const TOKEN = process.argv[2];
 const BASE = process.argv[3] || 'http://127.0.0.1:7788';
