@@ -133,12 +133,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('identify view:', idh);
     if (!/Confirm matches/.test(idh)) errors.push('identify review view missing');
   }
+  w.document.querySelector('.nav-item[data-view="discover"]').click(); await sleep(3000);
   const drow = w.document.querySelector('#main [data-dmore]');
   if (drow) { drow.click(); await sleep(300); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('discover menu:', items.join(' | ')); if (!items.some((t) => t.startsWith('Details'))) errors.push('discover row menu lacks details'); w.document.body.click(); await sleep(100); }
   const first = w.document.querySelector('#main [data-ditem]');
   if (first) { first.click(); await sleep(3000); const h1 = w.document.querySelector('#main h1'); console.log('discover item:', h1 && h1.textContent, '| also on rows', w.document.querySelectorAll('#main [data-vplay], #main .list-row').length, '| tag input', !!w.document.querySelector('#tagadd')); if (!h1) errors.push('discover item page did not render'); }
+  // Navigation: the item page has a real path; back returns to Discover with its path.
+  if (first) {
+    const itemPath = w.location.pathname;
+    console.log('item path:', itemPath, '| back label:', (w.document.querySelector('#dback') || {}).textContent);
+    if (!/^\/(song|album|artist)\/(mb-|isrc-|u-)/.test(itemPath)) errors.push('item page has no /song|/album|/artist path');
+    w.history.back(); await sleep(2500);
+    console.log('after back:', w.location.pathname, '| view tabs', !!w.document.querySelector('[data-dmode]'));
+    if (w.location.pathname !== '/discover') errors.push('back from an item page did not return to Discover');
+  }
+  // Search has a path with the query; back from an item opened there restores the query.
+  const sbox = w.document.querySelector('#search');
+  sbox.value = 'bohemian'; sbox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter' })); await sleep(4000);
+  console.log('search path:', w.location.pathname + w.location.search);
+  if (w.location.pathname !== '/search' || !/q=bohemian/.test(w.location.search)) errors.push('search has no /search?q= path');
+  const sItem = w.document.querySelector('#main [data-ditem]');
+  if (sItem) {
+    sItem.click(); await sleep(3000);
+    w.history.back(); await sleep(4000);
+    console.log('back to search:', w.location.pathname + w.location.search, '| box', sbox.value);
+    if (!/q=bohemian/.test(w.location.search) || sbox.value !== 'bohemian') errors.push('back did not restore the search');
+  }
   // heart on first track row (fixtures have no ids → disabled)
   const h = w.document.querySelector('.track .heart'); console.log('heart disabled (no ids):', h && h.disabled);
+  // A deep link (reload) of a song page lands on that page.
+  const dl = new JSDOM(html.replace('<script src="/app.js"></script>', ''), { url: BASE + '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
+  const w2 = dl.window;
+  w2.localStorage.setItem('pm.token', TOKEN);
+  w2.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
+  w2.HTMLMediaElement.prototype.play = async function () {};
+  w2.HTMLMediaElement.prototype.pause = function () {};
+  w2.eval(js); await sleep(6000);
+  const dh = w2.document.querySelector('#main h1');
+  console.log('deep link /song/mb-…:', dh && dh.textContent, '|', (w2.document.querySelector('#main .notice') || {}).textContent || '');
+  if (!dh) errors.push('deep link to a song page did not render');
   console.log('errors:', errors.length ? errors : 'none');
   process.exit(errors.length ? 1 : 0);
 })();

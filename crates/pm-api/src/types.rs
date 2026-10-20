@@ -960,6 +960,10 @@ pub struct DiscoverDetail {
     /// MusicBrainz / Wikipedia facts for artists, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_info: Option<ArtistInfo>,
+    /// Pinakes is still reading this link: the page shows the provider's own
+    /// data and asks again shortly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reading: bool,
 }
 
 // ---- streaming sources ----

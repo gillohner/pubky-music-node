@@ -103,6 +103,8 @@ pub(crate) struct ServiceLink {
     pub id: String,
     pub url: String,
     pub tagged: bool,
+    /// The page the item itself is (played first among equals).
+    pub own: bool,
 }
 
 pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
@@ -132,6 +134,7 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
         id,
         url: url.to_string(),
         tagged,
+        own: false,
     })
 }
 
@@ -256,7 +259,14 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
         };
     }
     let mut links: Vec<ServiceLink> = Vec::new();
-    if let Some(l) = it.page.as_deref().and_then(|p| service_link(p, true)) {
+    // The card's own page comes first; it counts as tagged only when its row says so
+    // (Pinakes now reads links nobody tagged).
+    if let Some(mut l) = it
+        .page
+        .as_deref()
+        .and_then(|p| service_link(p, it.taggers.unwrap_or(0) > 0))
+    {
+        l.own = true;
         links.push(l);
     }
     // `also_on` rows are tagged-first already; a row's url is the service page.
@@ -274,8 +284,8 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
         (Access::Full, _) => 0,
         (Access::External, _) => 2,
         _ => 9,
-    } * 2
-        + usize::from(!l.tagged);
+    } * 4
+        + if l.own { 0 } else { 1 + usize::from(!l.tagged) };
     let mut sorted = links.clone();
     sorted.sort_by_key(rank);
     let best = sorted
@@ -333,12 +343,9 @@ pub(crate) async fn play_plan(
         return Err(ApiError::bad_request("uri is required"));
     };
     let uri = uri.trim().to_string();
-    let r = match s.discovery() {
-        Some(d) => d.resource_for(&uri).await.unwrap_or_else(|e| {
-            tracing::debug!("play: pinakes: {e}");
-            None
-        }),
-        None => None,
+    let r = match crate::pinakes_reader::card(&s, &uri).await {
+        crate::pinakes_reader::Card::Found(r) => Some(*r),
+        _ => None,
     };
     // Pinakes knows it: every link of the group. Otherwise the provider's own page.
     let (it, album_id, album_name, duration) = match &r {
@@ -421,7 +428,9 @@ pub(crate) async fn describe(
                 .flatten()
                 .and_then(|j| serde_json::from_str::<(i64, DiscoverItem)>(&j).ok())
             {
-                if now - at < 86_400 {
+                // Rows Pinakes did not know yet are looked at again after ten minutes.
+                let ttl = if it.pinakes_id.is_some() { 86_400 } else { 600 };
+                if now - at < ttl {
                     found.insert(u.clone(), it);
                 }
             }
@@ -455,14 +464,18 @@ pub(crate) async fn describe(
             }
         }
     }
+    let mut unknown_to_pinakes = Vec::new();
     for u in &missing {
         if fresh.iter().any(|(x, _)| x == u) {
             continue;
         }
+        unknown_to_pinakes.push(u.clone());
         if let Some(it) = describe_from_provider(&s, u).await {
             fresh.push((u.clone(), it));
         }
     }
+    // Ask Pinakes to read them (paced), so their groups and tags come next time.
+    crate::pinakes_reader::resolve_later(&s, unknown_to_pinakes);
     {
         let lib = s.library.lock().expect("library poisoned");
         for (u, it) in &fresh {
@@ -671,32 +684,67 @@ pub(crate) async fn item_detail(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<DiscoverQuery>,
 ) -> ApiResult<DiscoverDetail> {
-    let d = discovery(&s)?;
     let Some(uri) = q.uri.clone().filter(|u| !u.trim().is_empty()) else {
         return Err(ApiError::bad_request("uri is required"));
     };
-    let Some(r) = d.resource_for(uri.trim()).await.map_err(upstream)? else {
-        return Err(ApiError::not_found("Pinakes has not seen this link"));
+    let uri = uri.trim().to_string();
+    let r = match crate::pinakes_reader::card(&s, &uri).await {
+        crate::pinakes_reader::Card::Found(r) => *r,
+        // Not in Pinakes yet: the provider's own data for that id, never an
+        // error page; the client asks again while `reading` is set.
+        other => {
+            let reading = matches!(other, crate::pinakes_reader::Card::Reading(_));
+            let pending = match other {
+                crate::pinakes_reader::Card::Reading(Some(p)) => Some(p),
+                _ => None,
+            };
+            let mut item = match describe_from_provider(&s, &uri).await {
+                Some(it) => it,
+                None => bare_item(&uri),
+            };
+            if let Some(p) = &pending {
+                item.title = item.title.or_else(|| p.card.name.clone());
+                item.image = item.image.or_else(|| p.card.image.clone());
+                item.description = item.description.or_else(|| p.card.description.clone());
+            }
+            return Ok(Json(DiscoverDetail {
+                item,
+                mbid: None,
+                isrcs: Vec::new(),
+                upc: None,
+                duration_secs: None,
+                album: None,
+                original_album: None,
+                artist_type: None,
+                on_pubky: None,
+                in_library_album: None,
+                artist_info: None,
+                reading,
+            }));
+        }
     };
     let facts = r.facts();
     let (mut item, in_library_album) = detail_item(&s, &r);
     fill_from_key(&s, &mut item, in_library_album).await;
-    let on_pubky = match d.nexus().resource_by_uri(&r.card.uri).await {
-        Ok(view) => {
-            let mut tags: Vec<(String, u64)> = view
-                .tags
-                .iter()
-                .map(|t| (t.label.clone(), t.taggers_count.max(t.taggers.len() as u64)))
-                .collect();
-            tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            Some(OnPubky {
-                uri: r.card.uri.clone(),
-                indexed: true,
-                taggers: view.distinct_taggers() as u64,
-                tags,
-            })
-        }
-        Err(_) => None,
+    let on_pubky = match s.discovery() {
+        Some(d) => match d.nexus().resource_by_uri(&r.card.uri).await {
+            Ok(view) => {
+                let mut tags: Vec<(String, u64)> = view
+                    .tags
+                    .iter()
+                    .map(|t| (t.label.clone(), t.taggers_count.max(t.taggers.len() as u64)))
+                    .collect();
+                tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                Some(OnPubky {
+                    uri: r.card.uri.clone(),
+                    indexed: true,
+                    taggers: view.distinct_taggers() as u64,
+                    tags,
+                })
+            }
+            Err(_) => None,
+        },
+        None => None,
     };
     Ok(Json(DiscoverDetail {
         item,
@@ -710,7 +758,32 @@ pub(crate) async fn item_detail(
         on_pubky,
         in_library_album,
         artist_info: None,
+        reading: false,
     }))
+}
+
+/// A row for a link nobody describes yet: its service, never the URL as a name.
+fn bare_item(u: &str) -> DiscoverItem {
+    DiscoverItem {
+        uri: u.to_string(),
+        title: None,
+        artist: None,
+        description: None,
+        image: None,
+        taggers: None,
+        in_library: None,
+        kind: service_link(u, false)
+            .map(|l| l.kind.to_string())
+            .unwrap_or_else(|| "other".into()),
+        site: site_of(u),
+        pinakes_id: None,
+        group_size: None,
+        playable: playable_uri(u),
+        also_on: Vec::new(),
+        page: Some(u.to_string()),
+        plays_from: None,
+        connect: Vec::new(),
+    }
 }
 
 fn page(

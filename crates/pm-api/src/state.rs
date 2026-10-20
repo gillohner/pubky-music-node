@@ -129,6 +129,8 @@ pub struct NodeState {
     pub mb_base: std::sync::RwLock<String>,
     /// The library identification job's progress.
     pub identify: Mutex<crate::identify::IdentifyProgress>,
+    /// Pinakes cards for any link: by-uri, then paced resolves, cached.
+    pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
     pub deezer_base: crate::deezer::SharedBase,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -235,6 +237,7 @@ impl NodeState {
             }),
             mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
             identify: Mutex::new(Default::default()),
+            pinakes_reader: Default::default(),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),

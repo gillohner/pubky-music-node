@@ -22,6 +22,7 @@ pub mod hls;
 pub mod identify;
 pub mod mbproxy;
 pub mod new_releases;
+pub mod pinakes_reader;
 pub mod playlists;
 pub mod radio;
 pub mod reviews;
@@ -243,11 +244,20 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/events", get(events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state.clone());
-    Router::new()
+    // The web UI's paths (navigation brief): a deep link or reload lands on
+    // the same view, so every page path serves index.html.
+    let mut web = Router::new()
         .route("/", get(web_ui))
         .route("/app", get(web_ui))
         .route("/app/", get(web_ui))
-        .route("/app.css", get(web_css))
+        .route("/song/{id}", get(web_ui))
+        .route("/album/{id}", get(web_ui))
+        .route("/artist/{id}", get(web_ui))
+        .route("/search", get(web_ui));
+    for view in WEB_VIEWS {
+        web = web.route(&format!("/{view}"), get(web_ui));
+    }
+    web.route("/app.css", get(web_css))
         .route("/ux/", get(ux_index))
         .route("/ux/{*path}", get(ux_file))
         .route("/app.js", get(web_js))
@@ -308,6 +318,23 @@ async fn auth(
 
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
+/// Top-level views of the web UI that have their own path.
+const WEB_VIEWS: [&str; 13] = [
+    "favourites",
+    "albums",
+    "artists",
+    "genres",
+    "tracks",
+    "playlists",
+    "radio",
+    "sources",
+    "discover",
+    "queue",
+    "zones",
+    "settings",
+    "identify",
+];
+
 /// `/ux/`: the UX wireframes in `docs/ux/` (steward brief 2026-10-20), read
 /// from the source tree on debug builds only; release builds answer 404.
 async fn ux_index() -> Response {
@@ -3544,6 +3571,125 @@ mod tests {
         let (st, again) = call(&app, "POST", "/v1/discover/describe", Some(body)).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(again[0]["title"], "Bohemian Rhapsody");
+    }
+
+    /// An item page for a link nobody tagged (owner bug "Pinakes has not seen
+    /// this link"): by-uri says 404, so the node asks Pinakes to read it
+    /// (once, even for two pages at the same time); while Pinakes reads, the
+    /// page answers with what is known and `reading`; then the card arrives.
+    #[tokio::test]
+    async fn an_unknown_link_is_resolved_never_an_error() {
+        let card = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/card-deezer-album-cut-to-the-feeling.json"
+        ))
+        .unwrap();
+        let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r2 = resolves.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/resources/by-uri",
+                get(|| async { (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#) }),
+            )
+            .route(
+                "/v1/resolve",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let card = card.clone();
+                    let n = r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        assert_eq!(body["uri"], "https://www.deezer.com/album/41839661");
+                        // Slow enough that two pages overlap.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        if n == 0 {
+                            let mut v: serde_json::Value = serde_json::from_str(&card).unwrap();
+                            v["status"] = "pending".into();
+                            v["also_on"] = serde_json::json!([]);
+                            (
+                                StatusCode::ACCEPTED,
+                                [(header::CONTENT_TYPE, "application/json")],
+                                v.to_string(),
+                            )
+                        } else {
+                            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], card)
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let q = "/v1/discover/item?uri=https%3A%2F%2Fwww.deezer.com%2Falbum%2F41839661";
+        let (a, b) = tokio::join!(call(&app, "GET", q, None), call(&app, "GET", q, None));
+        for (st, d) in [&a, &b] {
+            assert_eq!(*st, StatusCode::OK, "never an error page: {d}");
+            assert_eq!(d["reading"], true, "{d}");
+            assert_eq!(
+                d["item"]["title"], "Cut To The Feeling",
+                "the pending card's name: {d}"
+            );
+        }
+        assert_eq!(
+            resolves.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one resolve for two pages"
+        );
+        // A moment later the page asks again and Pinakes has read it.
+        *s.pinakes_reader.retry_after.lock().unwrap() = std::time::Duration::ZERO;
+        let (st, d) = call(&app, "GET", q, None).await;
+        assert_eq!(st, StatusCode::OK, "{d}");
+        assert!(d["reading"].is_null(), "{d}");
+        assert_eq!(d["upc"], "0602557656527");
+        assert!(!d["item"]["also_on"].as_array().unwrap().is_empty());
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Found cards are cached: no more resolves.
+        *s.pinakes_reader.retry_after.lock().unwrap() = crate::pinakes_reader::RETRY_AFTER;
+        call(&app, "GET", q, None).await;
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Deep links and reloads of web UI paths land on the UI (SPA fallback).
+    #[tokio::test]
+    async fn web_ui_paths_serve_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s);
+        for path in [
+            "/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "/album/u-aHR0cHM6Ly90aWRhbC5jb20vYWxidW0vMzM4MjA0NTYw",
+            "/artist/mb-0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "/search?q=cro%20bad%20chick",
+            "/discover",
+            "/settings",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            assert!(
+                String::from_utf8_lossy(&body).contains("/app.js"),
+                "{path} is not the UI"
+            );
+        }
     }
 
     #[test]

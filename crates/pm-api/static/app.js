@@ -430,20 +430,67 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
-  const setView = (v, arg) => {
+  // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
+  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'discover', 'queue', 'zones', 'settings', 'identify'];
+  const VIEW_LABELS = { home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist' };
+  const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
+  const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
+  // A page id is the canonical identity in short form: mb-<mbid>, isrc-<ISRC>, else u-<base64url of the link>.
+  const idOf = (uri) => { let m = uri.match(/^https:\/\/musicbrainz\.org\/(recording|artist|release-group)\/([0-9a-f-]{36})$/); if (m) return 'mb-' + m[2]; m = uri.match(/^https:\/\/musicbrainz\.org\/isrc\/([A-Za-z0-9]{12})$/); if (m) return 'isrc-' + m[1].toUpperCase(); return 'u-' + b64u(uri); };
+  const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } return null; };
+  const pathFor = (v, arg) => {
+    if (v === 'discover-item' && arg && arg.uri) return `/${itemSeg(arg.kind)}/${idOf(arg.uri)}`;
+    if (v === 'search') return arg && arg.q ? `/search?q=${encodeURIComponent(arg.q)}` : '/search';
+    if (v === 'home') return '/';
+    return NAV_VIEWS.includes(v) ? '/' + v : null;
+  };
+  const routeFromPath = () => {
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    let m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
+    if (m) { const uri = uriOf(m[1], m[2]); if (uri) return { v: 'discover-item', arg: { uri, kind: m[1] === 'song' ? 'track' : m[1] } }; }
+    if (p === '/search') { const q = new URLSearchParams(location.search).get('q') || ''; return { v: 'search', arg: q ? { q } : null }; }
+    const v = p.slice(1);
+    return NAV_VIEWS.includes(v) ? { v } : null;
+  };
+  // What the back arrow says on the next page.
+  const hereLabel = () => state.view === 'discover-item' ? (state.itemTitle || 'Back') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
+  // History stores only what restores a view (search keeps its query, not its results).
+  const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? { q: arg.q } : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
+  let navDepth = 0;
+  const setView = (v, arg, how = 'push') => {
+    if (how !== 'pop') {
+      const path = pathFor(v, arg) || location.pathname + location.search;
+      const cur = history.state || {};
+      try { history.replaceState({ ...cur, scroll: main.scrollTop }, '', location.pathname + location.search); } catch { /* sandboxed */ }
+      // Changing a query or tab inside the same page replaces; opening another page pushes.
+      const replace = how === 'replace' || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
+      const entry = { v, arg: histArg(v, arg), backLabel: replace ? cur.backLabel : hereLabel(), depth: replace ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
+      navDepth = entry.depth;
+    }
     state.view = v; state.viewArg = arg;
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
-    render();
+    return render();
   };
+  window.addEventListener('popstate', async (e) => {
+    const st = e.state || routeFromPath() || { v: 'home' };
+    navDepth = st.depth || 0;
+    if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; await runSearch('pop'); }
+    else await setView(st.v, st.arg, 'pop');
+    if (st.scroll) main.scrollTop = st.scroll;
+  });
+  // The back arrow: one step back when there is in-app history, else the parent page.
+  const goBack = (fallback) => { if (navDepth > 0) history.back(); else setView(fallback || 'home'); };
   $$('.nav-item').forEach((b) => b.onclick = () => setView(b.dataset.view));
   // Back from TIDAL's sign-in page.
   { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast('TIDAL signed in'); setView('sources', { source: 'tidal' }); } else toast('TIDAL sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
   let searchTimer = null;
-  const runSearch = async () => {
+  const runSearch = async (how) => {
     const q = search.value.trim();
     if (!q) { if (state.view === 'search') setView('home'); return; }
     // The library answers at once; streaming services and Pubky fill in when they reply.
@@ -452,12 +499,12 @@
     try {
       const lib = await api('GET', `/library/search?q=${enc}&limit=200&sources=0`);
       if (search.value.trim() !== q) return;
-      setView('search', { q, tracks: lib.tracks, albums: lib.albums || [], artists: lib.artists || [], genres: lib.genres || [], sources: [], pubky: [], pending: true });
+      setView('search', { q, tracks: lib.tracks, albums: lib.albums || [], artists: lib.artists || [], genres: lib.genres || [], sources: [], pubky: [], pending: true }, how === 'pop' ? 'pop' : 'push');
     } catch (e) { toast(e.message, 'error'); }
     try {
       const [r, pubky] = await full;
       if (search.value.trim() !== q || state.view !== 'search') return;
-      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [], sources: r.sources || [], pubky: pubky ? pubky.items : [] });
+      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [], sources: r.sources || [], pubky: pubky ? pubky.items : [] }, 'pop');
     } catch (e) { toast(e.message, 'error'); }
   };
   search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 280); });
@@ -703,10 +750,10 @@
     if (anchor) showMenu(anchor, options); else toast('Not on your services: connect one in Sources', 'error');
   };
   const bindDiscoverRows = (items) => {
-    $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('[data-dplay],[data-dmore]')) return; setView('discover-item', { uri: items[Number(row.dataset.ditem)].uri }); });
+    $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('[data-dplay],[data-dmore]')) return; { const it = items[Number(row.dataset.ditem)]; setView('discover-item', { uri: it.uri, kind: it.kind }); } });
     $$('[data-dplay]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); discoverPlay(items[Number(b.dataset.dplay)], null, b); });
     $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('sources'); });
-    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => window.open(it.uri, '_blank', 'noopener') }]); });
+    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => window.open(it.uri, '_blank', 'noopener') }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const pageHead = (title, count, actions = '') => `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
@@ -1175,7 +1222,7 @@
           const uri = state.viewArg && state.viewArg.uri;
           let d;
           try { d = await api('GET', `/discover/item?uri=${encodeURIComponent(uri)}`); }
-          catch (e) { main.innerHTML = backBtn('discover', 'Discover') + `<div class="notice warn">${esc(e.message)}</div>`; break; }
+          catch (e) { main.innerHTML = `<button class="back" id="dback">${icon('back')} ${esc((history.state && history.state.backLabel) || 'Discover')}</button>` + `<div class="notice">${esc(e.message)}</div>`; $('#dback').onclick = () => goBack('discover'); break; }
           if (state.view !== 'discover-item') return;
           const it = d.item;
           const ref = { uri: it.uri };
@@ -1184,11 +1231,14 @@
           try { myReview = ((await api('GET', `/reviews?uri=${encodeURIComponent(it.uri)}`)).reviews || [])[0] || null; } catch { /* no identity */ }
           const facts = [d.mbid ? `<a class="chip" href="https://musicbrainz.org/${it.kind === 'artist' ? 'artist' : it.kind === 'album' ? 'release' : 'recording'}/${esc(d.mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a>` : '', ...(d.isrcs || []).slice(0, 3).map((i) => `<span class="chip" title="ISRC">${esc(i)}</span>`), d.upc ? `<span class="chip" title="Barcode">UPC ${esc(d.upc)}</span>` : '', d.duration_secs ? `<span class="chip">${fmt(d.duration_secs * 1000)}</span>` : '', d.artist_type ? `<span class="chip">${esc(d.artist_type)}</span>` : ''].filter(Boolean).join('');
           const playOn = it.also_on.filter((v) => v.uri);
-          main.innerHTML = backBtn('discover', 'Discover') + `<div class="hero"><div class="art">${it.image ? `<img src="${esc(it.image)}" alt="" style="width:100%;border-radius:12px">` : `<div class="art placeholder"></div>`}</div><div><div class="eyebrow">${esc(it.kind)} · ${esc(it.site || '')}${it.group_size ? ` · on ${it.group_size} services` : ''}</div><h1>${esc(itemName(it))}</h1><p class="sub">${esc([it.artist, d.album || d.original_album].filter(Boolean).join(' · '))}</p><div class="chips facts">${facts}</div>
+          state.itemTitle = itemName(it);
+          main.innerHTML = `<button class="back" id="dback">${icon('back')} ${esc((history.state && history.state.backLabel) || 'Discover')}</button>` + (d.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '') + `<div class="hero"><div class="art">${it.image ? `<img src="${esc(it.image)}" alt="" style="width:100%;border-radius:12px">` : `<div class="art placeholder"></div>`}</div><div><div class="eyebrow">${esc(it.kind)} · ${esc(it.site || '')}${it.group_size ? ` · on ${it.group_size} services` : ''}</div><h1>${esc(itemName(it))}</h1><p class="sub">${esc([it.artist, d.album || d.original_album].filter(Boolean).join(' · '))}</p><div class="chips facts">${facts}</div>
             <div class="actions" style="margin-top:12px"><button class="btn primary" id="dplay">${icon('play')} Play</button>${playOn.length ? `<button class="btn" id="dplayon">${icon('zone')} Play on…</button>` : ''}<a class="btn" href="${esc(it.uri)}" target="_blank" rel="noopener">${icon('external')} Open on ${esc(it.site || 'the service')}</a>${d.in_library_album ? `<button class="btn" data-album="${d.in_library_album}">${icon('disc')} In your library</button>` : ''}</div><div class="playsfrom">${playsChip(it, true) || `<span class="muted small">Nothing to play here yet.</span>`}</div></div></div>`
             + (it.also_on.length ? `<section class="section"><div class="section-head"><h3>Also on</h3><span class="muted small">tagged links first; derived links may differ by country</span></div><div class="list">${it.also_on.map((v, i) => `<div class="list-row"><div class="grow"><div class="name"><span class="src-badge">${esc(v.source.toUpperCase())}</span> ${esc(v.label)}</div><div class="sub">${esc(v.url)}</div></div><span class="row-actions">${v.uri ? `<button class="icon-btn" data-vplay="${i}" title="Play">${icon('play')}</button>` : ''}<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></span></div>`).join('')}</div></section>` : '')
             + `<section class="section"><div class="section-head"><h3>On Pubky</h3></div>${d.on_pubky ? `<p class="muted small">${d.on_pubky.taggers} ${d.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${d.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">Not indexed on Pubky yet.</p>'}${tagRow(myTags, ref)}${reviewRow(myReview)}</section>`;
           $('#dplay') && ($('#dplay').onclick = (e) => discoverPlay(it, null, e.currentTarget));
+          $('#dback').onclick = () => goBack('discover');
+          if (d.reading) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 8) setTimeout(() => { if (state.view === 'discover-item' && state.viewArg && state.viewArg.uri === uri) { state.viewArg.tries = tries; render(); } }, 4000); }
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
           $('#dplayon') && ($('#dplayon').onclick = (e) => showMenu(e.currentTarget, playOn.map((v) => ({ label: v.label, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true) }))));
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => { const v = it.also_on[Number(b.dataset.vplay)]; playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true); });
@@ -1407,7 +1457,7 @@
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);
-      setView(state.view);
+      { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
       events();
     } catch (e) { setConn(false, e.message); main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)}</div>`; }
   };
