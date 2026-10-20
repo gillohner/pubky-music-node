@@ -36,8 +36,9 @@ ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, 
 
 **Controllers.** A built-in web UI at `/` (phone-friendly and installable to the home screen, keyboard
 shortcuts, media keys, Now Playing with the signal path and lyrics), a native Rust app (`pm-app`, egui) that also plays through the computer it runs on, an
-OpenSubsonic server for Symfonium, Feishin, Amperfy and friends, and a `/v1` API with a WebSocket
-event stream for anything else.
+OpenSubsonic server for Symfonium, Feishin, Amperfy and friends (their jukebox mode drives a zone of
+your choice), and a `/v1` API with a WebSocket event stream for anything else. Both UIs have a Zones
+overview for the whole house, Focus filters by file quality, and new releases from your artists.
 
 **Pubky.** Sign in with Pubky Ring. Playlists, reviews and listening activity are private v1
 `PubkyAppPost`s with a JSON envelope (ADR 0006), favourites are private v1 bookmarks (ADR 0010),
