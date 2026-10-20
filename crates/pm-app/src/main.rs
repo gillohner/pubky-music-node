@@ -155,6 +155,10 @@ struct App {
     list_filter: String,
     /// Set by the `/` shortcut; the search box takes focus on the next frame.
     focus_search: bool,
+    tidal_status: Option<pm_api::tidal::TidalStatus>,
+    /// Opened in the system browser on the next frame (TIDAL sign-in).
+    pending_open_url: Option<String>,
+    tidal_poll_at: Option<Instant>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -253,6 +257,9 @@ impl App {
             new_releases: None,
             list_filter: String::new(),
             focus_search: false,
+            tidal_status: None,
+            pending_open_url: None,
+            tidal_poll_at: None,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -415,6 +422,19 @@ impl App {
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
                 Msg::PubkyFiles(r) => self.pubky_files = Some(r),
+                Msg::TidalStatus(st) => {
+                    if st.signed_in {
+                        self.tidal_poll_at = None;
+                        self.sources.clear();
+                        self.backend.send(Cmd::LoadSources);
+                    }
+                    self.tidal_status = Some(st);
+                }
+                Msg::OpenUrl(u) => {
+                    self.pending_open_url = Some(u);
+                    // Poll the node until the sign-in lands (the browser finishes it).
+                    self.tidal_poll_at = Some(Instant::now() + Duration::from_secs(3));
+                }
                 Msg::NewReleases(nr) => self.new_releases = Some(*nr),
                 Msg::AlbumFormats(f) => {
                     self.album_formats = f.into_iter().map(|x| (x.album_id, x)).collect();
@@ -1696,16 +1716,77 @@ impl App {
             });
             return;
         }
-        ui.horizontal(|ui| {
-            ui.heading("Internet Archive");
-            ui.weak("live recordings, netlabels, public domain · no account");
+        // One tab per source; the heading follows the pick.
+        if self.sources.is_empty() {
+            self.backend.send(Cmd::LoadSources);
+        }
+        let sources = self.sources.clone();
+        ui.horizontal_wrapped(|ui| {
+            for src in &sources {
+                if ui.selectable_label(self.source_id == src.id, &src.name).clicked()
+                    && self.source_id != src.id
+                {
+                    self.source_id = src.id.clone();
+                    self.archive_results = None;
+                    if src.id == "tidal" {
+                        self.backend.send(Cmd::TidalStatus);
+                    }
+                }
+            }
         });
-        ui.small(
-            egui::RichText::new(
-                "Streams play on any zone; FLAC when the item has it, else MP3 or Ogg (shown as Lossy).",
-            )
-            .weak(),
-        );
+        let current = sources.iter().find(|s| s.id == self.source_id).cloned();
+        ui.horizontal(|ui| {
+            ui.heading(current.as_ref().map(|s| s.name.as_str()).unwrap_or("Sources"));
+            if let Some(c) = &current {
+                ui.weak(&c.status);
+            }
+        });
+        if let Some(c) = &current {
+            ui.small(egui::RichText::new(&c.description).weak());
+        }
+        if self.source_id == "tidal" {
+            if self.tidal_status.is_none() {
+                self.backend.send(Cmd::TidalStatus);
+                self.tidal_status = Some(Default::default());
+            }
+            let st = self.tidal_status.clone().unwrap_or_default();
+            ui.horizontal(|ui| {
+                if !st.configured {
+                    ui.weak("Add [tidal] client_id and client_secret to the node config to enable TIDAL.");
+                } else if st.signed_in {
+                    theme::pill(
+                        ui,
+                        Some(theme::OK),
+                        &format!(
+                            "Signed in{}{}",
+                            st.user_id
+                                .as_deref()
+                                .map(|u| format!(" · user {u}"))
+                                .unwrap_or_default(),
+                            st.country
+                                .as_deref()
+                                .map(|c| format!(" · {c}"))
+                                .unwrap_or_default()
+                        ),
+                    );
+                    if ui.small_button("Sign out").clicked() {
+                        self.backend.send(Cmd::TidalLogout);
+                    }
+                } else {
+                    if ui
+                        .add(theme::primary("Connect TIDAL"))
+                        .on_hover_text("Opens TIDAL's sign-in in your browser; the node keeps the tokens")
+                        .clicked()
+                    {
+                        self.backend.send(Cmd::TidalLogin);
+                    }
+                    ui.weak(format!(
+                        "The TIDAL app must list {} as a redirect URI.",
+                        st.redirect_uri
+                    ));
+                }
+            });
+        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let resp = ui.add(
@@ -3876,6 +3957,14 @@ impl App {
         if self.local_sleep_at.is_some_and(|at| Instant::now() >= at) {
             self.local_sleep_at = None;
             self.local.zone.pause();
+        }
+        if let Some(u) = self.pending_open_url.take() {
+            ctx.open_url(egui::OpenUrl::new_tab(u));
+        }
+        if self.tidal_poll_at.is_some_and(|at| Instant::now() >= at) {
+            self.tidal_poll_at = Some(Instant::now() + Duration::from_secs(3));
+            self.backend.send(Cmd::TidalStatus);
+            ctx.request_repaint_after(Duration::from_secs(3));
         }
         ctx.request_repaint_after(Duration::from_millis(500));
         let mut open = true;

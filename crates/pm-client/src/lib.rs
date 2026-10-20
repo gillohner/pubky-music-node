@@ -463,6 +463,22 @@ impl NodeClient {
         self.get("library/new-releases", &[]).await
     }
 
+    /// TIDAL account state on the node.
+    pub async fn tidal_status(&self) -> Result<pm_api::tidal::TidalStatus> {
+        self.get("sources/tidal/status", &[]).await
+    }
+
+    /// The TIDAL sign-in URL to open in a browser; the node finishes the flow.
+    pub async fn tidal_login_url(&self) -> Result<String> {
+        let l: pm_api::tidal::LoginUrl = self.get("sources/tidal/login", &[]).await?;
+        Ok(l.url)
+    }
+
+    pub async fn tidal_logout(&self) -> Result<pm_api::tidal::TidalStatus> {
+        self.send::<pm_api::tidal::TidalStatus, ()>(reqwest::Method::DELETE, "sources/tidal/session", None)
+            .await
+    }
+
     /// The best file format per album (badge text and quality flags).
     pub async fn album_formats(&self) -> Result<Vec<pm_library::AlbumFormat>> {
         self.get("library/albums/formats", &[]).await

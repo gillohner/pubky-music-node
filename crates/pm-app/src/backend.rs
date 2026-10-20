@@ -186,6 +186,9 @@ pub enum Cmd {
     /// a mirror of the remote files into the node.
     PubkyFiles,
     SetJukeboxZone(Option<String>),
+    TidalStatus,
+    TidalLogin,
+    TidalLogout,
     PubkyUpload(i64),
     PubkyMirror,
     LoadDsp(String),
@@ -253,6 +256,9 @@ pub enum Msg {
     AlbumFormats(Vec<pm_library::AlbumFormat>),
     NewReleases(Box<NewReleasesPage>),
     PubkyFiles(Result<Vec<pm_pubky::homeserver::RemoteFile>, String>),
+    TidalStatus(pm_api::tidal::TidalStatus),
+    /// A URL the app should open in the system browser (TIDAL sign-in).
+    OpenUrl(String),
     Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
@@ -583,6 +589,15 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadFolders => out.send(Msg::Folders(c.folders().await?)),
         Cmd::LoadNodeSettings => out.send(Msg::NodeSettings(c.node_settings().await?)),
+        Cmd::TidalStatus => out.send(Msg::TidalStatus(c.tidal_status().await?)),
+        Cmd::TidalLogin => {
+            let url = c.tidal_login_url().await?;
+            out.send(Msg::OpenUrl(url));
+        }
+        Cmd::TidalLogout => {
+            out.send(Msg::TidalStatus(c.tidal_logout().await?));
+            out.send(Msg::Notice("TIDAL signed out".into()));
+        }
         Cmd::SetJukeboxZone(zone) => {
             let v = c.set_jukebox_zone(zone.as_deref()).await?;
             out.send(Msg::NodeSettings(v));
