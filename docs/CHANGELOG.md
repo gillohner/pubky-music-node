@@ -25,4 +25,5 @@ Newest first. Dates are when the change landed on `main`.
   `after` cursor.
 - Filter boxes on the Albums, Artists and Tracks pages of both UIs.
 - The native app's Albums grid is virtualised (only visible covers are fetched).
+- The web UI's Tracks page renders 500 rows at a time with a filter over the whole list.
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
