@@ -84,6 +84,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
         .route("/outputs", get(outputs))
+        .route("/outputs/rescan", post(rescan_outputs))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
         .route("/zones/{id}/queue", get(queue).post(enqueue).delete(clear_queue))
@@ -186,6 +187,19 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
 
 async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputInfo>> {
     Json(s.outputs.list())
+}
+
+/// Discover outputs again (local devices, endpoints over mDNS and configured
+/// addresses); new ones get a zone. Returns the full list.
+async fn rescan_outputs(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<OutputInfo>> {
+    let st = s.clone();
+    let new = tokio::task::spawn_blocking(move || st.rescan_outputs())
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !new.is_empty() {
+        tracing::info!(?new, "new outputs");
+    }
+    Ok(Json(s.outputs.list()))
 }
 
 // ---- handlers: zones ----

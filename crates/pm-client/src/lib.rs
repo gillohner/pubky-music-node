@@ -137,6 +137,12 @@ impl NodeClient {
         self.get("outputs", &[]).await
     }
 
+    /// Discover outputs again (endpoints started after the node); new ones get zones.
+    pub async fn rescan_outputs(&self) -> Result<Vec<OutputInfo>> {
+        self.send::<Vec<OutputInfo>, ()>(reqwest::Method::POST, "outputs/rescan", None)
+            .await
+    }
+
     // ---- zones ----
 
     pub async fn zones(&self) -> Result<Vec<ZoneState>> {

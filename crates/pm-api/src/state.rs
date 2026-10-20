@@ -4,7 +4,7 @@ use crate::sources::NodeSources;
 use crate::types::ApiEvent;
 use pm_audio::PipelineConfig;
 use pm_library::Library;
-use pm_zones::{Output, OutputRegistry, Zone, ZoneId, Zones};
+use pm_zones::{Output, OutputId, OutputRegistry, Zone, ZoneId, Zones};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -50,6 +50,9 @@ pub struct NodeState {
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// How to find outputs again (local devices, endpoints); set by the binary.
+    #[allow(clippy::type_complexity)]
+    pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
     scanning: Mutex<bool>,
 }
 
@@ -84,6 +87,7 @@ impl NodeState {
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),
+            discover: Mutex::new(None),
             scanning: Mutex::new(false),
         })
     }
@@ -180,6 +184,31 @@ impl NodeState {
             Ok(w) => *self.watcher.lock().expect("watcher lock") = Some(w),
             Err(e) => tracing::warn!("folder watching unavailable: {e}"),
         }
+    }
+
+    pub fn set_discover(&self, f: Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>) {
+        *self.discover.lock().expect("discover lock") = Some(f);
+    }
+
+    /// Run discovery again: register outputs not seen before and give each
+    /// a zone. Returns the ids that are new. Blocking (mDNS browse, TCP
+    /// connects); call from `spawn_blocking`.
+    pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
+        let Some(f) = self.discover.lock().expect("discover lock").clone() else {
+            return Vec::new();
+        };
+        let mut new = Vec::new();
+        for out in f() {
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            let name = out.name();
+            self.outputs.register(out.clone());
+            new.push(id);
+            self.create_zone(&name, out);
+        }
+        new
     }
 
     /// Claim the scan slot; false if a scan is already running.

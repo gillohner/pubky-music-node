@@ -1213,7 +1213,16 @@ impl App {
             }
         });
         ui.add_space(12.0);
-        ui.heading("Node outputs");
+        ui.horizontal(|ui| {
+            ui.heading("Node outputs");
+            if ui
+                .button("Rescan")
+                .on_hover_text("Find endpoints started after the node")
+                .clicked()
+            {
+                self.backend.send(Cmd::RescanOutputs);
+            }
+        });
         for o in &self.outputs {
             let caps = &o.caps;
             let rates = caps

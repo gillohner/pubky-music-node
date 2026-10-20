@@ -82,6 +82,7 @@ pub enum Cmd {
         outputs: Vec<String>,
     },
     DeleteZone(String),
+    RescanOutputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +385,12 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                 c.create_group_zone(&name, outputs).await?
             };
             out.send(Msg::Notice(format!("zone “{}” created", z.name)));
+            out.send(Msg::Zones(c.zones().await?));
+        }
+        Cmd::RescanOutputs => {
+            let outs = c.rescan_outputs().await?;
+            out.send(Msg::Notice(format!("{} outputs", outs.len())));
+            out.send(Msg::Outputs(outs));
             out.send(Msg::Zones(c.zones().await?));
         }
         Cmd::DeleteZone(id) => {

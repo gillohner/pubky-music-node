@@ -163,6 +163,16 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
     }
+    {
+        let ocfg = cfg.outputs.clone();
+        state.set_discover(std::sync::Arc::new(move || {
+            let reg = outputs::discover_all(&ocfg);
+            reg.list()
+                .into_iter()
+                .filter_map(|info| reg.get(&info.id))
+                .collect()
+        }));
+    }
     if cfg.library.watch {
         state.watch_folders(std::time::Duration::from_secs(
             cfg.library.watch_quiet_secs.max(1),
