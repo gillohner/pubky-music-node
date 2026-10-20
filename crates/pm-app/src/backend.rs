@@ -4,7 +4,7 @@
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
     FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
-    PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction,
+    PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction, UpdatePlaylist,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -99,6 +99,11 @@ pub enum Cmd {
     AddToPlaylist {
         id: String,
         track_ids: Vec<i64>,
+    },
+    /// Move an item to a new index by re-sending the item order.
+    MovePlaylistItem {
+        id: String,
+        uris: Vec<String>,
     },
     RemovePlaylistItem {
         id: String,
@@ -506,6 +511,18 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             out.send(Msg::Notice(format!("added to “{}”", d.summary.name)));
             out.send(Msg::Playlist(Box::new(d)));
             out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::MovePlaylistItem { id, uris } => {
+            let d = c
+                .update_playlist(
+                    &id,
+                    &UpdatePlaylist {
+                        uris: Some(uris),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            out.send(Msg::Playlist(Box::new(d)));
         }
         Cmd::RemovePlaylistItem { id, index } => {
             let d = c.remove_playlist_item(&id, index).await?;

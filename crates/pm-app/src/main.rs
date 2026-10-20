@@ -2137,9 +2137,11 @@ impl App {
         });
         ui.add_space(10.0);
         let mut remove = None;
+        let mut moved: Option<(usize, usize)> = None;
+        let n_items = d.playlist.items.len();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("playlist-items")
-                .num_columns(4)
+                .num_columns(5)
                 .striped(true)
                 .show(ui, |ui| {
                     for (i, item) in d.playlist.items.iter().enumerate() {
@@ -2166,6 +2168,17 @@ impl App {
                                 ui.weak("");
                             }
                         }
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
+                                moved = Some((i, i - 1));
+                            }
+                            if ui
+                                .add_enabled(i + 1 < n_items, egui::Button::new("↓").small())
+                                .clicked()
+                            {
+                                moved = Some((i, i + 1));
+                            }
+                        });
                         if ui.small_button("✕").clicked() {
                             remove = Some(i);
                         }
@@ -2173,6 +2186,15 @@ impl App {
                     }
                 });
         });
+        if let Some((from, to)) = moved {
+            let mut uris: Vec<String> = d.playlist.items.iter().map(|it| it.uri.clone()).collect();
+            let u = uris.remove(from);
+            uris.insert(to, u);
+            self.backend.send(Cmd::MovePlaylistItem {
+                id: id.to_string(),
+                uris,
+            });
+        }
         if let Some(i) = remove {
             self.backend.send(Cmd::RemovePlaylistItem {
                 id: id.to_string(),
