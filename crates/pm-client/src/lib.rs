@@ -529,6 +529,26 @@ impl NodeClient {
         .await
     }
 
+    // ---- streaming sources ----
+
+    pub async fn sources(&self) -> Result<Vec<SourceInfo>> {
+        self.get("sources", &[]).await
+    }
+
+    pub async fn archive_search(&self, q: &str, limit: u32) -> Result<Vec<ArchiveHit>> {
+        Ok(self
+            .get::<ArchiveResults>(
+                "sources/archive/search",
+                &[("q", q.to_string()), ("limit", limit.to_string())],
+            )
+            .await?
+            .items)
+    }
+
+    pub async fn archive_item(&self, id: &str) -> Result<ArchiveItem> {
+        self.get(&format!("sources/archive/items/{id}"), &[]).await
+    }
+
     // ---- internet radio ----
 
     /// Search the radio-browser directory by name, tag or country.

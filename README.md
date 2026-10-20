@@ -23,7 +23,8 @@ by default: every conversion is a named stage with a quality level in the signal
 gapless playback, queues that survive restarts, grouping with drift correction, and a per-zone DSP
 chain (parametric EQ, convolution, crossfeed, ReplayGain, headroom, volume, dither, resampling only
 when an output needs it). Internet radio by URL with ICY titles, a radio-browser.info directory and
-saved stations.
+saved stations, and the Internet Archive's audio collections (live recordings, netlabels, public
+domain) as the first account-free streaming source.
 
 **Outputs.** Local ALSA devices on the node, `pm-endpoint` daemons on other machines (own protocol,
 ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, and any browser.

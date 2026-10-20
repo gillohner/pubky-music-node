@@ -83,6 +83,8 @@ pub struct NodeState {
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
     /// Cover Art Archive origin; tests point it at a local server.
     pub caa_base: std::sync::RwLock<String>,
+    /// Internet Archive origin; tests point it at a local server.
+    pub archive_base: std::sync::RwLock<String>,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -149,6 +151,7 @@ impl NodeState {
             pulls: Mutex::new(HashMap::new()),
             caa_base: std::sync::RwLock::new("https://coverartarchive.org".into()),
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
+            archive_base: std::sync::RwLock::new("https://archive.org".into()),
             http: Mutex::new(None),
             scanning: Mutex::new(false),
         })

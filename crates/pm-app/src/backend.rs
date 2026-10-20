@@ -2,9 +2,9 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
-    FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
-    PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction, UpdatePlaylist,
+    AddPlaylistItems, ApiEvent, ArchiveHit, ArchiveItem, ArtistDetail, ArtistInfo, CreatePlaylist,
+    DiscoverPage, Enqueue, FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky,
+    PlaylistDetail, PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction, UpdatePlaylist,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -27,6 +27,8 @@ pub enum Cmd {
     LoadHome,
     LoadFavourites,
     RadioSearch(String),
+    ArchiveSearch(String),
+    LoadArchiveItem(String),
     LoadStations,
     SaveStation(Box<RadioStation>),
     DeleteStation(String),
@@ -66,6 +68,12 @@ pub enum Cmd {
         at: QueueAt,
         replace: bool,
         play: bool,
+    },
+    /// Arbitrary queue items (stream URLs with their display metadata).
+    EnqueueItems {
+        zone: String,
+        items: Vec<QueueItem>,
+        replace: bool,
     },
     ClearQueue(String),
     RemoveItem {
@@ -166,6 +174,8 @@ pub enum Msg {
     /// `None` when discovery is off on the node (no contact configured).
     OnPubky(Option<Box<OnPubky>>),
     RadioResults(String, Vec<RadioStation>),
+    ArchiveResults(String, Vec<ArchiveHit>),
+    ArchiveItem(Box<ArchiveItem>),
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
@@ -369,6 +379,11 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             out.send(Msg::RadioResults(q, r));
         }
         Cmd::LoadStations => out.send(Msg::Stations(c.radio_stations().await?)),
+        Cmd::ArchiveSearch(q) => {
+            let r = c.archive_search(&q, 40).await?;
+            out.send(Msg::ArchiveResults(q, r));
+        }
+        Cmd::LoadArchiveItem(id) => out.send(Msg::ArchiveItem(Box::new(c.archive_item(&id).await?))),
         Cmd::SaveStation(st) => {
             out.send(Msg::Stations(c.save_station(&st).await?));
             out.send(Msg::Notice(format!("Saved “{}”", st.name)));
@@ -438,6 +453,21 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                     at,
                     replace,
                     play,
+                },
+            )
+            .await?;
+            let q = c.queue(&zone).await?;
+            out.send(Msg::Queue(zone, q));
+        }
+        Cmd::EnqueueItems { zone, items, replace } => {
+            c.enqueue(
+                &zone,
+                &Enqueue {
+                    track_ids: vec![],
+                    items,
+                    at: QueueAt::End,
+                    replace,
+                    play: replace,
                 },
             )
             .await?;

@@ -632,6 +632,66 @@ pub struct DiscoverItem {
     pub in_library: Option<Track>,
 }
 
+// ---- streaming sources ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// `ready`, or a reason it is not.
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveHit {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<u64>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArchiveResults {
+    pub items: Vec<ArchiveHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveTrack {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The archive's format label (`Flac`, `VBR MP3`, …).
+    pub format: String,
+    /// Direct stream URL.
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveItem {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licence: Option<String>,
+    pub url: String,
+    pub tracks: Vec<ArchiveTrack>,
+}
+
 /// What Pubky (via Nexus) knows about one canonical URL: who tagged it and how.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OnPubky {

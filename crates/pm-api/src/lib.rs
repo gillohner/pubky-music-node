@@ -10,6 +10,7 @@
 //! by pubkey (M5) wraps this API rather than replacing it.
 
 pub mod activity;
+pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod discover;
@@ -158,6 +159,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/uri", get(discover::on_pubky))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
+        .route("/sources", get(archive::list))
+        .route("/sources/archive/search", get(archive::search))
+        .route("/sources/archive/items/{id}", get(archive::item))
         .route("/radio/search", get(radio::search))
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
@@ -1536,6 +1540,86 @@ mod tests {
         let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
         assert_eq!(z["repeat"], "all");
         assert_eq!(z["transport"], "stopped", "restored queues do not start playing");
+    }
+
+    /// The Internet Archive source against a local mock: search, item
+    /// tracks with the best format, and the tracks play through a zone.
+    #[tokio::test]
+    async fn internet_archive_source_searches_and_plays() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/advancedsearch.php",
+                get(|| async {
+                    Json(serde_json::json!({"response": {"docs": [
+                        {"identifier": "fixture-set", "title": "Fixture Set", "creator": "Tester", "year": "2020", "downloads": 7}
+                    ]}}))
+                }),
+            )
+            .route(
+                "/metadata/{id}",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "metadata": {"title": "Fixture Set", "creator": "Tester", "year": "2020"},
+                        "files": [
+                            {"name": "one.flac", "format": "Flac", "source": "original", "title": "One", "track": "1", "length": "5.15"},
+                            {"name": "one.mp3", "format": "VBR MP3", "source": "derivative", "original": "one.flac", "title": "One", "track": "1"}
+                        ]
+                    }))
+                }),
+            )
+            .route(
+                "/download/{id}/{file}",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.archive_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, sources) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(sources[0]["id"], "archive");
+        let (st, _) = call(&app, "GET", "/v1/sources/archive/search?q=", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, r) = call(&app, "GET", "/v1/sources/archive/search?q=fixture", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["items"][0]["id"], "fixture-set");
+        let (st, it) = call(&app, "GET", "/v1/sources/archive/items/fixture-set", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(
+            it["tracks"].as_array().unwrap().len(),
+            1,
+            "one file per recording"
+        );
+        assert_eq!(it["tracks"][0]["format"], "Flac");
+        let url = it["tracks"][0]["url"].as_str().unwrap().to_string();
+        assert!(
+            url.starts_with(&format!("http://127.0.0.1:{port}/download/fixture-set/")),
+            "{url}"
+        );
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": url, "title": "One", "album": "Fixture Set"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
     }
 
     #[tokio::test]

@@ -67,6 +67,7 @@ enum View {
     NowPlaying,
     Favourites,
     Radio,
+    Archive,
     Albums,
     Album(i64),
     Artists,
@@ -117,6 +118,11 @@ struct App {
     radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
     radio_searching: bool,
     stations: Vec<pm_client::RadioStation>,
+    archive_query: String,
+    archive_results: Option<(String, Vec<pm_api::types::ArchiveHit>)>,
+    archive_searching: bool,
+    archive_item: Option<pm_api::types::ArchiveItem>,
+    archive_loading: Option<String>,
     /// Canonical URLs the user has hearted.
     fav_uris: std::collections::HashSet<String>,
     /// Tracks the app has seen, by library id, to find covers for queue items.
@@ -204,6 +210,11 @@ impl App {
             radio_results: None,
             radio_searching: false,
             stations: Vec::new(),
+            archive_query: String::new(),
+            archive_results: None,
+            archive_searching: false,
+            archive_item: None,
+            archive_loading: None,
             fav_uris: std::collections::HashSet::new(),
             known_tracks: HashMap::new(),
             last_local_play: None,
@@ -288,6 +299,14 @@ impl App {
                     self.radio_results = Some((q, r));
                 }
                 Msg::Stations(st) => self.stations = st,
+                Msg::ArchiveResults(q, r) => {
+                    self.archive_searching = false;
+                    self.archive_results = Some((q, r));
+                }
+                Msg::ArchiveItem(it) => {
+                    self.archive_loading = None;
+                    self.archive_item = Some(*it);
+                }
                 Msg::Folders(f) => self.folders = f,
                 Msg::NodeSettings(v) => {
                     self.contact_input = v.contact.clone();
@@ -923,6 +942,7 @@ impl App {
             ("Tracks", View::Tracks),
             ("Playlists", View::Playlists),
             ("Radio", View::Radio),
+            ("Internet Archive", View::Archive),
         ] {
             let selected = self.view == view
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
@@ -1035,6 +1055,7 @@ impl App {
             View::NowPlaying => self.now_playing_view(ui),
             View::Favourites => self.favourites_view(ui),
             View::Radio => self.radio_view(ui),
+            View::Archive => self.archive_view(ui),
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
@@ -1366,6 +1387,168 @@ impl App {
                     self.backend.send(Cmd::SaveStation(Box::new(st.clone())));
                 }
             });
+        });
+    }
+
+    /// Play Internet Archive tracks: queue items with their stream URLs.
+    fn play_archive(&mut self, item: &pm_api::types::ArchiveItem, from: usize, replace: bool) {
+        let items: Vec<QueueItem> = item
+            .tracks
+            .iter()
+            .skip(from)
+            .map(|t| t.queue_item(item))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        if self.is_local() {
+            if replace {
+                self.local.zone.stop();
+                self.local.zone.clear();
+            }
+            self.local.zone.enqueue(items, Insert::End);
+            if replace {
+                self.local.zone.play_index(0);
+            }
+        } else {
+            self.backend.send(Cmd::EnqueueItems {
+                zone: self.settings.zone.clone(),
+                items,
+                replace,
+            });
+        }
+        self.toast(if replace {
+            "Playing from the Internet Archive"
+        } else {
+            "Added to queue"
+        });
+    }
+
+    fn archive_view(&mut self, ui: &mut egui::Ui) {
+        if let Some(item) = self.archive_item.clone() {
+            ui.horizontal(|ui| {
+                if ui.button("‹ Results").clicked() {
+                    self.archive_item = None;
+                }
+            });
+            ui.add_space(6.0);
+            theme::eyebrow(ui, "Internet Archive");
+            ui.heading(egui::RichText::new(&item.title).size(26.0).strong());
+            let mut facts = Vec::new();
+            if let Some(c) = &item.creator {
+                facts.push(c.clone());
+            }
+            if let Some(y) = item.year {
+                facts.push(y.to_string());
+            }
+            facts.push(format!("{} tracks", item.tracks.len()));
+            ui.weak(facts.join(" · "));
+            ui.horizontal(|ui| {
+                if ui.add(theme::primary("▶  Play")).clicked() {
+                    self.play_archive(&item, 0, true);
+                }
+                if ui.add(theme::secondary("Add to queue")).clicked() {
+                    self.play_archive(&item, 0, false);
+                }
+                ui.hyperlink_to("archive.org ↗", &item.url);
+                if let Some(l) = &item.licence {
+                    ui.hyperlink_to("licence", l);
+                }
+            });
+            if let Some(d) = &item.description {
+                ui.add(egui::Label::new(egui::RichText::new(truncate(d, 400)).color(theme::FG_2)).wrap());
+            }
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                egui::Grid::new("archive-tracks")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let mut play_from = None;
+                        for (i, t) in item.tracks.iter().enumerate() {
+                            if theme::icon_button(ui, 28.0, "▶", "Play from here").clicked() {
+                                play_from = Some(i);
+                            }
+                            ui.weak(t.track_no.map(|n| n.to_string()).unwrap_or_default());
+                            ui.label(&t.title);
+                            ui.horizontal(|ui| {
+                                ui.weak(t.duration_ms.map(fmt_duration).unwrap_or_default());
+                                ui.small(egui::RichText::new(&t.format).weak());
+                            });
+                            ui.end_row();
+                        }
+                        if let Some(i) = play_from {
+                            self.play_archive(&item, i, true);
+                        }
+                    });
+            });
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.heading("Internet Archive");
+            ui.weak("live recordings, netlabels, public domain · no account");
+        });
+        ui.small(
+            egui::RichText::new(
+                "Streams play on any zone; FLAC when the item has it, else MP3 or Ogg (shown as Lossy).",
+            )
+            .weak(),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.archive_query)
+                    .hint_text("Search (Grateful Dead 1977, Bach, netlabel…)")
+                    .desired_width(360.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(theme::primary("Search")).clicked() || enter) && !self.archive_query.trim().is_empty()
+            {
+                self.archive_searching = true;
+                self.backend
+                    .send(Cmd::ArchiveSearch(self.archive_query.trim().to_string()));
+            }
+            if self.archive_searching || self.archive_loading.is_some() {
+                ui.spinner();
+            }
+        });
+        let Some((q, hits)) = self.archive_results.clone() else {
+            ui.add_space(20.0);
+            ui.weak("Search above. Results come from archive.org's audio collections.");
+            return;
+        };
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new(format!("Results for “{q}”"))
+                .strong()
+                .size(16.0),
+        );
+        if hits.is_empty() {
+            ui.weak("Nothing matched.");
+        }
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for h in &hits {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(&h.title).strong()).frame(false))
+                        .clicked()
+                    {
+                        self.archive_loading = Some(h.id.clone());
+                        self.backend.send(Cmd::LoadArchiveItem(h.id.clone()));
+                    }
+                    let mut facts = Vec::new();
+                    if let Some(c) = &h.creator {
+                        facts.push(c.clone());
+                    }
+                    if let Some(y) = h.year {
+                        facts.push(y.to_string());
+                    }
+                    if let Some(d) = h.downloads {
+                        facts.push(format!("{d} downloads"));
+                    }
+                    ui.weak(facts.join(" · "));
+                });
+            }
         });
     }
 

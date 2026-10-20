@@ -310,7 +310,7 @@
   const main = $('#main');
   const setView = (v, arg) => {
     state.view = v; state.viewArg = arg;
-    $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists')));
+    $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'archive-item' && b.dataset.view === 'archive')));
     $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
     render();
@@ -677,6 +677,38 @@
           const pmove = async (i, j) => { const uris = d.playlist.items.map((it) => it.uri); if (j < 0 || j >= uris.length) return; const [u] = uris.splice(i, 1); uris.splice(j, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-pup]', main).forEach((b) => b.onclick = () => pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1));
           $$('[data-pdown]', main).forEach((b) => b.onclick = () => pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1));
+          break;
+        }
+        case 'archive': {
+          const results = state.archiveResults || { q: '', items: [] };
+          main.innerHTML = pageHead('Internet Archive', 'live recordings, netlabels, public domain · no account')
+            + `<div class="toolbar"><input class="input" id="aq" placeholder="Search (Grateful Dead 1977, Bach, netlabel…)" value="${esc(results.q)}" style="width:360px"><button class="btn primary" id="asearch">${icon('search')} Search</button><span class="muted small">Streams play on any zone; FLAC when the item has it, else MP3 or Ogg (shown as Lossy).</span></div>`
+            + (results.q ? `<section class="section"><div class="section-head"><h3>Results for “${esc(results.q)}”</h3></div>${results.items.length ? `<div class="list">${results.items.map((h) => `<div class="list-row clickable" data-aitem="${esc(h.id)}"><div class="avatar" style="background:hsl(${hue(h.title)} 35% 28%)">${esc(initials(h.title))}</div><div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year, h.downloads != null ? h.downloads + ' downloads' : ''].filter(Boolean).join(' · '))}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : '<p class="muted">Nothing matched.</p>'}</section>` : emptyState('archive', 'Search archive.org', 'Concert recordings from the Live Music Archive, netlabel releases and public-domain 78s, all streamable without an account.'));
+          const doSearch = async () => { const q = $('#aq').value.trim(); if (!q) return; $('#asearch').disabled = true; try { const r = await api('GET', '/sources/archive/search?limit=40&q=' + encodeURIComponent(q)); state.archiveResults = { q, items: r.items }; render(); } catch (e) { toast(e.message, 'error'); $('#asearch').disabled = false; } };
+          $('#asearch').onclick = doSearch; $('#aq').onkeydown = (e) => { if (e.key === 'Enter') doSearch(); };
+          $$('[data-aitem]', main).forEach((b) => b.onclick = () => setView('archive-item', b.dataset.aitem));
+          break;
+        }
+        case 'archive-item': {
+          loading();
+          const it = await api('GET', `/sources/archive/items/${encodeURIComponent(state.viewArg)}`);
+          if (state.view !== 'archive-item') return;
+          const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms }));
+          const playFrom = async (i, replace = true) => {
+            const items = qitems.slice(i);
+            if (isBrowser()) {
+              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
+              if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
+              return;
+            }
+            try { await api('POST', `/zones/${state.zone}/queue`, { items, replace, play: replace, at: 'end' }); toast(replace ? 'Playing from the Internet Archive' : 'Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+          };
+          main.innerHTML = backBtn('archive', 'Internet Archive') + `<div class="page-head"><div><div class="eyebrow">Internet Archive</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, it.tracks.length + ' tracks'].filter(Boolean).join(' · '))} · <a href="${esc(it.url)}" target="_blank" rel="noopener">archive.org</a>${it.licence ? ` · <a href="${esc(it.licence)}" target="_blank" rel="noopener">licence</a>` : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button></div></div>`
+            + (it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : '')
+            + `<div class="tracks">${it.tracks.map((t, i) => `<div class="track compact" data-i="${i}"><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue">${icon('plus')}</button></div></div>`).join('')}</div>`;
+          $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
+          $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {
