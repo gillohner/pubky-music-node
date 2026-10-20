@@ -80,6 +80,7 @@ enum View {
     Tracks,
     Search,
     Queue,
+    Zones,
     Settings,
 }
 
@@ -1030,6 +1031,9 @@ impl App {
             self.view = View::Queue;
             self.refresh_queue();
         }
+        if theme::nav_item(ui, self.view == View::Zones, "Zones").clicked() {
+            self.view = View::Zones;
+        }
         ui.add_space(12.0);
         theme::eyebrow(ui, "Node");
         ui.add_space(2.0);
@@ -1153,6 +1157,7 @@ impl App {
                 });
             }
             View::Queue => self.queue_view(ui),
+            View::Zones => self.zones_view(ui),
             View::Settings => self.settings_view(ui),
         }
     }
@@ -2706,6 +2711,162 @@ impl App {
                 id: id.to_string(),
                 index: i,
             });
+        }
+    }
+
+    /// Multi-room overview: every zone with its transport and volume.
+    fn zones_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Zones");
+            ui.weak(format!("{}", self.zones.len() + 1));
+            if ui
+                .small_button("Group outputs…")
+                .on_hover_text("Create zones and groups in Settings")
+                .clicked()
+            {
+                self.view = View::Settings;
+            }
+        });
+        ui.add_space(8.0);
+        let mut rows: Vec<(String, ZoneState)> = vec![(LOCAL_ZONE_ID.to_string(), self.local.zone.state())];
+        let mut node_zones: Vec<(String, ZoneState)> =
+            self.zones.iter().map(|(id, z)| (id.clone(), z.clone())).collect();
+        node_zones.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        rows.extend(node_zones);
+        let outputs = self.outputs.clone();
+        let mut select: Option<String> = None;
+        let mut transport: Option<(String, TransportAction)> = None;
+        let mut volume: Option<(String, f32)> = None;
+        let mut delete: Option<String> = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for (id, z) in &rows {
+                let selected = *id == self.settings.zone;
+                let local = id == LOCAL_ZONE_ID;
+                let name = self.zone_name(id);
+                let frame = egui::Frame::new()
+                    .fill(theme::SURFACE)
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if selected { theme::ACCENT } else { theme::SURFACE_3 },
+                    ))
+                    .corner_radius(10.0)
+                    .inner_margin(12.0);
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&name).strong().size(16.0));
+                        let members = z.now_playing.as_ref().map(|n| n.members.len()).unwrap_or(0);
+                        if members > 0 {
+                            theme::pill(ui, None, &format!("{members} outputs"));
+                        }
+                        theme::pill(
+                            ui,
+                            Some(match z.transport {
+                                pm_zones::Transport::Playing => theme::OK,
+                                pm_zones::Transport::Paused => theme::WARN,
+                                pm_zones::Transport::Stopped => theme::MUTED,
+                            }),
+                            &format!("{:?}", z.transport).to_lowercase(),
+                        );
+                    });
+                    match &z.now_playing {
+                        Some(np) => {
+                            let title = np
+                                .stream_title
+                                .clone()
+                                .or_else(|| np.item.title.clone())
+                                .unwrap_or_else(|| np.item.uri.clone());
+                            ui.label(title);
+                            ui.weak(
+                                [np.item.artist.clone(), np.item.album.clone()]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(" · "),
+                            );
+                        }
+                        None => {
+                            ui.weak("Nothing playing");
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("⏮").on_hover_text("Previous").clicked() {
+                            transport = Some((id.clone(), TransportAction::Previous));
+                        }
+                        let playing = z.transport == pm_zones::Transport::Playing;
+                        if ui.add(theme::primary(if playing { "⏸" } else { "▶" })).clicked() {
+                            transport = Some((id.clone(), TransportAction::Toggle));
+                        }
+                        if ui.button("⏭").on_hover_text("Next").clicked() {
+                            transport = Some((id.clone(), TransportAction::Next));
+                        }
+                        let hw = outputs
+                            .iter()
+                            .find(|o| o.id == z.output)
+                            .and_then(|o| o.caps.hw_volume);
+                        let range = match hw {
+                            Some(pm_model::VolumeKind::Db { min, max, .. }) => Some((min, max)),
+                            _ if local => Some((-60.0, 0.0)),
+                            _ => None,
+                        };
+                        if let Some((min, max)) = range {
+                            let mut v = if selected { self.volume_db } else { max };
+                            let r = ui.add(
+                                egui::Slider::new(&mut v, min..=max)
+                                    .suffix(" dB")
+                                    .show_value(false),
+                            );
+                            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                                volume = Some((id.clone(), v));
+                            }
+                        } else {
+                            ui.weak("fixed volume");
+                        }
+                        if selected {
+                            theme::pill(ui, Some(theme::ACCENT), "selected");
+                        } else if ui.small_button("Play to").clicked() {
+                            select = Some(id.clone());
+                        }
+                        if id.starts_with("group:") && ui.small_button("Ungroup").clicked() {
+                            delete = Some(id.clone());
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
+        });
+        if let Some((zone, action)) = transport {
+            if zone == LOCAL_ZONE_ID {
+                let keep = self.settings.zone.clone();
+                self.settings.zone = LOCAL_ZONE_ID.to_string();
+                self.transport(action);
+                self.settings.zone = keep;
+            } else {
+                self.backend.send(Cmd::Transport { zone, action });
+            }
+        }
+        if let Some((zone, db)) = volume {
+            if zone == self.settings.zone {
+                self.set_volume(db);
+            } else if zone == LOCAL_ZONE_ID {
+                let z = self.local.zone.clone();
+                self.backend.handle.spawn(async move {
+                    let _ = z.set_volume(Volume::Db(db)).await;
+                });
+            } else {
+                self.backend.send(Cmd::Volume {
+                    zone,
+                    volume: Volume::Db(db),
+                });
+            }
+        }
+        if let Some(id) = select {
+            self.settings.zone = id;
+            self.refresh_queue();
+        }
+        if let Some(id) = delete {
+            self.backend.send(Cmd::DeleteZone(id));
         }
     }
 
