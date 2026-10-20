@@ -201,13 +201,34 @@ async fn zones(State(s): State<Arc<NodeState>>) -> Json<Vec<ZoneState>> {
 }
 
 async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
-    let output = s
-        .outputs
-        .get(&OutputId(body.output.clone()))
-        .ok_or_else(|| ApiError::not_found(format!("no output {}", body.output)))?;
     if body.name.trim().is_empty() {
         return Err(ApiError::bad_request("zone name is empty"));
     }
+    let mut ids: Vec<String> = body.outputs.clone();
+    if let Some(o) = body.output.clone() {
+        if !ids.contains(&o) {
+            ids.insert(0, o);
+        }
+    }
+    if ids.is_empty() {
+        return Err(ApiError::bad_request("give `output` or `outputs`"));
+    }
+    let mut members = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let out = s
+            .outputs
+            .get(&OutputId(id.clone()))
+            .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
+        members.push(out);
+    }
+    let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
+        members.remove(0)
+    } else {
+        Arc::new(
+            pm_zones::outputs::GroupOutput::new(body.name.trim(), members)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        )
+    };
     let zone = s.create_zone(body.name.trim(), output);
     Ok(Json(zone.state()))
 }

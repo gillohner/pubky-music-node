@@ -19,11 +19,15 @@ pub struct Info {
     pub outputs: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreateZone {
     pub name: String,
     /// Output id from `GET /v1/outputs`.
-    pub output: String,
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Two or more output ids to play as one group (the first is the leader).
+    #[serde(default)]
+    pub outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

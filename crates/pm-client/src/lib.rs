@@ -153,7 +153,22 @@ impl NodeClient {
             "zones",
             Some(&CreateZone {
                 name: name.into(),
-                output: output.into(),
+                output: Some(output.into()),
+                outputs: vec![],
+            }),
+        )
+        .await
+    }
+
+    /// A zone that plays one stream to several outputs (the first leads).
+    pub async fn create_group_zone(&self, name: &str, outputs: Vec<String>) -> Result<ZoneState> {
+        self.send(
+            reqwest::Method::POST,
+            "zones",
+            Some(&CreateZone {
+                name: name.into(),
+                output: None,
+                outputs,
             }),
         )
         .await

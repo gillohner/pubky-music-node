@@ -26,6 +26,6 @@ pub mod zone;
 
 pub use queue::{Insert, Queue, QueueItem, Repeat};
 pub use registry::OutputRegistry;
-pub use sink::{AudioSink, BufferLevel, ClockSource, Output, OutputId, OutputInfo, SinkError};
+pub use sink::{AudioSink, BufferLevel, ClockSource, MemberStatus, Output, OutputId, OutputInfo, SinkError};
 pub use source::{FrameSource, Processor, SourceError, SourceFactory};
 pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

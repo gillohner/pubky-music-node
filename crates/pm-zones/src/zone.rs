@@ -62,6 +62,9 @@ pub struct NowPlaying {
     pub source_format: AudioFormat,
     pub output_format: AudioFormat,
     pub signal_path: SignalPath,
+    /// Grouped outputs and their drift; empty for a single output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<crate::sink::MemberStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

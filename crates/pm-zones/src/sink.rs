@@ -90,6 +90,15 @@ pub trait ClockSource: Send + Sync {
     fn latency(&self) -> Duration;
 }
 
+/// One member of a grouped sink, as reported to the zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberStatus {
+    pub output: OutputId,
+    /// Audible position relative to the group's leader; positive = ahead.
+    pub drift_ms: i64,
+    pub level: BufferLevel,
+}
+
 /// An open output. Methods block; call them from the zone's audio thread.
 pub trait AudioSink: Send {
     /// The negotiated format. Every block written must match it exactly.
@@ -109,6 +118,11 @@ pub trait AudioSink: Send {
 
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
+
+    /// Members of a grouped sink and their drift; empty for a single output.
+    fn members(&self) -> Vec<MemberStatus> {
+        Vec::new()
+    }
 }
 
 /// One place audio can go (handoff §6.4).

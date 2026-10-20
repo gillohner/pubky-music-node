@@ -579,6 +579,7 @@ impl Engine {
             source_format: c.proc.source_format(),
             output_format: c.proc.output_format(),
             signal_path: c.proc.signal_path().clone(),
+            members: self.sink.as_ref().map(|s| s.members()).unwrap_or_default(),
         });
         self.state.send_modify(|s| {
             s.transport = self.transport;
