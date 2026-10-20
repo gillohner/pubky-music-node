@@ -1,40 +1,211 @@
 name: release
-# Publishes the node image to GHCR for amd64 and arm64 (Umbrel boxes are
-# mostly Raspberry Pis). Runs on version tags and by hand, not on every push:
-# the arm64 cross-build is the expensive part of CI.
+# Every push to main replaces the `edge` pre-release (and the `edge` image);
+# a `v*` tag makes a versioned release (and `latest`/semver images). A manual
+# run builds everything from any branch as workflow artifacts and publishes
+# nothing, which is how changes to this file are tried before they merge.
+#
+# - the app (pm-desktop, Tauri 2): macOS universal .dmg, Windows .msi and
+#   setup .exe, Linux .AppImage and .deb for x86_64 and arm64;
+# - pm-node and pm-endpoint for Linux x86_64, arm64 and armv7 (Raspberry Pi),
+#   plus Windows and macOS, with the egui pm-app where it was released before
+#   (frozen, ADR 0012);
+# - the multi-arch node image on GHCR.
+#
+# Builds are unsigned until the owner provides an Apple Developer ID and a
+# Windows certificate.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Extra image tag to publish (for example edge)"
-        default: "edge"
-      images:
-        description: "Build and publish the multi-arch node image"
-        type: boolean
-        default: true
-      binaries:
-        description: "Build the native controller, node and endpoint for Linux, Windows and macOS"
-        type: boolean
-        default: true
+concurrency:
+  # One release run per ref at a time. A running build finishes and
+  # publishes; newer pushes queue behind it (only the newest is kept).
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
-  packages: write
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 jobs:
-  image:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.images }}
-    runs-on: ubuntu-latest
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.m.outputs.channel }}
+      version: ${{ steps.m.outputs.version }}
+      publish: ${{ steps.m.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - id: m
+        name: channel and version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            channel="$GITHUB_REF_NAME"; publish=true
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version; bump Cargo.toml first"
+              exit 1
+            fi
+          elif [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            channel=edge; publish=true
+          else
+            channel=dev; publish=false
+          fi
+          echo "channel=$channel version=$version publish=$publish"
+          { echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
+
+  app:
+    name: app (${{ matrix.platform }})
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-universal
+            os: macos-15
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles dmg
+          - platform: windows-x86_64
+            os: windows-2025
+            targets: ""
+            args: --bundles msi,nsis
+          # Ubuntu 22.04 keeps the AppImage and .deb on glibc 2.35, so they
+          # run on Debian 12 and Ubuntu 22.04 too.
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            targets: ""
+            args: --bundles appimage,deb
+          - platform: linux-arm64
+            os: ubuntu-22.04-arm
+            targets: ""
+            args: --bundles appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/pm-desktop
+          key: ${{ matrix.platform }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev \
+            libxdo-dev libasound2-dev patchelf file libfuse2
+      - name: version
+        shell: bash
+        run: echo '{"version":"${{ needs.meta.outputs.version }}"}' > crates/pm-desktop/release.conf.json
+      - name: build
+        shell: bash
+        working-directory: crates/pm-desktop
+        run: |
+          npm ci --no-audit --no-fund
+          npx tauri build --ci ${{ matrix.args }} --config release.conf.json
+      - name: collect
+        shell: bash
+        run: tools/release/collect-app.sh ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  binaries:
+    name: binaries (${{ matrix.platform }})
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features alsa,pm-app/cpal
+            dir: target/release
+            bins: pm-node pm-endpoint pm-app
+          - platform: linux-arm64
+            os: ubuntu-22.04-arm
+            build: cargo build --release --locked -p pm-node -p pm-endpoint --features alsa
+            dir: target/release
+            bins: pm-node pm-endpoint
+          - platform: linux-armv7
+            os: ubuntu-24.04
+            build: tools/release/build-armv7.sh
+            dir: target/armv7-unknown-linux-gnueabihf/release
+            bins: pm-node pm-endpoint
+          - platform: windows-x86_64
+            os: windows-2025
+            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features pm-app/cpal
+            dir: target/release
+            bins: pm-node.exe pm-endpoint.exe pm-app.exe
+          - platform: macos-arm64
+            os: macos-15
+            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features pm-app/cpal
+            dir: target/release
+            bins: pm-node pm-endpoint pm-app
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.platform != 'linux-armv7'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - if: matrix.platform == 'linux-armv7'
+        uses: actions/cache@v5
+        with:
+          path: |
+            .cargo-armv7
+            target/armv7-unknown-linux-gnueabihf
+          key: armv7-${{ hashFiles('Cargo.lock') }}
+          restore-keys: armv7-
+      - if: runner.os == 'Linux' && matrix.platform != 'linux-armv7'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - name: build
+        shell: bash
+        run: ${{ matrix.build }}
+      - name: collect
+        shell: bash
+        run: |
+          name="pubky-music-node-${{ matrix.platform }}"
+          mkdir -p "pkg/$name" dist
+          for b in ${{ matrix.bins }}; do cp "${{ matrix.dir }}/$b" "pkg/$name/"; done
+          cp README.md docs/deploy.md "pkg/$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            (cd pkg && 7z a -tzip "../dist/$name.zip" "$name" >/dev/null)
+          else
+            tar -C pkg -czf "dist/$name.tar.gz" "$name"
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  image:
+    needs: meta
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - if: needs.meta.outputs.publish == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
+      - id: tags
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
@@ -42,60 +213,71 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=${{ inputs.tag || 'edge' }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=edge,enable=${{ needs.meta.outputs.channel == 'edge' }}
             type=sha
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ needs.meta.outputs.publish == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.tags.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-  # Native controller (pm-app), node and endpoint for the desktops people run
-  # them on. Linux gets bit-perfect ALSA playback; Windows and macOS play
-  # through CoreAudio / WASAPI in shared mode (cpal) and control nodes.
-  binaries:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.binaries }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: linux-x86_64
-            features: --features alsa,pm-app/cpal
-            ext: ""
-          - os: windows-latest
-            name: windows-x86_64
-            features: --features pm-app/cpal
-            ext: .exe
-          - os: macos-latest
-            name: macos-arm64
-            features: --features pm-app/cpal
-            ext: ""
-    runs-on: ${{ matrix.os }}
+
+  publish:
+    needs: [meta, app, binaries, image]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
-      - run: cargo build --release -p pm-app -p pm-node -p pm-endpoint ${{ matrix.features }}
-      - name: collect
-        shell: bash
-        run: |
-          mkdir -p dist
-          for b in pm-app pm-node pm-endpoint; do cp "target/release/$b${{ matrix.ext }}" dist/; done
-          cp README.md docs/deploy.md dist/
-          cd dist && tar czf "../pubky-music-${{ matrix.name }}.tar.gz" .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
-          name: pubky-music-${{ matrix.name }}
-          path: pubky-music-${{ matrix.name }}.tar.gz
-      - name: attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: notes
+        env:
+          CHANNEL: ${{ needs.meta.outputs.channel }}
+        run: |
+          short=${GITHUB_SHA::7}
+          {
+            if [ "$CHANNEL" = edge ]; then
+              echo "The latest build of \`main\` ($short), replaced on every push. Not a release: expect rough edges."
+            else
+              echo "Pubky Music $CHANNEL. What changed: [docs/CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$CHANNEL/docs/CHANGELOG.md)."
+            fi
+            echo
+            echo "| Download | For |"
+            echo "| :-- | :-- |"
+            echo "| \`pubky-music-macos-universal.dmg\` | the app on macOS (Apple silicon and Intel); unsigned: right-click → Open the first time |"
+            echo "| \`pubky-music-windows-x86_64-setup.exe\` or \`.msi\` | the app on Windows; unsigned: SmartScreen → More info → Run anyway |"
+            echo "| \`pubky-music-linux-x86_64.AppImage\` or \`.deb\` (also \`arm64\`) | the app on Linux |"
+            echo "| \`pubky-music-android-universal.apk\`, \`pubky-music-android-arm64.apk\` | the app on Android (when built) |"
+            echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node and endpoint (armv7: 32-bit Raspberry Pi OS) |"
+            echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the node image (amd64, arm64) |"
+            echo
+            echo "Check downloads against \`SHA256SUMS\`."
+          } > notes.md
+      - name: edge
+        if: needs.meta.outputs.channel == 'edge'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" "pubky-music-${{ matrix.name }}.tar.gz" --clobber || gh release create "${GITHUB_REF_NAME}" "pubky-music-${{ matrix.name }}.tar.gz" --title "${GITHUB_REF_NAME}" --notes "See docs/CHANGELOG.md"
+        run: |
+          gh release delete edge --cleanup-tag --yes || true
+          gh release create edge dist/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Edge (main @ ${GITHUB_SHA::7})" --notes-file notes.md
+      - name: versioned
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Pubky Music $GITHUB_REF_NAME" --notes-file notes.md
+          fi
