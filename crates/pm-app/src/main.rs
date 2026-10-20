@@ -42,6 +42,9 @@ fn main() -> eframe::Result {
 struct Settings {
     node_url: String,
     token: String,
+    /// Exported Pubky session secret; lets the app find the node via the homeserver (ADR 0008).
+    #[serde(default)]
+    session_secret: String,
     /// Last selected zone id; `local` for this computer.
     zone: String,
 }
@@ -51,6 +54,7 @@ impl Default for Settings {
         Self {
             node_url: std::env::var("PM_NODE").unwrap_or_else(|_| "http://127.0.0.1:7788".into()),
             token: std::env::var("PM_TOKEN").unwrap_or_default(),
+            session_secret: std::env::var("PM_SESSION_SECRET").unwrap_or_default(),
             zone: LOCAL_ZONE_ID.into(),
         }
     }
@@ -181,6 +185,10 @@ impl App {
             match m {
                 Msg::Connecting => self.conn = Conn::Connecting,
                 Msg::Connected(info) => self.conn = Conn::Connected(info),
+                Msg::ResolvedNode(url, token) => {
+                    self.settings.node_url = url;
+                    self.settings.token = token;
+                }
                 Msg::ConnectFailed(e) => self.conn = Conn::Failed(e),
                 Msg::Disconnected(e) => self.toast(format!("event stream: {e}")),
                 Msg::Zones(zs) => {
@@ -1113,10 +1121,28 @@ impl App {
                         .desired_width(360.0),
                 );
                 ui.end_row();
+                ui.label("Pubky session");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings.session_secret)
+                        .password(true)
+                        .hint_text("exported session secret; finds your node through your homeserver")
+                        .desired_width(360.0),
+                );
+                ui.end_row();
             });
         ui.horizontal(|ui| {
             if ui.button("Connect").clicked() {
                 self.connect();
+            }
+            let has_secret = !self.settings.session_secret.trim().is_empty();
+            if ui
+                .add_enabled(has_secret, egui::Button::new("Find my node via Pubky"))
+                .on_hover_text("Reads /priv/pubky.music/node.json from your homeserver")
+                .clicked()
+            {
+                self.backend.send(Cmd::ConnectViaPubky {
+                    secret: self.settings.session_secret.trim().to_string(),
+                });
             }
             if ui.button("Scan library").clicked() {
                 self.backend.send(Cmd::Scan);

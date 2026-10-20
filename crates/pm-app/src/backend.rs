@@ -18,6 +18,10 @@ pub enum Cmd {
         base: String,
         token: String,
     },
+    /// Find the node through the user's homeserver (ADR 0008).
+    ConnectViaPubky {
+        secret: String,
+    },
     Refresh,
     LoadAlbums,
     LoadAlbumTracks(i64),
@@ -91,6 +95,8 @@ pub enum DiscoverKind {
 pub enum Msg {
     Connecting,
     Connected(Info),
+    /// The node's address and token as resolved through the homeserver.
+    ResolvedNode(String, String),
     ConnectFailed(String),
     Disconnected(String),
     Zones(Vec<ZoneState>),
@@ -189,9 +195,29 @@ async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, out: Emitter, shared: Arc<R
     let (gen_tx, _) = watch::channel(0u64);
     let mut generation = 0u64;
     while let Some(cmd) = cmds.recv().await {
-        if let Cmd::Connect { base, token } = &cmd {
-            out.send(Msg::Connecting);
-            match NodeClient::new(base, Some(token.clone())) {
+        let resolved = match &cmd {
+            Cmd::ConnectViaPubky { secret } => {
+                out.send(Msg::Connecting);
+                match pm_client::connect_via_pubky(pm_pubky::Network::Mainnet, secret).await {
+                    Ok((c, record)) => {
+                        out.send(Msg::Notice(format!(
+                            "found node “{}” at {}",
+                            record.name, record.api_url
+                        )));
+                        out.send(Msg::ResolvedNode(record.api_url.clone(), record.token.clone()));
+                        Some(Ok(c))
+                    }
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            Cmd::Connect { base, token } => {
+                out.send(Msg::Connecting);
+                Some(NodeClient::new(base, Some(token.clone())))
+            }
+            _ => None,
+        };
+        if let Some(resolved) = resolved {
+            match resolved {
                 Ok(c) => {
                     client = Some(c.clone());
                     *shared.write().expect("client lock") = Some(c.clone());
@@ -245,7 +271,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
 
 async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()> {
     match cmd {
-        Cmd::Connect { .. } => {}
+        Cmd::Connect { .. } | Cmd::ConnectViaPubky { .. } => {}
         Cmd::Refresh => {
             out.send(Msg::Connected(c.info().await?));
             initial_load(&c, out).await;

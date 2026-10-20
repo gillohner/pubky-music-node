@@ -58,6 +58,27 @@ impl PubkySync {
         &self.session
     }
 
+    /// Tell the user's other devices where this node is (ADR 0008).
+    pub async fn publish_node(
+        &self,
+        name: &str,
+        api_url: &str,
+        token: Option<&str>,
+        version: &str,
+    ) -> Result<(), SyncError> {
+        let record = pm_pubky::homeserver::NodeRecord {
+            name: name.to_string(),
+            api_url: api_url.to_string(),
+            token: token.unwrap_or("").to_string(),
+            version: version.to_string(),
+            updated_at: now_micros(),
+        };
+        Ok(self
+            .homeserver
+            .publish_node_record(&self.session, &record)
+            .await?)
+    }
+
     pub async fn list_private_files(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, SyncError> {
         Ok(self.homeserver.list_private_files(&self.session).await?)
     }

@@ -39,6 +39,10 @@ pub struct ApiConfig {
     pub name: String,
     /// Username for OpenSubsonic clients; the password is `token`.
     pub subsonic_user: String,
+    /// How the user's devices reach this API (`https://music.example.org`, a
+    /// Tailscale name, …). Published privately on the homeserver when a session
+    /// exists (ADR 0008). Empty = `http://<listen>`.
+    pub public_url: String,
 }
 
 impl Default for NodeConfig {
@@ -93,6 +97,7 @@ impl Default for ApiConfig {
             token: String::new(),
             name: "Pubky Music Node".into(),
             subsonic_user: "pubky".into(),
+            public_url: String::new(),
         }
     }
 }

@@ -303,6 +303,45 @@ impl NodeHomeserver {
 
 /// Where the user's own audio files live on the homeserver: private, never `/pub/`.
 pub const PRIVATE_FILES_DIR: &str = "/priv/pubky.music/files/";
+/// Where a node publishes how to reach it, readable only by the owner (ADR 0008).
+pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
+
+/// How the user's own devices find their node (ADR 0008).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NodeRecord {
+    pub name: String,
+    /// HTTP(S) origin of the `/v1` API as the user's devices can reach it.
+    pub api_url: String,
+    /// Bearer token; fine here because the folder is private to the owner.
+    #[serde(default)]
+    pub token: String,
+    pub version: String,
+    /// Microseconds.
+    pub updated_at: i64,
+}
+
+impl NodeHomeserver {
+    pub async fn publish_node_record(
+        &self,
+        session: &PubkySession,
+        record: &NodeRecord,
+    ) -> Result<(), HomeserverError> {
+        self.write_object(session, NODE_RECORD_PATH, record).await
+    }
+
+    /// The owner's node record, if a node published one.
+    pub async fn read_node_record(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Option<NodeRecord>, HomeserverError> {
+        let storage = session.storage();
+        if !storage.exists(NODE_RECORD_PATH).await? {
+            return Ok(None);
+        }
+        let record: NodeRecord = storage.get_json(NODE_RECORD_PATH).await?;
+        Ok(Some(record))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteFile {

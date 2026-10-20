@@ -485,6 +485,42 @@ impl NodeClient {
     }
 }
 
+/// Find the user's node through their homeserver (ADR 0008): restore the
+/// session from an exported secret, read the private node record, and
+/// return a client for it.
+pub async fn connect_via_pubky(
+    network: pm_pubky::Network,
+    session_secret: &str,
+) -> Result<(NodeClient, pm_pubky::homeserver::NodeRecord)> {
+    let hs = pm_pubky::homeserver::NodeHomeserver::new(network)
+        .map_err(|e| ClientError::Url(format!("pubky client: {e}")))?;
+    let session = hs
+        .restore_session(session_secret.trim())
+        .await
+        .map_err(|e| ClientError::Api {
+            status: 401,
+            message: format!("pubky session: {e}"),
+        })?;
+    let record = hs
+        .read_node_record(&session)
+        .await
+        .map_err(|e| ClientError::Api {
+            status: 502,
+            message: format!("homeserver: {e}"),
+        })?
+        .ok_or_else(|| ClientError::Api {
+            status: 404,
+            message:
+                "no node has published its address for this pubky yet (start `pm-node serve` with a session)"
+                    .into(),
+        })?;
+    let client = NodeClient::new(
+        &record.api_url,
+        (!record.token.is_empty()).then(|| record.token.clone()),
+    )?;
+    Ok((client, record))
+}
+
 /// Re-export so callers need not depend on pm-library for one struct.
 pub mod pm_library_stats {
     pub use pm_library::LibraryStats;

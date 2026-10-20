@@ -20,6 +20,7 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
+pm-pubky = { workspace = true }
 pm-api = { workspace = true }
 pm-client = { workspace = true }
 pm-out-local = { workspace = true, optional = true }
