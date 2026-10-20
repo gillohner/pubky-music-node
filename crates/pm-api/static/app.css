@@ -386,9 +386,12 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .zone-btn span { max-width: 90px; }
   .hero { grid-template-columns: 1fr; }
   .hero .art { width: 180px; }
-  .track { grid-template-columns: 36px minmax(0, 1fr) 56px; }
-  .track .album-col, .track .fmt, .track .row-actions { display: none; }
-  .track.compact { grid-template-columns: 36px minmax(0, 1fr) 56px; }
+  .track { grid-template-columns: 36px minmax(0, 1fr) 56px 40px; }
+  .track .album-col, .track .fmt { display: none; }
+  .track .row-actions { opacity: 1; }
+  .track .row-actions .icon-btn:not([data-act="more"]) { display: none; }
+  .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
+  .track.compact { grid-template-columns: 36px minmax(0, 1fr) 56px 40px; }
   .np-hero { grid-template-columns: 1fr; }
   .np-page { padding: 16px; }
   .kv { grid-template-columns: 1fr; }
