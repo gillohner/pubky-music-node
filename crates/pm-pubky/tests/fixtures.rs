@@ -226,3 +226,40 @@ fn maybe_same_parses_on_event_cards() {
     assert_eq!(c.maybe_same[0].site.as_deref(), Some("Songkick"));
     assert_eq!(c.maybe_same[0].score, Some(0.82));
 }
+
+/// The node calls only routes Pinakes documents (openapi candidate from pubky/pinakes#21).
+#[test]
+fn every_pinakes_route_the_node_uses_is_documented() {
+    let v: serde_json::Value =
+        serde_json::from_str(&fixture("pinakes/music/openapi-candidate.json")).unwrap();
+    let paths = v["paths"].as_object().expect("paths");
+    for route in [
+        "/v1/search",
+        "/v1/resources/lookup",
+        "/v1/resources/by-uri",
+        "/v1/resources/{id}",
+        "/v1/groups/{id}",
+        "/v1/resolve",
+        "/v1/changes/lookup",
+        "/v1/info",
+    ] {
+        assert!(
+            paths.contains_key(route),
+            "{route} missing from the Pinakes OpenAPI"
+        );
+    }
+    let search: Vec<String> = paths["/v1/search"]["get"]["parameters"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for q in ["key", "sort", "window", "collapse", "type"] {
+        assert!(
+            search.iter().any(|n| n == q),
+            "search has no `{q}` parameter: {search:?}"
+        );
+    }
+}
