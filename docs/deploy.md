@@ -48,8 +48,14 @@ app store. Points worth knowing:
 - Hard constraints hold on every shape: audio stays node-local or in private storage, nothing under
   `/pub/`, and the node never serves one person's library to many users.
 
-Image builds are not possible on the development machine (no Docker daemon); CI's `docker` job
-builds the image to catch Dockerfile drift.
+Images are published to `ghcr.io/gillohner/pubky-music-node` for `linux/amd64` and `linux/arm64`
+(Umbrel boxes are mostly Raspberry Pis) by `.github/workflows/release.yml`: every `v*` tag gives
+`<version>`, `<major.minor>` and `latest`; running the workflow by hand publishes `edge`. The
+arm64 binary is cross-compiled on the amd64 runner (Debian multiarch ALSA headers, GNU cross
+toolchain), so no emulated cargo build. The Umbrel compose file pins the version tag; make the
+package public in the repository's package settings before pointing an Umbrel at it. Image builds
+are not possible on the development machine (no Docker daemon); CI's `docker` job builds the
+native image on every push to catch Dockerfile drift.
 
 ## Reaching the node from outside the house
 
