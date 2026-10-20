@@ -1000,14 +1000,18 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let canonical = track.publishable_uri().map(|u| u.to_url());
+    let pinakes_key = track
+        .recording_mbid
+        .as_ref()
+        .map(|m| format!("mbid:{m}"))
+        .or_else(|| track.isrc.as_ref().map(|i| format!("isrc:{i}")));
     let key = format!("pinakes.version.track.{id}");
     let (t, d, p) = tokio::join!(
         tidal::track_versions(&s, &track),
         deezer::track_versions(&s, &track),
         async {
-            match canonical {
-                Some(url) => discover::also_on_versions(&s, &url, &key).await,
+            match pinakes_key {
+                Some(k) => discover::also_on_versions(&s, &k, &key).await,
                 None => Vec::new(),
             }
         }
@@ -1026,23 +1030,19 @@ async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_album(id)?
         .ok_or_else(|| ApiError::not_found(format!("no album {id}")))?;
-    let canonical = album
+    let pinakes_key = album
         .release_mbid
         .as_ref()
-        .map(|m| pm_model::MusicUri::Release { mbid: *m }.to_url())
-        .or_else(|| {
-            album
-                .release_group_mbid
-                .as_ref()
-                .map(|m| pm_model::MusicUri::ReleaseGroup { mbid: *m }.to_url())
-        });
+        .or(album.release_group_mbid.as_ref())
+        .map(|m| format!("mbid:{m}"))
+        .or_else(|| album.upc.as_ref().map(|u| format!("upc:{u}")));
     let key = format!("pinakes.version.album.{id}");
     let (t, d, p) = tokio::join!(
         tidal::album_versions(&s, &album),
         deezer::album_versions(&s, &album),
         async {
-            match canonical {
-                Some(url) => discover::also_on_versions(&s, &url, &key).await,
+            match pinakes_key {
+                Some(k) => discover::also_on_versions(&s, &k, &key).await,
                 None => Vec::new(),
             }
         }
@@ -2884,7 +2884,7 @@ mod tests {
     async fn versions_include_pinakes_also_on_links() {
         let fixture = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../pm-pubky/tests/fixtures/pinakes/music/card-tidal-track-bohemian.json"
+            "/../pm-pubky/tests/fixtures/pinakes/music/search-key-isrc.json"
         ))
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2892,7 +2892,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen2 = seen.clone();
         let mock = Router::new().route(
-            "/v1/resources/by-uri",
+            "/v1/search",
             get(
                 move |Query(q): Query<std::collections::HashMap<String, String>>| {
                     let fixture = fixture.clone();
@@ -2900,7 +2900,7 @@ mod tests {
                     async move {
                         seen.lock()
                             .unwrap()
-                            .push(q.get("uri").cloned().unwrap_or_default());
+                            .push(q.get("key").cloned().unwrap_or_default());
                         ([(header::CONTENT_TYPE, "application/json")], fixture)
                     }
                 },
@@ -2957,7 +2957,7 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            ["https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"]
+            ["mbid:b1a9c0e9-d987-4042-ae91-78d6a3267d69"]
         );
         let sources: Vec<&str> = v
             .as_array()
@@ -2981,13 +2981,17 @@ mod tests {
             .unwrap();
         assert_eq!(deezer["uri"], "deezer:track:4329888262");
         assert!(deezer["label"].as_str().unwrap().contains("tagged on Pubky"));
-        let derived = v
+        // No page twice, even though every item repeats the group's links.
+        let mut urls: Vec<&str> = v
             .as_array()
             .unwrap()
             .iter()
-            .filter(|x| x["label"].as_str().unwrap().contains("via musicbrainz"))
-            .count();
-        assert_eq!(derived, 1);
+            .map(|x| x["url"].as_str().unwrap())
+            .collect();
+        let n = urls.len();
+        urls.sort();
+        urls.dedup();
+        assert_eq!(urls.len(), n, "{v}");
         assert!(v
             .as_array()
             .unwrap()

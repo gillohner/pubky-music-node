@@ -70,48 +70,72 @@ pub(crate) fn playable_uri(url: &str) -> Option<String> {
     }
 }
 
-/// Pinakes's `also_on` for a canonical URL as "Versions" rows: every service
-/// that has the same recording or release, tagged links first, with a queue
-/// URI when the node can stream it (TIDAL, Deezer). Empty without a contact
-/// or when Pinakes has not seen the URL. Cached a day.
-pub(crate) async fn also_on_versions(s: &NodeState, url: &str, cache_key: &str) -> Vec<Version> {
+/// Pinakes's links for an exact key (`mbid:<uuid>`, `isrc:<code>`,
+/// `upc:<barcode>`) as "Versions" rows: every tagged page carrying the key
+/// on any service, then the `also_on` links of those pages; tagged first,
+/// with a queue URI when the node can stream it (TIDAL, Deezer). Pinakes
+/// has no card for a MusicBrainz URL itself, so keys are the join. Empty
+/// without a contact or when nobody on Pubky tagged the recording. Cached
+/// a day.
+pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) -> Vec<Version> {
     let Some(d) = s.discovery() else {
         return Vec::new();
     };
     if let Some(v) = crate::tidal::cache_get_ttl(s, cache_key, 24 * 3600) {
         return v;
     }
-    let out: Vec<Version> = match d.resource_for(url).await {
-        Ok(Some(r)) => {
-            let mut links: Vec<&pm_pubky::pinakes::AlsoOn> = r.also_on().iter().collect();
-            links.sort_by_key(|a| !a.is_tagged());
-            links
-                .into_iter()
-                .map(|a| {
-                    let site = a.site.clone().unwrap_or_else(|| "link".into());
-                    Version {
-                        source: site.to_lowercase().replace(' ', "-"),
-                        id: a.id.clone().unwrap_or_default(),
-                        label: if a.is_tagged() {
-                            format!("{site} · tagged on Pubky")
-                        } else {
-                            format!(
-                                "{site} · via {}",
-                                a.via.clone().unwrap_or_else(|| "Pinakes".into())
-                            )
-                        },
-                        url: a.uri.clone(),
-                        uri: playable_uri(&a.uri),
-                    }
-                })
-                .collect()
-        }
-        Ok(None) => Vec::new(),
+    let page = match d
+        .pinakes()
+        .search(&pm_pubky::pinakes::SearchQuery {
+            limit: Some(50),
+            ..pm_pubky::pinakes::SearchQuery::key(key)
+        })
+        .await
+    {
+        Ok(p) => p,
         Err(e) => {
-            tracing::debug!(%url, "also_on: {e}");
+            tracing::debug!(%key, "key search: {e}");
             return Vec::new();
         }
     };
+    let mut out: Vec<Version> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let site_slug = |site: &str| site.to_lowercase().replace(' ', "-");
+    for card in &page.items {
+        if !card.is_ok() || !seen.insert(card.uri.trim_end_matches('/').to_string()) {
+            continue;
+        }
+        let site = card.site.clone().unwrap_or_else(|| "link".into());
+        out.push(Version {
+            source: site_slug(&site),
+            id: card.id.clone(),
+            label: format!("{site} · tagged on Pubky"),
+            url: card.uri.clone(),
+            uri: playable_uri(&card.uri),
+        });
+    }
+    for card in &page.items {
+        for a in &card.also_on {
+            if !seen.insert(a.uri.trim_end_matches('/').to_string()) {
+                continue;
+            }
+            let site = a.site.clone().unwrap_or_else(|| "link".into());
+            out.push(Version {
+                source: site_slug(&site),
+                id: a.id.clone().unwrap_or_default(),
+                label: if a.is_tagged() {
+                    format!("{site} · tagged on Pubky")
+                } else {
+                    format!(
+                        "{site} · via {}",
+                        a.via.clone().unwrap_or_else(|| "Pinakes".into())
+                    )
+                },
+                url: a.uri.clone(),
+                uri: playable_uri(&a.uri),
+            });
+        }
+    }
     crate::tidal::cache_put(s, cache_key, &out);
     out
 }

@@ -227,15 +227,17 @@ impl Card {
         if !self.is_music() || self.type_.as_deref() == Some("MusicGroup") {
             return None;
         }
-        let d = self.description.as_deref()?;
-        let first = d.split([' ', '\u{a0}']).collect::<Vec<_>>().join(" ");
-        let first = first
-            .split(" · ")
-            .next()
-            .and_then(|x| x.split(" - ").next())
-            .map(str::trim)
-            .filter(|x| !x.is_empty() && x.len() < 80 && !x.starts_with("Listen to"))?;
-        Some(first.to_string())
+        let d = self.description.as_deref()?.replace('\u{a0}', " ");
+        let sep = if d.contains(" · ") {
+            " · "
+        } else if d.contains(" - ") {
+            " - "
+        } else {
+            return None;
+        };
+        let first = d.split(sep).next().map(str::trim)?;
+        let sentence = first.contains(" by ") || first.contains(" on ") || first.ends_with('.');
+        (!first.is_empty() && first.len() <= 60 && !sentence).then(|| first.to_string())
     }
 
     pub fn is_ok(&self) -> bool {

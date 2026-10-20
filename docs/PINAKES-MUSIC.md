@@ -7,7 +7,7 @@ This replaces the earlier version of this file. Real answers from the build that
 
 - **Public instance (8092), today:** the official sources and the **same-event hint** (`maybe_same` on
   event cards, see the end of this file) are live. Music matching is not live there yet.
-- **The music PR (pubky/pinakes#21)** has passed every check (review, a live run of the owner's cases,
+- **The music PR (pubky/pinakes#21) is MERGED and live on 8092 (2026-10-20 17:30 UTC).** All 12 owner music cases pass on the public instance.
   load) and is with Talos now. Expect it on 8092 **later today**; the steward promotes it right after the merge.
 - **Coming after it:** podcasts, books and films (`also_on` across Apple Podcasts, Spotify, Podcast Index,
   RSS…), then places, papers, software and **Discogs** (artist ↔ artist, master ↔ album, release ↔
