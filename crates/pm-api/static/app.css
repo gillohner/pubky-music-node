@@ -457,3 +457,11 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .chip.tag .chipx:hover { color: var(--bad); }
 .taginput { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12px; width: 130px; }
 .taginput:focus { border-color: var(--accent); outline: none; }
+.fmt { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.02em; background: var(--surface-3); color: var(--fg-2); vertical-align: 1px; }
+.fmt.hi { background: var(--accent-soft); color: var(--accent-strong); }
+.fmt.lossy { color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.chips .chip { cursor: pointer; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg-2); border-radius: 999px; padding: 5px 12px; font-size: 13px; }
+.chips .chip:hover { border-color: var(--accent); color: var(--fg); }
+.chips .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.chips .chip .count { margin-left: 4px; color: var(--muted); font-size: 12px; }

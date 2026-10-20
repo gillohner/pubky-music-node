@@ -143,6 +143,8 @@ struct App {
     /// Lyrics by track id; `None` once the node said there are none.
     lyrics: HashMap<i64, Option<Box<pm_api::types::Lyrics>>>,
     lyrics_requested: HashSet<i64>,
+    album_formats: HashMap<i64, pm_library::AlbumFormat>,
+    album_focus: Option<pm_library::Focus>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -234,6 +236,8 @@ impl App {
             queues: HashMap::new(),
             lyrics: HashMap::new(),
             lyrics_requested: HashSet::new(),
+            album_formats: HashMap::new(),
+            album_focus: None,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -395,6 +399,9 @@ impl App {
                 }
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
+                Msg::AlbumFormats(f) => {
+                    self.album_formats = f.into_iter().map(|x| (x.album_id, x)).collect();
+                }
                 Msg::Lyrics(id, l) => {
                     self.lyrics.insert(id, l);
                 }
@@ -1846,16 +1853,78 @@ impl App {
         });
     }
 
+    fn album_in_focus(&self, id: Option<i64>, focus: pm_library::Focus) -> bool {
+        use pm_library::Focus;
+        let Some(f) = id.and_then(|id| self.album_formats.get(&id)) else {
+            return false;
+        };
+        match focus {
+            Focus::HiRes => f.hi_res,
+            Focus::Dsd => f.dsd,
+            Focus::Cd => f.lossless && !f.hi_res && !f.dsd,
+            Focus::Lossless => f.lossless,
+            Focus::Lossy => !f.lossless,
+        }
+    }
+
     fn albums_view(&mut self, ui: &mut egui::Ui) {
+        use pm_library::Focus;
+        let albums: Vec<Album> = match self.album_focus {
+            Some(f) => self
+                .albums
+                .iter()
+                .filter(|a| self.album_in_focus(a.id, f))
+                .cloned()
+                .collect(),
+            None => self.albums.clone(),
+        };
         ui.horizontal(|ui| {
             ui.heading("Albums");
-            ui.weak(format!("{}", self.albums.len()));
+            if self.album_focus.is_some() {
+                ui.weak(format!("{} of {}", albums.len(), self.albums.len()));
+            } else {
+                ui.weak(format!("{}", self.albums.len()));
+            }
         });
         if self.albums.is_empty() {
             ui.weak("No albums yet. Add folders to the node config and run a scan from Settings.");
             return;
         }
-        let albums = self.albums.clone();
+        if !self.album_formats.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Focus");
+                if ui.selectable_label(self.album_focus.is_none(), "All").clicked() {
+                    self.album_focus = None;
+                }
+                for (f, label) in [
+                    (Focus::HiRes, "Hi-res"),
+                    (Focus::Dsd, "DSD"),
+                    (Focus::Cd, "CD quality"),
+                    (Focus::Lossless, "Lossless"),
+                    (Focus::Lossy, "Lossy"),
+                ] {
+                    let n = self
+                        .albums
+                        .iter()
+                        .filter(|a| self.album_in_focus(a.id, f))
+                        .count();
+                    if n == 0 {
+                        continue;
+                    }
+                    if ui
+                        .selectable_label(self.album_focus == Some(f), format!("{label} {n}"))
+                        .clicked()
+                    {
+                        self.album_focus = Some(f);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if albums.is_empty() {
+            ui.weak("No album has a file of that quality.");
+            return;
+        }
         let tile = 168.0;
         let gap = 14.0;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1866,7 +1935,10 @@ impl App {
                 ui.horizontal(|ui| {
                     for a in row {
                         let tex = self.cover(a.id);
-                        let (resp, play) = album_tile(ui, a, tile, tex.as_ref());
+                        let badge =
+                            a.id.and_then(|id| self.album_formats.get(&id))
+                                .map(|f| f.label.clone());
+                        let (resp, play) = album_tile_badged(ui, a, tile, tex.as_ref(), badge.as_deref());
                         if play {
                             play_album = a.id;
                         } else if resp.clicked() {
@@ -3495,6 +3567,17 @@ fn album_tile(
     size: f32,
     tex: Option<&egui::TextureHandle>,
 ) -> (egui::Response, bool) {
+    album_tile_badged(ui, a, size, tex, None)
+}
+
+/// An album tile with an optional format badge (`24/96 FLAC`) on the art.
+fn album_tile_badged(
+    ui: &mut egui::Ui,
+    a: &Album,
+    size: f32,
+    tex: Option<&egui::TextureHandle>,
+    badge: Option<&str>,
+) -> (egui::Response, bool) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size + 44.0), egui::Sense::click());
     let art = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
     let play_rect = egui::Rect::from_min_size(
@@ -3512,6 +3595,16 @@ fn album_tile(
         );
     }
     theme::cover(ui, art, tex, &a.title, hovered);
+    if let Some(b) = badge {
+        let font = egui::FontId::proportional(10.5);
+        let galley = ui.painter().layout_no_wrap(b.to_string(), font, theme::FG);
+        let pad = egui::vec2(5.0, 2.0);
+        let size_b = galley.size() + pad * 2.0;
+        let r = egui::Rect::from_min_size(egui::pos2(art.min.x + 6.0, art.max.y - 6.0 - size_b.y), size_b);
+        ui.painter()
+            .rect_filled(r, 4.0, egui::Color32::from_black_alpha(170));
+        ui.painter().galley(r.min + pad, galley, theme::FG);
+    }
     if hovered {
         ui.painter().rect_stroke(
             art,

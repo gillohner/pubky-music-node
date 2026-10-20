@@ -430,6 +430,11 @@ impl NodeClient {
             .tracks)
     }
 
+    /// The best file format per album (badge text and quality flags).
+    pub async fn album_formats(&self) -> Result<Vec<pm_library::AlbumFormat>> {
+        self.get("library/albums/formats", &[]).await
+    }
+
     pub async fn albums(&self, after: Option<i64>, limit: u32) -> Result<Vec<Album>> {
         let mut q = vec![("limit", limit.to_string())];
         if let Some(a) = after {

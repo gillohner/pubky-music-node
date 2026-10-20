@@ -26,7 +26,9 @@ pub mod scan;
 pub mod tags;
 
 pub use canonical::{assign, Resolver};
-pub use db::{AlbumArt, ArtistSummary, FavouriteRow, GenreSummary, PlayEntry, PlayedTrack, TagRow};
+pub use db::{
+    AlbumArt, AlbumFormat, ArtistSummary, FavouriteRow, Focus, GenreSummary, PlayEntry, PlayedTrack, TagRow,
+};
 pub use db::{Library, LibraryStats};
 pub use error::{LibraryError, Result};
 pub use import::{ImportFormat, ImportedList, ImportedTrack};

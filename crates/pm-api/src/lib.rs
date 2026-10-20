@@ -126,6 +126,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/genres", get(genres))
         .route("/library/genres/{id}", get(genre))
         .route("/library/albums", get(albums))
+        .route("/library/albums/formats", get(album_formats))
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/albums/{id}/cover", get(album_cover))
         .route("/library/history", get(history).post(record_play))
@@ -894,8 +895,13 @@ async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
         s.library
             .lock()
             .expect("library poisoned")
-            .list_albums(p.after, limit)?,
+            .list_albums_focused(p.focus, p.after, limit)?,
     ))
+}
+
+/// The best file format per album, for badges and Focus in clients.
+async fn album_formats(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::AlbumFormat>> {
+    Ok(Json(s.library.lock().expect("library poisoned").album_formats()?))
 }
 
 async fn genres(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::GenreSummary>> {

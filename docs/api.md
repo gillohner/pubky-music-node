@@ -42,7 +42,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/artists/{id}/image` | | the cached portrait (Wikimedia Commons); 404 when none |
 | GET | `/v1/library/genres` | | `[{id, name, tracks, albums}]` from the files' genre tags (several per track when the tag lists several) |
 | GET | `/v1/library/genres/{id}` | | `{genre, albums, tracks}` |
-| GET | `/v1/library/albums` | `?after=&limit=` | `Album[]` |
+| GET | `/v1/library/albums` | `?after=&limit=&focus=` | `Album[]`; `focus` keeps albums with at least one file of that quality: `hi_res` (PCM above 16/48, lossless), `dsd`, `cd` (16-bit at 44.1/48), `lossless`, `lossy` |
+| GET | `/v1/library/albums/formats` | | `[{album_id, label, lossless, hi_res, dsd}]`: the best present file per album, e.g. `24/96 FLAC`, `DSD64`, `MP3` |
 | GET | `/v1/library/albums/{id}/tracks` | | `{tracks}` |
 | GET | `/v1/library/albums/{id}/cover` | | image bytes: the embedded picture extracted at scan, `cover.jpg` next to the files, or (for albums with a MusicBrainz release/release-group id) the Cover Art Archive front image fetched once and cached in the art dir; misses are remembered for a week; 404 when none |
 | GET | `/v1/library/history` | `?limit=` | `{plays: [{id, track, zone, played_at}]}`, newest first; node zones record a play when a library track starts |

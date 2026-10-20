@@ -234,6 +234,7 @@ pub enum Msg {
     /// Info plus the decoded portrait (width, height, rgba) when there is one.
     ArtistInfo(i64, Box<ArtistInfo>, Option<(usize, usize, Vec<u8>)>),
     Lyrics(i64, Option<Box<Lyrics>>),
+    AlbumFormats(Vec<pm_library::AlbumFormat>),
     Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
@@ -397,7 +398,12 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             out.send(Msg::Connected(c.info().await?));
             initial_load(&c, out).await;
         }
-        Cmd::LoadAlbums => out.send(Msg::Albums(c.albums(None, 500).await?)),
+        Cmd::LoadAlbums => {
+            out.send(Msg::Albums(c.albums(None, 500).await?));
+            if let Ok(f) = c.album_formats().await {
+                out.send(Msg::AlbumFormats(f));
+            }
+        }
         Cmd::LoadHome => out.send(Msg::Home(Box::new(c.home(12).await?))),
         Cmd::LoadFavourites => out.send(Msg::Favourites(Box::new(c.favourites().await?))),
         Cmd::RadioSearch(q) => {

@@ -61,6 +61,49 @@ pub struct FavouriteRow {
     pub deleted: bool,
 }
 
+/// Roon-style "Focus" on albums by what the files are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Focus {
+    /// PCM above 16/48 in a lossless container.
+    HiRes,
+    Dsd,
+    /// 16-bit PCM at 44.1 or 48 kHz in a lossless container.
+    Cd,
+    Lossless,
+    Lossy,
+}
+
+const LOSSY_CONTAINERS: &str = "('mp3', 'aac', 'vorbis', 'opus')";
+
+impl Focus {
+    /// An SQL predicate over a `files` row aliased `f`.
+    fn predicate(self) -> String {
+        match self {
+            Focus::HiRes => format!(
+                "f.sample_kind = 'pcm' AND (f.rate_hz > 48000 OR f.bits > 16) AND f.container NOT IN {LOSSY_CONTAINERS}"
+            ),
+            Focus::Dsd => "f.sample_kind = 'dsd'".to_string(),
+            Focus::Cd => format!(
+                "f.sample_kind = 'pcm' AND f.rate_hz <= 48000 AND f.bits <= 16 AND f.container NOT IN {LOSSY_CONTAINERS}"
+            ),
+            Focus::Lossless => format!("f.container NOT IN {LOSSY_CONTAINERS}"),
+            Focus::Lossy => format!("f.container IN {LOSSY_CONTAINERS}"),
+        }
+    }
+}
+
+/// The best file format on an album, for a badge and for Focus.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AlbumFormat {
+    pub album_id: i64,
+    /// `24/96 FLAC`, `DSD64`, `16/44.1 ALAC`, `MP3`.
+    pub label: String,
+    pub lossless: bool,
+    pub hi_res: bool,
+    pub dsd: bool,
+}
+
 /// A genre as the browse views list it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GenreSummary {
@@ -369,14 +412,59 @@ impl Library {
     // ----- albums -------------------------------------------------------
 
     pub fn list_albums(&self, after: Option<i64>, limit: u32) -> Result<Vec<Album>> {
+        self.list_albums_focused(None, after, limit)
+    }
+
+    /// Albums with at least one present file matching `focus` (all albums
+    /// when `None`).
+    pub fn list_albums_focused(
+        &self,
+        focus: Option<Focus>,
+        after: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Album>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE id > ?1 ORDER BY id LIMIT ?2",
-        )?;
+        let filter = match focus {
+            Some(f) => format!(
+                " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND f.missing = 0 AND {})",
+                f.predicate()
+            ),
+            None => String::new(),
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE id > ?1{filter} ORDER BY id LIMIT ?2"
+        ))?;
         let v = stmt
             .query_map(params![after.unwrap_or(0), limit as i64], row_to_album)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         v.into_iter().collect()
+    }
+
+    /// The best present file per album (highest rate, then bits), labelled.
+    pub fn album_formats(&self) -> Result<Vec<AlbumFormat>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT t.album_id, f.container, f.sample_kind, f.rate_hz, f.bits,
+                    MAX(f.rate_hz * 100 + f.bits)
+             FROM files f JOIN tracks t ON t.id = f.track_id
+             WHERE t.album_id IS NOT NULL AND f.missing = 0
+             GROUP BY t.album_id ORDER BY t.album_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (album_id, container, kind, rate, bits) = row?;
+            out.push(describe_format(album_id, &container, &kind, rate, bits));
+        }
+        Ok(out)
     }
 
     pub fn album_tracks(&self, album_id: i64) -> Result<Vec<Track>> {
@@ -1280,6 +1368,45 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
     })
 }
 
+fn describe_format(album_id: i64, container: &str, kind: &str, rate: i64, bits: i64) -> AlbumFormat {
+    let lossy = crate::tags::is_lossy_container(container);
+    let dsd = kind == "dsd";
+    let container_label = match container {
+        "flac" => "FLAC",
+        "alac" | "m4a" | "mp4" | "isomp4" => "ALAC",
+        "wav" | "wave" | "riff" => "WAV",
+        "aiff" | "aif" => "AIFF",
+        "dsf" => "DSF",
+        "dff" => "DFF",
+        "mp3" => "MP3",
+        "aac" => "AAC",
+        "vorbis" | "ogg" => "Vorbis",
+        "opus" => "Opus",
+        other => other,
+    };
+    let label = if dsd {
+        let mult = (rate as f64 / 44_100.0).round().max(1.0) as i64;
+        format!("DSD{mult}")
+    } else if lossy {
+        container_label.to_string()
+    } else {
+        let khz = rate as f64 / 1000.0;
+        let khz = if khz.fract() == 0.0 {
+            format!("{khz:.0}")
+        } else {
+            format!("{khz:.1}")
+        };
+        format!("{bits}/{khz} {container_label}")
+    };
+    AlbumFormat {
+        album_id,
+        label,
+        lossless: !lossy,
+        hi_res: !lossy && !dsd && (rate > 48_000 || bits > 16),
+        dsd,
+    }
+}
+
 fn sample_kind_str(k: SampleKind) -> &'static str {
     match k {
         SampleKind::Pcm => "pcm",
@@ -1608,6 +1735,54 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    #[test]
+    fn format_labels() {
+        let f = describe_format(1, "flac", "pcm", 96_000, 24);
+        assert_eq!(
+            (f.label.as_str(), f.hi_res, f.lossless, f.dsd),
+            ("24/96 FLAC", true, true, false)
+        );
+        let f = describe_format(1, "flac", "pcm", 44_100, 16);
+        assert_eq!((f.label.as_str(), f.hi_res), ("16/44.1 FLAC", false));
+        let f = describe_format(1, "dsf", "dsd", 5_644_800, 1);
+        assert_eq!((f.label.as_str(), f.dsd, f.hi_res), ("DSD128", true, false));
+        let f = describe_format(1, "mp3", "pcm", 44_100, 16);
+        assert_eq!((f.label.as_str(), f.lossless), ("MP3", false));
+    }
+
+    #[test]
+    fn focus_filters_albums_by_their_files() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut cd = sample_track("/music/cd.flac", "CD");
+        cd.album.as_mut().unwrap().title = "CD album".into();
+        let mut hires = sample_track("/music/hires.flac", "Hi");
+        hires.album.as_mut().unwrap().title = "Hi-res album".into();
+        hires.file.format.rate_hz = 96_000;
+        hires.file.format.bits = 24;
+        let mut lossy = sample_track("/music/l.mp3", "Lo");
+        lossy.album.as_mut().unwrap().title = "MP3 album".into();
+        lossy.file.container = "mp3".into();
+        for t in [&cd, &hires, &lossy] {
+            lib.upsert_track(t).unwrap();
+        }
+        let titles = |focus| -> Vec<String> {
+            lib.list_albums_focused(focus, None, 100)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.title)
+                .collect()
+        };
+        assert_eq!(titles(None).len(), 3);
+        assert_eq!(titles(Some(Focus::HiRes)), ["Hi-res album"]);
+        assert_eq!(titles(Some(Focus::Cd)), ["CD album"]);
+        assert_eq!(titles(Some(Focus::Lossy)), ["MP3 album"]);
+        assert_eq!(titles(Some(Focus::Lossless)).len(), 2);
+        assert!(titles(Some(Focus::Dsd)).is_empty());
+        let formats = lib.album_formats().unwrap();
+        assert_eq!(formats.len(), 3);
+        assert!(formats.iter().any(|f| f.label == "24/96 FLAC" && f.hi_res));
+    }
 
     #[test]
     fn backup_is_a_usable_copy() {

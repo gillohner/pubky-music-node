@@ -11,6 +11,8 @@
     zone: localStorage.getItem('pm.zone') || '',
     zones: {},
     lyrics: new Map(),
+    formats: null,
+    focus: '',
     view: 'home',
     viewArg: null,
     albums: null,
@@ -440,7 +442,9 @@
       }
     }, { once: false });
   };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}</div></button>`;
+  const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
+  const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div></button>`;
   const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"><span class="muted small">Public pubky.app tags on the MusicBrainz URL; Discover reads them back via Pinakes.</span></div>`;
   const bindTagRow = (ref) => {
     const add = $('#tagadd'); if (!add) return;
@@ -554,7 +558,21 @@
     await loadFavourites();
     toast(on ? 'Added to favourites' : 'Removed from favourites');
   };
-  const albumsAll = async () => { if (!state.albums) state.albums = await api('GET', '/library/albums?limit=1000'); return state.albums; };
+  const albumsAll = async () => {
+    if (!state.albums) {
+      const [albums, formats] = await Promise.all([api('GET', '/library/albums?limit=1000'), api('GET', '/library/albums/formats').catch(() => [])]);
+      state.albums = albums; state.formats = new Map(formats.map((f) => [f.album_id, f]));
+    }
+    return state.albums;
+  };
+  // Roon-style Focus: which albums have a file of this quality.
+  const FOCUS = [['', 'All'], ['hi_res', 'Hi-res'], ['dsd', 'DSD'], ['cd', 'CD quality'], ['lossless', 'Lossless'], ['lossy', 'Lossy']];
+  const inFocus = (a, focus) => {
+    if (!focus) return true;
+    const f = fmtOf(a.id); if (!f) return false;
+    switch (focus) { case 'hi_res': return f.hi_res; case 'dsd': return f.dsd; case 'cd': return f.lossless && !f.hi_res && !f.dsd; case 'lossless': return f.lossless; case 'lossy': return !f.lossless; default: return true; }
+  };
+  const focusChips = (albums) => `<div class="chips" role="tablist" aria-label="Focus">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" role="tab" aria-selected="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
 
   // ---- render --------------------------------------------------------------
   const render = async () => {
@@ -601,7 +619,9 @@
           loading();
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
-          main.innerHTML = pageHead('Albums', albums.length) + (albums.length ? albumGrid(albums) : emptyState('disc', 'No albums yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          const shown = albums.filter((a) => inFocus(a, state.focus));
+          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length) + (albums.length ? focusChips(albums) : '') + (shown.length ? albumGrid(shown) : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
           break;
         }
         case 'album': {

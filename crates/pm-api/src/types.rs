@@ -115,6 +115,10 @@ pub struct MoveItem {
 pub struct Page {
     pub after: Option<i64>,
     pub limit: Option<u32>,
+    /// Albums only: keep albums with a file of this quality (`hi_res`,
+    /// `dsd`, `cd`, `lossless`, `lossy`).
+    #[serde(default)]
+    pub focus: Option<pm_library::Focus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
