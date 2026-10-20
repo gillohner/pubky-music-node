@@ -5,6 +5,7 @@ use crate::types::ApiEvent;
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_zones::{Output, OutputId, OutputRegistry, Zone, ZoneId, Zones};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -52,6 +53,8 @@ pub struct NodeState {
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Pull outputs by stream name (they are also in `outputs`).
+    pub pulls: Mutex<HashMap<String, Arc<crate::pull::PullOutput>>>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -91,6 +94,7 @@ impl NodeState {
             sync: Mutex::new(None),
             watcher: Mutex::new(None),
             discover: Mutex::new(None),
+            pulls: Mutex::new(HashMap::new()),
             scanning: Mutex::new(false),
         })
     }

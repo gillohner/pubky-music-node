@@ -359,3 +359,11 @@ pub struct DiscoverPage {
     pub facets: Vec<(String, i64)>,
     pub items: Vec<DiscoverItem>,
 }
+
+// ---- pull outputs ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePull {
+    /// URL segment: `GET /v1/outputs/pull/{name}/stream.wav`.
+    pub name: String,
+}

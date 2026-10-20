@@ -13,6 +13,7 @@ pub mod activity;
 pub mod discover;
 pub mod files;
 pub mod playlists;
+pub mod pull;
 pub mod sources;
 pub mod state;
 pub mod subsonic;
@@ -28,7 +29,7 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pm_model::TrackId;
-use pm_zones::{Insert, OutputId, OutputInfo, QueueItem, Zone, ZoneId, ZoneState};
+use pm_zones::{Insert, Output, OutputId, OutputInfo, QueueItem, Zone, ZoneId, ZoneState};
 use sources::NodeSources;
 pub use state::{NodeSettings, NodeState};
 use std::sync::Arc;
@@ -85,6 +86,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/info", get(info))
         .route("/outputs", get(outputs))
         .route("/outputs/rescan", post(rescan_outputs))
+        .route("/outputs/pull", post(create_pull))
+        .route("/outputs/pull/{name}/stream.wav", get(pull_stream))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
         .route("/zones/{id}/queue", get(queue).post(enqueue).delete(clear_queue))
@@ -208,6 +211,65 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
 
 async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputInfo>> {
     Json(s.outputs.list())
+}
+
+/// Create a pull output: a zone that plays to it streams WAV at
+/// `/v1/outputs/pull/{name}/stream.wav` for any renderer or browser to fetch.
+async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePull>) -> ApiResult<OutputInfo> {
+    let name = body.name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ApiError::bad_request("name must be letters, digits, '-' or '_'"));
+    }
+    let out = Arc::new(pull::PullOutput::new(name));
+    if s.outputs.get(&out.id()).is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("pull output {name} exists"),
+        ));
+    }
+    let info = out.info();
+    s.pulls
+        .lock()
+        .expect("pulls lock")
+        .insert(name.to_string(), out.clone());
+    s.outputs.register(out.clone());
+    s.create_zone(&format!("Stream {name}"), out);
+    Ok(Json(info))
+}
+
+/// The live WAV stream of a pull output. Waits up to 15 s for a zone to
+/// start playing into it; a second listener replaces the first.
+async fn pull_stream(
+    State(s): State<Arc<NodeState>>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    let out = s
+        .pulls
+        .lock()
+        .expect("pulls lock")
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("no pull output {name}")))?;
+    let Some(live) = out.take_stream(pull::LISTENER_TIMEOUT).await else {
+        return Err(ApiError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "no zone is playing into this stream; start playback to the Stream zone first",
+        ));
+    };
+    let stream = tokio_stream::wrappers::ReceiverStream::new(live.rx).map(Ok::<_, std::convert::Infallible>);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "audio/wav".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (header::ACCEPT_RANGES, "none".to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }
 
 /// Discover outputs again (local devices, endpoints over mDNS and configured

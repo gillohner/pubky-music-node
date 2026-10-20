@@ -11,7 +11,7 @@ implemented with automated tests but not yet exercised outside this repository's
 | M3 | Native API + minimal client | built | `/v1` HTTP + WebSocket; a built-in web UI at `/`; `pm-app` (egui) with browse, search, queue, zones, volume, signal path, playlists, discover, DSP. Never run on a display by its author: `docs/LAPTOP-TEST-PROMPT.md`. |
 | M4 | OpenSubsonic | built | XML and JSON; ID3 browsing, search, stream with ranges, cover art, playlists, scrobble. Needs a client run (Symfonium, Feishin, Amperfy). |
 | M5 | Remote access by pubkey | partial | Node publishes its address privately on the homeserver; app finds it from a session secret (ADR 0008). No Pubky live transport or relay exists yet; wire stays HTTPS. |
-| M6 | OpenHome / UPnP (Linn DSM) | not started | |
+| M6 | OpenHome / UPnP (Linn DSM) | started | Pull outputs: a zone streams live WAV at `/v1/outputs/pull/{name}/stream.wav` for any renderer to fetch (bit-exact, tested). SSDP/OpenHome control point not written. |
 | M7 | Slimproto, AirPlay 2, Chromecast | not started | |
 | M8 | DSP engine | partial | Sample-rate conversion (`Lossy`, FFT sinc), parametric EQ, convolution from an IR WAV, headphone crossfeed, ReplayGain loudness (all `Enhanced`), headroom, software volume, TPDF dither; per-zone, persisted, editable in the app. Missing: PCM↔DSD, drift correction, selectable SRC filters. Bypass is bit-perfect (tested). |
 | M9 | Pubky social | partial | Objects are v1 `PubkyAppPost` envelopes in `/priv/pubky.app/posts/` (ADR 0006); playlists, reviews, activity; private sync with the homeserver; private audio files. Sign-in is by exported session secret; Pubky Ring flow and public publishing wait for the social primitives. |
