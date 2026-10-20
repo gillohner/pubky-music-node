@@ -593,6 +593,62 @@ impl NodeClient {
         }
     }
 
+    // ---- reviews ----
+
+    /// My review of one object (`Some(r)`) or all my reviews (`None`).
+    pub async fn reviews(&self, r: Option<&FavouriteRef>) -> Result<Reviews> {
+        let mut q: Vec<(&str, String)> = Vec::new();
+        if let Some(r) = r {
+            if let Some(u) = &r.uri {
+                q.push(("uri", u.clone()));
+            }
+            if let Some(i) = r.track_id {
+                q.push(("track_id", i.to_string()));
+            }
+            if let Some(i) = r.album_id {
+                q.push(("album_id", i.to_string()));
+            }
+            if let Some(i) = r.artist_id {
+                q.push(("artist_id", i.to_string()));
+            }
+        }
+        self.get("reviews", &q).await
+    }
+
+    /// Create or replace my review of an object.
+    pub async fn set_review(&self, r: &FavouriteRef, rating: Option<u8>, text: &str) -> Result<ReviewEntry> {
+        let req = ReviewRef {
+            uri: r.uri.clone(),
+            track_id: r.track_id,
+            album_id: r.album_id,
+            artist_id: r.artist_id,
+            rating,
+            text: Some(text.to_string()),
+        };
+        self.send(reqwest::Method::PUT, "reviews", Some(&req)).await
+    }
+
+    pub async fn delete_review(&self, r: &FavouriteRef) -> Result<()> {
+        let mut url = self.url("reviews");
+        {
+            let mut q = url.query_pairs_mut();
+            if let Some(u) = &r.uri {
+                q.append_pair("uri", u);
+            }
+            if let Some(i) = r.track_id {
+                q.append_pair("track_id", &i.to_string());
+            }
+            if let Some(i) = r.album_id {
+                q.append_pair("album_id", &i.to_string());
+            }
+            if let Some(i) = r.artist_id {
+                q.append_pair("artist_id", &i.to_string());
+            }
+        }
+        let resp = self.authed(self.http.delete(url)).send().await?;
+        Self::finish::<Reviews>(resp).await.map(|_| ())
+    }
+
     // ---- favourites ----
 
     pub async fn favourites(&self) -> Result<Favourites> {

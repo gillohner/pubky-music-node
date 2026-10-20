@@ -498,6 +498,63 @@ async fn playlist_lifecycle() {
     assert_eq!(mine["tags"].as_array().unwrap().len(), 1);
     assert_eq!(mine["tags"][0]["label"], "funk");
 
+    // Reviews: one per target, edits keep the id, a rating alone is fine.
+    let (st, r) = call(
+        &app,
+        "PUT",
+        "/v1/reviews",
+        Some(serde_json::json!({"track_id": tagged_id, "rating": 4})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let rid = r["id"].as_str().unwrap().to_string();
+    assert_eq!(r["rating"], 4);
+    let (st, r2) = call(
+        &app,
+        "PUT",
+        "/v1/reviews",
+        Some(serde_json::json!({"track_id": tagged_id, "rating": 5, "text": "  Desert island.  "})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r2}");
+    assert_eq!(r2["id"], rid, "editing keeps the post id");
+    assert_eq!(r2["text"], "Desert island.");
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/reviews",
+        Some(serde_json::json!({"track_id": tagged_id, "rating": 7})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/reviews",
+        Some(serde_json::json!({"track_id": tagged_id})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    if let Some(u) = untagged {
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/reviews",
+            Some(serde_json::json!({"track_id": u["id"], "rating": 3})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let (_, mine) = call(&app, "GET", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
+    assert_eq!(mine["reviews"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["reviews"][0]["rating"], 5);
+    let (_, all) = call(&app, "GET", "/v1/reviews", None).await;
+    assert_eq!(all["reviews"].as_array().unwrap().len(), 1);
+    let (st, _) = call(&app, "DELETE", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, mine) = call(&app, "GET", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
+    assert!(mine["reviews"].as_array().unwrap().is_empty());
+
     // Search spans tracks, albums, artists and genres.
     let (st, sr) = call(&app, "GET", "/v1/library/search?q=lists", None).await;
     assert_eq!(st, StatusCode::OK);

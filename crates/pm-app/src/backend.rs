@@ -3,8 +3,8 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
-    Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, SearchResults, Tags,
-    TransportAction,
+    Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Reviews,
+    SearchResults, Tags, TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -40,6 +40,13 @@ pub enum Cmd {
         on: bool,
     },
     LoadTags(FavouriteRef),
+    LoadReview(FavouriteRef),
+    SetReview {
+        what: FavouriteRef,
+        rating: Option<u8>,
+        text: String,
+    },
+    DeleteReview(FavouriteRef),
     SetTag {
         what: FavouriteRef,
         label: String,
@@ -144,6 +151,7 @@ pub enum Msg {
     Home(Box<HomePage>),
     Favourites(Box<Favourites>),
     Tags(Box<Tags>),
+    Review(Box<Reviews>),
     RadioResults(String, Vec<RadioStation>),
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
@@ -350,6 +358,17 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             c.play_station(&zone, &station).await?;
         }
         Cmd::LoadTags(what) => out.send(Msg::Tags(Box::new(c.tags(Some(&what)).await?))),
+        Cmd::LoadReview(what) => out.send(Msg::Review(Box::new(c.reviews(Some(&what)).await?))),
+        Cmd::SetReview { what, rating, text } => {
+            c.set_review(&what, rating, &text).await?;
+            out.send(Msg::Notice("Review saved".into()));
+            out.send(Msg::Review(Box::new(c.reviews(Some(&what)).await?)));
+        }
+        Cmd::DeleteReview(what) => {
+            c.delete_review(&what).await?;
+            out.send(Msg::Notice("Review removed".into()));
+            out.send(Msg::Review(Box::new(c.reviews(Some(&what)).await?)));
+        }
         Cmd::SetTag { what, label, on } => {
             let r = c.set_tag(&what, &label, on).await?;
             out.send(Msg::Notice(if r.tagged {

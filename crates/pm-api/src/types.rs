@@ -236,6 +236,42 @@ pub struct TagChanged {
     pub tagged: bool,
 }
 
+/// A review target (one of the id fields) with the rating and/or text to store.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReviewRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewEntry {
+    /// The post id (timestamp id).
+    pub id: String,
+    pub uri: String,
+    pub rating: Option<u8>,
+    pub text: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Reviews {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    pub reviews: Vec<ReviewEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FavouriteChanged {
     pub uri: String,

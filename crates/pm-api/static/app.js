@@ -400,6 +400,15 @@
     $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
     $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
   };
+  const reviewRow = (r) => `<div class="reviewrow"><span class="eyebrow">My rating</span><span class="stars" id="stars">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${r && r.rating >= n ? 'on' : ''}" data-star="${n}" aria-label="${n} star${n === 1 ? '' : 's'}">${r && r.rating >= n ? '★' : '☆'}</button>`).join('')}</span><button class="btn sm ghost" id="notesbtn">${r && r.text ? 'Edit notes' : 'Add notes'}</button>${r && r.text ? `<div class="notes" id="notes">${esc(r.text)}</div>` : ''}<div class="notes-edit" id="notesedit" hidden><textarea class="input" id="notestext" rows="3" placeholder="Notes, kept privately on your homeserver">${esc(r ? r.text : '')}</textarea><div class="actions" style="margin-top:8px"><button class="btn primary sm" id="notessave">Save</button><button class="btn sm ghost" id="notescancel">Cancel</button></div></div></div>`;
+  const bindReviewRow = (ref, r) => {
+    const stars = $('#stars'); if (!stars) return;
+    const save = async (rating, text) => { try { if (rating == null && !text) await api('DELETE', '/reviews?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString()); else await api('PUT', '/reviews', { ...ref, rating, text }); toast('Review saved'); render(); } catch (e) { toast(e.message, 'error'); } };
+    $$('[data-star]', stars).forEach((b) => b.onclick = () => { const n = Number(b.dataset.star); const cur = r ? r.rating : null; save(cur === n ? null : n, r ? r.text : ''); });
+    $('#notesbtn').onclick = () => { $('#notesedit').hidden = false; $('#notesbtn').hidden = true; if ($('#notes')) $('#notes').hidden = true; $('#notestext').focus(); };
+    $('#notescancel').onclick = () => { $('#notesedit').hidden = true; $('#notesbtn').hidden = false; if ($('#notes')) $('#notes').hidden = false; };
+    $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
+  };
   const albumGrid = (albums) => `<div class="grid">${albums.map(tile).join('')}</div>`;
   const strip = (title, albums, more) => (!albums || !albums.length) ? '' : `<section class="section"><div class="section-head"><h3>${esc(title)}</h3>${more ? `<button class="link" data-more="${more}">See all</button>` : ''}</div><div class="strip">${albums.map(tile).join('')}</div></section>`;
   const bindTiles = () => {
@@ -477,6 +486,7 @@
           if (state.view !== 'album') return;
           const a = albums.find((x) => x.id === id) || (tr.tracks[0] && tr.tracks[0].album) || { id, title: 'Album' };
           const myTags = a.release_mbid ? (await api('GET', `/tags?album_id=${id}`).catch(() => ({ tags: [] }))).tags : [];
+          const myReview = a.release_mbid ? ((await api('GET', `/reviews?album_id=${id}`).catch(() => ({ reviews: [] }))).reviews[0] || null) : null;
           const tracks = tr.tracks;
           const total = tracks.reduce((s, t) => s + (t.duration_ms || 0), 0);
           const relUrl = a.release_mbid ? 'https://musicbrainz.org/release/' + a.release_mbid : null;
@@ -488,8 +498,10 @@
               <div class="facts">${[a.year, `${tracks.length} tracks`, fmtLong(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div>
               <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
               ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
+              ${relUrl ? reviewRow(myReview) : ''}
             </div></div>` + trackRows(tracks, { showAlbum: false, numbers: 'track', key: 'album' });
           bindTagRow({ album_id: id });
+          bindReviewRow({ album_id: id }, myReview);
           lists.album = tracks;
           $('#playall').onclick = () => playTracks(tracks, true);
           $('#nextall').onclick = () => playTracks(tracks, false, 'next');

@@ -58,7 +58,13 @@ impl Validatable for Review {
             }
         }
         let n = chars(&self.text);
-        if !(limits::REVIEW_TEXT_MIN..=limits::REVIEW_TEXT_MAX).contains(&n) {
+        // A rating alone is a valid review; text is required only without one.
+        let min = if self.rating.is_some() {
+            0
+        } else {
+            limits::REVIEW_TEXT_MIN
+        };
+        if !(min..=limits::REVIEW_TEXT_MAX).contains(&n) {
             return Err(SchemaError::validation(format!(
                 "review text must be {}–{} characters",
                 limits::REVIEW_TEXT_MIN,

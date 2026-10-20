@@ -103,6 +103,9 @@ struct App {
     /// My tags per canonical URL (album and artist pages).
     tags: HashMap<String, Vec<pm_api::types::TagEntry>>,
     tag_input: String,
+    /// My review per canonical URL, and the draft being edited (url, rating, text).
+    reviews: HashMap<String, Option<pm_api::types::ReviewEntry>>,
+    review_draft: Option<(String, Option<u8>, String)>,
     folders: Vec<(String, bool)>,
     folder_input: String,
     radio_query: String,
@@ -181,6 +184,8 @@ impl App {
             favourites: None,
             tags: HashMap::new(),
             tag_input: String::new(),
+            reviews: HashMap::new(),
+            review_draft: None,
             folders: Vec::new(),
             folder_input: String::new(),
             radio_query: String::new(),
@@ -270,6 +275,11 @@ impl App {
                 }
                 Msg::Stations(st) => self.stations = st,
                 Msg::Folders(f) => self.folders = f,
+                Msg::Review(r) => {
+                    if let Some(uri) = r.uri.clone() {
+                        self.reviews.insert(uri, r.reviews.into_iter().next());
+                    }
+                }
                 Msg::Tags(t) => {
                     if let Some(uri) = t.uri.clone() {
                         self.tags.insert(uri, t.tags);
@@ -516,8 +526,112 @@ impl App {
             .any(|a| a.id == Some(id) && a.release_mbid.is_some())
         {
             self.backend.send(Cmd::LoadTags(FavouriteRef::album(id)));
+            self.backend.send(Cmd::LoadReview(FavouriteRef::album(id)));
         }
         self.view = View::Album(id);
+    }
+
+    /// Rating stars and notes for an object; private v1 review posts.
+    fn review_row(&mut self, ui: &mut egui::Ui, uri: Option<pm_model::MusicUri>, what: FavouriteRef) {
+        let Some(uri) = uri else {
+            return;
+        };
+        let url = uri.to_url();
+        let saved = self.reviews.get(&url).cloned().flatten();
+        let editing = self.review_draft.as_ref().is_some_and(|(u, _, _)| *u == url);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("My rating")
+                    .size(12.0)
+                    .strong()
+                    .color(theme::MUTED),
+            );
+            let current = if editing {
+                self.review_draft.as_ref().and_then(|d| d.1)
+            } else {
+                saved.as_ref().and_then(|r| r.rating)
+            };
+            let mut clicked = None;
+            for n in 1..=5u8 {
+                let on = current.is_some_and(|c| c >= n);
+                let star = egui::RichText::new(if on { "★" } else { "☆" })
+                    .size(18.0)
+                    .color(if on { theme::WARN } else { theme::MUTED });
+                if ui
+                    .add(egui::Button::new(star).frame(false))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    clicked = Some(n);
+                }
+            }
+            if let Some(n) = clicked {
+                let rating = if current == Some(n) { None } else { Some(n) };
+                let text = saved.as_ref().map(|r| r.text.clone()).unwrap_or_default();
+                if rating.is_none() && text.is_empty() {
+                    self.backend.send(Cmd::DeleteReview(what.clone()));
+                } else {
+                    self.backend.send(Cmd::SetReview {
+                        what: what.clone(),
+                        rating,
+                        text,
+                    });
+                }
+            }
+            if !editing {
+                let label = if saved.as_ref().is_some_and(|r| !r.text.is_empty()) {
+                    "Edit notes"
+                } else {
+                    "Add notes"
+                };
+                if ui.add(theme::secondary(label)).clicked() {
+                    self.review_draft = Some((
+                        url.clone(),
+                        saved.as_ref().and_then(|r| r.rating),
+                        saved.as_ref().map(|r| r.text.clone()).unwrap_or_default(),
+                    ));
+                }
+            }
+        });
+        if editing {
+            let mut save = false;
+            let mut cancel = false;
+            if let Some((_, _, text)) = self.review_draft.as_mut() {
+                ui.add(
+                    egui::TextEdit::multiline(text)
+                        .hint_text("Notes, kept privately on your homeserver")
+                        .desired_rows(3)
+                        .desired_width(520.0),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui.add(theme::primary("Save")).clicked() {
+                    save = true;
+                }
+                if ui.add(theme::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+            if save {
+                if let Some((_, rating, text)) = self.review_draft.take() {
+                    let rating = rating.or(saved.as_ref().and_then(|r| r.rating));
+                    if rating.is_none() && text.trim().is_empty() {
+                        self.backend.send(Cmd::DeleteReview(what.clone()));
+                    } else {
+                        self.backend.send(Cmd::SetReview {
+                            what: what.clone(),
+                            rating,
+                            text: text.trim().to_string(),
+                        });
+                    }
+                }
+            }
+            if cancel {
+                self.review_draft = None;
+            }
+        } else if let Some(r) = saved.as_ref().filter(|r| !r.text.is_empty()) {
+            ui.label(egui::RichText::new(&r.text).color(theme::FG_2));
+        }
     }
 
     /// Tag chips for an object plus an "Add a tag" field. Objects without a
@@ -1435,6 +1549,14 @@ impl App {
                 });
                 ui.add_space(6.0);
                 self.tag_row(
+                    ui,
+                    album
+                        .release_mbid
+                        .map(|mbid| pm_model::MusicUri::Release { mbid }),
+                    FavouriteRef::album(id),
+                );
+                ui.add_space(4.0);
+                self.review_row(
                     ui,
                     album
                         .release_mbid

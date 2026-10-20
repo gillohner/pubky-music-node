@@ -391,6 +391,15 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .card.genre { border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform 0.15s var(--ease), border-color 0.15s var(--ease); }
 .card.genre:hover { transform: translateY(-2px); border-color: var(--line-strong); }
 
+/* ---- reviews ---- */
+.reviewrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.stars { display: inline-flex; gap: 2px; }
+.star { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px; }
+.star.on, .stars:hover .star:hover, .stars .star:has(~ .star:hover) { color: var(--warn); }
+.notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; }
+.notes-edit { flex-basis: 100%; max-width: 560px; }
+.notes-edit textarea { resize: vertical; font: inherit; }
+
 /* ---- tags ---- */
 .tagrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .chip.tag { padding: 0; overflow: hidden; }

@@ -10,7 +10,7 @@ use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
-use pm_pubky::schemas::post::TYPE_PLAYLIST;
+use pm_pubky::schemas::post::{TYPE_PLAYLIST, TYPE_REVIEW};
 use pm_pubky::{Favourite, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
 use pubky_app_specs::traits::HasIdPath;
@@ -245,7 +245,7 @@ impl PubkySync {
         let lib = library.lock().expect("library poisoned");
         for (path, post) in remote {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
-            if post.content.type_name() != TYPE_PLAYLIST {
+            if !matches!(post.content.type_name(), t if t == TYPE_PLAYLIST || t == TYPE_REVIEW) {
                 continue;
             }
             let remote_updated = match &post.content {
