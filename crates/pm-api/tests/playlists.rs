@@ -366,6 +366,22 @@ async fn playlist_lifecycle() {
     let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(home["favourite_albums"].is_array());
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getAlbumList2?type=starred&f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(
+        sub["subsonic-response"]["albumList2"]["album"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "starred albums list the hearted album"
+    );
+
     // Un-heart by id through the query form.
     let (st, f) = call(
         &app,

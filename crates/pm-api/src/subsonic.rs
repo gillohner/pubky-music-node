@@ -700,7 +700,13 @@ async fn dispatch(
                     all.truncate(size as usize);
                     all
                 }
-                "starred" => Vec::new(),
+                "starred" => crate::favourites::collect(&lib)
+                    .map_err(|e| SubErr::new(0, e.message))?
+                    .albums
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(size as usize)
+                    .collect(),
                 "byGenre" => match p.get("genre").and_then(|g| lib.genre_by_name(g).ok().flatten()) {
                     Some(g) => lib
                         .genre_albums(g.id)?
