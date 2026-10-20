@@ -1455,6 +1455,21 @@ impl App {
                     pm_model::MusicUri::parse(&item.url).ok(),
                     FavouriteRef::uri(&item.url),
                 );
+                let playlists = self.playlists.clone();
+                ui.menu_button("Add to playlist", |ui| {
+                    if playlists.is_empty() {
+                        ui.weak("No playlists yet");
+                    }
+                    for p in &playlists {
+                        if ui.button(&p.name).clicked() {
+                            self.backend.send(Cmd::AddUrisToPlaylist {
+                                id: p.id.clone(),
+                                uris: item.tracks.iter().map(|t| t.url.clone()).collect(),
+                            });
+                            ui.close();
+                        }
+                    }
+                });
                 ui.hyperlink_to("archive.org ↗", &item.url);
                 if let Some(l) = &item.licence {
                     ui.hyperlink_to("licence", l);

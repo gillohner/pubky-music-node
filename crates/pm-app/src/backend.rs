@@ -108,6 +108,11 @@ pub enum Cmd {
         id: String,
         track_ids: Vec<i64>,
     },
+    /// Canonical URLs (Internet Archive files) into a playlist.
+    AddUrisToPlaylist {
+        id: String,
+        uris: Vec<String>,
+    },
     /// Move an item to a new index by re-sending the item order.
     MovePlaylistItem {
         id: String,
@@ -528,6 +533,21 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                 })
                 .await?;
             out.send(Msg::Notice(format!("created playlist “{}”", d.summary.name)));
+            out.send(Msg::Playlist(Box::new(d)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::AddUrisToPlaylist { id, uris } => {
+            let n = uris.len();
+            let d = c
+                .add_playlist_items(
+                    &id,
+                    &AddPlaylistItems {
+                        uris,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            out.send(Msg::Notice(format!("{n} added to “{}”", d.summary.name)));
             out.send(Msg::Playlist(Box::new(d)));
             out.send(Msg::Playlists(c.playlists().await?));
         }
