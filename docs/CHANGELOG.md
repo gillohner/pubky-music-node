@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- The upstream contact (User-Agent for MusicBrainz, Wikipedia, Pinakes) is derived from the owner's Pubky identity, `https://pubky.app/profile/<pubkey>`, as soon as the node has a session and no contact was set; a typed contact still wins.
 - **Settings follow your Pubky identity**: after every sync the node writes contact, library folders, the TIDAL session, renderers added by hand, the jukebox zone and DSP to `/priv/pubky.music/settings.json`; a fresh node restores them after its first Ring sign-in (`POST /v1/node/settings/backup|restore` for manual runs). A reinstalled container still needs `/data` on a host path to keep its Pubky session itself.
 - **Sign in with Pubky Ring, no tokens**: browsers get a "Sign in with Pubky Ring" button in the connect dialog (`POST /v1/auth/pubky/start`, `GET /v1/auth/pubky/poll`); the node accepts only its own owner and hands the API token out itself. The native app has the same button in Settings and additionally finds the node's address through the owner's homeserver, so nothing is typed on a new device.
 - Native app: transport and queue glyphs that egui ships (the old ones rendered as boxes on Linux); alsa-lib's stderr chatter is silenced in the node and the app.

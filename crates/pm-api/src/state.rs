@@ -131,6 +131,11 @@ pub struct NodeState {
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 
+/// The public page of a Pubky identity, usable as an upstream contact.
+pub fn profile_url(z32: &str) -> String {
+    format!("https://pubky.app/profile/{z32}")
+}
+
 impl NodeState {
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
         let library = Arc::new(Mutex::new(library));
@@ -743,7 +748,21 @@ impl NodeState {
     }
 
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
+        let derived = sync.as_ref().map(|s| profile_url(s.z32()));
         *self.sync.lock().expect("sync lock") = sync;
+        // The owner's pubky.app profile is a public URL that reaches them,
+        // which is all MusicBrainz, Wikipedia and Pinakes ask of a contact:
+        // use it when nothing was set, so discovery works without any form.
+        if let Some(url) = derived {
+            if self.contact().trim().is_empty() {
+                match self.set_contact(&url) {
+                    Ok(()) => {
+                        tracing::info!(contact = %url, "upstream contact derived from the Pubky identity")
+                    }
+                    Err(e) => tracing::warn!("derived contact refused: {e}"),
+                }
+            }
+        }
     }
 
     pub fn sync_handle(&self) -> Option<Arc<crate::sync::PubkySync>> {
