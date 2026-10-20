@@ -16,7 +16,7 @@ they conflict. Decisions live in `docs/adr/`.
 | `pm-zones` | `Output` / `AudioSink` traits, registry, null and WAV outputs; zone engine (queue, transport, gapless, position, events) | M0 done; zone engine done (single output; groups at M2) |
 | `pm-audio` | decode (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path | M1 done |
 | `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
-| `pm-pubky` | `pubky.music` schemas, Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
+| `pm-pubky` | music objects as v1 `PubkyAppPost` envelopes (private folder by default, ADR 0006), Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
 | `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |
 | `pm-api` | native `/v1` HTTP + WebSocket API (`docs/api.md`) | M3 server side done |
 | `pm-client` | Rust client for `/v1` (HTTP + event stream) | done |

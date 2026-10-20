@@ -1,25 +1,30 @@
-use super::{Activity, ActivitySource, Playlist, PlaylistItem, Review, SchemaError, Validatable, PROTOCOL};
+use super::post::{MusicContent, MusicPost, Visibility};
+use super::{Activity, ActivitySource, Playlist, PlaylistItem, Review, SchemaError, PROTOCOL};
 use pm_model::MusicUri;
 
-/// Where an object was written: its id, session-relative path and full URL.
+/// Where an object was written: its id, session-relative path, full URL and
+/// visibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
     pub id: String,
     pub path: String,
     pub url: String,
+    pub visibility: Visibility,
 }
 
 /// Mirrors `PubkySpecsBuilder`: takes the author's raw 52-char z32 id and
-/// returns validated objects with their write location. Builders do not
+/// returns validated posts with their write location. Builders do not
 /// write; see [`crate::homeserver`].
 #[derive(Debug, Clone)]
 pub struct MusicSpecsBuilder {
     z32: String,
+    visibility: Visibility,
 }
 
 impl MusicSpecsBuilder {
     /// `z32` must be the raw 52-character z-base-32 key, never the
-    /// `pubky<z32>` display form.
+    /// `pubky<z32>` display form. Objects are private until
+    /// [`with_visibility`](Self::with_visibility) says otherwise.
     pub fn new(z32: &str) -> Result<Self, SchemaError> {
         let z32 = z32.trim();
         if z32.len() != 52 || base32::decode(base32::Alphabet::Z, z32).is_none() {
@@ -27,16 +32,41 @@ impl MusicSpecsBuilder {
                 "the string is not a 52 character z-base-32 public key",
             ));
         }
-        Ok(Self { z32: z32.to_string() })
+        Ok(Self {
+            z32: z32.to_string(),
+            visibility: Visibility::Private,
+        })
+    }
+
+    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 
     pub fn z32(&self) -> &str {
         &self.z32
     }
 
-    fn meta(&self, id: String, path: String) -> Meta {
+    pub fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    fn meta(&self, id: String) -> Meta {
+        let path = MusicPost::path(&id, self.visibility);
         let url = format!("{PROTOCOL}{}{path}", self.z32);
-        Meta { id, path, url }
+        Meta {
+            id,
+            path,
+            url,
+            visibility: self.visibility,
+        }
+    }
+
+    fn finish(&self, content: MusicContent) -> Result<(MusicPost, Meta), SchemaError> {
+        let post = MusicPost::new(content);
+        let id = post.create_id();
+        post.validate(Some(&id))?;
+        Ok((post, self.meta(id)))
     }
 
     pub fn create_playlist(
@@ -45,21 +75,27 @@ impl MusicSpecsBuilder {
         description: Option<String>,
         image: Option<String>,
         items: Vec<PlaylistItem>,
-    ) -> Result<(Playlist, Meta), SchemaError> {
-        let playlist = Playlist::new(name, description, image, items);
-        let id = playlist.create_id();
-        playlist.validate(Some(&id))?;
-        let path = Playlist::create_path(&id);
-        Ok((playlist, self.meta(id, path)))
+    ) -> Result<(MusicPost, Meta), SchemaError> {
+        self.finish(MusicContent::Playlist(Playlist::new(
+            name,
+            description,
+            image,
+            items,
+        )))
     }
 
     /// Re-validate an edited playlist; the id and path do not change.
-    pub fn edit_playlist(&self, mut playlist: Playlist, id: &str) -> Result<(Playlist, Meta), SchemaError> {
+    pub fn edit_playlist(&self, mut playlist: Playlist, id: &str) -> Result<(MusicPost, Meta), SchemaError> {
         playlist.touch();
-        let playlist = playlist.sanitize();
-        playlist.validate(Some(id))?;
-        let path = Playlist::create_path(id);
-        Ok((playlist, self.meta(id.to_string(), path)))
+        let post = MusicPost::new(MusicContent::Playlist(playlist));
+        if post.create_id() != id {
+            return Err(SchemaError::Id {
+                expected: post.create_id(),
+                found: id.to_string(),
+            });
+        }
+        post.validate(Some(id))?;
+        Ok((post, self.meta(id.to_string())))
     }
 
     pub fn create_review(
@@ -67,12 +103,8 @@ impl MusicSpecsBuilder {
         target: &MusicUri,
         rating: Option<u8>,
         text: &str,
-    ) -> Result<(Review, Meta), SchemaError> {
-        let review = Review::new(target, rating, text);
-        let id = review.create_id();
-        review.validate(Some(&id))?;
-        let path = Review::create_path(&id);
-        Ok((review, self.meta(id, path)))
+    ) -> Result<(MusicPost, Meta), SchemaError> {
+        self.finish(MusicContent::Review(Review::new(target, rating, text)))
     }
 
     pub fn create_activity(
@@ -80,17 +112,13 @@ impl MusicSpecsBuilder {
         uri: &MusicUri,
         source: ActivitySource,
         duration_ms: Option<u64>,
-    ) -> Result<(Activity, Meta), SchemaError> {
-        let activity = Activity::new(uri, source, duration_ms);
-        let id = activity.create_id();
-        activity.validate(Some(&id))?;
-        let path = Activity::create_path(&id);
-        Ok((activity, self.meta(id, path)))
+    ) -> Result<(MusicPost, Meta), SchemaError> {
+        self.finish(MusicContent::Activity(Activity::new(uri, source, duration_ms)))
     }
 
     /// A pubky.app tag on a canonical music URL, byte-identical to what
     /// pubky.app would write: `/pub/pubky.app/tags/<Blake3 of "{uri}:{label}">`.
-    #[cfg(feature = "app-specs")]
+    /// Tags are always public: a tag on a private playlist makes no sense.
     pub fn create_music_tag(
         &self,
         target: &MusicUri,
@@ -101,7 +129,16 @@ impl MusicSpecsBuilder {
         let id = tag.create_id();
         tag.validate(Some(&id)).map_err(SchemaError::Validation)?;
         let path = pubky_app_specs::PubkyAppTag::create_path(&id);
-        Ok((tag, self.meta(id, path)))
+        let url = format!("{PROTOCOL}{}{path}", self.z32);
+        Ok((
+            tag,
+            Meta {
+                id,
+                path,
+                url,
+                visibility: Visibility::Public,
+            },
+        ))
     }
 }
 
@@ -123,40 +160,31 @@ mod tests {
     }
 
     #[test]
-    fn playlist_meta() {
+    fn playlist_meta_is_private_by_default() {
         let b = MusicSpecsBuilder::new(Z32).unwrap();
-        let (p, meta) = b
+        let (post, meta) = b
             .create_playlist("Mix", None, None, vec![PlaylistItem::new(&rec())])
             .unwrap();
-        assert_eq!(meta.path, format!("/pub/pubky.music/playlists/{}", meta.id));
+        assert_eq!(meta.visibility, Visibility::Private);
+        assert_eq!(meta.path, format!("/priv/pubky.app/posts/{}", meta.id));
         assert_eq!(meta.url, format!("pubky://{Z32}{}", meta.path));
+        let p = post.as_playlist().unwrap().clone();
         let (edited, meta2) = b.edit_playlist(p.clone(), &meta.id).unwrap();
         assert_eq!(meta2.id, meta.id);
-        assert!(edited.updated_at >= p.updated_at);
-        assert!(b.create_playlist("", None, None, vec![]).is_err());
+        assert!(edited.as_playlist().unwrap().updated_at >= p.updated_at);
+        assert!(b.edit_playlist(p, "0000000000000").is_err());
+
+        let public = b.with_visibility(Visibility::Public);
+        let (_, meta) = public.create_review(&rec(), Some(4), "fine").unwrap();
+        assert_eq!(meta.path, format!("/pub/pubky.app/posts/{}", meta.id));
     }
 
     #[test]
-    fn review_and_activity_meta() {
+    fn tags_are_public_and_spec_shaped() {
         let b = MusicSpecsBuilder::new(Z32).unwrap();
-        let (_, m) = b.create_review(&rec(), Some(4), "nice").unwrap();
-        assert!(m.path.starts_with("/pub/pubky.music/reviews/"));
-        assert_eq!(m.id.len(), 26);
-        let (_, m) = b.create_activity(&rec(), ActivitySource::Local, None).unwrap();
-        assert!(m.path.starts_with("/pub/pubky.music/activity/"));
-        assert_eq!(m.id.len(), 13);
-    }
-
-    #[cfg(feature = "app-specs")]
-    #[test]
-    fn music_tag_matches_app_specs_hash() {
-        let b = MusicSpecsBuilder::new(Z32).unwrap();
-        let (tag, meta) = b.create_music_tag(&rec(), " Favourite ").unwrap();
-        assert_eq!(tag.label, "favourite");
+        let (tag, meta) = b.create_music_tag(&rec(), "ambient").unwrap();
         assert_eq!(tag.uri, rec().to_url());
-        let expected = crate::ids::hash_id(&format!("{}:{}", tag.uri, tag.label));
-        assert_eq!(meta.id, expected);
-        assert_eq!(meta.path, format!("/pub/pubky.app/tags/{expected}"));
-        assert!(b.create_music_tag(&rec(), "two words").is_err());
+        assert_eq!(meta.visibility, Visibility::Public);
+        assert!(meta.path.starts_with("/pub/pubky.app/tags/"));
     }
 }

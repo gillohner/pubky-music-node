@@ -1,6 +1,7 @@
-//! Read and write the music objects on homeservers through the `pubky` SDK
-//! (0.16.2). The node writes the user's own objects with their session and
-//! reads anyone's public objects without one.
+//! Read and write the music posts on homeservers through the `pubky` SDK
+//! (0.16.2). The node writes the user's own posts with their session (to
+//! the private folder by default) and reads anyone's public posts without
+//! one. Private posts are listed and read only with the owner's session.
 //!
 //! Sign-in is Pubky Ring's `pubkyauth` flow (M9) and lives outside this crate;
 //! here a session is either handed in or restored from an exported grant
@@ -13,7 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, Playlist, Review, Validatable, APP_NAMESPACE};
+use crate::schemas::{Activity, MusicPost, Playlist, Review, Visibility};
 use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
@@ -30,6 +31,8 @@ pub enum HomeserverError {
         path: String,
         source: crate::schemas::SchemaError,
     },
+    #[error("reading private objects needs the owner's session")]
+    NeedsSession,
 }
 
 /// Default page size for listings; the homeserver may cap it.
@@ -68,26 +71,40 @@ impl NodeHomeserver {
         PublicKey::try_from(z32).map_err(|e| HomeserverError::Key(e.to_string()))
     }
 
-    /// List every object path under `/pub/pubky.music/<segment>` for a user,
-    /// following the cursor until the end.
-    async fn list_segment(
+    /// List a user's posts directory: public through anyone's view, private
+    /// only with the owner's session. Follows the cursor to the end.
+    async fn list_posts(
         &self,
         user: &PublicKey,
-        segment: &str,
-    ) -> Result<Vec<pubky::PubkyResource>, HomeserverError> {
-        let public = self.pubky.public_storage();
-        let dir = format!("/pub/{APP_NAMESPACE}/{segment}");
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let dir = visibility.posts_dir();
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let mut builder = public.list((user, dir.as_str()))?.limit(LIST_LIMIT).shallow(true);
-            if let Some(c) = &cursor {
-                builder = builder.cursor(c);
-            }
-            let page = builder.send().await?;
+            let page = match (visibility, session) {
+                (Visibility::Public, _) => {
+                    let public = self.pubky.public_storage();
+                    let mut b = public.list((user, dir.as_str()))?.limit(LIST_LIMIT).shallow(true);
+                    if let Some(c) = &cursor {
+                        b = b.cursor(c);
+                    }
+                    b.send().await?
+                }
+                (Visibility::Private, Some(session)) => {
+                    let storage = session.storage();
+                    let mut b = storage.list(dir.as_str())?.limit(LIST_LIMIT).shallow(true);
+                    if let Some(c) = &cursor {
+                        b = b.cursor(c);
+                    }
+                    b.send().await?
+                }
+                (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
+            };
             let n = page.len();
             cursor = page.last().map(|e| e.to_pubky_url());
-            all.extend(page);
+            all.extend(page.into_iter().map(|e| e.path.to_string()));
             if n < LIST_LIMIT as usize {
                 break;
             }
@@ -95,48 +112,91 @@ impl NodeHomeserver {
         Ok(all)
     }
 
-    async fn read_all<T: Validatable>(
+    async fn fetch(
+        &self,
+        user: &PublicKey,
+        path: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<u8>, HomeserverError> {
+        let resp = match (visibility, session) {
+            (Visibility::Public, _) => self.pubky.public_storage().get((user, path)).await?,
+            (Visibility::Private, Some(session)) => session.storage().get(path).await?,
+            (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
+        };
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| HomeserverError::Transport(e.to_string()))
+    }
+
+    /// Every music post of a user: `(path, post)`. Ordinary posts are
+    /// skipped silently; invalid music envelopes are skipped with a warning
+    /// (an indexer never trusts a homeserver body). Private posts need the
+    /// owner's session.
+    pub async fn read_music_posts(
         &self,
         user_z32: &str,
-        segment: &str,
-    ) -> Result<Vec<(String, T)>, HomeserverError> {
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<(String, MusicPost)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        let public = self.pubky.public_storage();
         let mut out = Vec::new();
-        for entry in self.list_segment(&user, segment).await? {
-            let path = entry.path.as_str().to_string();
-            let id = path.rsplit('/').next().unwrap_or_default().to_string();
-            let bytes = public
-                .get(&entry)
-                .await?
-                .bytes()
-                .await
-                .map_err(|e| HomeserverError::Transport(e.to_string()))?;
-            match T::try_from(&bytes, &id) {
-                Ok(obj) => out.push((path, obj)),
-                Err(source) => {
-                    tracing::warn!(%path, %source, "skipping invalid object");
-                }
+        for path in self.list_posts(&user, visibility, session).await? {
+            let id = path.rsplit('/').next().unwrap_or("").to_string();
+            let bytes = self.fetch(&user, &path, visibility, session).await?;
+            match MusicPost::try_from_bytes(&bytes, &id) {
+                Ok(Some(post)) => out.push((path, post)),
+                Ok(None) => {}
+                Err(source) => tracing::warn!(%path, %source, "skipping invalid music post"),
             }
         }
         Ok(out)
     }
 
-    /// Another user's playlists, validated; invalid objects are skipped with
-    /// a warning (an indexer never trusts a homeserver body).
+    /// Another user's public playlists.
     pub async fn read_playlists_of(
         &self,
         user_z32: &str,
     ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
-        self.read_all::<Playlist>(user_z32, Playlist::PATH_SEGMENT).await
+        Ok(self
+            .read_music_posts(user_z32, Visibility::Public, None)
+            .await?
+            .into_iter()
+            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
+            .collect())
+    }
+
+    /// The signed-in user's private playlists.
+    pub async fn read_private_playlists(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
+        let me = session.public_key().to_string();
+        Ok(self
+            .read_music_posts(&me, Visibility::Private, Some(session))
+            .await?
+            .into_iter()
+            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
+            .collect())
     }
 
     pub async fn read_reviews_of(&self, user_z32: &str) -> Result<Vec<(String, Review)>, HomeserverError> {
-        self.read_all::<Review>(user_z32, Review::PATH_SEGMENT).await
+        Ok(self
+            .read_music_posts(user_z32, Visibility::Public, None)
+            .await?
+            .into_iter()
+            .filter_map(|(p, post)| post.as_review().cloned().map(|r| (p, r)))
+            .collect())
     }
 
     pub async fn read_activity_of(&self, user_z32: &str) -> Result<Vec<(String, Activity)>, HomeserverError> {
-        self.read_all::<Activity>(user_z32, Activity::PATH_SEGMENT).await
+        Ok(self
+            .read_music_posts(user_z32, Visibility::Public, None)
+            .await?
+            .into_iter()
+            .filter_map(|(p, post)| post.as_activity().cloned().map(|a| (p, a)))
+            .collect())
     }
 
     /// Write any object to its session-relative path (`Meta::path`).
@@ -150,34 +210,16 @@ impl NodeHomeserver {
         Ok(())
     }
 
-    pub async fn write_playlist(
+    /// Write a music post where its `Meta` says (private or public folder).
+    pub async fn write_post(
         &self,
         session: &PubkySession,
-        playlist: &Playlist,
+        post: &MusicPost,
         meta: &crate::schemas::Meta,
     ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, playlist).await
+        self.write_object(session, &meta.path, &post.post).await
     }
 
-    pub async fn write_review(
-        &self,
-        session: &PubkySession,
-        review: &Review,
-        meta: &crate::schemas::Meta,
-    ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, review).await
-    }
-
-    pub async fn write_activity(
-        &self,
-        session: &PubkySession,
-        activity: &Activity,
-        meta: &crate::schemas::Meta,
-    ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, activity).await
-    }
-
-    #[cfg(feature = "app-specs")]
     pub async fn write_tag(
         &self,
         session: &PubkySession,
@@ -187,7 +229,7 @@ impl NodeHomeserver {
         self.write_object(session, &meta.path, tag).await
     }
 
-    /// Delete an object the user wrote (unfollow a playlist, retract a review).
+    /// Delete an object the user wrote (remove a playlist, retract a review).
     pub async fn delete(&self, session: &PubkySession, path: &str) -> Result<(), HomeserverError> {
         session.storage().delete(path).await?;
         Ok(())

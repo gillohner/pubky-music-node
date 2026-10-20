@@ -1,6 +1,4 @@
-use super::{
-    app_path, canonical_uri, chars, limits, sanitize_uri, SchemaError, Validatable, ACTIVITY_SEGMENT,
-};
+use super::{canonical_uri, chars, limits, sanitize_uri, SchemaError, Validatable};
 use crate::ids::{self, validate_timestamp_id};
 use serde::{Deserialize, Serialize};
 
@@ -18,9 +16,9 @@ pub enum ActivitySource {
     Unknown,
 }
 
-/// `/pub/pubky.music/activity/<timestamp id>`: one coarse "played this"
-/// record. Opt-in and public (handoff §8.3); a full listening history stays
-/// private on the node.
+/// The `pubky.music/activity` envelope: one coarse "played this" record.
+/// Opt-in (handoff §8.3); private by default, a full listening history
+/// stays on the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     pub uri: String,
@@ -41,12 +39,6 @@ impl Activity {
             duration_ms,
         }
         .sanitize()
-    }
-
-    pub const PATH_SEGMENT: &'static str = ACTIVITY_SEGMENT;
-
-    pub fn create_path(id: &str) -> String {
-        format!("{}{}{}", app_path(), Self::PATH_SEGMENT, id)
     }
 
     pub fn create_id(&self) -> String {

@@ -1,19 +1,48 @@
-# Draft: `PubkyMusicPlaylist` for pubky-app-specs
+# `pubky.music` objects as v1 `PubkyAppPost`s
 
-Status: draft for the Nexus/Pinakes owner (answers §6). Implemented in `pm-pubky::schemas::playlist`;
-the wire form below is what the node writes today. Once stable, Nexus adds a `collection`
-reference kind for it and playlist items count toward Pinakes ranking.
+Status: implemented in `pm-pubky::schemas::post` (pubky-app-specs 0.8.1). This replaces the
+earlier draft of an own `PubkyMusicPlaylist` object type: until the music-specific social
+primitives are defined, every music object is a **regular v1 post** whose `content` is a JSON
+envelope, kept in the owner's **private** posts folder.
 
-## Path
-
-`/pub/pubky.music/playlists/<id>`, `id` a Timestamp ID (microseconds → 8 big-endian bytes →
-Crockford base32, 13 characters), the same generator as `PubkyAppPost`. The namespace name
-`pubky.music` is a placeholder constant until the app name is decided (handoff §11).
-
-## Body
+## Post
 
 ```json
 {
+  "content": "{\"type\":\"pubky.music/playlist\",\"v\":1,\"name\":\"Late night\", ...}",
+  "kind": "long",
+  "parent": null,
+  "embed": null,
+  "attachments": null
+}
+```
+
+- `kind` is `long` (the envelope is JSON, not prose; the 50 000-character limit applies).
+- `parent` and `attachments` are never set by this node.
+- Reviews and activity set `embed: {"kind": "link", "uri": "<canonical music URL>"}` so a generic
+  client shows what the post is about. Playlists have no single subject.
+- The post passes `PubkyAppPost::validate` unchanged; the node additionally validates the envelope.
+
+## Paths and ids
+
+| Visibility | Path | Who can read |
+| :-- | :-- | :-- |
+| private (default) | `pubky://<z32>/priv/pubky.app/posts/<id>` | the owner's session only |
+| public | `pubky://<z32>/pub/pubky.app/posts/<id>` | everyone; indexed by Nexus like any post |
+
+`id` is a Timestamp ID (microseconds → 8 big-endian bytes → Crockford base32, 13 characters),
+derived from the object's `created_at`/`played_at`. Moving an object public is a prefix change.
+Tags on music URLs stay plain public `PubkyAppTag`s.
+
+## Envelope
+
+Common fields: `type` (one of the three below) and `v` (currently `1`; readers reject newer).
+
+### `pubky.music/playlist`
+
+```json
+{
+  "type": "pubky.music/playlist", "v": 1,
   "name": "Late night",
   "description": "Quiet ones",
   "image": "pubky://<z32>/pub/pubky.app/files/<id>",
@@ -34,19 +63,22 @@ Crockford base32, 13 characters), the same generator as `PubkyAppPost`. The name
 | `image` | optional, ≤ 200, `pubky`, `http` or `https` URL |
 | `items` | ≤ 500; order is the curator's order |
 | `items[].uri` | a canonical music URL (ADR 0001): MusicBrainz recording / release / release-group / artist, the ISRC fallback, or a service's canonical track/album/artist URL. Normalized by the writer; `music:` is rejected |
-| `items[].added_at` | microseconds |
-| `created_at`, `updated_at` | microseconds; `updated_at` bumps on every edit |
+| `items[].added_at`, `created_at`, `updated_at` | microseconds; `updated_at` bumps on every edit |
+
+### `pubky.music/review`
+
+`target_uri` (canonical music URL), optional `rating` 1–5, `text` 1–2000 characters, `created_at`.
+Posts have timestamp ids, so "one review per target" is a reader rule: the newest wins.
+
+### `pubky.music/activity`
+
+`uri`, `played_at` (microseconds, also the id), `source_kind` (`{"kind":"local"}`,
+`{"kind":"service","name":"tidal"}`, `{"kind":"roon"}`), optional `duration_ms`.
 
 Optional fields are omitted when absent (JS style); readers accept `null` too.
 
-## Reference semantics (for Nexus)
+## For Nexus / Pinakes
 
-Each `items[].uri` is one reference of kind `collection` from the author to that URI, keyed by
-the playlist's `object_path`. A `put` replaces the whole item set; a `del` removes it. Nothing in
-the body is private; audio never appears here (handoff constraint 2).
-
-## Open
-
-- Unlisted playlists (§8.3 says "public or unlisted"): the homeserver has no unlisted mode; an
-  unlisted playlist is simply one the author does not tag or link. To be decided.
-- Whether `image` may be an external URL or must be a Pubky file.
+Nothing to index yet: private posts are invisible to indexers by design. When an object goes
+public it is an ordinary post; a `content` starting with `{"type":"pubky.music/` marks it as one
+of these envelopes. Playlist items then count as references to their canonical URLs.

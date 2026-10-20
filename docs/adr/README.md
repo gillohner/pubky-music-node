@@ -9,6 +9,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0003](0003-decoding-and-dsd.md) | Symphonia for PCM containers, own readers for DSF/DFF |
 | [0004](0004-sample-representation.md) | One in-memory sample layout for bit-perfect playback |
 | [0005](0005-zone-engine.md) | Zone engine: one audio thread, gapless by format, pause as flush-and-seek |
+| [0006](0006-social-objects-as-v1-posts.md) | Social objects are v1 `PubkyAppPost`s with a JSON envelope, in a private folder by default |
 
 Open (handoff §11), not yet decided: OAAT adopt/fork; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

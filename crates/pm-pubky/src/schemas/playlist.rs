@@ -1,7 +1,4 @@
-use super::{
-    app_path, canonical_uri, chars, limits, sanitize_uri, validate_image_url, SchemaError, Validatable,
-    PLAYLISTS_SEGMENT,
-};
+use super::{canonical_uri, chars, limits, sanitize_uri, validate_image_url, SchemaError, Validatable};
 use crate::ids::{self, validate_timestamp_id};
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +19,9 @@ impl PlaylistItem {
     }
 }
 
-/// `/pub/pubky.music/playlists/<timestamp id>`. Public or unlisted: an
-/// unlisted playlist is simply one the author does not announce; the path is
-/// still public, so nothing private goes here (constraint 2).
+/// The `pubky.music/playlist` envelope of a post (see [`super::post`]).
+/// Private by default (`/priv/pubky.app/posts/<timestamp id>`); a public
+/// one is an ordinary pubky.app post, so nothing private goes there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
@@ -57,13 +54,6 @@ impl Playlist {
             updated_at: now,
         }
         .sanitize()
-    }
-
-    /// Path segment under the app path.
-    pub const PATH_SEGMENT: &'static str = PLAYLISTS_SEGMENT;
-
-    pub fn create_path(id: &str) -> String {
-        format!("{}{}{}", app_path(), Self::PATH_SEGMENT, id)
     }
 
     /// New timestamp ID; use the same ID on later edits.
@@ -174,8 +164,8 @@ mod tests {
         let back = <Playlist as Validatable>::try_from(json.as_bytes(), &id).unwrap();
         assert_eq!(back, p);
         assert_eq!(
-            Playlist::create_path(&id),
-            format!("/pub/pubky.music/playlists/{id}")
+            super::super::post::MusicPost::path(&id, super::super::post::Visibility::Private),
+            format!("/priv/pubky.app/posts/{id}")
         );
     }
 

@@ -1,47 +1,39 @@
-//! The music node's social objects (handoff §8.3), drafted to the conventions
-//! of `pubky-app-specs`: sanitize, then validate; lengths count Unicode scalar
-//! values; optional fields are omitted from JSON when `None`; readers accept
-//! both omitted and `null`.
+//! The music node's social objects (handoff §8.3), written as **v1
+//! `PubkyAppPost`s** whose `content` is a JSON envelope (see [`post`]):
 //!
-//! | Object | Path | ID |
+//! | Object | Envelope `type` | Post path (private by default) |
 //! | :-- | :-- | :-- |
-//! | [`Playlist`] | `/pub/pubky.music/playlists/<id>` | timestamp |
-//! | [`Review`] | `/pub/pubky.music/reviews/<id>` | hash of the target URI |
-//! | [`Activity`] | `/pub/pubky.music/activity/<id>` | timestamp |
-//! | music tag | `/pub/pubky.app/tags/<id>` | `PubkyAppTag` hash (reused) |
+//! | [`Playlist`] | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` |
+//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` |
+//! | [`Activity`] | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` |
+//! | music tag | `PubkyAppTag` (reused as-is) | `/pub/pubky.app/tags/<id>` |
 //!
-//! Every URI inside these objects is a canonical `pm_model::MusicUri` rendered
-//! with `to_url()`; `music:` URIs are rejected at validation.
+//! Ids are Timestamp IDs like every post. Objects follow the pubky-app-specs
+//! conventions: sanitize, then validate; lengths count Unicode scalar
+//! values; optional fields are omitted when `None`; readers accept `null`.
+//! Every URI inside is a canonical `pm_model::MusicUri` rendered with
+//! `to_url()`; `music:` URIs are rejected at validation.
 
 mod activity;
 mod builder;
 mod playlist;
+pub mod post;
 mod review;
 
 pub use activity::{Activity, ActivitySource};
 pub use builder::{Meta, MusicSpecsBuilder};
 pub use playlist::{Playlist, PlaylistItem};
+pub use post::{MusicContent, MusicPost, Visibility};
 pub use review::Review;
 
 use pm_model::ids::IdError;
 use pm_model::MusicUri;
 use serde::de::DeserializeOwned;
 
-/// The app namespace under `/pub/`. Handoff §11 leaves the final name open;
+/// The envelope type prefix; handoff §11 leaves the final app name open and
 /// this is the one place to change it.
 pub const APP_NAMESPACE: &str = "pubky.music";
-
 pub const PROTOCOL: &str = "pubky://";
-pub const PUBLIC_PATH: &str = "/pub/";
-
-/// `/pub/pubky.music/`
-pub fn app_path() -> String {
-    format!("{PUBLIC_PATH}{APP_NAMESPACE}/")
-}
-
-pub const PLAYLISTS_SEGMENT: &str = "playlists/";
-pub const REVIEWS_SEGMENT: &str = "reviews/";
-pub const ACTIVITY_SEGMENT: &str = "activity/";
 
 /// Limits, in one place like `pubky_app_specs::VALIDATION_LIMITS`.
 pub mod limits {
@@ -77,7 +69,7 @@ impl SchemaError {
 }
 
 /// The ingestion contract, as `pubky_app_specs::traits::Validatable`:
-/// parse a homeserver body, sanitize it, validate it against its path id.
+/// parse a body, sanitize it, validate it against its path id.
 pub trait Validatable: Sized + DeserializeOwned {
     fn try_from(blob: &[u8], id: &str) -> Result<Self, SchemaError> {
         let instance: Self = serde_json::from_slice(blob).map_err(|e| SchemaError::Json(e.to_string()))?;

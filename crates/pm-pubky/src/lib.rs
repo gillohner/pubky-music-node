@@ -34,6 +34,6 @@ pub use discovery::{DiscoveredItem, Discovery};
 pub use nexus::{NexusClient, NexusError};
 pub use pinakes::{Card, PinakesClient, PinakesError, SearchQuery, SearchResponse};
 pub use schemas::{
-    Activity, ActivitySource, Meta, MusicSpecsBuilder, Playlist, PlaylistItem, Review, SchemaError,
-    APP_NAMESPACE,
+    Activity, ActivitySource, Meta, MusicContent, MusicPost, MusicSpecsBuilder, Playlist, PlaylistItem,
+    Review, SchemaError, Visibility, APP_NAMESPACE,
 };
