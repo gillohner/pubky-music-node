@@ -81,13 +81,24 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 | `pm-out-upnp`, `pm-out-slimproto`, `pm-out-cast` | UPnP/OpenHome, Squeezebox and Chromecast outputs |
 | `pm-node` | the binary: CLI plus `serve` |
 
-## Downloads
+## Download
 
-The release workflow builds `pm-app` (the native controller), `pm-node` and `pm-endpoint` for
-Linux x86_64 (with ALSA), Windows x86_64 and macOS arm64 as artifacts and attaches them to every
-`v*` release. The Linux build plays bit-perfect through ALSA; the Windows and macOS builds play
-through CoreAudio or WASAPI in shared mode (shown as lossless-up-to, not bit-perfect) and control
-nodes. Images for amd64 and arm64 are on GHCR.
+| | Latest release | Edge (every push to `main`) |
+| :-- | :-- | :-- |
+| All files | [releases/latest](https://github.com/gillohner/pubky-music-node/releases/latest) | [releases/tag/edge](https://github.com/gillohner/pubky-music-node/releases/tag/edge) |
+| macOS (universal) | [.dmg](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-macos-universal.dmg) | [.dmg](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-macos-universal.dmg) |
+| Windows | [setup .exe](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-windows-x86_64-setup.exe) | [setup .exe](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-windows-x86_64-setup.exe) |
+| Linux x86_64 | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-x86_64.deb) | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-x86_64.deb) |
+| Linux arm64 | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.deb) | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.deb) |
+| Android and Google TV | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-android-arm64.apk) |
+| Node and endpoint | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz` (armv7: 32-bit Raspberry Pi OS), Windows and macOS too | same names under edge |
+| Node image | `ghcr.io/gillohner/pubky-music-node:latest` (amd64, arm64) | `…:edge` |
+
+The app (`pm-desktop`) is the node's web UI in a window; on desktops it also plays through the
+computer's DACs, bit-perfect through ALSA on Linux. The macOS and Windows builds are not signed
+yet: on macOS right-click the app and choose Open the first time; on Windows choose More info,
+then Run anyway. Android builds are signed with the project's release key. Every release has a
+`SHA256SUMS` file. How releases are made: `docs/RELEASING.md`.
 
 ## Build
 
