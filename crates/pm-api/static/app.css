@@ -487,3 +487,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .tile .art .src-badge { position: absolute; left: 8px; bottom: 8px; margin: 0; background: rgba(0,0,0,0.65); color: #fff; }
 .tile .art .src-badge.lib { left: auto; right: 8px; }
 .chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
+
+/* Pubky Ring sign-in: a QR tile next to the instructions. */
+.qrbox { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.qrbox .qr { flex: 0 0 180px; width: 180px; height: 180px; border-radius: 12px; overflow: hidden; background: #fff; padding: 6px; box-sizing: border-box; }
+.qrbox .qr svg { width: 100%; height: 100%; display: block; }
+.qrbox p { margin: 0 0 10px; }
+

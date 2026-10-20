@@ -101,7 +101,7 @@
     const out = $('#ringout'); $('#ringstart').disabled = true; out.innerHTML = 'Starting…';
     try {
       const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json(); if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      out.innerHTML = `<p>Open this in Pubky Ring on your phone, or paste it into Ring: <a href="${esc(j.url)}">${esc(j.url.slice(0, 48))}…</a></p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p>`;
+      out.innerHTML = `<div class="qrbox">${j.qr_svg ? `<div class="qr">${j.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or <a href="${esc(j.url)}">open it in Ring on this device</a>.</p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p></div></div>`;
       clearInterval(ringPoll);
       ringPoll = setInterval(async () => {
         try {
@@ -1233,7 +1233,8 @@
           const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
             try {
               const r = await api('POST', '/pubky/login');
-              $('#pkurl').innerHTML = `<div class="notice" style="margin-top:12px">Open Pubky Ring, paste this URL and approve. This page updates by itself.<br><code class="qr-note">${esc(r.url)}</code></div>`;
+              $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve. This page updates by itself.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
+              const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); toast('Signed in as ' + st.user); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
           };

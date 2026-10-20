@@ -1560,10 +1560,31 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
-    Ok(Json(LoginStarted { url }))
+    let qr_svg = qr_svg(&url);
+    Ok(Json(LoginStarted { url, qr_svg }))
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A QR code of `text` as an SVG string (dark modules on a light tile, a
+/// quiet zone of four modules), for Pubky Ring sign-ins.
+pub(crate) fn qr_svg(text: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let w = code.width();
+    let quiet = 4;
+    let size = w + 2 * quiet;
+    let mut path = String::new();
+    for y in 0..w {
+        for x in 0..w {
+            if code[(x, y)] == qrcode::Color::Dark {
+                path.push_str(&format!("M{} {}h1v1h-1z", x + quiet, y + quiet));
+            }
+        }
+    }
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#111\"/></svg>"
+    ))
+}
 
 /// `POST /v1/auth/pubky/start`: a controller or browser asks to sign in with
 /// Pubky Ring. Only the node's owner (the identity the node itself is signed
@@ -1589,7 +1610,13 @@ async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<Co
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     logins.insert(id.clone(), (flow, std::time::Instant::now()));
-    Ok(Json(ControllerLoginStarted { id, url, owner }))
+    let qr_svg = qr_svg(&url);
+    Ok(Json(ControllerLoginStarted {
+        id,
+        url,
+        owner,
+        qr_svg,
+    }))
 }
 
 /// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with

@@ -1024,6 +1024,9 @@ pub struct CreatePull {
 pub struct LoginStarted {
     /// `pubkyauth://…` to scan or paste into Pubky Ring.
     pub url: String,
+    /// The same as a QR code (SVG markup), for screens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_svg: Option<String>,
 }
 
 /// `POST /v1/auth/pubky/start`: a controller or browser sign-in with Pubky Ring.
@@ -1034,6 +1037,8 @@ pub struct ControllerLoginStarted {
     pub url: String,
     /// Who must approve: the node's owner (z32 public key).
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_svg: Option<String>,
 }
 
 /// `GET /v1/auth/pubky/poll?id=`.

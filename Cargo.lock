@@ -3959,6 +3959,7 @@ dependencies = [
  "pm-zones",
  "pubky 0.16.2",
  "pubky-app-specs",
+ "qrcode",
  "rand 0.8.8",
  "reqwest",
  "serde",
