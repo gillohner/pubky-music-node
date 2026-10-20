@@ -78,6 +78,13 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 | `pm-out-upnp`, `pm-out-slimproto`, `pm-out-cast` | UPnP/OpenHome, Squeezebox and Chromecast outputs |
 | `pm-node` | the binary: CLI plus `serve` |
 
+## Downloads
+
+The release workflow builds `pm-app` (the native controller), `pm-node` and `pm-endpoint` for
+Linux x86_64 (with ALSA), Windows x86_64 and macOS arm64 as artifacts and attaches them to every
+`v*` release; the Linux build is the one that plays locally, the others control nodes and play
+through endpoints or the browser. Images for amd64 and arm64 are on GHCR.
+
 ## Build
 
 ```sh

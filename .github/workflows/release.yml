@@ -10,11 +10,20 @@ on:
       tag:
         description: "Extra image tag to publish (for example edge)"
         default: "edge"
+      images:
+        description: "Build and publish the multi-arch node image"
+        type: boolean
+        default: true
+      binaries:
+        description: "Build the native controller, node and endpoint for Linux, Windows and macOS"
+        type: boolean
+        default: true
 permissions:
   contents: read
   packages: write
 jobs:
   image:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.images }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,3 +53,49 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+  # Native controller (pm-app), node and endpoint for the desktops people run
+  # them on. Linux gets ALSA playback; Windows and macOS builds control nodes
+  # and play through the browser or endpoints until a local output exists there.
+  binaries:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.binaries }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            features: --features alsa
+            ext: ""
+          - os: windows-latest
+            name: windows-x86_64
+            features: ""
+            ext: .exe
+          - os: macos-latest
+            name: macos-arm64
+            features: ""
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: cargo build --release -p pm-app -p pm-node -p pm-endpoint ${{ matrix.features }}
+      - name: collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          for b in pm-app pm-node pm-endpoint; do cp "target/release/$b${{ matrix.ext }}" dist/; done
+          cp README.md docs/deploy.md dist/
+          cd dist && tar czf "../pubky-music-${{ matrix.name }}.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pubky-music-${{ matrix.name }}
+          path: pubky-music-${{ matrix.name }}.tar.gz
+      - name: attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "pubky-music-${{ matrix.name }}.tar.gz" --clobber || gh release create "${GITHUB_REF_NAME}" "pubky-music-${{ matrix.name }}.tar.gz" --title "${GITHUB_REF_NAME}" --notes "See docs/CHANGELOG.md"
