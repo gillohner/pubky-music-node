@@ -179,6 +179,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources", get(streaming::list))
         .route("/sources/{source}/search", get(streaming::search))
         .route("/sources/{source}/items/{id}", get(streaming::item))
+        .route("/sources/{source}/artists/{id}", get(streaming::artist))
         .route("/sources/tidal/login", get(tidal::login))
         .route("/sources/tidal/status", get(tidal::status))
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
@@ -2426,6 +2427,8 @@ mod tests {
                             assert!(q.contains("filter%5Bquery%5D=daft+punk") || q.contains("filter%5Bquery%5D=daft%20punk"), "{q}");
                             if q.contains("include=albums") {
                                 Json(serde_json::json!({"data": [{"id": "s", "type": "searchResults", "relationships": {"albums": {"data": [{"id": "20115556", "type": "albums"}]}}}], "included": [album]}))
+                            } else if q.contains("include=artists") {
+                                Json(serde_json::json!({"data": [{"id": "s", "type": "searchResults", "relationships": {"artists": {"data": [{"id": "3996", "type": "artists"}]}}}]}))
                             } else {
                                 Json(serde_json::json!({"data": [{"id": "s", "type": "searchResults", "relationships": {"tracks": {"data": [{"id": "20115564", "type": "tracks"}]}}}], "included": [t1]}))
                             }
@@ -2469,6 +2472,17 @@ mod tests {
                         Json(serde_json::json!({"data": [{"id": "20115564", "type": "tracks"}, {"id": "20115557", "type": "tracks"}, {"id": "v1", "type": "videos"}], "included": [t1, t2]}))
                     }
                 }),
+            )
+            .route(
+                "/artists",
+                get(|| async {
+                    Json(serde_json::json!({"data": [{"id": "3996", "type": "artists", "attributes": {"name": "Daft Punk", "numberOfFollowers": 12}, "relationships": {"profileArt": {"data": [{"id": "pa1", "type": "artworks"}]}}}],
+                        "included": [{"id": "pa1", "type": "artworks", "attributes": {"files": [{"href": "https://img/artist.jpg", "meta": {"width": 640, "height": 640}}]}}]}))
+                }),
+            )
+            .route(
+                "/artists/{id}/relationships/albums",
+                get(|| async { Json(serde_json::json!({"data": [{"id": "20115556", "type": "albums"}]})) }),
             );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
 
@@ -2507,13 +2521,24 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         let items = r["items"].as_array().unwrap();
-        assert_eq!(items[0]["kind"], "album");
-        assert_eq!(items[0]["creator"], "Daft Punk");
-        assert_eq!(items[0]["image"], "https://img/640.jpg");
-        assert_eq!(items[0]["url"], "https://tidal.com/browse/album/20115556");
-        assert_eq!(items[1]["kind"], "track");
-        assert_eq!(items[1]["title"], "Get Lucky");
+        assert_eq!(items[0]["kind"], "artist", "artists come first: {r}");
+        assert_eq!(items[0]["id"], "artist:3996");
+        assert_eq!(items[0]["image"], "https://img/artist.jpg");
+        assert_eq!(items[1]["kind"], "album");
         assert_eq!(items[1]["creator"], "Daft Punk");
+        assert_eq!(items[1]["image"], "https://img/640.jpg");
+        assert_eq!(items[1]["url"], "https://tidal.com/browse/album/20115556");
+        assert_eq!(items[2]["kind"], "track");
+        assert_eq!(items[2]["title"], "Get Lucky");
+        assert_eq!(items[2]["creator"], "Daft Punk");
+        assert_eq!(items[2]["duration_ms"], 369_000);
+        // An artist page lists the artist's albums with library matches.
+        let (st, a) = call(&app, "GET", "/v1/sources/tidal/artists/artist:3996", None).await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(a["name"], "Daft Punk");
+        assert_eq!(a["albums"][0]["id"], "album:20115556");
+        let (st, _) = call(&app, "GET", "/v1/sources/archive/artists/x", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
         assert!(tokens
             .lock()
             .unwrap()

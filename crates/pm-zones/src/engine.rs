@@ -316,7 +316,7 @@ impl Engine {
         let Some(c) = self.current.as_mut() else {
             return;
         };
-        let ms = match c.source.duration_ms() {
+        let ms = match c.source.duration_ms().or(c.item.duration_ms) {
             Some(d) => ms.min(d),
             None => ms,
         };
@@ -611,7 +611,8 @@ impl Engine {
             item: c.item.clone(),
             index: c.index,
             position_ms: self.position_ms(),
-            duration_ms: c.source.duration_ms(),
+            // Streams (HLS, radio) rarely know their length; the queue item may.
+            duration_ms: c.source.duration_ms().or(c.item.duration_ms),
             source_format: c.proc.source_format(),
             output_format: c.proc.output_format(),
             signal_path: c.proc.signal_path().clone(),

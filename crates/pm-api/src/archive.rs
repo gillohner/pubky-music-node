@@ -120,6 +120,8 @@ pub(crate) fn parse_search(v: &serde_json::Value) -> Vec<SourceHit> {
                         url: format!("https://archive.org/details/{id}"),
                         image: Some(format!("https://archive.org/services/img/{id}")),
                         kind: "item".into(),
+                        duration_ms: None,
+                        library_artist_id: None,
                         isrc: None,
                         upc: None,
                         library_track_id: None,
@@ -279,6 +281,7 @@ impl SourceTrack {
         q.artist = self.artist.clone().or_else(|| item.creator.clone());
         q.album = Some(item.title.clone());
         q.duration_ms = self.duration_ms;
+        q.image = item.image.clone();
         q
     }
 }

@@ -76,6 +76,8 @@ pub(crate) fn hit(host: &str, t: &serde_json::Value) -> Option<SourceHit> {
             .or(t["artwork"]["150x150"].as_str())
             .map(str::to_string),
         kind: "track".into(),
+        duration_ms: None,
+        library_artist_id: None,
         isrc: None,
         upc: None,
         library_track_id: None,

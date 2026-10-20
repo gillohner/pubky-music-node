@@ -21,6 +21,9 @@ pub struct QueueItem {
     pub album: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Cover image URL for items that are not library tracks (streaming sources).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 impl QueueItem {
@@ -32,6 +35,7 @@ impl QueueItem {
             artist: None,
             album: None,
             duration_ms: None,
+            image: None,
         }
     }
 

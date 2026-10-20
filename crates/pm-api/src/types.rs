@@ -167,6 +167,20 @@ pub struct SearchResults {
     pub sources: Vec<SourceResults>,
 }
 
+/// An artist on a streaming service with their albums.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceArtist {
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub url: String,
+    pub albums: Vec<SourceHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_artist_id: Option<i64>,
+}
+
 /// Where else a library album or track can be streamed from (Roon's "Versions").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Version {
@@ -779,6 +793,12 @@ pub struct SourceHit {
     /// `item` (several tracks) or `track`.
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Track hits: length, so a queue item knows it before the stream does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Artist hits: the library artist with the same name, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_artist_id: Option<i64>,
     /// Identity the service exposes, for matching against the library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isrc: Option<String>,

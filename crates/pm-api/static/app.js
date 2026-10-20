@@ -66,6 +66,11 @@
     const img = albumId ? `<img loading="lazy" alt="" src="/v1/library/albums/${albumId}/cover${tokenQ()}" onerror="this.remove()">` : '';
     return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}</div>`;
   };
+  // Art for a queue item: a streaming source's image, else the library album cover.
+  const itemArt = (it, cls = '') => {
+    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" onerror="this.remove()"></div>`; }
+    return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls);
+  };
   const toast = (msg, kind = '') => {
     const t = $('#toast');
     t.textContent = msg;
@@ -105,7 +110,7 @@
       id: BROWSER, name: 'This browser', output: 'browser',
       transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing',
       queue_index: state.browserIndex,
-      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (audio.duration || 0) * 1000, signal_path: null } : null,
+      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null } : null,
     };
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
@@ -121,14 +126,14 @@
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
     if (isBrowser()) {
-      const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
+      const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (replace) { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
       if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${bitems.length} tracks added`);
       return;
     }
     try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${qitems.length} tracks added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
-  const hitItem = (h, album) => ({ uri: `tidal:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: null });
+  const hitItem = (h, album) => ({ uri: `tidal:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i) => {
     const it = state.browserQueue[i];
     if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; }
@@ -146,7 +151,7 @@
     if (!hasMediaSession) return;
     try {
       const albumId = albumIdOf(it);
-      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
+      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: it.image ? [{ src: it.image, sizes: '640x640' }] : albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
     } catch { /* metadata is a nicety */ }
   };
   if (hasMediaSession) {
@@ -276,7 +281,7 @@
     }
     const it = np.item;
     const live = np.stream_title;
-    $('#np').innerHTML = `<div class="np-art">${art(albumIdOf(it), it.title || it.uri, 'sm')}</div><div class="np-text"><div class="np-title">${esc(live || it.title || it.uri)}</div><div class="np-sub">${esc(live ? [it.title, it.album].filter(Boolean).join(' · ') : [it.artist, it.album].filter(Boolean).join(' · '))}</div></div>`;
+    $('#np').innerHTML = `<div class="np-art">${itemArt(it, 'sm')}</div><div class="np-text"><div class="np-title">${esc(live || it.title || it.uri)}</div><div class="np-sub">${esc(live ? [it.title, it.album].filter(Boolean).join(' · ') : [it.artist, it.album].filter(Boolean).join(' · '))}</div></div>`;
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
@@ -313,7 +318,7 @@
       <div class="np-page">
         <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span><button class="btn ghost" id="npsleep" title="Pause this zone after a while">${icon('moon')} ${sleepLabel()}</button>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
         <div class="np-hero">
-          <div class="np-big">${art(albumId, it.title || it.uri)}</div>
+          <div class="np-big">${itemArt(it)}</div>
           <div class="np-meta">
             <div class="eyebrow">${esc(np.stream_title ? 'Live · ' + (it.title || '') : it.album ? 'From ' + it.album : 'Track')}</div>
             <h1>${esc(np.stream_title || it.title || it.uri)}</h1>
@@ -808,19 +813,23 @@
           break;
         }
         case 'search': {
+          if ((!state.viewArg || !state.viewArg.q) && search.value.trim()) { runSearch(); return; }
           const { q, tracks, albums, artists, genres, sources } = { tracks: [], albums: [], artists: [], genres: [], sources: [], ...(state.viewArg || { q: '' }) };
-          const tidalHits = ((sources || []).find((s) => s.source === 'tidal') || { items: [] }).items;
-          const tAlbums = tidalHits.filter((h) => h.kind === 'album'); const tTracks = tidalHits.filter((h) => h.kind === 'track');
-          const none = !tracks.length && !albums.length && !artists.length && !genres.length && !tidalHits.length;
-          main.innerHTML = pageHead(`Results for “${q}”`, none ? null : `${tracks.length} tracks · ${albums.length} albums · ${artists.length} artists`)
-            + (none ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library.') : '')
-            + (albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div><div class="strip">${albums.map(tile).join('')}</div></section>` : '')
-            + (artists.length || genres.length ? `<section class="section"><div class="section-head"><h3>${artists.length ? 'Artists' : ''}${artists.length && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div><div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
+          // Every source in one page: library first, then streaming hits that are not already owned.
+          const srcHits = (sources || []).flatMap((s) => s.items.map((h) => ({ ...h, source: s.source })));
+          const tAlbums = srcHits.filter((h) => h.kind === 'album' && !h.library_album_id); const tTracks = srcHits.filter((h) => h.kind === 'track' && !h.library_track_id); const tArtists = srcHits.filter((h) => h.kind === 'artist' && !h.library_artist_id);
+          const none = !tracks.length && !albums.length && !artists.length && !genres.length && !srcHits.length;
+          const srcTile = (h) => `<button class="tile" data-sitem="${esc(h.id)}" data-src="${esc(h.source)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}<span class="src-badge">${esc(h.source.toUpperCase())}</span></div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></button>`;
+          main.innerHTML = pageHead(`Results for “${q}”`, none ? null : `${tracks.length + tTracks.length} tracks · ${albums.length + tAlbums.length} albums · ${artists.length + tArtists.length} artists`)
+            + (none ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library and on your streaming accounts.') : '')
+            + (albums.length || tAlbums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3>${tAlbums.length ? `<span class="muted small">${albums.length ? 'yours first, then ' : ''}streaming</span>` : ''}</div><div class="strip">${albums.map(tile).join('')}${tAlbums.map(srcTile).join('')}</div></section>` : '')
+            + (artists.length || genres.length || tArtists.length ? `<section class="section"><div class="section-head"><h3>${artists.length || tArtists.length ? 'Artists' : ''}${(artists.length || tArtists.length) && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div>${tArtists.length ? `<div class="chips" style="margin-bottom:8px">${tArtists.map((h) => `<button class="chip" data-sartist="${esc(h.id)}" data-src="${esc(h.source)}">${h.image ? `<img class="chip-avatar" src="${esc(h.image)}" alt="">` : ''}${esc(h.title)} <span class="src-badge">${esc(h.source.toUpperCase())}</span></button>`).join('')}</div>` : ''}<div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
             + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '')
-            + (tidalHits.length ? `<section class="section"><div class="section-head"><h3>On TIDAL</h3><span class="muted small">streams from your TIDAL account</span></div>${tAlbums.length ? `<div class="strip">${tAlbums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}<span class="src-badge">TIDAL</span>${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : ''}${tTracks.length ? `<div class="list">${tTracks.map((h, i) => `<div class="list-row"><button class="icon-btn" data-tplay="${i}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(h.title)} <span class="src-badge">TIDAL</span>${h.library_track_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="row-actions"><button class="icon-btn" data-tnext="${i}" title="Play next">${icon('playnext')}</button><button class="icon-btn" data-tadd="${i}" title="Add to queue">${icon('plus')}</button></span></div>`).join('')}</div>` : ''}</section>` : '')
+            + (tTracks.length ? `<section class="section"><div class="section-head"><h3>${tracks.length ? 'More tracks on streaming' : 'Tracks on streaming'}</h3><span class="muted small">from your accounts</span></div><div class="list">${tTracks.map((h, i) => `<div class="list-row"><button class="icon-btn" data-tplay="${i}" title="Play">${icon('play')}</button>${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(h.title)} <span class="src-badge">${esc(h.source.toUpperCase())}</span></div><div class="sub">${esc([h.creator, h.year, h.duration_ms ? fmt(h.duration_ms) : null].filter(Boolean).join(' · '))}</div></div><span class="row-actions"><button class="icon-btn" data-tnext="${i}" title="Play next">${icon('playnext')}</button><button class="icon-btn" data-tadd="${i}" title="Add to queue">${icon('plus')}</button></span></div>`).join('')}</div></section>` : '')
             + `<section class="section"><div class="section-head"><h3>Elsewhere</h3></div><div class="actions"><button class="btn" id="s-archive">${icon('archive')} Search the Internet Archive for “${esc(q)}”</button><button class="btn" id="s-audius">${icon('archive')} Search Audius for “${esc(q)}”</button><button class="btn" id="s-radio">${icon('radio')} Find radio stations named “${esc(q)}”</button></div></section>`;
           lists.search = tracks;
-          $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
+          $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: b.dataset.src || 'tidal', id: b.dataset.sitem }));
+          $$('[data-sartist]', main).forEach((b) => b.onclick = () => setView('source-artist', { source: b.dataset.src || 'tidal', id: b.dataset.sartist }));
           $$('[data-tplay]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tplay)])], true));
           $$('[data-tnext]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tnext)])], false, 'next'));
           $$('[data-tadd]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tadd)])], false, 'end'));
@@ -914,17 +923,27 @@
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: cur.id, id: b.dataset.sitem }));
           break;
         }
+        case 'source-artist': {
+          loading();
+          const { source, id } = state.viewArg;
+          const a = await api('GET', `/sources/${encodeURIComponent(source)}/artists/${encodeURIComponent(id)}`);
+          if (state.view !== 'source-artist') return;
+          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" onerror="this.remove()">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${a.albums.length} albums · <a href="${esc(a.url)}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
+          $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source, id: b.dataset.sitem }));
+          $$('[data-artist]', main).forEach((b) => b.onclick = () => setView('artist', Number(b.dataset.artist)));
+          break;
+        }
         case 'source-item': {
           loading();
           const { source, id } = state.viewArg;
           const it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`);
           if (state.view !== 'source-item') return;
           const srcName = ((state.sources || []).find((x) => x.id === source) || { name: source }).name;
-          const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms }));
+          const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);
             if (isBrowser()) {
-              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
+              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
               if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
               return;
             }
@@ -938,7 +957,7 @@
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {
@@ -1038,7 +1057,7 @@
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
               <div class="zc-head">${icon('zone')}<h3>${esc(z.name)}</h3>${members}<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span></div>
-              <div class="zc-now">${it ? art(albumIdOf(it), it.title || it.uri, 'sm') : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</div></div></div>
+              <div class="zc-now">${it ? itemArt(it, 'sm') : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</div></div></div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>

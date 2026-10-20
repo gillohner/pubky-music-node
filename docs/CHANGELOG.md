@@ -8,7 +8,10 @@ Newest first. Dates are when the change landed on `main`.
   albums and tracks next to the library (flagged when already owned), album pages show Versions
   on TIDAL by UPC, track menus offer Stream from TIDAL by ISRC, and the browser zone plays TIDAL
   through a node proxy; Home shows a strip from the TIDAL collection and TIDAL album pages link
-  to the owned album. The Sources screen is for connecting accounts.
+  to the owned album. Search merges artists, albums and tracks from the library and the
+  streaming accounts (owned items first, streaming artists open their own page), queue items
+  from streaming carry their cover and length, and the browser zone shows a stream's real length.
+  The Sources screen is for connecting accounts.
 - TIDAL through the official API: catalogue search, albums and tracks in the Sources view, sign-in
   with OAuth 2 + PKCE from either UI, playback of `tidal:track:` URIs through stream manifests and
   HLS segments (FLAC; verified live: the THIRD_PARTY developer tier gets 30 s previews until TIDAL

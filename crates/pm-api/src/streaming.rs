@@ -22,6 +22,10 @@ pub trait StreamingService: Send + Sync {
     }
     async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError>;
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError>;
+    /// An artist page (services that have artists).
+    async fn artist(&self, _s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
+        Err(ApiError::not_found(format!("no artist {id} on this source")))
+    }
 }
 
 /// The built-in services, in display order.
@@ -106,6 +110,14 @@ pub(crate) async fn unified_search(s: &Arc<NodeState>, term: &str, limit: u32) -
 
 /// Fill `library_track_id` / `library_album_id` from the hit's ISRC or UPC.
 pub(crate) fn mark_library(lib: &pm_library::Library, h: &mut SourceHit) {
+    if h.kind == "artist" && h.library_artist_id.is_none() {
+        h.library_artist_id = lib
+            .list_artists()
+            .ok()
+            .and_then(|all| all.into_iter().find(|x| x.name.eq_ignore_ascii_case(&h.title)))
+            .map(|x| x.id);
+        return;
+    }
     if let Some(isrc) = h.isrc.as_deref().and_then(|i| pm_model::Isrc::parse(i).ok()) {
         if let Ok(ts) = lib.tracks_by_canonical(&pm_model::MusicUri::Isrc { isrc }) {
             h.library_track_id = ts.first().and_then(|t| t.id.map(|i| i.0));
@@ -119,6 +131,27 @@ pub(crate) fn mark_library(lib: &pm_library::Library, h: &mut SourceHit) {
             h.library_album_id = a.id;
         }
     }
+}
+
+/// `GET /v1/sources/{source}/artists/{id}`.
+pub(crate) async fn artist(
+    State(s): State<Arc<NodeState>>,
+    Path((source, id)): Path<(String, String)>,
+) -> ApiResult<SourceArtist> {
+    let svc = find(&source)?;
+    let mut a = svc.artist(&s, &id).await?;
+    let lib = s.library.lock().expect("library poisoned");
+    for h in &mut a.albums {
+        mark_library(&lib, h);
+    }
+    if a.library_artist_id.is_none() {
+        a.library_artist_id = lib
+            .list_artists()
+            .ok()
+            .and_then(|all| all.into_iter().find(|x| x.name.eq_ignore_ascii_case(&a.name)))
+            .map(|x| x.id);
+    }
+    Ok(Json(a))
 }
 
 /// `GET /v1/sources/{source}/items/{id}`.

@@ -601,8 +601,41 @@ impl StreamingService for Tidal {
             ],
         )
         .await?;
+        let artists_page = get_json(
+            s,
+            "/searchResults",
+            &[
+                ("filter[query]", term.to_string()),
+                ("countryCode", country(s)),
+                ("include", "artists".into()),
+            ],
+        )
+        .await?;
         let mut hits = Vec::new();
         let per_kind = (limit as usize).div_ceil(2).max(1);
+        let artist_ids: Vec<String> = rel_ids(&artists_page["data"][0], "artists")
+            .into_iter()
+            .map(|(id, _)| id)
+            .take(6)
+            .collect();
+        if !artist_ids.is_empty() {
+            // TIDAL ranks related artists high; the one whose name matches the query goes first.
+            let needle = term.trim().to_lowercase();
+            let mut artists = artist_hits(s, &artist_ids).await?;
+            artists.sort_by_key(|h| {
+                let name = h.title.to_lowercase();
+                if name == needle {
+                    0
+                } else if name.starts_with(&needle) || needle.starts_with(&name) {
+                    1
+                } else if name.contains(&needle) {
+                    2
+                } else {
+                    3
+                }
+            });
+            hits.extend(artists);
+        }
         let album_ids: Vec<String> = rel_ids(&albums["data"][0], "albums")
             .into_iter()
             .map(|(id, _)| id)
@@ -642,6 +675,8 @@ impl StreamingService for Tidal {
                     downloads: None,
                     image: artwork_url(&dinc, a),
                     kind: "album".into(),
+                    duration_ms: None,
+                    library_artist_id: None,
                     isrc: None,
                     upc: at["barcodeId"].as_str().map(str::to_string),
                     library_track_id: None,
@@ -681,6 +716,8 @@ impl StreamingService for Tidal {
                     downloads: None,
                     image: album.and_then(|a| artwork_url(&dinc, a)),
                     kind: "track".into(),
+                    duration_ms: t["attributes"]["duration"].as_str().and_then(duration_ms),
+                    library_artist_id: None,
                     isrc: t["attributes"]["isrc"].as_str().map(str::to_string),
                     upc: None,
                     library_track_id: None,
@@ -690,6 +727,34 @@ impl StreamingService for Tidal {
             }
         }
         Ok(hits)
+    }
+
+    async fn artist(&self, s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
+        let aid = id.strip_prefix("artist:").unwrap_or(id);
+        if aid.is_empty() || !aid.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(ApiError::bad_request("bad TIDAL artist id"));
+        }
+        let head = artist_hits(s, &[aid.to_string()]).await?;
+        let Some(h) = head.into_iter().next() else {
+            return Err(ApiError::not_found(format!("no TIDAL artist {aid}")));
+        };
+        let album_ids = relationship_ids(
+            s,
+            &format!("/artists/{aid}/relationships/albums"),
+            &[("countryCode", country(s))],
+        )
+        .await?;
+        let mut albums = album_hits(s, &album_ids.into_iter().take(60).collect::<Vec<_>>()).await?;
+        albums.sort_by_key(|a| std::cmp::Reverse(a.year));
+        Ok(SourceArtist {
+            source: SOURCE_ID.into(),
+            id: format!("artist:{aid}"),
+            name: h.title,
+            image: h.image,
+            url: tidal_url("artist", aid),
+            albums,
+            library_artist_id: None,
+        })
     }
 
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
@@ -1065,6 +1130,8 @@ async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Ve
                 downloads: None,
                 image: album.and_then(|a| artwork_url(&dinc, a)),
                 kind: "track".into(),
+                duration_ms: t["attributes"]["duration"].as_str().and_then(duration_ms),
+                library_artist_id: None,
                 isrc: t["attributes"]["isrc"].as_str().map(str::to_string),
                 upc: None,
                 library_track_id: None,
@@ -1101,6 +1168,8 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
                 downloads: None,
                 image: artwork_url(&dinc, &a),
                 kind: "album".into(),
+                duration_ms: None,
+                library_artist_id: None,
                 isrc: None,
                 upc: a["attributes"]["barcodeId"].as_str().map(str::to_string),
                 library_track_id: None,
@@ -1119,6 +1188,57 @@ const COLLECTION_TTL_SECS: i64 = 15 * 60;
 pub(crate) struct CollectionQuery {
     #[serde(default)]
     refresh: Option<u8>,
+}
+
+/// Artist hits with their portrait, by id (≤ 20 per call).
+async fn artist_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, ApiError> {
+    let mut q: Vec<(&str, String)> = vec![("countryCode", country(s)), ("include", "profileArt".into())];
+    for id in ids.iter().take(20) {
+        q.push(("filter[id]", id.clone()));
+    }
+    let v = get_json(s, "/artists", &q).await?;
+    let inc = included(&v);
+    Ok(v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|ar| {
+                    let id = ar["id"].as_str()?;
+                    Some(SourceHit {
+                        id: format!("artist:{id}"),
+                        title: ar["attributes"]["name"].as_str().unwrap_or("").to_string(),
+                        creator: None,
+                        year: None,
+                        downloads: ar["attributes"]["numberOfFollowers"].as_u64(),
+                        image: profile_art_url(&inc, ar),
+                        kind: "artist".into(),
+                        duration_ms: None,
+                        library_artist_id: None,
+                        isrc: None,
+                        upc: None,
+                        library_track_id: None,
+                        library_album_id: None,
+                        url: tidal_url("artist", id),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The artist's profile picture closest to 640 px wide.
+fn profile_art_url(inc: &Included<'_>, res: &Value) -> Option<String> {
+    let (id, _) = rel_ids(res, "profileArt").into_iter().next()?;
+    let art = inc.get(&("artworks".to_string(), id))?;
+    let files = art["attributes"]["files"].as_array()?;
+    files
+        .iter()
+        .filter_map(|f| {
+            let w = f["meta"]["width"].as_i64().unwrap_or(0);
+            Some((f["href"].as_str()?.to_string(), (w - 640).abs()))
+        })
+        .min_by_key(|(_, d)| *d)
+        .map(|(href, _)| href)
 }
 
 /// `GET /v1/sources/tidal/collection?refresh=`: the user's favourite tracks

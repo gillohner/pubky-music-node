@@ -486,3 +486,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .src-badge.lib { background: var(--accent-soft); color: var(--accent-strong); }
 .tile .art .src-badge { position: absolute; left: 8px; bottom: 8px; margin: 0; background: rgba(0,0,0,0.65); color: #fff; }
 .tile .art .src-badge.lib { left: auto; right: 8px; }
+.chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
