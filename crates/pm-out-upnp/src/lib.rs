@@ -154,11 +154,16 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
     };
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_read_timeout(Some(Duration::from_millis(300)))?;
-    let msg = format!(
-        "M-SEARCH * HTTP/1.1\r\nHOST: {dest}\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {MEDIA_RENDERER}\r\n\r\n"
-    );
-    for _ in 0..2 {
-        socket.send_to(msg.as_bytes(), dest)?;
+    // UPnP 1.1 says a unicast search carries the device's own address in
+    // HOST; some stacks (ohNet on Linn) only parse the multicast form, and
+    // some only answer `ssdp:all`, so every combination is sent.
+    for host in [dest.to_string(), "239.255.255.250:1900".to_string()] {
+        for st in [MEDIA_RENDERER, "ssdp:all", "upnp:rootdevice"] {
+            let msg = format!(
+                "M-SEARCH * HTTP/1.1\r\nHOST: {host}\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {st}\r\n\r\n"
+            );
+            socket.send_to(msg.as_bytes(), dest)?;
+        }
     }
     let deadline = Instant::now() + timeout;
     let mut locations: Vec<String> = Vec::new();
@@ -236,9 +241,40 @@ fn tcp_fallback_on(ip: std::net::IpAddr, ports: &[u16]) -> Option<Result<Rendere
                     return Some(Ok(r));
                 }
             }
+            // A root page or directory listing that links to a description.
+            if let Some(r) = linked_description(&format!("http://{addr}/")) {
+                return Some(Ok(r));
+            }
         }
     }
     open.map(Err)
+}
+
+/// Follow `.xml` links on a page (some stacks list their devices at `/`).
+fn linked_description(url: &str) -> Option<Renderer> {
+    let text = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+    let base = url::Url::parse(url).ok()?;
+    for cand in text
+        .split(['"', '\'', '<', '>', ' '])
+        .filter(|t| t.ends_with(".xml") && !t.contains("://") || t.starts_with("http"))
+        .filter(|t| t.ends_with(".xml"))
+        .take(20)
+    {
+        if let Ok(full) = base.join(cand) {
+            if let Ok(Some(r)) = describe(full.as_str()) {
+                return Some(r);
+            }
+        }
+    }
+    None
 }
 
 /// The `friendlyName` of any device description (not only renderers).
