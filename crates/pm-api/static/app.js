@@ -645,8 +645,11 @@
             + (none ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library.') : '')
             + (albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div><div class="strip">${albums.map(tile).join('')}</div></section>` : '')
             + (artists.length || genres.length ? `<section class="section"><div class="section-head"><h3>${artists.length ? 'Artists' : ''}${artists.length && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div><div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
-            + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '');
+            + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '')
+            + `<section class="section"><div class="section-head"><h3>Elsewhere</h3></div><div class="actions"><button class="btn" id="s-archive">${icon('archive')} Search the Internet Archive for “${esc(q)}”</button><button class="btn" id="s-radio">${icon('radio')} Find radio stations named “${esc(q)}”</button></div></section>`;
           lists.search = tracks;
+          $('#s-archive').onclick = () => setView('archive', { q });
+          $('#s-radio').onclick = () => { state.radioResults = null; setView('radio', { q }); };
           $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
           break;
         }
@@ -689,6 +692,12 @@
           break;
         }
         case 'archive': {
+          const wanted = state.viewArg && state.viewArg.q;
+          if (wanted && (!state.archiveResults || state.archiveResults.q !== wanted)) {
+            loading();
+            try { const r = await api('GET', '/sources/archive/search?limit=40&q=' + encodeURIComponent(wanted)); state.archiveResults = { q: wanted, items: r.items }; } catch (e) { toast(e.message, 'error'); state.archiveResults = { q: wanted, items: [] }; }
+            if (state.view !== 'archive') return;
+          }
           const results = state.archiveResults || { q: '', items: [] };
           main.innerHTML = pageHead('Internet Archive', 'live recordings, netlabels, public domain · no account')
             + `<div class="toolbar"><input class="input" id="aq" placeholder="Search (Grateful Dead 1977, Bach, netlabel…)" value="${esc(results.q)}" style="width:360px"><button class="btn primary" id="asearch">${icon('search')} Search</button><span class="muted small">Streams play on any zone; FLAC when the item has it, else MP3 or Ogg (shown as Lossy).</span></div>`
@@ -723,6 +732,11 @@
           break;
         }
         case 'radio': {
+          const wantedR = state.viewArg && state.viewArg.q;
+          if (wantedR && (!state.radioResults || state.radioResults.q !== wantedR)) {
+            try { const r = await api('GET', '/radio/search?limit=40&q=' + encodeURIComponent(wantedR)); state.radioResults = { q: wantedR, stations: r.stations }; } catch (e) { toast(e.message, 'error'); state.radioResults = { q: wantedR, stations: [] }; }
+            if (state.view !== 'radio') return;
+          }
           const saved = (await api('GET', '/radio/stations')).stations;
           const row = (st, isSaved) => `<div class="list-row"><button class="icon-btn" data-st-play="${esc(st.id)}" title="Play">${icon('play')}</button><div class="avatar" style="background:hsl(${hue(st.name)} 35% 28%);overflow:hidden">${st.favicon ? `<img src="${esc(st.favicon)}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : esc(initials(st.name))}</div><div class="grow"><div class="name">${esc(st.name)}</div><div class="sub">${esc([st.country, st.codec ? st.codec + (st.bitrate ? ' ' + st.bitrate + ' kbps' : '') : '', (st.tags || []).slice(0, 4).join(', ')].filter(Boolean).join(' · '))}</div></div>${isSaved ? `<button class="btn sm ghost" data-st-del="${esc(st.id)}">Remove</button>` : saved.some((x) => x.url === st.url) ? '<span class="pill ok">saved</span>' : `<button class="btn sm" data-st-save="${esc(st.id)}">Save</button>`}${st.homepage ? `<a class="icon-btn" href="${esc(st.homepage)}" target="_blank" rel="noopener" title="Homepage">${icon('external')}</a>` : ''}</div>`;
           const results = state.radioResults || { q: '', stations: [] };
