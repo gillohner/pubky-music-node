@@ -15,7 +15,7 @@ const MISS_TTL_SECS: i64 = 7 * 24 * 3600;
 
 fn client(s: &NodeState) -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let contact = s.pubky.user_agent_contact.clone();
+    let contact = s.contact();
     CLIENT
         .get_or_init(move || {
             let ua = if contact.is_empty() || contact == "unknown" {

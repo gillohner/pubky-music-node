@@ -58,6 +58,15 @@ G. If you have a Pubky session secret (exported from Pubky Ring): set
    `pm-node upload some.flac` and check `/v1/pubky/files`; on restart the file is mirrored into
    data_dir/homeserver and scanned. Playlists appear under /priv/pubky.app/posts on the homeserver.
 
+H. Newer screens (web UI at http://<laptop-ip>:7788/ and the app): Settings → set the upstream
+   contact and add a library folder from the UI (watch it scan); Home (recently added/played,
+   history after a few plays); Genres (needs genre tags); an album page: heart, tags (add one,
+   it must appear under /pub/pubky.app/tags on the homeserver after Sync), stars and notes,
+   "On Pubky" row; an artist page with a portrait and biography (needs MusicBrainz artist ids in
+   the tags); Radio: search "fip", play on the KA17 zone and on "This browser", watch the live
+   title change; Favourites; search for an album title and an artist name. Say which of these
+   produced an error toast and paste the node log line.
+
 Commit on a branch `laptop-test-<date>`, push, open a PR against main with the results table,
 hw_params captures, screenshots of the app, the Subsonic client's error log if any, and the fixes.
 ```

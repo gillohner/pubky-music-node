@@ -61,7 +61,12 @@ pub struct NodeState {
     pub slimproto_port: u16,
     pub session_secret_path: Option<PathBuf>,
     pub pubky: pm_pubky::PmPubkyConfig,
-    pub discovery: Option<Arc<pm_pubky::Discovery>>,
+    /// Pinakes/Nexus discovery; `None` until a valid contact is known. Rebuilt
+    /// when the contact is set at runtime.
+    pub discovery: std::sync::RwLock<Option<Arc<pm_pubky::Discovery>>>,
+    /// The contact for outbound User-Agent strings: from the config, else the
+    /// one saved through the API (`node.contact`), else empty.
+    pub contact: std::sync::RwLock<String>,
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
     /// The zones' source factory, also the per-output DSP registry.
@@ -88,10 +93,24 @@ impl NodeState {
         let library = Arc::new(Mutex::new(library));
         let sources = Arc::new(NodeSources::new(library.clone(), settings.pipeline));
         let (events, _) = broadcast::channel(1024);
-        let discovery = match settings.pubky.validate_contact() {
+        // A contact saved through the API wins over an unset config value.
+        let mut pubky = settings.pubky;
+        if pubky.validate_contact().is_err() {
+            if let Ok(Some(saved)) = library.lock().expect("library poisoned").get_setting(CONTACT_KEY) {
+                if pm_pubky::config::validate_contact(&saved).is_ok() {
+                    pubky.user_agent_contact = saved;
+                }
+            }
+        }
+        let contact = if pubky.validate_contact().is_ok() {
+            pubky.user_agent_contact.clone()
+        } else {
+            String::new()
+        };
+        let discovery = match pubky.validate_contact() {
             Ok(()) => match (
-                pm_pubky::PinakesClient::new(&settings.pubky),
-                pm_pubky::NexusClient::new(&settings.pubky),
+                pm_pubky::PinakesClient::new(&pubky),
+                pm_pubky::NexusClient::new(&pubky),
             ) {
                 (Ok(p), Ok(n)) => Some(Arc::new(pm_pubky::Discovery::new(p, n))),
                 _ => None,
@@ -116,8 +135,9 @@ impl NodeState {
             cast: settings.cast,
             slimproto_port: settings.slimproto_port,
             session_secret_path: settings.session_secret_path,
-            pubky: settings.pubky,
-            discovery,
+            pubky,
+            discovery: std::sync::RwLock::new(discovery),
+            contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
             events,
             sync: Mutex::new(None),
@@ -257,6 +277,40 @@ impl NodeState {
     }
 
     /// Watch the configured folders and rescan after `quiet` without events.
+    /// The contact used in outbound User-Agent strings (empty when none is set).
+    pub fn contact(&self) -> String {
+        self.contact.read().expect("contact lock").clone()
+    }
+
+    pub fn discovery(&self) -> Option<Arc<pm_pubky::Discovery>> {
+        self.discovery.read().expect("discovery lock").clone()
+    }
+
+    /// Set the contact at runtime: validated, saved in the library settings,
+    /// and discovery (Pinakes, Nexus) is built from it.
+    pub fn set_contact(&self, contact: &str) -> Result<(), String> {
+        let contact = contact.trim().to_string();
+        pm_pubky::config::validate_contact(&contact)?;
+        let mut cfg = self.pubky.clone();
+        cfg.user_agent_contact = contact.clone();
+        let discovery = match (
+            pm_pubky::PinakesClient::new(&cfg),
+            pm_pubky::NexusClient::new(&cfg),
+        ) {
+            (Ok(p), Ok(n)) => Some(Arc::new(pm_pubky::Discovery::new(p, n))),
+            (Err(e), _) => return Err(format!("pinakes client: {e}")),
+            (_, Err(e)) => return Err(format!("nexus client: {e}")),
+        };
+        self.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(CONTACT_KEY, &contact)
+            .map_err(|e| e.to_string())?;
+        *self.contact.write().expect("contact lock") = contact;
+        *self.discovery.write().expect("discovery lock") = discovery;
+        Ok(())
+    }
+
     /// The configured folders plus the ones added through the API, in order,
     /// without duplicates.
     pub fn all_folders(&self) -> Vec<PathBuf> {
@@ -504,6 +558,8 @@ impl NodeState {
         *self.scanning.lock().expect("scan flag poisoned")
     }
 }
+
+const CONTACT_KEY: &str = "node.contact";
 
 fn queue_key(id: &ZoneId) -> String {
     format!("queue.{}", id.0)

@@ -303,6 +303,23 @@ pub struct ScanStarted {
     pub folders: Vec<String>,
 }
 
+/// Runtime-changeable node settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeSettingsView {
+    /// Contact (email or URL) sent in outbound User-Agent strings; required by Pinakes, MusicBrainz and friends.
+    #[serde(default)]
+    pub contact: String,
+    /// Pinakes/Nexus discovery is available.
+    #[serde(default)]
+    pub discovery: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeSettingsUpdate {
+    #[serde(default)]
+    pub contact: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderRequest {
     pub path: String,

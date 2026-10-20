@@ -135,6 +135,22 @@ impl NodeClient {
         self.get("info", &[]).await
     }
 
+    pub async fn node_settings(&self) -> Result<NodeSettingsView> {
+        self.get("node/settings", &[]).await
+    }
+
+    /// Set the node's contact (email or URL) for upstream services.
+    pub async fn set_contact(&self, contact: &str) -> Result<NodeSettingsView> {
+        self.send(
+            reqwest::Method::PUT,
+            "node/settings",
+            Some(&NodeSettingsUpdate {
+                contact: Some(contact.to_string()),
+            }),
+        )
+        .await
+    }
+
     pub async fn outputs(&self) -> Result<Vec<OutputInfo>> {
         self.get("outputs", &[]).await
     }

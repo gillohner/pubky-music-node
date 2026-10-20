@@ -111,6 +111,8 @@ struct App {
     review_draft: Option<(String, Option<u8>, String)>,
     folders: Vec<(String, bool)>,
     folder_input: String,
+    node_settings: Option<pm_api::types::NodeSettingsView>,
+    contact_input: String,
     radio_query: String,
     radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
     radio_searching: bool,
@@ -194,6 +196,8 @@ impl App {
             review_draft: None,
             folders: Vec::new(),
             folder_input: String::new(),
+            node_settings: None,
+            contact_input: String::new(),
             radio_query: String::new(),
             radio_results: None,
             radio_searching: false,
@@ -282,6 +286,13 @@ impl App {
                 }
                 Msg::Stations(st) => self.stations = st,
                 Msg::Folders(f) => self.folders = f,
+                Msg::NodeSettings(v) => {
+                    self.contact_input = v.contact.clone();
+                    if v.discovery {
+                        self.discovery_off = false;
+                    }
+                    self.node_settings = Some(v);
+                }
                 Msg::OnPubky(None) => self.discovery_off = true,
                 Msg::OnPubky(Some(v)) => {
                     self.on_pubky.insert(v.uri.clone(), *v);
@@ -932,6 +943,7 @@ impl App {
         if theme::nav_item(ui, self.view == View::Settings, "Settings").clicked() {
             self.view = View::Settings;
             self.backend.send(Cmd::LoadFolders);
+            self.backend.send(Cmd::LoadNodeSettings);
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(6.0);
@@ -2363,6 +2375,37 @@ impl App {
         if let Conn::Failed(e) = &self.conn {
             ui.colored_label(theme::BAD, e);
         }
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("Upstream contact").strong().size(16.0));
+        ui.small(
+            egui::RichText::new(
+                "An email or URL sent in the node's User-Agent; Pinakes (Discover, On Pubky), MusicBrainz and Wikipedia ask for one.",
+            )
+            .weak(),
+        );
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.contact_input)
+                    .hint_text("you@example.org or https://your.site")
+                    .desired_width(300.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(theme::primary("Save")).clicked() || enter) && !self.contact_input.trim().is_empty() {
+                self.backend
+                    .send(Cmd::SetContact(self.contact_input.trim().to_string()));
+            }
+            if let Some(v) = &self.node_settings {
+                theme::pill(
+                    ui,
+                    Some(if v.discovery { theme::OK } else { theme::WARN }),
+                    if v.discovery {
+                        "Discover on"
+                    } else {
+                        "Discover off"
+                    },
+                );
+            }
+        });
         ui.add_space(14.0);
         ui.label(egui::RichText::new("Library folders").strong().size(16.0));
         ui.small(

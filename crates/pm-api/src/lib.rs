@@ -89,6 +89,7 @@ pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
+        .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/outputs", get(outputs))
         .route("/outputs/rescan", post(rescan_outputs))
         .route("/outputs/pull", post(create_pull))
@@ -800,6 +801,29 @@ async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool
     Ok(Json(f))
 }
 
+fn settings_view(s: &NodeState) -> NodeSettingsView {
+    NodeSettingsView {
+        contact: s.contact(),
+        discovery: s.discovery().is_some(),
+    }
+}
+
+async fn node_settings(State(s): State<Arc<NodeState>>) -> ApiResult<NodeSettingsView> {
+    Ok(Json(settings_view(&s)))
+}
+
+/// `PUT /v1/node/settings {contact}`: set the contact without touching the
+/// config file; discovery comes alive at once.
+async fn update_node_settings(
+    State(s): State<Arc<NodeState>>,
+    Json(req): Json<NodeSettingsUpdate>,
+) -> ApiResult<NodeSettingsView> {
+    if let Some(c) = req.contact {
+        s.set_contact(&c).map_err(ApiError::bad_request)?;
+    }
+    Ok(Json(settings_view(&s)))
+}
+
 fn folder_list(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
     Ok(s.library
         .lock()
@@ -1245,9 +1269,40 @@ mod tests {
             home["stats"]["albums"]
         );
 
-        // Without a contact, the Pubky view of an object is a clear 412.
+        // Without a contact, the Pubky view of an object is a clear 412; the
+        // contact can be set through the API and discovery comes alive.
         let (st, e) = call(&app, "GET", &format!("/v1/discover/uri?track_id={id}"), None).await;
         assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        let (st, v) = call(&app, "GET", "/v1/node/settings", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["discovery"], false);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"contact": "github.com/x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"contact": " me@example.org "})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["contact"], "me@example.org");
+        assert_eq!(v["discovery"], true);
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("node.contact")
+                .unwrap()
+                .as_deref(),
+            Some("me@example.org")
+        );
 
         // Unknown track and unknown zone are 404s.
         let (st, _) = call(

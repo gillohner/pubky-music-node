@@ -3,8 +3,8 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
-    FavouriteRef, Favourites, GenreDetail, HomePage, Info, OnPubky, PlaylistDetail, PlaylistSummary, QueueAt,
-    Reviews, SearchResults, Tags, TransportAction,
+    FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
+    PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -86,6 +86,8 @@ pub enum Cmd {
     },
     Scan,
     LoadFolders,
+    LoadNodeSettings,
+    SetContact(String),
     AddFolder(String),
     RemoveFolder(String),
     LoadPlaylists,
@@ -165,6 +167,7 @@ pub enum Msg {
     LibraryChanged,
     ScanStarted,
     Folders(Vec<(String, bool)>),
+    NodeSettings(NodeSettingsView),
     Playlists(Vec<PlaylistSummary>),
     Playlist(Box<PlaylistDetail>),
     PlaylistDeleted(String),
@@ -450,6 +453,12 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             out.send(Msg::ScanStarted);
         }
         Cmd::LoadFolders => out.send(Msg::Folders(c.folders().await?)),
+        Cmd::LoadNodeSettings => out.send(Msg::NodeSettings(c.node_settings().await?)),
+        Cmd::SetContact(contact) => {
+            let v = c.set_contact(&contact).await?;
+            out.send(Msg::Notice("Contact saved; Discover is on".into()));
+            out.send(Msg::NodeSettings(v));
+        }
         Cmd::AddFolder(path) => {
             let r = c.add_folder(&path).await?;
             out.send(Msg::Notice(if r.scan_started {

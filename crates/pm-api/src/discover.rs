@@ -13,7 +13,7 @@ use pm_pubky::{DiscoveredItem, Discovery};
 use std::sync::Arc;
 
 fn discovery(s: &NodeState) -> Result<Arc<Discovery>, ApiError> {
-    s.discovery.clone().ok_or_else(|| {
+    s.discovery().ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "discovery is off: set `contact` (an email or URL) in the node config",
