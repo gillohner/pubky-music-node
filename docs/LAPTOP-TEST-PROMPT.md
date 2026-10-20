@@ -61,3 +61,14 @@ G. If you have a Pubky session secret (exported from Pubky Ring): set
 Commit on a branch `laptop-test-<date>`, push, open a PR against main with the results table,
 hw_params captures, screenshots of the app, the Subsonic client's error log if any, and the fixes.
 ```
+
+## Visual review (added 2026-10-20)
+
+The author cannot see either UI (no display on the build box). Please take screenshots of the
+native app (Home, an album page, Now Playing, the transport bar with something playing, Settings)
+and of the web UI at `/` (same screens plus the zone picker and a track list on hover), and judge
+them against these principles: clear hierarchy and spacing, consistent components, one accent on a
+calm dark palette with real contrast, hover/focus/empty/loading states that explain the next step,
+no clipped or overlapping text at 1280×800 and at a phone width for the web UI. Attach the
+screenshots to the PR and list everything that looks wrong, however small. `tools/ui-smoke.js`
+(jsdom) renders every web UI view headlessly against a running node and must exit 0.

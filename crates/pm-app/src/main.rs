@@ -10,6 +10,7 @@
 
 mod backend;
 mod local;
+mod theme;
 
 use backend::{Backend, Cmd, DiscoverKind, Msg};
 use local::{LocalPlayer, LOCAL_ZONE_ID};
@@ -141,10 +142,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
-        let mut style = (*cc.egui_ctx.style_of(egui::Theme::Dark)).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        cc.egui_ctx.set_style_of(egui::Theme::Dark, style);
+        theme::apply(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, "settings"))
@@ -429,7 +427,7 @@ impl App {
                 let on = self.fav_uris.contains(&u.to_url());
                 let label = if on { "♥" } else { "♡" };
                 let btn = egui::Button::new(egui::RichText::new(label).size(16.0).color(if on {
-                    egui::Color32::from_rgb(230, 80, 110)
+                    theme::HEART
                 } else {
                     ui.visuals().weak_text_color()
                 }))
@@ -571,10 +569,16 @@ impl App {
     // ---- UI ----
 
     fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading(egui::RichText::new("Pubky Music").strong());
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("LIBRARY").small().weak());
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 11.0, theme::ACCENT);
+            ui.painter().circle_filled(r.center(), 5.5, theme::SURFACE);
+            ui.label(egui::RichText::new("Pubky Music").size(15.0).strong());
+        });
+        ui.add_space(14.0);
+        theme::eyebrow(ui, "Library");
+        ui.add_space(2.0);
         for (label, view) in [
             ("Home", View::Home),
             ("Favourites", View::Favourites),
@@ -587,7 +591,7 @@ impl App {
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
                 || matches!((&self.view, &view), (View::Artist(_), View::Artists))
                 || matches!((&self.view, &view), (View::Playlist(_), View::Playlists));
-            if ui.selectable_label(selected, label).clicked() {
+            if theme::nav_item(ui, selected, label).clicked() {
                 if view == View::Tracks && self.tracks.is_empty() {
                     self.backend.send(Cmd::LoadTracks);
                 }
@@ -606,29 +610,26 @@ impl App {
                 self.view = view;
             }
         }
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("PUBKY").small().weak());
-        if ui
-            .selectable_label(self.view == View::Discover, "Discover")
-            .clicked()
-        {
+        ui.add_space(12.0);
+        theme::eyebrow(ui, "Pubky");
+        ui.add_space(2.0);
+        if theme::nav_item(ui, self.view == View::Discover, "Discover").clicked() {
             self.view = View::Discover;
             if self.discover.is_none() && !self.discover_loading {
                 self.load_discover(DiscoverKind::Trends);
             }
         }
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("PLAYING").small().weak());
-        if ui.selectable_label(self.view == View::Queue, "Queue").clicked() {
+        ui.add_space(12.0);
+        theme::eyebrow(ui, "Playing");
+        ui.add_space(2.0);
+        if theme::nav_item(ui, self.view == View::Queue, "Queue").clicked() {
             self.view = View::Queue;
             self.refresh_queue();
         }
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("NODE").small().weak());
-        if ui
-            .selectable_label(self.view == View::Settings, "Settings")
-            .clicked()
-        {
+        ui.add_space(12.0);
+        theme::eyebrow(ui, "Node");
+        ui.add_space(2.0);
+        if theme::nav_item(ui, self.view == View::Settings, "Settings").clicked() {
             self.view = View::Settings;
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -636,19 +637,14 @@ impl App {
             match &self.conn {
                 Conn::Connected(info) => {
                     ui.small(format!("{} tracks", info.library.tracks));
-                    ui.small(
-                        egui::RichText::new(format!("● {}", info.name))
-                            .color(egui::Color32::from_rgb(90, 200, 120)),
-                    );
+                    ui.small(egui::RichText::new(format!("● {}", info.name)).color(theme::OK));
                 }
                 Conn::Connecting => {
                     ui.small(egui::RichText::new("○ connecting…").weak());
                 }
                 Conn::Failed(e) => {
-                    ui.small(
-                        egui::RichText::new("● not connected").color(egui::Color32::from_rgb(220, 90, 90)),
-                    )
-                    .on_hover_text(e);
+                    ui.small(egui::RichText::new("● not connected").color(theme::BAD))
+                        .on_hover_text(e);
                 }
             }
         });
@@ -862,10 +858,7 @@ impl App {
         ui.add_space(8.0);
         ui.horizontal_top(|ui| {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(art_size, art_size), egui::Sense::click());
-            match tex {
-                Some(t) => paint_texture(ui.painter(), rect, &t, false),
-                None => paint_art(ui.painter(), rect, &title, false),
-            }
+            theme::cover(ui, rect, tex.as_ref(), &title, false);
             if let Some(a) = &album {
                 if resp
                     .on_hover_text("Open album")
@@ -904,10 +897,10 @@ impl App {
                 ui.add_space(14.0);
                 let headline = np.signal_path.headline();
                 let (label, color) = match headline {
-                    Quality::BitPerfect => ("Bit-perfect", egui::Color32::from_rgb(120, 90, 220)),
-                    Quality::Enhanced => ("Enhanced", egui::Color32::from_rgb(90, 160, 220)),
-                    Quality::Lossless => ("Lossless", egui::Color32::from_rgb(90, 200, 120)),
-                    Quality::Lossy => ("Lossy", egui::Color32::from_rgb(230, 170, 60)),
+                    Quality::BitPerfect => ("Bit-perfect", theme::Q_BIT_PERFECT),
+                    Quality::Enhanced => ("Enhanced", theme::Q_ENHANCED),
+                    Quality::Lossless => ("Lossless", theme::Q_LOSSLESS),
+                    Quality::Lossy => ("Lossy", theme::Q_LOSSY),
                 };
                 ui.horizontal(|ui| {
                     ui.colored_label(color, "●");
@@ -1040,14 +1033,21 @@ impl App {
         ui.add_space(6.0);
         let tex = self.cover(album.id);
         ui.horizontal(|ui| {
-            album_art(ui, &album, 180.0, tex.as_ref());
+            album_art(ui, &album, 200.0, tex.as_ref());
+            ui.add_space(8.0);
             ui.vertical(|ui| {
-                ui.heading(egui::RichText::new(&album.title).size(26.0).strong());
+                ui.add_space(12.0);
+                theme::eyebrow(ui, "Album");
+                ui.heading(egui::RichText::new(&album.title).size(28.0).strong());
                 ui.label(
-                    album
-                        .album_artist
-                        .clone()
-                        .unwrap_or_else(|| "Unknown artist".into()),
+                    egui::RichText::new(
+                        album
+                            .album_artist
+                            .clone()
+                            .unwrap_or_else(|| "Unknown artist".into()),
+                    )
+                    .size(16.0)
+                    .color(theme::FG_2),
                 );
                 let mut facts = Vec::new();
                 if let Some(y) = album.year {
@@ -1064,13 +1064,13 @@ impl App {
                 ui.weak(facts.join(" · "));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("▶  Play album").clicked() {
+                    if ui.add(theme::primary("▶  Play")).clicked() {
                         self.play_tracks(&tracks, true, QueueAt::End);
                     }
-                    if ui.button("Play next").clicked() {
+                    if ui.add(theme::secondary("Play next")).clicked() {
                         self.play_tracks(&tracks, false, QueueAt::Next);
                     }
-                    if ui.button("Add to queue").clicked() {
+                    if ui.add(theme::secondary("Add to queue")).clicked() {
                         self.play_tracks(&tracks, false, QueueAt::End);
                     }
                     self.heart(
@@ -1104,11 +1104,7 @@ impl App {
                 .show(ui, |ui| {
                     for (i, t) in tracks.iter().enumerate() {
                         let no = t.track_no.map(|n| n.to_string()).unwrap_or_default();
-                        if ui
-                            .add(egui::Button::new("▶").frame(false))
-                            .on_hover_text("Play from here")
-                            .clicked()
-                        {
+                        if theme::icon_button(ui, 28.0, "▶", "Play from here").clicked() {
                             action = Some((i, "play"));
                         }
                         ui.weak(no);
@@ -1137,7 +1133,7 @@ impl App {
                                 let resp = ui.add_enabled(
                                     uri.is_some(),
                                     egui::Button::new(egui::RichText::new(label).color(if on {
-                                        egui::Color32::from_rgb(230, 80, 110)
+                                        theme::HEART
                                     } else {
                                         ui.visuals().weak_text_color()
                                     }))
@@ -1862,10 +1858,7 @@ impl App {
                         let title = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
                         let (rect, resp) =
                             ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::click());
-                        match tex {
-                            Some(t) => paint_texture(ui.painter(), rect, &t, resp.hovered()),
-                            None => paint_art(ui.painter(), rect, &title, resp.hovered()),
-                        }
+                        theme::cover(ui, rect, tex.as_ref(), &title, resp.hovered());
                         let open = resp
                             .on_hover_text("Now playing")
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1902,27 +1895,15 @@ impl App {
                 egui::Layout::top_down(egui::Align::Center),
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - 150.0).max(0.0) / 2.0);
-                        if ui
-                            .add(egui::Button::new("⏮").min_size(egui::vec2(36.0, 30.0)))
-                            .clicked()
-                        {
+                        ui.add_space((ui.available_width() - 136.0).max(0.0) / 2.0);
+                        if theme::icon_button(ui, 36.0, "⏮", "Previous").clicked() {
                             self.transport(TransportAction::Previous);
                         }
                         let playing = zone.transport == Transport::Playing;
-                        if ui
-                            .add(
-                                egui::Button::new(if playing { "⏸" } else { "▶" })
-                                    .min_size(egui::vec2(44.0, 30.0)),
-                            )
-                            .clicked()
-                        {
+                        if theme::play_button(ui, 44.0, playing).clicked() {
                             self.transport(TransportAction::Toggle);
                         }
-                        if ui
-                            .add(egui::Button::new("⏭").min_size(egui::vec2(36.0, 30.0)))
-                            .clicked()
-                        {
+                        if theme::icon_button(ui, 36.0, "⏭", "Next").clicked() {
                             self.transport(TransportAction::Next);
                         }
                     });
@@ -1950,18 +1931,12 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let headline = np.as_ref().map(|n| n.signal_path.headline());
                 let (label, color) = match headline {
-                    Some(Quality::BitPerfect) => ("Bit-perfect", egui::Color32::from_rgb(120, 90, 220)),
-                    Some(Quality::Enhanced) => ("Enhanced", egui::Color32::from_rgb(90, 160, 220)),
-                    Some(Quality::Lossless) => ("Lossless", egui::Color32::from_rgb(90, 200, 120)),
-                    Some(Quality::Lossy) => ("Lossy", egui::Color32::from_rgb(230, 170, 60)),
-                    None => ("—", egui::Color32::GRAY),
+                    Some(q) => (theme::quality_label(q), theme::quality_color(q)),
+                    None => ("—", theme::MUTED),
                 };
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(format!("● {label}")).color(color))
-                            .frame(false),
-                    )
+                if theme::pill(ui, Some(color), label)
                     .on_hover_text("Signal path")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
                     self.show_path = !self.show_path;
@@ -2320,20 +2295,12 @@ impl eframe::App for App {
         egui::Panel::left("nav")
             .default_size(200.0)
             .resizable(false)
-            .frame(
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(24, 24, 28))
-                    .inner_margin(12),
-            )
+            .frame(egui::Frame::NONE.fill(theme::SURFACE).inner_margin(12))
             .show(ui, |ui| self.nav(ui));
         egui::Panel::bottom("transport")
             .exact_size(84.0)
             .resizable(false)
-            .frame(
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(30, 30, 36))
-                    .inner_margin(10),
-            )
+            .frame(egui::Frame::NONE.fill(theme::SURFACE).inner_margin(10))
             .show(ui, |ui| self.transport_bar(ui));
         egui::Panel::top("search")
             .exact_size(44.0)
@@ -2344,11 +2311,7 @@ impl eframe::App for App {
             egui::Panel::right("queue")
                 .default_size(300.0)
                 .resizable(true)
-                .frame(
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(26, 26, 31))
-                        .inner_margin(10),
-                )
+                .frame(egui::Frame::NONE.fill(theme::SURFACE).inner_margin(10))
                 .show(ui, |ui| self.queue_panel(ui));
         }
         egui::CentralPanel::default()
@@ -2373,10 +2336,10 @@ fn signal_path_ui(ui: &mut egui::Ui, path: &SignalPath, zone: &ZoneState) {
         .show(ui, |ui| {
             for s in &path.stages {
                 let color = match s.quality {
-                    Quality::BitPerfect => egui::Color32::from_rgb(120, 90, 220),
-                    Quality::Enhanced => egui::Color32::from_rgb(90, 160, 220),
-                    Quality::Lossless => egui::Color32::from_rgb(90, 200, 120),
-                    Quality::Lossy => egui::Color32::from_rgb(230, 170, 60),
+                    Quality::BitPerfect => theme::Q_BIT_PERFECT,
+                    Quality::Enhanced => theme::Q_ENHANCED,
+                    Quality::Lossless => theme::Q_LOSSLESS,
+                    Quality::Lossy => theme::Q_LOSSY,
                 };
                 ui.colored_label(color, "●");
                 ui.label(&s.name);
@@ -2392,107 +2355,67 @@ fn signal_path_ui(ui: &mut egui::Ui, path: &SignalPath, zone: &ZoneState) {
 }
 
 fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size + 40.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size + 44.0), egui::Sense::click());
     let art = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
-    match tex {
-        Some(t) => paint_texture(ui.painter(), art, t, resp.hovered()),
-        None => paint_art(ui.painter(), art, &a.title, resp.hovered()),
+    let hovered = resp.hovered();
+    if hovered {
+        // A soft lift: shadow under the art.
+        ui.painter().rect_filled(
+            art.translate(egui::vec2(0.0, 4.0)).expand(2.0),
+            egui::CornerRadius::same(theme::RADIUS + 2),
+            egui::Color32::from_black_alpha(90),
+        );
+    }
+    theme::cover(ui, art, tex, &a.title, hovered);
+    if hovered {
+        ui.painter().rect_stroke(
+            art,
+            egui::CornerRadius::same(theme::RADIUS),
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(40)),
+            egui::StrokeKind::Inside,
+        );
     }
     let p = ui.painter();
-    let font = egui::FontId::proportional(13.0);
-    let title = truncate(&a.title, 24);
+    let title = truncate(&a.title, (size / 7.0) as usize);
     p.text(
-        egui::pos2(rect.min.x, art.max.y + 6.0),
+        egui::pos2(rect.min.x + 1.0, art.max.y + 9.0),
         egui::Align2::LEFT_TOP,
         title,
-        font.clone(),
-        ui.visuals().text_color(),
+        egui::FontId::proportional(13.0),
+        theme::FG,
     );
+    let mut sub = a.album_artist.clone().unwrap_or_default();
+    if let Some(y) = a.year {
+        if !sub.is_empty() {
+            sub.push_str(" · ");
+        }
+        sub.push_str(&y.to_string());
+    }
     p.text(
-        egui::pos2(rect.min.x, art.max.y + 22.0),
+        egui::pos2(rect.min.x + 1.0, art.max.y + 26.0),
         egui::Align2::LEFT_TOP,
-        truncate(a.album_artist.as_deref().unwrap_or(""), 26),
+        truncate(&sub, (size / 6.5) as usize),
         egui::FontId::proportional(12.0),
-        ui.visuals().weak_text_color(),
+        theme::MUTED,
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn album_art(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    match tex {
-        Some(t) => paint_texture(ui.painter(), rect, t, false),
-        None => paint_art(ui.painter(), rect, &a.title, false),
-    }
-}
-
-fn paint_texture(p: &egui::Painter, rect: egui::Rect, tex: &egui::TextureHandle, hovered: bool) {
-    let tint = if hovered {
-        egui::Color32::from_white_alpha(230)
-    } else {
-        egui::Color32::WHITE
-    };
-    p.image(
-        tex.id(),
-        rect,
-        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        tint,
+    ui.painter().rect_filled(
+        rect.translate(egui::vec2(0.0, 6.0)).expand(2.0),
+        egui::CornerRadius::same(theme::RADIUS + 2),
+        egui::Color32::from_black_alpha(110),
     );
+    theme::cover(ui, rect, tex, &a.title, false);
 }
 
 fn art_square(ui: &mut egui::Ui, title: &str, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    paint_art(ui.painter(), rect, title, false);
+    theme::placeholder(ui.painter(), rect, title, false);
 }
 
-/// Placeholder cover: a colour from the title and its initials. Real
-/// artwork arrives with the library's art extraction.
-fn paint_art(p: &egui::Painter, rect: egui::Rect, title: &str, hovered: bool) {
-    let h = title
-        .bytes()
-        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-    let hue = (h % 360) as f32 / 360.0;
-    let (r, g, b) = hsl(hue, 0.35, if hovered { 0.42 } else { 0.34 });
-    p.rect_filled(
-        rect,
-        egui::CornerRadius::same(6),
-        egui::Color32::from_rgb(r, g, b),
-    );
-    let initials: String = title
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
-    p.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        initials,
-        egui::FontId::proportional(rect.height() * 0.3),
-        egui::Color32::from_white_alpha(200),
-    );
-}
-
-fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match (h * 6.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    (
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    )
-}
-
-/// `https://musicbrainz.org/recording/<mbid>` → `musicbrainz.org/recording/…`
 fn short_uri(uri: &str) -> String {
     let s = uri.trim_start_matches("https://").trim_start_matches("http://");
     truncate(s, 48)
@@ -2591,8 +2514,8 @@ mod tests {
 
     #[test]
     fn placeholder_colours_are_stable() {
-        assert_eq!(hsl(0.0, 0.35, 0.34), hsl(0.0, 0.35, 0.34));
-        let (r, g, b) = hsl(0.5, 0.35, 0.34);
+        assert_eq!(theme::hsl(0.0, 0.35, 0.34), theme::hsl(0.0, 0.35, 0.34));
+        let (r, g, b) = theme::hsl(0.5, 0.35, 0.34);
         assert!(r < g && r < b);
     }
 }
