@@ -16,7 +16,7 @@ fn discovery(s: &NodeState) -> Result<Arc<Discovery>, ApiError> {
     s.discovery().ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "discovery is off: set `contact` (an email or URL) in the node config",
+            "discovery is off: set the upstream contact (an email or URL) in Settings or as `contact` in the node config",
         )
     })
 }
