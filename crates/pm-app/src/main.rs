@@ -2392,8 +2392,8 @@ impl App {
                 self.backend.send(Cmd::Refresh);
             }
             if ui
-                .button("Sync playlists to Pubky")
-                .on_hover_text("Needs a session on the node")
+                .button("Sync with Pubky")
+                .on_hover_text("Playlists, favourites, tags and reviews; needs a session on the node")
                 .clicked()
             {
                 self.backend.send(Cmd::PubkySync);
