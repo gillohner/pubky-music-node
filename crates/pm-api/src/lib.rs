@@ -107,6 +107,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/transport", post(transport))
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
+        .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
@@ -527,6 +528,16 @@ async fn repeat(
     Json(body): Json<SetRepeat>,
 ) -> Result<StatusCode, ApiError> {
     zone_of(&s, &id)?.set_repeat(body.repeat);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Library radio: keep the zone playing with similar music after the last item.
+async fn radio(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetRadio>,
+) -> Result<StatusCode, ApiError> {
+    zone_of(&s, &id)?.set_radio(body.on);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1697,6 +1708,60 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{q}");
         let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+    }
+
+    /// Library radio: with the flag on, a zone that runs out of queue gets
+    /// similar tracks appended and keeps playing.
+    #[tokio::test]
+    async fn library_radio_continues_after_the_last_track() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        write_wav(&dir.path().join("music/two.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        let first = tracks["tracks"][0]["id"].as_i64().unwrap();
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/radio"),
+            Some(serde_json::json!({"on": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(z["radio"], true);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": [first], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let mut grew = false;
+        for _ in 0..500 {
+            if zone.queue().len() >= 2 {
+                grew = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(grew, "radio did not add tracks");
+        assert!(zone.queue().len() <= 2, "only the one other track exists");
+        zone.set_radio(false);
         assert_eq!(zone.wait_stopped().await.error, None);
     }
 

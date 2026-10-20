@@ -285,6 +285,16 @@ impl NodeClient {
             .await
     }
 
+    /// Keep the zone playing with similar library tracks after the last item.
+    pub async fn set_radio(&self, zone: &str, on: bool) -> Result<()> {
+        self.send(
+            reqwest::Method::PUT,
+            &format!("zones/{zone}/radio"),
+            Some(&SetRadio { on }),
+        )
+        .await
+    }
+
     pub async fn set_repeat(&self, zone: &str, repeat: Repeat) -> Result<()> {
         self.send(
             reqwest::Method::PUT,

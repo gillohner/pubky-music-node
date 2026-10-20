@@ -563,6 +563,47 @@ impl Library {
         Ok(())
     }
 
+    /// Tracks that go with `seed` for a library radio: same genres first, then
+    /// the same artists, then anything; random within each tier, never the
+    /// seed itself or anything in `exclude`. Up to `limit`.
+    pub fn similar_tracks(&self, seed: &Track, exclude: &[TrackId], limit: usize) -> Result<Vec<Track>> {
+        let mut out: Vec<Track> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = exclude.iter().map(|t| t.0).collect();
+        if let Some(id) = seed.id {
+            seen.insert(id.0);
+        }
+        let mut push = |tracks: Vec<Track>, out: &mut Vec<Track>| {
+            for t in tracks {
+                if out.len() >= limit {
+                    break;
+                }
+                if let Some(id) = t.id {
+                    if seen.insert(id.0) {
+                        out.push(t);
+                    }
+                }
+            }
+        };
+        for g in &seed.genres {
+            if let Some(genre) = self.genre_by_name(g)? {
+                let mut tracks = self.genre_tracks(genre.id, 200)?;
+                shuffle(&mut tracks);
+                push(tracks, &mut out);
+            }
+        }
+        for a in &seed.artists {
+            if let Some(aid) = a.id {
+                let mut tracks = self.artist_tracks(aid)?;
+                shuffle(&mut tracks);
+                push(tracks, &mut out);
+            }
+        }
+        if out.len() < limit {
+            push(self.random_tracks((limit * 2) as u32)?, &mut out);
+        }
+        Ok(out)
+    }
+
     // ----- genres -----------------------------------------------------------
 
     /// Every genre with track and album counts, by name.
@@ -1391,6 +1432,21 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
         .query_map(params![id], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(track)
+}
+
+/// Fisher–Yates with a time-seeded xorshift; good enough for a radio shuffle.
+fn shuffle<T>(v: &mut [T]) {
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9)
+        | 1;
+    for i in (1..v.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
 }
 
 fn row_to_tag(r: &Row<'_>) -> rusqlite::Result<TagRow> {

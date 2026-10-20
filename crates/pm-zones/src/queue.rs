@@ -68,6 +68,9 @@ pub struct Queue {
     current: Option<usize>,
     next_id: u64,
     repeat: Repeat,
+    /// "Radio": whoever owns the zone keeps it playing with similar music
+    /// after the last item (the engine only carries the flag).
+    radio: bool,
     version: u64,
 }
 
@@ -90,6 +93,17 @@ impl Queue {
 
     pub fn repeat(&self) -> Repeat {
         self.repeat
+    }
+
+    pub fn radio(&self) -> bool {
+        self.radio
+    }
+
+    pub fn set_radio(&mut self, on: bool) {
+        if self.radio != on {
+            self.radio = on;
+            self.version += 1;
+        }
     }
 
     pub fn set_repeat(&mut self, r: Repeat) {

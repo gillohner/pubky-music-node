@@ -88,6 +88,11 @@ pub struct SetVolume {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRadio {
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRepeat {
     pub repeat: Repeat,
 }

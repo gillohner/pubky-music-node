@@ -592,9 +592,15 @@ impl Engine {
     fn publish(&mut self) {
         self.last_position_publish = Instant::now();
         self.dirty = false;
-        let (queue, queue_index, queue_version, repeat) = {
+        let (queue, queue_index, queue_version, repeat, radio) = {
             let q = self.queue.lock().expect("queue poisoned");
-            (q.items().to_vec(), q.current_index(), q.version(), q.repeat())
+            (
+                q.items().to_vec(),
+                q.current_index(),
+                q.version(),
+                q.repeat(),
+                q.radio(),
+            )
         };
         let now_playing = self.current.as_ref().map(|c| NowPlaying {
             item: c.item.clone(),
@@ -614,6 +620,7 @@ impl Engine {
             s.queue_index = queue_index;
             s.queue_version = queue_version;
             s.repeat = repeat;
+            s.radio = radio;
             s.error = self.error.clone();
             s.acked = self.acked;
         });

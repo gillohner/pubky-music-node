@@ -81,6 +81,9 @@ pub struct ZoneState {
     pub queue_index: Option<usize>,
     pub queue_version: u64,
     pub repeat: Repeat,
+    /// Keep playing similar music after the last item (implemented by the node).
+    #[serde(default)]
+    pub radio: bool,
     /// Last error that stopped playback; cleared on the next successful start.
     pub error: Option<String>,
     /// Sequence number of the last command the engine handled (see [`Zone::wait_stopped`]).
@@ -155,6 +158,7 @@ impl Zone {
             queue_index: None,
             queue_version: 0,
             repeat: Repeat::Off,
+            radio: false,
             error: None,
             acked: 0,
         };
@@ -239,6 +243,14 @@ impl Zone {
 
     pub fn set_repeat(&self, r: Repeat) {
         self.with_queue(|q| q.set_repeat(r))
+    }
+
+    pub fn set_radio(&self, on: bool) {
+        self.with_queue(|q| q.set_radio(on))
+    }
+
+    pub fn radio(&self) -> bool {
+        self.queue.lock().expect("queue poisoned").radio()
     }
 
     pub fn queue(&self) -> Vec<QueueItem> {

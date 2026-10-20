@@ -2511,6 +2511,19 @@ impl App {
                     });
                 }
             }
+            if !self.is_local() {
+                let mut radio = zone.radio;
+                if ui
+                    .toggle_value(&mut radio, "Radio")
+                    .on_hover_text("When the queue ends, keep playing similar music from the library")
+                    .changed()
+                {
+                    self.backend.send(Cmd::SetRadio {
+                        zone: self.settings.zone.clone(),
+                        on: radio,
+                    });
+                }
+            }
         });
         if items.is_empty() {
             ui.weak("Nothing queued.");

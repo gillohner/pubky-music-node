@@ -101,6 +101,11 @@ pub enum Cmd {
         repeat: Repeat,
     },
     Scan,
+    /// Library radio on a node zone.
+    SetRadio {
+        zone: String,
+        on: bool,
+    },
     LoadFolders,
     LoadNodeSettings,
     SetContact(String),
@@ -506,6 +511,7 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::Volume { zone, volume } => c.set_volume(&zone, volume).await?,
         Cmd::Repeat { zone, repeat } => c.set_repeat(&zone, repeat).await?,
+        Cmd::SetRadio { zone, on } => c.set_radio(&zone, on).await?,
         Cmd::Scan => {
             c.scan(vec![]).await?;
             out.send(Msg::ScanStarted);

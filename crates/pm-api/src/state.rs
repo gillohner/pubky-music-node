@@ -179,6 +179,7 @@ impl NodeState {
                     let saved = SavedQueue {
                         items: state.queue.clone(),
                         repeat: state.repeat,
+                        radio: state.radio,
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");
@@ -194,12 +195,16 @@ impl NodeState {
         let mut ev_rx = zone.subscribe();
         let id = zone.id().clone();
         let library = self.library.clone();
+        let zone_for_radio = zone.clone();
         tokio::spawn(async move {
             loop {
                 match ev_rx.recv().await {
                     Ok(event) => {
                         if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
                             record_play(&library, &id, &item.uri);
+                        }
+                        if matches!(event, pm_zones::ZoneEvent::Stopped) {
+                            continue_radio(&library, &zone_for_radio);
                         }
                         let _ = events.send(ApiEvent::ZoneEvent {
                             zone: id.clone(),
@@ -232,6 +237,7 @@ impl NodeState {
         let n = saved.items.len();
         zone.enqueue(saved.items, pm_zones::Insert::End);
         zone.set_repeat(saved.repeat);
+        zone.set_radio(saved.radio);
         tracing::info!(zone = %zone.id(), items = n, "queue restored");
     }
 
@@ -609,6 +615,52 @@ fn queue_key(id: &ZoneId) -> String {
 struct SavedQueue {
     items: Vec<pm_zones::QueueItem>,
     repeat: pm_zones::Repeat,
+    #[serde(default)]
+    radio: bool,
+}
+
+/// Library radio: when a zone with `radio` on runs out of queue, add tracks
+/// similar to the last library track it played and keep going.
+fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
+    let state = zone.state();
+    if !state.radio || state.queue.is_empty() || state.repeat != pm_zones::Repeat::Off {
+        return;
+    }
+    let Some(last) = state.queue.last() else {
+        return;
+    };
+    let Some(seed_id) = last
+        .uri
+        .strip_prefix(crate::sources::TRACK_SCHEME)
+        .and_then(|v| v.parse::<i64>().ok())
+    else {
+        return;
+    };
+    let queued: Vec<pm_model::TrackId> = state
+        .queue
+        .iter()
+        .filter_map(|q| q.uri.strip_prefix(crate::sources::TRACK_SCHEME))
+        .filter_map(|v| v.parse::<i64>().ok())
+        .map(pm_model::TrackId)
+        .collect();
+    let picks = {
+        let lib = library.lock().expect("library poisoned");
+        let Ok(Some(seed)) = lib.get_track(pm_model::TrackId(seed_id)) else {
+            return;
+        };
+        lib.similar_tracks(&seed, &queued, 10).unwrap_or_default()
+    };
+    let items: Vec<pm_zones::QueueItem> = picks
+        .iter()
+        .filter_map(crate::sources::NodeSources::item_for)
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    let start = state.queue.len();
+    tracing::info!(zone = %zone.id(), added = items.len(), "radio: continuing with similar tracks");
+    zone.enqueue(items, pm_zones::Insert::End);
+    zone.play_index(start);
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.
