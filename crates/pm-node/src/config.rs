@@ -17,11 +17,15 @@ pub struct NodeConfig {
     pub api: ApiConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LibraryConfig {
     /// Folders to scan. Mounted shares count as folders.
     pub folders: Vec<PathBuf>,
+    /// Rescan automatically when files change in the folders (default on).
+    pub watch: bool,
+    /// Seconds without changes before an automatic rescan starts.
+    pub watch_quiet_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -42,6 +46,16 @@ impl Default for NodeConfig {
             library: LibraryConfig::default(),
             pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
+        }
+    }
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            watch: true,
+            watch_quiet_secs: 15,
         }
     }
 }

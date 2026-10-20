@@ -143,6 +143,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             version: env!("CARGO_PKG_VERSION").into(),
             db_path,
             scan_folders: cfg.library.folders.clone(),
+            art_dir: cfg.data_dir.join("art"),
             pipeline: pm_audio::PipelineConfig::default(),
             token,
         },
@@ -152,6 +153,11 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     state.zones_for_all_outputs();
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
+    }
+    if cfg.library.watch {
+        state.watch_folders(std::time::Duration::from_secs(
+            cfg.library.watch_quiet_secs.max(1),
+        ));
     }
     if let Some(file) = &cfg.pubky.session_secret_file {
         match std::fs::read_to_string(file) {

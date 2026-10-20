@@ -305,6 +305,34 @@ impl NodeClient {
         Ok(bytes.len() as u64)
     }
 
+    /// The album's cover bytes and MIME type; `None` when the album has none.
+    pub async fn album_cover(&self, album_id: i64) -> Result<Option<(String, Vec<u8>)>> {
+        let resp = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("library/albums/{album_id}/cover"))),
+            )
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ClientError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+        Ok(Some((mime, resp.bytes().await?.to_vec())))
+    }
+
     pub async fn folders(&self) -> Result<Vec<(String, bool)>> {
         self.get("library/folders", &[]).await
     }

@@ -30,6 +30,8 @@ use symphonia::core::meta::{MetadataOptions, RawValue, StandardTag, Tag};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TagSet {
     pub title: Option<String>,
+    /// Embedded cover art (front cover preferred), when the file has one.
+    pub picture: Option<Picture>,
     pub artists: Vec<String>,
     pub album_artist: Option<String>,
     pub album: Option<String>,
@@ -46,6 +48,31 @@ pub struct TagSet {
     pub acoustid: Option<String>,
     pub replaygain_track_gain_db: Option<f32>,
     pub replaygain_album_gain_db: Option<f32>,
+}
+
+/// An embedded image.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Picture {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Picture({} bytes, {})", self.data.len(), self.mime)
+    }
+}
+
+impl Picture {
+    /// File extension for the MIME type.
+    pub fn extension(&self) -> &'static str {
+        match self.mime.to_ascii_lowercase().as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "jpg",
+        }
+    }
 }
 
 /// What the container says about the audio.
@@ -169,8 +196,10 @@ fn probe_symphonia(path: &Path, ext: &str) -> Result<(FileProbe, TagSet)> {
         loop {
             if let Some(rev) = md.current() {
                 merge_symphonia_tags(&mut tags, &rev.media.tags);
+                merge_visuals(&mut tags, &rev.media.visuals);
                 for pt in &rev.per_track {
                     merge_symphonia_tags(&mut tags, &pt.metadata.tags);
+                    merge_visuals(&mut tags, &pt.metadata.visuals);
                 }
             }
             if md.pop().is_none() {
@@ -211,6 +240,9 @@ fn default_bits(id: symphonia::core::codecs::audio::AudioCodecId) -> Option<u32>
 impl TagSet {
     /// Overlay `other` on `self`: set fields present in `other`.
     pub fn merge_from(&mut self, other: TagSet) {
+        if other.picture.is_some() {
+            self.picture = other.picture;
+        }
         macro_rules! take {
             ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
         }
@@ -337,6 +369,26 @@ fn raw_string(v: &RawValue) -> Option<String> {
     }
 }
 
+/// Keep the front cover if there is one, else the first picture seen.
+fn merge_visuals(tags: &mut TagSet, visuals: &[symphonia::core::meta::Visual]) {
+    use symphonia::core::meta::StandardVisualKey;
+    for v in visuals {
+        if v.data.is_empty() {
+            continue;
+        }
+        let front = matches!(v.usage, Some(StandardVisualKey::FrontCover));
+        if tags.picture.is_none() || front {
+            tags.picture = Some(Picture {
+                mime: v.media_type.clone().unwrap_or_else(|| "image/jpeg".into()),
+                data: v.data.to_vec(),
+            });
+            if front {
+                return;
+            }
+        }
+    }
+}
+
 fn merge_symphonia_tags(tags: &mut TagSet, list: &[Tag]) {
     for tag in list {
         if let Some(std) = &tag.std {
@@ -440,6 +492,21 @@ pub fn from_id3(t: &id3::Tag) -> TagSet {
     }
     for et in t.extended_texts() {
         tags.apply_named(&et.description, &et.value);
+    }
+    for pic in t.pictures() {
+        if pic.data.is_empty() {
+            continue;
+        }
+        let front = pic.picture_type == id3::frame::PictureType::CoverFront;
+        if tags.picture.is_none() || front {
+            tags.picture = Some(Picture {
+                mime: pic.mime_type.clone(),
+                data: pic.data.clone(),
+            });
+            if front {
+                break;
+            }
+        }
     }
     tags
 }

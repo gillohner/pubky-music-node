@@ -12,6 +12,7 @@ musicbrainz = ["dep:reqwest", "dep:tokio", "dep:serde_json", "dep:url"]
 
 [dependencies]
 pm-model = { workspace = true }
+blake3 = { workspace = true }
 id3 = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

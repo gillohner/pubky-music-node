@@ -24,8 +24,9 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/search` | `?q=&limit=` | `{tracks}` (FTS5) |
 | GET | `/v1/library/albums` | `?after=&limit=` | `Album[]` |
 | GET | `/v1/library/albums/{id}/tracks` | | `{tracks}` |
+| GET | `/v1/library/albums/{id}/cover` | | image bytes (embedded picture extracted at scan, or `cover.jpg` next to the files); 404 when none |
 | GET | `/v1/library/folders` | | `[path, present][]` |
-| POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs |
+| POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs. With `[library] watch = true` (default) the node also rescans by itself after `watch_quiet_secs` without file changes |
 | GET / POST | `/v1/playlists` | POST: `{name, description?, image?, uris?, track_ids?}` | `PlaylistSummary[]` / `PlaylistDetail` |
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |
 | POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |

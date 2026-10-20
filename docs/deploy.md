@@ -38,8 +38,9 @@ app store. Points worth knowing:
   Umbrel's web login. A browser UI would go behind `app_proxy` later.
 - `/dev/snd` is passed through for a DAC on the Umbrel box; otherwise use a network endpoint (M2).
 - Umbrel's shared storage is mounted read-only at `/music`, so a torrent or download app writing
-  there is just a scan source. Trigger scans with `POST /v1/library/scan` or from the controller's
-  Settings page; automatic pickup (a filesystem watcher with debounce) is on the list.
+  there is just a scan source. The node watches its folders and rescans 15 s after the last change
+  (`[library] watch`, `watch_quiet_secs`), so downloads appear on their own; `POST /v1/library/scan`
+  and the controller's Settings page still trigger a scan at any time.
 - Hard constraints hold on every shape: audio stays node-local or in private storage, nothing under
   `/pub/`, and the node never serves one person's library to many users.
 

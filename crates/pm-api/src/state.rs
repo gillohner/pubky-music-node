@@ -17,6 +17,8 @@ pub struct NodeSettings {
     /// Path of the SQLite file, so a scan can use its own connection.
     pub db_path: PathBuf,
     pub scan_folders: Vec<PathBuf>,
+    /// Where extracted cover art is written.
+    pub art_dir: PathBuf,
     pub pipeline: PipelineConfig,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
@@ -29,6 +31,7 @@ pub struct NodeState {
     /// Path of the SQLite file, so a scan can use its own connection.
     pub db_path: PathBuf,
     pub scan_folders: Vec<PathBuf>,
+    pub art_dir: PathBuf,
     pub outputs: OutputRegistry,
     pub zones: Zones,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
@@ -36,6 +39,8 @@ pub struct NodeState {
     pub events: broadcast::Sender<ApiEvent>,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
+    /// Folder watcher, kept alive here.
+    pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     scanning: Mutex<bool>,
 }
 
@@ -50,11 +55,13 @@ impl NodeState {
             library,
             db_path: settings.db_path,
             scan_folders: settings.scan_folders,
+            art_dir: settings.art_dir,
             outputs,
             zones: Zones::new(sources),
             token: settings.token,
             events,
             sync: Mutex::new(None),
+            watcher: Mutex::new(None),
             scanning: Mutex::new(false),
         })
     }
@@ -106,6 +113,50 @@ impl NodeState {
             if let Some(out) = self.outputs.get(&info.id) {
                 self.create_zone(&info.name, out);
             }
+        }
+    }
+
+    /// Scan `folders` in the background on a separate SQLite connection.
+    /// `Ok(false)` when a scan is already running. Call inside a runtime.
+    pub fn start_scan(self: &Arc<Self>, folders: Vec<PathBuf>) -> Result<bool, String> {
+        if folders.is_empty() {
+            return Err("no folders to scan".into());
+        }
+        if !self.begin_scan() {
+            return Ok(false);
+        }
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<(), pm_library::LibraryError> {
+                let lib = pm_library::Library::open(&state.db_path)?;
+                let scanner = pm_library::Scanner::new(&lib).with_art_dir(&state.art_dir);
+                for root in &folders {
+                    lib.add_folder(root)?;
+                    match scanner.scan(root) {
+                        Ok(r) => {
+                            tracing::info!(root = %root.display(), added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "scan done")
+                        }
+                        Err(e) => tracing::warn!(root = %root.display(), "scan failed: {e}"),
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                tracing::error!("scan: {e}");
+            }
+            state.end_scan();
+        });
+        Ok(true)
+    }
+
+    /// Watch the configured folders and rescan after `quiet` without events.
+    pub fn watch_folders(self: &Arc<Self>, quiet: std::time::Duration) {
+        if self.scan_folders.is_empty() {
+            return;
+        }
+        match crate::watch::spawn(self.clone(), self.scan_folders.clone(), quiet) {
+            Ok(w) => *self.watcher.lock().expect("watcher lock") = Some(w),
+            Err(e) => tracing::warn!("folder watching unavailable: {e}"),
         }
     }
 

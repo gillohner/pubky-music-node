@@ -30,11 +30,63 @@ pub struct ScanReport {
 
 pub struct Scanner<'a> {
     lib: &'a Library,
+    /// Where extracted embedded covers are written; `None` skips cover art.
+    art_dir: Option<PathBuf>,
 }
+
+/// Folder image names tried, in order, when a file has no embedded picture.
+const FOLDER_COVERS: &[&str] = &["cover", "folder", "front", "album", "artwork"];
 
 impl<'a> Scanner<'a> {
     pub fn new(lib: &'a Library) -> Self {
-        Self { lib }
+        Self { lib, art_dir: None }
+    }
+
+    /// Extract embedded covers into `dir` (created on demand) and pick up
+    /// `cover.jpg`-style images next to the files.
+    pub fn with_art_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.art_dir = Some(dir.into());
+        self
+    }
+
+    /// Give the album its cover if it has none yet: the file's embedded
+    /// picture, else an image in the file's folder.
+    fn cover_for(&self, path: &Path, album_id: i64, tags: &TagSet) -> Result<()> {
+        let Some(art_dir) = &self.art_dir else {
+            return Ok(());
+        };
+        if self.lib.album_art(album_id)?.is_some() {
+            return Ok(());
+        }
+        if let Some(pic) = &tags.picture {
+            std::fs::create_dir_all(art_dir).map_err(|e| LibraryError::Io {
+                path: art_dir.clone(),
+                source: e,
+            })?;
+            let hash = blake3::hash(&pic.data).to_hex();
+            let file = art_dir.join(format!("{}.{}", &hash[..32], pic.extension()));
+            if !file.exists() {
+                std::fs::write(&file, &pic.data).map_err(|e| LibraryError::Io {
+                    path: file.clone(),
+                    source: e,
+                })?;
+            }
+            return self.lib.set_album_art(&crate::db::AlbumArt {
+                album_id,
+                file,
+                mime: pic.mime.clone(),
+                source: "embedded".into(),
+            });
+        }
+        if let Some((file, mime)) = folder_cover(path) {
+            return self.lib.set_album_art(&crate::db::AlbumArt {
+                album_id,
+                file,
+                mime,
+                source: "folder".into(),
+            });
+        }
+        Ok(())
     }
 
     pub fn scan(&self, root: &Path) -> Result<ScanReport> {
@@ -116,6 +168,7 @@ impl<'a> Scanner<'a> {
 
     fn index_file(&self, path: &Path, size: u64, mtime: i64, existing: Option<TrackId>) -> Result<TrackId> {
         let (probe, tagset) = tags::probe_and_read(path)?;
+        let has_album = tagset.album.is_some();
         let file = AudioFile {
             path: path.to_path_buf(),
             size_bytes: size,
@@ -126,8 +179,53 @@ impl<'a> Scanner<'a> {
         };
         let mut track = track_from_tags(file, &tagset);
         track.id = existing;
-        self.lib.upsert_track(&track)
+        let id = self.lib.upsert_track(&track)?;
+        if has_album && self.art_dir.is_some() {
+            if let Some(album_id) = self.lib.get_track(id)?.and_then(|t| t.album.and_then(|a| a.id)) {
+                if let Err(e) = self.cover_for(path, album_id, &tagset) {
+                    tracing::warn!(path = %path.display(), "cover art: {e}");
+                }
+            }
+        }
+        Ok(id)
     }
+}
+
+/// `cover.jpg`, `Folder.png`, … next to `audio_path`, case-insensitive.
+pub fn folder_cover(audio_path: &Path) -> Option<(PathBuf, String)> {
+    let dir = audio_path.parent()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(usize, PathBuf, String)> = None;
+    for e in entries.flatten() {
+        let p = e.path();
+        let Some(stem) = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+        else {
+            continue;
+        };
+        let Some(ext) = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+        else {
+            continue;
+        };
+        let mime = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "webp" => "image/webp",
+            _ => continue,
+        };
+        let Some(rank) = FOLDER_COVERS.iter().position(|n| *n == stem) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(r, _, _)| rank < *r) {
+            best = Some((rank, p, mime.to_string()));
+        }
+    }
+    best.map(|(_, p, m)| (p, m))
 }
 
 /// Build a [`Track`] from a probed file and its tags. A missing title falls
@@ -287,6 +385,57 @@ mod tests {
         assert_eq!(r.files_updated + r.files_unchanged, 2);
         assert_eq!(lib.stats().unwrap().missing_files, 0);
         assert!(!lib.file_by_path(&b).unwrap().unwrap().missing);
+    }
+
+    #[test]
+    fn covers_from_tags_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        // Album A: embedded front cover in the ID3 tag.
+        let wav = a.join("01.wav");
+        write_wav(&wav, 441, "A1", false);
+        let mut t = id3::Tag::read_from_path(&wav).unwrap();
+        t.set_album("Album A");
+        t.add_frame(id3::frame::Picture {
+            mime_type: "image/png".into(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: String::new(),
+            data: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+        });
+        t.write_to_path(&wav, id3::Version::Id3v24).unwrap();
+        // Album B: no picture, a Folder.jpg beside the file.
+        let wav_b = b.join("01.wav");
+        write_wav(&wav_b, 441, "B1", false);
+        let mut t = id3::Tag::read_from_path(&wav_b).unwrap();
+        t.set_album("Album B");
+        t.write_to_path(&wav_b, id3::Version::Id3v24).unwrap();
+        fs::write(b.join("Folder.jpg"), b"\xff\xd8jpeg").unwrap();
+        fs::write(b.join("back.png"), b"png").unwrap();
+
+        let lib = Library::open_in_memory().unwrap();
+        let art = dir.path().join("art");
+        Scanner::new(&lib).with_art_dir(&art).scan(dir.path()).unwrap();
+        let albums = lib.list_albums(None, 10).unwrap();
+        let find = |title: &str| albums.iter().find(|x| x.title == title).unwrap().id.unwrap();
+        let art_a = lib.album_art(find("Album A")).unwrap().unwrap();
+        assert_eq!(art_a.source, "embedded");
+        assert_eq!(art_a.mime, "image/png");
+        assert!(art_a.file.starts_with(&art));
+        assert_eq!(
+            fs::read(&art_a.file).unwrap(),
+            vec![0x89, b'P', b'N', b'G', 1, 2, 3]
+        );
+        let art_b = lib.album_art(find("Album B")).unwrap().unwrap();
+        assert_eq!(art_b.source, "folder");
+        assert_eq!(art_b.mime, "image/jpeg");
+        assert!(art_b.file.ends_with("Folder.jpg"));
+        // Without an art dir nothing is recorded.
+        let lib2 = Library::open_in_memory().unwrap();
+        Scanner::new(&lib2).scan(dir.path()).unwrap();
+        assert!(lib2.album_art(1).unwrap().is_none());
     }
 
     #[test]

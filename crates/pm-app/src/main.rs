@@ -74,6 +74,7 @@ enum Conn {
 }
 
 struct App {
+    cover_ctx: egui::Context,
     settings: Settings,
     backend: Backend,
     local: LocalPlayer,
@@ -89,6 +90,9 @@ struct App {
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     new_playlist_name: String,
+    /// Album id → texture (`None` once the node said there is no cover).
+    covers: HashMap<i64, Option<egui::TextureHandle>>,
+    cover_requests: std::collections::HashSet<i64>,
     view: View,
     show_path: bool,
     volume_db: f32,
@@ -114,6 +118,7 @@ impl App {
             token: settings.token.clone(),
         });
         Self {
+            cover_ctx: cc.egui_ctx.clone(),
             settings,
             backend,
             local,
@@ -129,6 +134,8 @@ impl App {
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             new_playlist_name: String::new(),
+            covers: HashMap::new(),
+            cover_requests: std::collections::HashSet::new(),
             view: View::Albums,
             show_path: false,
             volume_db: -20.0,
@@ -197,6 +204,17 @@ impl App {
                     }
                 }
                 Msg::Notice(n) => self.toast(n),
+                Msg::Cover(id, img) => {
+                    let tex = img.map(|(w, h, rgba)| {
+                        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                        self.cover_ctx.load_texture(
+                            format!("cover-{id}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    self.covers.insert(id, tex);
+                }
                 Msg::Error(e) => self.toast(e),
             }
         }
@@ -309,6 +327,20 @@ impl App {
     fn refresh_queue(&mut self) {
         if !self.is_local() {
             self.backend.send(Cmd::Queue(self.settings.zone.clone()));
+        }
+    }
+
+    /// The album's cover texture, requesting it from the node on first use.
+    fn cover(&mut self, album_id: Option<i64>) -> Option<egui::TextureHandle> {
+        let id = album_id?;
+        match self.covers.get(&id) {
+            Some(t) => t.clone(),
+            None => {
+                if self.cover_requests.insert(id) {
+                    self.backend.send(Cmd::LoadCover(id));
+                }
+                None
+            }
         }
     }
 
@@ -446,7 +478,8 @@ impl App {
             for row in albums.chunks(cols) {
                 ui.horizontal(|ui| {
                     for a in row {
-                        if album_tile(ui, a, tile).clicked() {
+                        let tex = self.cover(a.id);
+                        if album_tile(ui, a, tile, tex.as_ref()).clicked() {
                             clicked = a.id;
                         }
                     }
@@ -474,8 +507,9 @@ impl App {
             }
         });
         ui.add_space(6.0);
+        let tex = self.cover(album.id);
         ui.horizontal(|ui| {
-            album_art(ui, &album, 180.0);
+            album_art(ui, &album, 180.0, tex.as_ref());
             ui.vertical(|ui| {
                 ui.heading(egui::RichText::new(&album.title).size(26.0).strong());
                 ui.label(
@@ -1144,10 +1178,13 @@ fn signal_path_ui(ui: &mut egui::Ui, path: &SignalPath, zone: &ZoneState) {
         });
 }
 
-fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32) -> egui::Response {
+fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size + 40.0), egui::Sense::click());
     let art = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
-    paint_art(ui.painter(), art, &a.title, resp.hovered());
+    match tex {
+        Some(t) => paint_texture(ui.painter(), art, t, resp.hovered()),
+        None => paint_art(ui.painter(), art, &a.title, resp.hovered()),
+    }
     let p = ui.painter();
     let font = egui::FontId::proportional(13.0);
     let title = truncate(&a.title, 24);
@@ -1168,9 +1205,26 @@ fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn album_art(ui: &mut egui::Ui, a: &Album, size: f32) {
+fn album_art(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    paint_art(ui.painter(), rect, &a.title, false);
+    match tex {
+        Some(t) => paint_texture(ui.painter(), rect, t, false),
+        None => paint_art(ui.painter(), rect, &a.title, false),
+    }
+}
+
+fn paint_texture(p: &egui::Painter, rect: egui::Rect, tex: &egui::TextureHandle, hovered: bool) {
+    let tint = if hovered {
+        egui::Color32::from_white_alpha(230)
+    } else {
+        egui::Color32::WHITE
+    };
+    p.image(
+        tex.id(),
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        tint,
+    );
 }
 
 fn art_square(ui: &mut egui::Ui, title: &str, size: f32) {

@@ -14,6 +14,7 @@ pub mod sources;
 pub mod state;
 pub mod sync;
 pub mod types;
+pub mod watch;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -22,7 +23,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use pm_library::{Library, Scanner};
 use pm_model::TrackId;
 use pm_zones::{Insert, OutputId, OutputInfo, QueueItem, Zone, ZoneId, ZoneState};
 use sources::NodeSources;
@@ -97,6 +97,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/search", get(search))
         .route("/library/albums", get(albums))
         .route("/library/albums/{id}/tracks", get(album_tracks))
+        .route("/library/albums/{id}/cover", get(album_cover))
         .route("/library/folders", get(folders))
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
@@ -444,37 +445,34 @@ async fn scan(State(s): State<Arc<NodeState>>, Json(body): Json<ScanRequest>) ->
     } else {
         body.folders.iter().map(std::path::PathBuf::from).collect()
     };
-    if folders.is_empty() {
-        return Err(ApiError::bad_request("no folders to scan"));
+    match s.start_scan(folders.clone()) {
+        Ok(true) => Ok(Json(ScanStarted {
+            folders: folders.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        })),
+        Ok(false) => Err(ApiError::new(StatusCode::CONFLICT, "a scan is already running")),
+        Err(e) => Err(ApiError::bad_request(e)),
     }
-    if !s.begin_scan() {
-        return Err(ApiError::new(StatusCode::CONFLICT, "a scan is already running"));
-    }
-    let state = s.clone();
-    let list = folders.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = (|| -> Result<(), pm_library::LibraryError> {
-            let lib = Library::open(&state.db_path)?;
-            let scanner = Scanner::new(&lib);
-            for root in &list {
-                lib.add_folder(root)?;
-                match scanner.scan(root) {
-                    Ok(r) => {
-                        tracing::info!(root = %root.display(), added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "scan done")
-                    }
-                    Err(e) => tracing::warn!(root = %root.display(), "scan failed: {e}"),
-                }
-            }
-            Ok(())
-        })();
-        if let Err(e) = result {
-            tracing::error!("scan: {e}");
-        }
-        state.end_scan();
-    });
-    Ok(Json(ScanStarted {
-        folders: folders.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-    }))
+}
+
+/// The album's cover image (extracted at scan time or found in the folder).
+async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let art = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .album_art(id)?
+        .ok_or_else(|| ApiError::not_found(format!("no cover for album {id}")))?;
+    let bytes = tokio::fs::read(&art.file)
+        .await
+        .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, art.mime),
+            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 // ---- pubky ----
@@ -570,6 +568,7 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use pm_audio::PipelineConfig;
+    use pm_library::Library;
     use pm_zones::outputs::NullOutput;
     use pm_zones::OutputRegistry;
     use tower::ServiceExt;
@@ -600,6 +599,7 @@ mod tests {
                 version: "0".into(),
                 db_path: db,
                 scan_folders: vec![dir.join("music")],
+                art_dir: dir.join("art"),
                 pipeline: PipelineConfig::default(),
                 token: token.map(str::to_string),
             },

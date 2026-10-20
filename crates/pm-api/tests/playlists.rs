@@ -39,6 +39,12 @@ fn write_wav(path: &std::path::Path, title: &str, mbid: Option<&str>) {
             description: "MusicBrainz Track Id".into(),
             value: m.into(),
         });
+        t.add_frame(id3::frame::Picture {
+            mime_type: "image/png".into(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: String::new(),
+            data: b"\x89PNG-not-really".to_vec(),
+        });
     }
     t.write_to_path(path, id3::Version::Id3v24).unwrap();
 }
@@ -85,6 +91,7 @@ async fn playlist_lifecycle() {
             version: "0".into(),
             db_path: db.clone(),
             scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
             pipeline: PipelineConfig::default(),
             token: None,
         },
@@ -110,6 +117,21 @@ async fn playlist_lifecycle() {
     let untagged = tracks.iter().find(|t| t["title"] == "Untagged").unwrap()["id"]
         .as_i64()
         .unwrap();
+
+    // The album got its cover from the tagged file's embedded picture.
+    let (_, albums) = call(&app, "GET", "/v1/library/albums", None).await;
+    let album_id = albums[0]["id"].as_i64().unwrap();
+    let req = Request::builder()
+        .uri(format!("/v1/library/albums/{album_id}/cover"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"\x89PNG-not-really");
+    let (st, _) = call(&app, "GET", "/v1/library/albums/999/cover", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 
     // Create from a raw canonical URL plus a tagged track.
     let (st, pl) = call(

@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/0001_init.sql")),
     (2, include_str!("migrations/0002_music_posts.sql")),
+    (3, include_str!("migrations/0003_album_art.sql")),
 ];
 
 pub struct Library {
@@ -32,6 +33,16 @@ pub struct LibraryStats {
 }
 
 /// The scanner's view of a stored file.
+/// Where an album's cover lives on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumArt {
+    pub album_id: i64,
+    pub file: PathBuf,
+    pub mime: String,
+    /// `embedded` (extracted from a tag) or `folder` (an image next to the files).
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRow {
     pub id: i64,
@@ -294,6 +305,42 @@ impl Library {
             .query_map(params![album_id], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
         raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    // ----- album art -----------------------------------------------------
+
+    pub fn album_art(&self, album_id: i64) -> Result<Option<AlbumArt>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT album_id, file, mime, source FROM album_art WHERE album_id = ?1",
+                [album_id],
+                |r| {
+                    Ok(AlbumArt {
+                        album_id: r.get(0)?,
+                        file: PathBuf::from(r.get::<_, String>(1)?),
+                        mime: r.get(2)?,
+                        source: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_album_art(&self, art: &AlbumArt) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO album_art(album_id, file, mime, source, set_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(album_id) DO UPDATE SET file = excluded.file, mime = excluded.mime,
+             source = excluded.source, set_at = excluded.set_at",
+            params![
+                art.album_id,
+                art.file.to_string_lossy().into_owned(),
+                art.mime,
+                art.source,
+                now_unix()
+            ],
+        )?;
+        Ok(())
     }
 
     // ----- stats and folders -------------------------------------------
@@ -706,7 +753,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 2);
+        assert_eq!(lib.schema_version().unwrap(), 3);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

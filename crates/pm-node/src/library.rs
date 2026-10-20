@@ -24,7 +24,7 @@ pub fn scan(cfg: &NodeConfig, folders: &[std::path::PathBuf]) -> anyhow::Result<
         !folders.is_empty(),
         "no folders to scan: pass paths or set [library] folders"
     );
-    let scanner = Scanner::new(&lib);
+    let scanner = Scanner::new(&lib).with_art_dir(cfg.data_dir.join("art"));
     for root in folders {
         lib.add_folder(root)?;
         let r = scanner

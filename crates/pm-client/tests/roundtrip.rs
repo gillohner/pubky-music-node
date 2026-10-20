@@ -41,6 +41,7 @@ async fn client_round_trip() {
             version: "0".into(),
             db_path: db.clone(),
             scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
             pipeline: PipelineConfig::default(),
             token: Some("tok".into()),
         },
