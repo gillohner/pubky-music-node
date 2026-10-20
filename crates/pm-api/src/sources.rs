@@ -107,6 +107,9 @@ fn http_client() -> &'static reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(10))
+            // Dead peers are noticed by keepalive; the body reader thread
+            // then ends instead of lingering until the OS gives up.
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .timeout(None)
             .build()
             .expect("http client")
