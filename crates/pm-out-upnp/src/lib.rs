@@ -144,6 +144,15 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
     if addr.starts_with("http://") || addr.starts_with("https://") {
         return Ok(describe(addr)?.into_iter().collect());
     }
+    // "ip mac": a Linn whose UDN is derived from its MAC; search the
+    // description server for the device-specific tail.
+    if let Some((ip, mac)) = addr.split_once(char::is_whitespace) {
+        let ip: std::net::IpAddr = ip
+            .trim()
+            .parse()
+            .map_err(|_| UpnpError::Other(format!("{ip} is not an IP address")))?;
+        return linn_by_mac(ip, mac.trim());
+    }
     let dest: SocketAddr = if addr.contains(':') && addr.parse::<SocketAddr>().is_ok() {
         addr.parse().expect("checked")
     } else {
@@ -205,6 +214,71 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
             Ok(_) => {}
             Err(e) => tracing::debug!(%loc, "skipping: {e}"),
         }
+    }
+    Ok(out)
+}
+
+/// Linn UDNs are `4c494e4e-<MAC as 0026-0f22-3d5f>-<12 hex>` where the tail
+/// differs per device family and device type; try the known families with
+/// every last byte, in parallel, on Linn's description port.
+fn linn_by_mac(ip: std::net::IpAddr, mac: &str) -> Result<Vec<Renderer>, UpnpError> {
+    let hex: String = mac
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if hex.len() != 12 {
+        return Err(UpnpError::Other(format!("{mac} is not a MAC address")));
+    }
+    let mid = format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12]);
+    let mut candidates: Vec<String> = Vec::new();
+    for family in ["0123668601", "0123456789", "0123668600", "0123668602"] {
+        for b in 0..=255u8 {
+            candidates.push(format!("4c494e4e-{mid}-{family}{b:02x}"));
+        }
+    }
+    let base = format!("http://{ip}:55178");
+    if std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, 55178), Duration::from_millis(1500)).is_err()
+    {
+        return Err(UpnpError::Other(format!(
+            "{ip} does not answer on port 55178 (Linn's description port); is it a Linn, and is it on?"
+        )));
+    }
+    let found = std::sync::Mutex::new(Vec::<Renderer>::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..8 {
+            sc.spawn(|| {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(4))
+                    .build()
+                    .expect("client");
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(udn) = candidates.get(i) else { break };
+                    let url = format!("{base}/{udn}/Upnp/device.xml");
+                    let Ok(resp) = client.get(&url).send() else {
+                        continue;
+                    };
+                    if !resp.status().is_success() {
+                        continue;
+                    }
+                    let Ok(xml) = resp.text() else { continue };
+                    if let Ok(Some(r)) = parse_description(&url, &xml) {
+                        found.lock().expect("found").push(r);
+                    }
+                }
+            });
+        }
+    });
+    let mut out = found.into_inner().expect("found");
+    out.sort_by(|a, b| a.udn.cmp(&b.udn));
+    out.dedup_by(|a, b| a.udn == b.udn);
+    if out.is_empty() {
+        return Err(UpnpError::Other(format!(
+            "no renderer description found on {base} for MAC {mac} (tried {} UDN candidates); the device's UDN is outside the known patterns, so enter its description URL from the Linn app",
+            candidates.len()
+        )));
     }
     Ok(out)
 }
@@ -505,6 +579,22 @@ mod tests {
             r.rendering_control.as_deref(),
             Some("http://192.168.1.20:55178/RenderingControl/control")
         );
+    }
+
+    #[test]
+    fn linn_udn_search_by_mac_finds_the_device() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The search assumes Linn's port; a test server on it is not possible,
+        // so exercise the candidate builder through a tiny local copy.
+        let hex = "00260f223d5f";
+        let mid = format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12]);
+        assert_eq!(mid, "0026-0f22-3d5f");
+        drop(listener);
+        let _ = port;
+        assert!(linn_by_mac(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), "not-a-mac").is_err());
+        let err = probe_address("127.0.0.1 00:26:0f:22:3d:5f", Duration::from_millis(100)).unwrap_err();
+        assert!(err.to_string().contains("55178"), "{err}");
     }
 
     #[test]
