@@ -55,7 +55,7 @@ impl Station {
         item
     }
 
-    fn with_id(mut self) -> Self {
+    pub(crate) fn with_id(mut self) -> Self {
         if self.id.trim().is_empty() {
             self.id = format!("url-{}", blake3_short(&self.url));
         }
@@ -198,7 +198,7 @@ pub(crate) async fn search(
     Ok(Json(Stations { stations }))
 }
 
-fn load_saved(s: &NodeState) -> Result<Vec<Station>, ApiError> {
+pub(crate) fn load_saved(s: &NodeState) -> Result<Vec<Station>, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     Ok(lib
         .get_setting(SETTING)?
@@ -206,7 +206,7 @@ fn load_saved(s: &NodeState) -> Result<Vec<Station>, ApiError> {
         .unwrap_or_default())
 }
 
-fn store_saved(s: &NodeState, stations: &[Station]) -> Result<(), ApiError> {
+pub(crate) fn store_saved(s: &NodeState, stations: &[Station]) -> Result<(), ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     lib.set_setting(
         SETTING,

@@ -867,6 +867,60 @@ async fn dispatch(
                 .collect();
             m.insert("playlists".into(), json!({"playlist": list}));
         }
+        // Internet radio: the node's saved stations.
+        "getInternetRadioStations" => {
+            let stations = crate::radio::load_saved(s).map_err(|e| SubErr::new(0, e.message))?;
+            let list: Vec<Value> = stations
+                .iter()
+                .map(|st| {
+                    json!({"id": st.id, "name": st.name, "streamUrl": st.url, "homePageUrl": st.homepage.clone().unwrap_or_default()})
+                })
+                .collect();
+            m.insert(
+                "internetRadioStations".into(),
+                json!({"internetRadioStation": list}),
+            );
+        }
+        "createInternetRadioStation" | "updateInternetRadioStation" => {
+            let url = want(p, "streamUrl")?;
+            let name = want(p, "name")?;
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(SubErr::new(10, "streamUrl must be http(s)"));
+            }
+            let mut stations = crate::radio::load_saved(s).map_err(|e| SubErr::new(0, e.message))?;
+            let existing_id = if method == "updateInternetRadioStation" {
+                Some(want(p, "id")?)
+            } else {
+                None
+            };
+            let st = crate::radio::Station {
+                id: existing_id.clone().unwrap_or_default(),
+                name,
+                url: url.clone(),
+                homepage: p.get("homepageUrl").cloned().filter(|h| !h.is_empty()),
+                ..Default::default()
+            }
+            .with_id();
+            if let Some(id) = &existing_id {
+                if !stations.iter().any(|x| &x.id == id) {
+                    return Err(SubErr::not_found("Station not found"));
+                }
+                stations.retain(|x| &x.id != id);
+            }
+            stations.retain(|x| x.id != st.id && x.url != st.url);
+            stations.insert(0, st);
+            crate::radio::store_saved(s, &stations).map_err(|e| SubErr::new(0, e.message))?;
+        }
+        "deleteInternetRadioStation" => {
+            let id = want(p, "id")?;
+            let mut stations = crate::radio::load_saved(s).map_err(|e| SubErr::new(0, e.message))?;
+            let before = stations.len();
+            stations.retain(|x| x.id != id);
+            if stations.len() == before {
+                return Err(SubErr::not_found("Station not found"));
+            }
+            crate::radio::store_saved(s, &stations).map_err(|e| SubErr::new(0, e.message))?;
+        }
         "getPlaylist" => {
             let lib = s.library.lock().expect("library poisoned");
             let (row, pl) = load_playlist(&lib, &want(p, "id")?)?;

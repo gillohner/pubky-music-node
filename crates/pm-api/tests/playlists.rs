@@ -502,6 +502,61 @@ async fn playlist_lifecycle() {
     assert_eq!(mine["tags"].as_array().unwrap().len(), 1);
     assert_eq!(mine["tags"][0]["label"], "funk");
 
+    // Subsonic internet radio maps onto the node's saved stations.
+    let (st, _) = call(&app, "GET", "/rest/createInternetRadioStation?streamUrl=https%3A%2F%2Fice1.somafm.com%2Fgroovesalad-128-mp3&name=Groove%20Salad&homepageUrl=https%3A%2F%2Fsomafm.com&f=json&u=pubky&p=x&v=1.16.1&c=t", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getInternetRadioStations?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    let radio = &sub["subsonic-response"]["internetRadioStations"]["internetRadioStation"];
+    assert_eq!(radio.as_array().unwrap().len(), 1, "{sub}");
+    assert_eq!(radio[0]["name"], "Groove Salad");
+    assert_eq!(radio[0]["homePageUrl"], "https://somafm.com");
+    let sid = radio[0]["id"].as_str().unwrap().to_string();
+    let (_, saved) = call(&app, "GET", "/v1/radio/stations", None).await;
+    assert_eq!(
+        saved["stations"][0]["id"], sid,
+        "the same list as the node's Radio screen"
+    );
+    let (st, _) = call(&app, "GET", &format!("/rest/updateInternetRadioStation?id={sid}&streamUrl=https%3A%2F%2Fice1.somafm.com%2Fgroovesalad-256-mp3&name=Groove%20Salad%20256&f=json&u=pubky&p=x&v=1.16.1&c=t"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getInternetRadioStations?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    let radio = &sub["subsonic-response"]["internetRadioStations"]["internetRadioStation"];
+    assert_eq!(radio.as_array().unwrap().len(), 1);
+    assert_eq!(radio[0]["name"], "Groove Salad 256");
+    let sid2 = radio[0]["id"].as_str().unwrap().to_string();
+    let (_, sub) = call(
+        &app,
+        "GET",
+        &format!("/rest/deleteInternetRadioStation?id={sid2}&f=json&u=pubky&p=x&v=1.16.1&c=t"),
+        None,
+    )
+    .await;
+    assert_eq!(sub["subsonic-response"]["status"], "ok", "{sub}");
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getInternetRadioStations?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert!(
+        sub["subsonic-response"]["internetRadioStations"]["internetRadioStation"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
     // Reviews: one per target, edits keep the id, a rating alone is fine.
     let (st, r) = call(
         &app,
