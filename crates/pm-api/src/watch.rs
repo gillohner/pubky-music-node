@@ -44,7 +44,7 @@ pub fn spawn(
                     Err(_) => break,
                 }
             }
-            match state.start_scan(folders.clone()) {
+            match state.start_scan(state.all_folders()) {
                 Ok(true) => tracing::info!("folder change: rescanning"),
                 Ok(false) => tracing::debug!("folder change: scan already running"),
                 Err(e) => tracing::warn!("folder change: {e}"),

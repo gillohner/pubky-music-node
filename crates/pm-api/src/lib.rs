@@ -115,7 +115,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/albums/{id}/cover", get(album_cover))
         .route("/library/history", get(history).post(record_play))
         .route("/library/home", get(home))
-        .route("/library/folders", get(folders))
+        .route(
+            "/library/folders",
+            get(folders).post(add_folder).delete(remove_folder),
+        )
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/import", post(activity::import_playlist))
@@ -708,10 +711,73 @@ async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool
     Ok(Json(f))
 }
 
+fn folder_list(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
+    Ok(s.library
+        .lock()
+        .expect("library poisoned")
+        .list_folders()?
+        .into_iter()
+        .map(|(p, present)| (p.to_string_lossy().into_owned(), present))
+        .collect())
+}
+
+/// `POST /v1/library/folders {path}`: add a folder, watch it, scan it.
+async fn add_folder(
+    State(s): State<Arc<NodeState>>,
+    Json(req): Json<FolderRequest>,
+) -> ApiResult<FoldersChanged> {
+    let raw = req.path.trim();
+    if raw.is_empty() {
+        return Err(ApiError::bad_request("path is required"));
+    }
+    let path = std::path::PathBuf::from(raw);
+    let path = tokio::fs::canonicalize(&path)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("{}: {e}", path.display())))?;
+    if !path.is_dir() {
+        return Err(ApiError::bad_request(format!(
+            "{} is not a directory",
+            path.display()
+        )));
+    }
+    s.library.lock().expect("library poisoned").add_folder(&path)?;
+    s.watch_more(&path);
+    let scan_started = matches!(s.start_scan(vec![path]), Ok(true));
+    Ok(Json(FoldersChanged {
+        folders: folder_list(&s)?,
+        scan_started,
+        removed_files: 0,
+        removed_tracks: 0,
+    }))
+}
+
+/// `DELETE /v1/library/folders?path=`: forget a folder and everything scanned from it.
+async fn remove_folder(
+    State(s): State<Arc<NodeState>>,
+    Query(req): Query<FolderRequest>,
+) -> ApiResult<FoldersChanged> {
+    let path = std::path::PathBuf::from(req.path.trim());
+    if s.is_scanning() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "a scan is running; try again when it is done",
+        ));
+    }
+    s.unwatch(&path);
+    let (removed_files, removed_tracks) = s.library.lock().expect("library poisoned").remove_folder(&path)?;
+    s.notify_library();
+    Ok(Json(FoldersChanged {
+        folders: folder_list(&s)?,
+        scan_started: false,
+        removed_files,
+        removed_tracks,
+    }))
+}
+
 /// Start a scan in the background on its own SQLite connection; one at a time.
 async fn scan(State(s): State<Arc<NodeState>>, Json(body): Json<ScanRequest>) -> ApiResult<ScanStarted> {
     let folders: Vec<std::path::PathBuf> = if body.folders.is_empty() {
-        s.scan_folders.clone()
+        s.all_folders()
     } else {
         body.folders.iter().map(std::path::PathBuf::from).collect()
     };
@@ -1202,6 +1268,59 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "search without terms is refused before any network call"
         );
+    }
+
+    #[tokio::test]
+    async fn folders_can_be_added_and_removed_through_the_api() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        let extra = dir.path().join("more");
+        std::fs::create_dir(&extra).unwrap();
+        write_wav(&extra.join("extra.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/library/folders",
+            Some(serde_json::json!({"path": "/nope/missing"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/library/folders",
+            Some(serde_json::json!({"path": extra.to_string_lossy()})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["scan_started"], true);
+        assert!(r["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f[0] == extra.to_string_lossy().as_ref()));
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        assert_eq!(tracks["tracks"].as_array().unwrap().len(), 1);
+        let (st, r) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/library/folders?path={}", extra.to_string_lossy()),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["removed_tracks"], 1);
+        assert!(r["folders"].as_array().unwrap().is_empty());
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        assert!(tracks["tracks"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

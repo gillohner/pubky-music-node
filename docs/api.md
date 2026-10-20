@@ -39,6 +39,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/library/history` | `{track_id, zone?}` | records a play made by the client itself (the app's local zone, the browser); 404 for an unknown track |
 | GET | `/v1/library/home` | `?limit=` | `{recently_added, recently_played, most_played_albums, most_played: [{track, plays, last_played_at}], history, stats}` |
 | GET | `/v1/library/folders` | | `[path, present][]` |
+| POST | `/v1/library/folders` | `{path}` | adds a folder on the node (must exist), watches it and starts a scan; `{folders, scan_started}` |
+| DELETE | `/v1/library/folders` | `?path=` | forgets the folder and the tracks that lived only there; `{folders, removed_files, removed_tracks}`; 409 while a scan runs |
 | POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs. With `[library] watch = true` (default) the node also rescans by itself after `watch_quiet_secs` without file changes |
 | GET / POST | `/v1/playlists` | POST: `{name, description?, image?, uris?, track_ids?}` | `PlaylistSummary[]` / `PlaylistDetail` |
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |

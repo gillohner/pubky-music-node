@@ -75,3 +75,10 @@ address (`squeezelite -s <node-ip> -o hw:0,0`); it appears as an output and zone
 model and MAC, plays the zone's post-DSP PCM as a WAV stream it fetches from `[api] public_url`, and
 takes volume through its own digital gain. Players on the same subnet also find the node through
 the discovery responder.
+
+## Adding music after the node is running
+
+Folders can be added from the web UI or the app (Settings → Library folders) as well as in
+`[library] folders` of the config. Folders added from the UI are stored in the library database,
+watched for changes and scanned straight away; removing one there forgets the tracks that lived
+only in it.

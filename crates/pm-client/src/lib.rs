@@ -417,6 +417,26 @@ impl NodeClient {
         self.get("library/folders", &[]).await
     }
 
+    /// Add a library folder on the node; it is watched and scanned.
+    pub async fn add_folder(&self, path: &str) -> Result<FoldersChanged> {
+        self.send(
+            reqwest::Method::POST,
+            "library/folders",
+            Some(&FolderRequest {
+                path: path.to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// Forget a library folder and everything scanned from it.
+    pub async fn remove_folder(&self, path: &str) -> Result<FoldersChanged> {
+        let mut url = self.url("library/folders");
+        url.query_pairs_mut().append_pair("path", path);
+        let resp = self.authed(self.http.delete(url)).send().await?;
+        Self::finish(resp).await
+    }
+
     pub async fn scan(&self, folders: Vec<String>) -> Result<ScanStarted> {
         self.send(
             reqwest::Method::POST,

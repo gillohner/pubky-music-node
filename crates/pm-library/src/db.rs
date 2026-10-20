@@ -936,6 +936,54 @@ impl Library {
         Ok(())
     }
 
+    /// Forget a library folder: its files, the tracks that lived only there,
+    /// and the albums and artists left empty. Returns `(files, tracks)` removed.
+    pub fn remove_folder(&self, root: &Path) -> Result<(u64, u64)> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let root_s = root.to_string_lossy().into_owned();
+        let prefix = format!("{}/", root_s.trim_end_matches('/'));
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let files = tx.execute(
+            "DELETE FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![root_s, format!("{escaped}%")],
+        )? as u64;
+        tx.execute(
+            "DELETE FROM plays WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM track_artists WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM tracks_fts WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
+            [],
+        )?;
+        let tracks = tx.execute(
+            "DELETE FROM tracks WHERE id NOT IN (SELECT track_id FROM files)",
+            [],
+        )? as u64;
+        tx.execute(
+            "DELETE FROM album_art WHERE album_id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM artists WHERE id NOT IN (SELECT DISTINCT artist_id FROM track_artists)",
+            [],
+        )?;
+        tx.execute("DELETE FROM folders WHERE path = ?1", params![root_s])?;
+        tx.commit()?;
+        Ok((files, tracks))
+    }
+
     pub fn list_folders(&self) -> Result<Vec<(PathBuf, bool)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT path, enabled FROM folders ORDER BY path")?;
@@ -1589,5 +1637,47 @@ mod tag_tests {
             lib.tag_by_id("t1").unwrap().is_none(),
             "pushed tombstones are purged"
         );
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::tests_support::sample_track;
+    use super::*;
+
+    #[test]
+    fn remove_folder_drops_its_tracks_and_empty_albums() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.add_folder(Path::new("/m/a")).unwrap();
+        lib.add_folder(Path::new("/m/b")).unwrap();
+        let a = lib.upsert_track(&sample_track("/m/a/one.flac", "One")).unwrap();
+        let b = lib.upsert_track(&sample_track("/m/b/two.flac", "Two")).unwrap();
+        let mut other = sample_track("/m/b/three.flac", "Three");
+        other.album.as_mut().unwrap().title = "Other".into();
+        other.album.as_mut().unwrap().release_mbid = None;
+        let c = lib.upsert_track(&other).unwrap();
+        lib.record_play(a, None).unwrap();
+        assert_eq!(lib.stats().unwrap().albums, 2);
+        let (files, tracks) = lib.remove_folder(Path::new("/m/b")).unwrap();
+        assert_eq!((files, tracks), (2, 2));
+        assert!(lib.get_track(a).unwrap().is_some());
+        assert!(lib.get_track(b).unwrap().is_none());
+        assert!(lib.get_track(c).unwrap().is_none());
+        assert_eq!(
+            lib.stats().unwrap().albums,
+            1,
+            "the album only track three used is gone"
+        );
+        assert_eq!(lib.list_folders().unwrap().len(), 1);
+        assert!(
+            lib.search_tracks("Three", 10).unwrap().is_empty(),
+            "FTS rows go too"
+        );
+        assert_eq!(lib.history(10).unwrap().len(), 1);
+        // A prefix that is not a path boundary is left alone.
+        lib.add_folder(Path::new("/m")).unwrap();
+        let (files, _) = lib.remove_folder(Path::new("/m/a_other")).unwrap();
+        assert_eq!(files, 0);
+        assert!(lib.get_track(a).unwrap().is_some());
     }
 }

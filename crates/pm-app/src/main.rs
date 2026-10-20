@@ -101,6 +101,8 @@ struct App {
     /// My tags per canonical URL (album and artist pages).
     tags: HashMap<String, Vec<pm_api::types::TagEntry>>,
     tag_input: String,
+    folders: Vec<(String, bool)>,
+    folder_input: String,
     radio_query: String,
     radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
     radio_searching: bool,
@@ -175,6 +177,8 @@ impl App {
             favourites: None,
             tags: HashMap::new(),
             tag_input: String::new(),
+            folders: Vec::new(),
+            folder_input: String::new(),
             radio_query: String::new(),
             radio_results: None,
             radio_searching: false,
@@ -259,6 +263,7 @@ impl App {
                     self.radio_results = Some((q, r));
                 }
                 Msg::Stations(st) => self.stations = st,
+                Msg::Folders(f) => self.folders = f,
                 Msg::Tags(t) => {
                     if let Some(uri) = t.uri.clone() {
                         self.tags.insert(uri, t.tags);
@@ -733,6 +738,7 @@ impl App {
         ui.add_space(2.0);
         if theme::nav_item(ui, self.view == View::Settings, "Settings").clicked() {
             self.view = View::Settings;
+            self.backend.send(Cmd::LoadFolders);
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(6.0);
@@ -1980,8 +1986,46 @@ impl App {
             }
         });
         if let Conn::Failed(e) = &self.conn {
-            ui.colored_label(egui::Color32::from_rgb(220, 90, 90), e);
+            ui.colored_label(theme::BAD, e);
         }
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("Library folders").strong().size(16.0));
+        ui.small(
+            egui::RichText::new(
+                "Paths on the node. New folders are watched and scanned; removing one forgets its tracks.",
+            )
+            .weak(),
+        );
+        if self.folders.is_empty() {
+            ui.weak("No folders yet.");
+        }
+        let folders = self.folders.clone();
+        for (path, present) in &folders {
+            ui.horizontal(|ui| {
+                ui.label(path);
+                if !present {
+                    theme::pill(ui, Some(theme::WARN), "missing");
+                }
+                if ui.add(theme::secondary("Remove")).clicked() {
+                    self.backend.send(Cmd::RemoveFolder(path.clone()));
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.folder_input)
+                    .hint_text("/path/on/the/node/Music")
+                    .desired_width(360.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(theme::primary("Add folder")).clicked() || enter)
+                && !self.folder_input.trim().is_empty()
+            {
+                self.backend
+                    .send(Cmd::AddFolder(self.folder_input.trim().to_string()));
+                self.folder_input.clear();
+            }
+        });
         ui.add_space(12.0);
         ui.heading("Zones");
         ui.label(format!("This computer plays through: {}", self.local.output_name));

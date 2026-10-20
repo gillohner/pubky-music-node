@@ -76,6 +76,9 @@ pub enum Cmd {
         repeat: Repeat,
     },
     Scan,
+    LoadFolders,
+    AddFolder(String),
+    RemoveFolder(String),
     LoadPlaylists,
     LoadPlaylist(String),
     CreatePlaylist {
@@ -146,6 +149,7 @@ pub enum Msg {
     Queue(String, Vec<QueueItem>),
     LibraryChanged,
     ScanStarted,
+    Folders(Vec<(String, bool)>),
     Playlists(Vec<PlaylistSummary>),
     Playlist(Box<PlaylistDetail>),
     PlaylistDeleted(String),
@@ -409,6 +413,24 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::Scan => {
             c.scan(vec![]).await?;
             out.send(Msg::ScanStarted);
+        }
+        Cmd::LoadFolders => out.send(Msg::Folders(c.folders().await?)),
+        Cmd::AddFolder(path) => {
+            let r = c.add_folder(&path).await?;
+            out.send(Msg::Notice(if r.scan_started {
+                "Folder added; scanning".into()
+            } else {
+                "Folder added; it is scanned after the current scan".into()
+            }));
+            out.send(Msg::Folders(r.folders));
+        }
+        Cmd::RemoveFolder(path) => {
+            let r = c.remove_folder(&path).await?;
+            out.send(Msg::Notice(format!(
+                "Folder removed · {} tracks gone",
+                r.removed_tracks
+            )));
+            out.send(Msg::Folders(r.folders));
         }
         Cmd::LoadPlaylists => out.send(Msg::Playlists(c.playlists().await?)),
         Cmd::LoadPlaylist(id) => out.send(Msg::Playlist(Box::new(c.playlist(&id).await?))),

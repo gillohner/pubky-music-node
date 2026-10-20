@@ -215,11 +215,43 @@ impl NodeState {
     }
 
     /// Watch the configured folders and rescan after `quiet` without events.
+    /// The configured folders plus the ones added through the API, in order,
+    /// without duplicates.
+    pub fn all_folders(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self.scan_folders.clone();
+        if let Ok(extra) = self.library.lock().expect("library poisoned").list_folders() {
+            for (p, _) in extra {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Start watching one more folder (after `watch_folders`); no-op without a watcher.
+    pub fn watch_more(&self, folder: &std::path::Path) {
+        use notify::Watcher as _;
+        if let Some(w) = self.watcher.lock().expect("watcher lock").as_mut() {
+            if let Err(e) = w.watch(folder, notify::RecursiveMode::Recursive) {
+                tracing::warn!(folder = %folder.display(), "cannot watch: {e}");
+            }
+        }
+    }
+
+    pub fn unwatch(&self, folder: &std::path::Path) {
+        use notify::Watcher as _;
+        if let Some(w) = self.watcher.lock().expect("watcher lock").as_mut() {
+            let _ = w.unwatch(folder);
+        }
+    }
+
     pub fn watch_folders(self: &Arc<Self>, quiet: std::time::Duration) {
-        if self.scan_folders.is_empty() {
+        let folders = self.all_folders();
+        if folders.is_empty() {
             return;
         }
-        match crate::watch::spawn(self.clone(), self.scan_folders.clone(), quiet) {
+        match crate::watch::spawn(self.clone(), folders, quiet) {
             Ok(w) => *self.watcher.lock().expect("watcher lock") = Some(w),
             Err(e) => tracing::warn!("folder watching unavailable: {e}"),
         }

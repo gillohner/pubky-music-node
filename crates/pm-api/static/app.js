@@ -609,6 +609,7 @@
         case 'settings': {
           const info = await api('GET', '/info'); state.info = info;
           const outs = await api('GET', '/outputs');
+          const folders = await api('GET', '/library/folders').catch(() => []);
           let pk = null; try { pk = await api('GET', '/pubky'); } catch { /* no pubky config */ }
           if (state.view !== 'settings') return;
           main.innerHTML = pageHead('Settings') + `
@@ -617,10 +618,16 @@
                 <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><button class="btn ghost" id="logout">Change token</button></div></div>
               <div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p><div class="actions" style="margin-top:14px">${pk.user ? '' : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync">Sync playlists and favourites</button></div><div id="pkurl"></div>` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
             </div>
+            <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
+              ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
+              <div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
             <section class="section"><div class="section-head"><h3>Outputs</h3></div>${outs.length ? `<div class="list">${outs.map((o) => `<div class="list-row"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted">No outputs found.</p>'}</section>
             <section class="section"><div class="section-head"><h3>Zones</h3></div><div class="list">${zoneList().map((z) => `<div class="list-row"><div class="grow"><div class="name">${esc(z.name)}</div><div class="sub">${esc(z.output || '')}</div></div><span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span></div>`).join('')}</div></section>
             <p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>`;
           $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); } catch (e) { toast(e.message, 'error'); } };
+          const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); render(); } catch (e) { toast(e.message, 'error'); } };
+          $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
+          $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${r.removed_tracks} tracks gone`); render(); } catch (e) { toast(e.message, 'error'); } });
           $('#rescan').onclick = async () => { try { await api('POST', '/outputs/rescan'); toast('Outputs rescanned'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#logout').onclick = () => login();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}`); render(); } catch (e) { toast(e.message, 'error'); } };

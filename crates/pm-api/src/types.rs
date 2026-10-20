@@ -255,6 +255,24 @@ pub struct ScanStarted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoldersChanged {
+    /// `[path, present]` for every library folder.
+    pub folders: Vec<(String, bool)>,
+    /// A scan of the new folder started (false when one was already running).
+    #[serde(default)]
+    pub scan_started: bool,
+    #[serde(default)]
+    pub removed_files: u64,
+    #[serde(default)]
+    pub removed_tracks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: String,
 }
