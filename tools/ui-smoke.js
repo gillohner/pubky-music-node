@@ -108,6 +108,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const after = w.document.querySelectorAll('.list.queue .list-row').length;
   console.log('queue rows before/after:', before, after);
   if (before < 2 || after !== before - 1) errors.push('queue editing failed');
+  // Settings carries the Subsonic jukebox zone picker.
+  w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(900);
+  if (!w.document.querySelector('#jukeboxzone')) errors.push('no jukebox zone picker in Settings');
   // Track ⋯ menu opens with playlist entries.
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
   const more = w.document.querySelector('.track [data-act="more"]');

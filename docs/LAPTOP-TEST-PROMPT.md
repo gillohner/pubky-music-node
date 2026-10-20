@@ -45,7 +45,9 @@ C3. Web UI extras: the Zones page (sidebar) must show every zone with transport 
    quality…) must match what the files are, with a format badge on each tile; Home must show
    "New releases from your artists" once a contact is set (MusicBrainz, one artist per second);
    Settings → Download backup must produce a SQLite file that `pm-node restore` accepts; on a
-   phone, "Add to Home Screen" installs the UI.
+   phone, "Add to Home Screen" installs the UI. In Symfonium (or any Subsonic client with
+   jukebox mode), pick the KA17 zone under Settings → Subsonic jukebox and confirm the client's
+   jukebox plays through the node.
 D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
    127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96
