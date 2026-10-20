@@ -385,6 +385,9 @@ impl NodeHomeserver {
 pub const PRIVATE_FILES_DIR: &str = "/priv/pubky.music/files/";
 /// Where a node publishes how to reach it, readable only by the owner (ADR 0008).
 pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
+/// The node's settings (contact, folders, streaming sessions, renderers, DSP)
+/// so a reinstalled or replaced node restores them after one Ring sign-in.
+pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
 
 /// How the user's own devices find their node (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -407,6 +410,27 @@ impl NodeHomeserver {
         record: &NodeRecord,
     ) -> Result<(), HomeserverError> {
         self.write_object(session, NODE_RECORD_PATH, record).await
+    }
+
+    /// The owner's node settings backup, written by the node after every sync.
+    pub async fn write_node_settings(
+        &self,
+        session: &PubkySession,
+        settings: &serde_json::Value,
+    ) -> Result<(), HomeserverError> {
+        self.write_object(session, NODE_SETTINGS_PATH, settings).await
+    }
+
+    pub async fn read_node_settings(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Option<serde_json::Value>, HomeserverError> {
+        let storage = session.storage();
+        if !storage.exists(NODE_SETTINGS_PATH).await? {
+            return Ok(None);
+        }
+        let v: serde_json::Value = storage.get_json(NODE_SETTINGS_PATH).await?;
+        Ok(Some(v))
     }
 
     /// The owner's node record, if a node published one.

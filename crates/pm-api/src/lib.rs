@@ -97,6 +97,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
         .route("/node/settings", get(node_settings).put(update_node_settings))
+        .route("/node/settings/backup", post(settings_backup_now))
+        .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))
         .route("/outputs/rescan", post(rescan_outputs))
         .route("/outputs/discovery", get(discovery_report))
@@ -1380,6 +1382,37 @@ async fn node_settings(State(s): State<Arc<NodeState>>) -> ApiResult<NodeSetting
     Ok(Json(settings_view(&s)))
 }
 
+/// `POST /v1/node/settings/backup`: write the owner's settings to
+/// `/priv/pubky.music/settings.json` now (also done after every sync).
+async fn settings_backup_now(State(s): State<Arc<NodeState>>) -> ApiResult<serde_json::Value> {
+    let sync = s.sync_handle().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "no Pubky session: sign in with Pubky Ring first",
+        )
+    })?;
+    sync.backup_settings(&s).await;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// `POST /v1/node/settings/restore`: bring the owner's settings from the
+/// homeserver onto this node (missing values only; existing ones stay).
+async fn settings_restore_now(State(s): State<Arc<NodeState>>) -> ApiResult<sync::SettingsRestored> {
+    let sync = s.sync_handle().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "no Pubky session: sign in with Pubky Ring first",
+        )
+    })?;
+    let r = sync
+        .restore_settings(&s, false)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("no settings backup on the homeserver yet"))?;
+    s.notify_library();
+    Ok(Json(r))
+}
+
 /// `PUT /v1/node/settings {contact}`: set the contact without touching the
 /// config file; discovery comes alive at once.
 async fn update_node_settings(
@@ -1671,9 +1704,15 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
             {
                 tracing::warn!("publishing the node record failed: {e}");
             }
+            match sync.restore_settings(&s, true).await {
+                Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("settings restore failed: {e}"),
+            }
             if let Err(e) = sync.sync(&s.library).await {
                 tracing::warn!("first sync failed: {e}");
             }
+            sync.backup_settings(&s).await;
             s.notify_library();
             Ok(Json(LoginStatus {
                 status: "signed_in".into(),
@@ -1700,6 +1739,7 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
         .sync(&s.library)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    sync.backup_settings(&s).await;
     if report.pulled > 0 {
         s.notify_library();
     }

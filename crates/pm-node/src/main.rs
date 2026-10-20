@@ -252,6 +252,11 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                     {
                         tracing::warn!("publishing the node record failed: {e}");
                     }
+                    match sync.restore_settings(&state, true).await {
+                        Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver"),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("settings restore failed: {e}"),
+                    }
                     match sync.sync(&state.library).await {
                         Ok(r) => tracing::info!(
                             pushed = r.pushed,

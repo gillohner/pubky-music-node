@@ -272,3 +272,151 @@ impl std::fmt::Debug for PubkySync {
         f.debug_struct("PubkySync").field("z32", &self.z32).finish()
     }
 }
+
+/// Settings keys that belong to the owner, not to a machine: streaming
+/// sessions, renderers added by hand, the Subsonic jukebox zone, DSP per
+/// output. Caches (`tidal.collection`, `tidal.version.*`, `artist.info.*`,
+/// `mb.rg.*`, `pinakes.version.*`) are not backed up.
+const BACKED_UP_SETTING_PREFIXES: [&str; 6] = [
+    "tidal.user",
+    "tidal.playback_limit",
+    "outputs.upnp_addresses",
+    "subsonic.jukebox_zone",
+    "dsp/",
+    "library.",
+];
+
+/// What `/priv/pubky.music/settings.json` holds.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct SettingsBackup {
+    pub version: u32,
+    pub saved_at: i64,
+    pub node: String,
+    #[serde(default)]
+    pub contact: String,
+    #[serde(default)]
+    pub folders: Vec<String>,
+    #[serde(default)]
+    pub settings: std::collections::BTreeMap<String, String>,
+}
+
+impl PubkySync {
+    /// Snapshot the owner's settings into the private folder (after every
+    /// sync and every change the API makes). Best effort; errors are logged.
+    pub async fn backup_settings(&self, s: &crate::state::NodeState) {
+        let backup = {
+            let lib = s.library.lock().expect("library poisoned");
+            let mut settings = std::collections::BTreeMap::new();
+            for prefix in BACKED_UP_SETTING_PREFIXES {
+                if let Ok(rows) = lib.settings_with_prefix(prefix) {
+                    settings.extend(rows);
+                }
+            }
+            SettingsBackup {
+                version: 1,
+                saved_at: pm_library::db::now_unix(),
+                node: s.name.clone(),
+                contact: s.contact(),
+                folders: lib
+                    .list_folders()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(p, _)| p.to_string_lossy().into_owned())
+                    .collect(),
+                settings,
+            }
+        };
+        let v = serde_json::to_value(&backup).expect("serializes");
+        if let Err(e) = self.homeserver.write_node_settings(&self.session, &v).await {
+            tracing::warn!("settings backup failed: {e}");
+        }
+    }
+
+    /// Bring the owner's settings onto this node from the private folder.
+    /// `only_if_fresh`: skip when the node already has folders or a contact
+    /// (a running node keeps what it has). Returns what was applied.
+    pub async fn restore_settings(
+        &self,
+        s: &Arc<crate::state::NodeState>,
+        only_if_fresh: bool,
+    ) -> Result<Option<SettingsRestored>, SyncError> {
+        let Some(v) = self.homeserver.read_node_settings(&self.session).await? else {
+            return Ok(None);
+        };
+        let backup: SettingsBackup =
+            serde_json::from_value(v).map_err(|e| SyncError::Store(format!("settings backup: {e}")))?;
+        let fresh = {
+            let lib = s.library.lock().expect("library poisoned");
+            lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && s.contact().trim().is_empty()
+        };
+        if only_if_fresh && !fresh {
+            return Ok(None);
+        }
+        let mut out = SettingsRestored {
+            from_node: backup.node.clone(),
+            saved_at: backup.saved_at,
+            ..Default::default()
+        };
+        if s.contact().trim().is_empty()
+            && !backup.contact.trim().is_empty()
+            && s.set_contact(&backup.contact).is_ok()
+        {
+            out.contact = true;
+        }
+        let mut new_folders = Vec::new();
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            let have: std::collections::HashSet<String> = lib
+                .list_folders()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(p, _)| p.to_string_lossy().into_owned())
+                .collect();
+            for f in &backup.folders {
+                let p = std::path::PathBuf::from(f);
+                if have.contains(f) {
+                    continue;
+                }
+                if p.is_dir() {
+                    if lib.add_folder(&p).is_ok() {
+                        new_folders.push(p);
+                    }
+                } else {
+                    out.folders_missing.push(f.clone());
+                }
+            }
+            for (k, val) in &backup.settings {
+                let keep = lib
+                    .get_setting(k)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cur| !cur.is_empty());
+                if !keep && lib.set_setting(k, val).is_ok() {
+                    out.settings += 1;
+                }
+            }
+        }
+        for p in &new_folders {
+            s.watch_more(p);
+        }
+        if !new_folders.is_empty() {
+            out.folders = new_folders
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let _ = s.start_scan(new_folders);
+        }
+        Ok(Some(out))
+    }
+}
+
+/// Report of a settings restore.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct SettingsRestored {
+    pub from_node: String,
+    pub saved_at: i64,
+    pub contact: bool,
+    pub folders: Vec<String>,
+    pub folders_missing: Vec<String>,
+    pub settings: u32,
+}
