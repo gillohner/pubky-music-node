@@ -24,6 +24,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
 | POST | `/v1/zones/{id}/volume` | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
+| GET / PUT | `/v1/zones/{id}/sleep` | PUT: `{seconds}` or `{seconds: null}` | `{ends_at_ms?, remaining_ms?}`; sleep timer: the zone pauses when it fires; one timer per zone, a new PUT replaces it |
 | POST | `/v1/zones/{id}/transfer` | `{to}` | the target's `ZoneState`; moves the queue, the playing item and its position, repeat and radio to zone `to` (paused stays paused); the source ends up stopped and empty; 400 for an empty queue or the same zone |
 | POST | `/v1/zones/{id}/shuffle` | | 204; shuffles the items after the current one (all items when nothing plays) |
 | PUT | `/v1/zones/{id}/radio` | `{on}` | library radio: when the queue ends (repeat off), the node appends up to 10 tracks similar to the last one (same genres, then same artists, then anything) and keeps playing; the flag is in `ZoneState.radio` and survives restarts |
@@ -43,6 +44,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/genres` | | `[{id, name, tracks, albums}]` from the files' genre tags (several per track when the tag lists several) |
 | GET | `/v1/library/genres/{id}` | | `{genre, albums, tracks}` |
 | GET | `/v1/library/albums` | `?after=&limit=&focus=` | `Album[]`; `focus` keeps albums with at least one file of that quality: `hi_res` (PCM above 16/48, lossless), `dsd`, `cd` (16-bit at 44.1/48), `lossless`, `lossy` |
+| GET / POST | `/v1/library/new-releases` (POST `…/refresh`) | | `{items: [{artist_id, artist, release_group_mbid, title, first_release_date, kind, url, in_library?}], artists_total, artists_checked, refreshing, refreshed_at?}`: albums, EPs and singles from the last year that MusicBrainz lists for the library's artists (those with an artist MBID), cached a week per artist and refreshed in the background one request per second; needs a contact |
 | GET | `/v1/library/albums/formats` | | `[{album_id, label, lossless, hi_res, dsd}]`: the best present file per album, e.g. `24/96 FLAC`, `DSD64`, `MP3` |
 | GET | `/v1/library/albums/{id}/tracks` | | `{tracks}` |
 | GET | `/v1/library/albums/{id}/cover` | | image bytes: the embedded picture extracted at scan, `cover.jpg` next to the files, or (for albums with a MusicBrainz release/release-group id) the Cover Art Archive front image fetched once and cached in the art dir; misses are remembered for a week; 404 when none |

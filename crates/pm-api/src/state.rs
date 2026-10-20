@@ -1,6 +1,26 @@
 //! Shared node state behind the API: library, outputs, zones, event fan-out.
 
 use crate::sources::NodeSources;
+
+/// A running sleep timer on a zone.
+pub struct SleepTimer {
+    /// Unix time in milliseconds when the zone pauses.
+    pub ends_at_ms: u64,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SleepTimer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 use crate::types::ApiEvent;
 use pm_audio::PipelineConfig;
 use pm_library::Library;
@@ -76,6 +96,8 @@ pub struct NodeState {
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Sleep timers: the zone pauses when its deadline passes.
+    pub sleep: Mutex<HashMap<ZoneId, SleepTimer>>,
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
@@ -149,6 +171,7 @@ impl NodeState {
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),
+            sleep: Mutex::new(HashMap::new()),
             discover: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
             caa_base: std::sync::RwLock::new("https://coverartarchive.org".into()),
@@ -569,6 +592,38 @@ impl NodeState {
             self.create_zone(&name, out);
         }
         new
+    }
+
+    /// Pause `zone` after `seconds` (`None` cancels). Returns when the zone
+    /// will pause, as unix milliseconds.
+    pub fn set_sleep(self: &Arc<Self>, zone: Arc<Zone>, seconds: Option<u64>) -> Option<u64> {
+        let mut timers = self.sleep.lock().expect("sleep lock");
+        timers.remove(zone.id());
+        let secs = seconds?;
+        let ends_at_ms = unix_ms() + secs * 1000;
+        let state = Arc::clone(self);
+        let id = zone.id().clone();
+        let key = id.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            zone.pause();
+            tracing::info!(zone = %zone.name(), "sleep timer: paused");
+            if let Ok(mut t) = state.sleep.lock() {
+                t.remove(&id);
+            }
+        });
+        timers.insert(key, SleepTimer { ends_at_ms, task });
+        Some(ends_at_ms)
+    }
+
+    /// When the zone's sleep timer fires, if one is set.
+    pub fn sleep_ends_at(&self, zone: &ZoneId) -> Option<u64> {
+        self.sleep
+            .lock()
+            .expect("sleep lock")
+            .get(zone)
+            .map(|t| t.ends_at_ms)
+            .filter(|ms| *ms > unix_ms())
     }
 
     /// Claim the scan slot; false if a scan is already running.

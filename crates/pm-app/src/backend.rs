@@ -3,9 +3,9 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
-    FavouriteRef, Favourites, GenreDetail, HomePage, Info, Lyrics, NodeSettingsView, OnPubky, PlaylistDetail,
-    PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags,
-    TransportAction, UpdatePlaylist, UploadFile,
+    FavouriteRef, Favourites, GenreDetail, HomePage, Info, Lyrics, NewReleasesPage, NodeSettingsView,
+    OnPubky, PlaylistDetail, PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit,
+    SourceItem, Tags, TransportAction, UpdatePlaylist, UploadFile,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -26,6 +26,7 @@ pub enum Cmd {
     },
     Refresh,
     LoadHome,
+    LoadNewReleases,
     LoadFavourites,
     RadioSearch(String),
     SourceSearch {
@@ -88,6 +89,10 @@ pub enum Cmd {
     Transfer {
         zone: String,
         to: String,
+    },
+    SetSleep {
+        zone: String,
+        seconds: Option<u64>,
     },
     /// Save a queue as a playlist: a node zone's queue, or the local
     /// player's queue given as URIs.
@@ -240,6 +245,7 @@ pub enum Msg {
     ArtistInfo(i64, Box<ArtistInfo>, Option<(usize, usize, Vec<u8>)>),
     Lyrics(i64, Option<Box<Lyrics>>),
     AlbumFormats(Vec<pm_library::AlbumFormat>),
+    NewReleases(Box<NewReleasesPage>),
     PubkyFiles(Result<Vec<pm_pubky::homeserver::RemoteFile>, String>),
     Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
@@ -410,7 +416,15 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                 out.send(Msg::AlbumFormats(f));
             }
         }
-        Cmd::LoadHome => out.send(Msg::Home(Box::new(c.home(12).await?))),
+        Cmd::LoadHome => {
+            out.send(Msg::Home(Box::new(c.home(12).await?)));
+            if let Ok(nr) = c.new_releases().await {
+                out.send(Msg::NewReleases(Box::new(nr)));
+            }
+        }
+        Cmd::LoadNewReleases => {
+            out.send(Msg::NewReleases(Box::new(c.new_releases().await?)));
+        }
         Cmd::LoadFavourites => out.send(Msg::Favourites(Box::new(c.favourites().await?))),
         Cmd::RadioSearch(q) => {
             let r = c
@@ -524,6 +538,13 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::ClearQueue(z) => {
             c.clear_queue(&z).await?;
             out.send(Msg::Queue(z, vec![]));
+        }
+        Cmd::SetSleep { zone, seconds } => {
+            c.set_sleep(&zone, seconds).await?;
+            out.send(Msg::Notice(match seconds {
+                Some(s) => format!("sleep timer: pausing in {} min", s / 60),
+                None => "sleep timer off".to_string(),
+            }));
         }
         Cmd::Transfer { zone, to } => {
             let st = c.transfer(&zone, &to).await?;

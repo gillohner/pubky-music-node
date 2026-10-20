@@ -286,6 +286,20 @@ impl NodeClient {
     }
 
     /// Keep the zone playing with similar library tracks after the last item.
+    /// Pause the zone after `seconds`; `None` cancels the timer.
+    pub async fn set_sleep(&self, zone: &str, seconds: Option<u64>) -> Result<SleepView> {
+        self.send(
+            reqwest::Method::PUT,
+            &format!("zones/{zone}/sleep"),
+            Some(&SetSleep { seconds }),
+        )
+        .await
+    }
+
+    pub async fn sleep(&self, zone: &str) -> Result<SleepView> {
+        self.get(&format!("zones/{zone}/sleep"), &[]).await
+    }
+
     /// Move playback (queue, position, repeat, radio) from `zone` to `to`.
     pub async fn transfer(&self, zone: &str, to: &str) -> Result<ZoneState> {
         self.send(
@@ -428,6 +442,11 @@ impl NodeClient {
             .get::<Tracks>(&format!("library/artists/{id}/tracks"), &[])
             .await?
             .tracks)
+    }
+
+    /// Recent release groups for the library's artists (MusicBrainz, cached on the node).
+    pub async fn new_releases(&self) -> Result<NewReleasesPage> {
+        self.get("library/new-releases", &[]).await
     }
 
     /// The best file format per album (badge text and quality flags).

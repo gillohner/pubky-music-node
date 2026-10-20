@@ -13,6 +13,8 @@
     lyrics: new Map(),
     formats: null,
     focus: '',
+    sleepAt: {},
+    browserSleepTimer: null,
     pubkyUser: undefined,
     view: 'home',
     viewArg: null,
@@ -292,7 +294,7 @@
     const colour = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
     overlay.innerHTML = `
       <div class="np-page">
-        <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
+        <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span><button class="btn ghost" id="npsleep" title="Pause this zone after a while">${icon('moon')} ${sleepLabel()}</button>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
         <div class="np-hero">
           <div class="np-big">${art(albumId, it.title || it.uri)}</div>
           <div class="np-meta">
@@ -315,7 +317,23 @@
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npq').onclick = () => { toggleNowPlaying(); setView('queue'); };
     const npd = $('#npdsp'); if (npd) npd.onclick = () => { toggleNowPlaying(); state.dspOpen = state.zone; setView('settings'); };
+    const nps = $('#npsleep'); if (nps) nps.onclick = () => showMenu(nps, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]);
     loadLyrics(it);
+    refreshSleep();
+  };
+  // Sleep timer per zone (node zones through the API, the browser zone locally).
+  const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
+  const setSleep = async (seconds) => {
+    if (isBrowser()) {
+      clearTimeout(state.browserSleepTimer);
+      if (seconds) { state.sleepAt[BROWSER] = Date.now() + seconds * 1000; state.browserSleepTimer = setTimeout(() => { audio.pause(); delete state.sleepAt[BROWSER]; renderNowPlaying(); }, seconds * 1000); } else delete state.sleepAt[BROWSER];
+      toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); return;
+    }
+    try { const v = await api('PUT', `/zones/${encodeURIComponent(state.zone)}/sleep`, { seconds }); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); } catch (e) { toast(e.message, 'error'); }
+  };
+  const refreshSleep = async () => {
+    if (isBrowser()) return;
+    try { const v = await api('GET', `/zones/${encodeURIComponent(state.zone)}/sleep`); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; const b = $('#npsleep'); if (b) b.innerHTML = `${icon('moon')} ${sleepLabel()}`; } catch { /* keep */ }
   };
   // Lyrics for the playing library track (tags or a sidecar .lrc); synced lines follow the position.
   const trackIdOf = (it) => { const m = /^track:(\d+)$/.exec(it && it.uri || ''); return m ? Number(m[1]) : null; };
@@ -539,6 +557,13 @@
     $('#d-reset').onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(zoneId)}/dsp`); toast('DSP reset'); render(); } catch (e) { toast(e.message, 'error'); } };
     $('#d-close').onclick = () => { state.dspOpen = null; render(); };
   };
+  // "New releases from your artists": release groups MusicBrainz lists for tagged artists.
+  const newReleasesSection = (nr) => {
+    if (!nr || !nr.artists_total) return '';
+    const sub = nr.refreshing ? `checking ${nr.artists_checked} of ${nr.artists_total} artists…` : `${nr.artists_checked} of ${nr.artists_total} tagged artists checked`;
+    const rows = nr.items.slice(0, 12).map((r) => `<div class="list-row"><div class="grow"><div class="name">${esc(r.title)} <span class="muted small">${esc(r.kind)}</span></div><div class="sub">${esc(r.artist)} · ${esc(r.first_release_date)}</div></div>${r.in_library ? `<button class="btn ghost small" data-album="${r.in_library.id}">In library</button>` : `<a class="btn ghost small" href="${esc(r.url)}" target="_blank" rel="noopener">MusicBrainz</a>`}</div>`).join('');
+    return `<section class="section"><div class="section-head"><h3>New releases from your artists</h3><span class="muted small">${sub}</span>${nr.refreshing ? '' : `<button class="link" id="nrrefresh">Refresh</button>`}</div>${rows ? `<div class="list">${rows}</div>` : `<p class="muted">Nothing from the last year yet${nr.artists_checked < nr.artists_total ? ' (still checking)' : ''}.</p>`}</section>`;
+  };
   const albumGrid = (albums) => `<div class="grid">${albums.map(tile).join('')}</div>`;
   const strip = (title, albums, more) => (!albums || !albums.length) ? '' : `<section class="section"><div class="section-head"><h3>${esc(title)}</h3>${more ? `<button class="link" data-more="${more}">See all</button>` : ''}</div><div class="strip">${albums.map(tile).join('')}</div></section>`;
   const bindTiles = () => {
@@ -587,7 +612,7 @@
       switch (v) {
         case 'home': {
           loading();
-          const h = await api('GET', '/library/home?limit=12');
+          const [h, nr] = await Promise.all([api('GET', '/library/home?limit=12'), api('GET', '/library/new-releases').catch(() => null)]);
           if (state.view !== 'home') return;
           const most = h.most_played.map((p) => p.track);
           if (!h.stats.tracks) {
@@ -599,10 +624,12 @@
             + strip('Recently added', h.recently_added, 'albums')
             + strip('Recently played', h.recently_played)
             + strip('Most played albums', h.most_played_albums)
+            + newReleasesSection(nr)
             + (most.length ? `<section class="section"><div class="section-head"><h3>Most played tracks</h3></div>${trackRows(most, { key: 'most' })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>History</h3></div>${h.history.length ? `<div class="list">${h.history.map((p, i) => `<div class="list-row"><button class="icon-btn" data-hplay="${i}" title="Play">${icon('play')}</button><div class="avatar" style="background:hsl(${hue(p.track.title)} 35% 28%)">${esc(initials(p.track.title))}</div><div class="grow"><div class="name">${esc(p.track.title)}</div><div class="sub">${esc(artists(p.track))}</div></div><span class="muted small">${esc((state.zones[p.zone] || {}).name || (p.zone === 'browser' ? 'This browser' : p.zone) || '')} · ${ago(p.played_at)}</span></div>`).join('')}</div>` : `<p class="muted">Nothing played yet. Plays on every zone show up here.</p>`}</section>`;
           lists.most = most;
           $$('[data-hplay]', main).forEach((b) => b.onclick = () => playTracks([h.history[Number(b.dataset.hplay)].track], true));
+          const nrr = $('#nrrefresh'); if (nrr) nrr.onclick = async () => { try { await api('POST', '/library/new-releases/refresh'); toast('Checking MusicBrainz for new releases (one artist per second)…'); } catch (e) { toast(e.message, 'error'); } };
           break;
         }
         case 'favourites': {

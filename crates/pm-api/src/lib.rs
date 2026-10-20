@@ -17,6 +17,7 @@ pub mod audius;
 pub mod discover;
 pub mod favourites;
 pub mod files;
+pub mod new_releases;
 pub mod playlists;
 pub mod radio;
 pub mod reviews;
@@ -110,6 +111,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/shuffle", post(shuffle_queue))
         .route("/zones/{id}/transfer", post(transfer))
+        .route("/zones/{id}/sleep", get(sleep_get).put(sleep_set))
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
@@ -127,6 +129,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/genres/{id}", get(genre))
         .route("/library/albums", get(albums))
         .route("/library/albums/formats", get(album_formats))
+        .route("/library/new-releases", get(new_releases))
+        .route("/library/new-releases/refresh", post(new_releases_refresh))
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/albums/{id}/cover", get(album_cover))
         .route("/library/history", get(history).post(record_play))
@@ -526,9 +530,12 @@ async fn transport(
         TransportAction::Previous => zone.previous(),
         TransportAction::Seek { position_ms } => zone.seek_ms(position_ms),
     }
-    // The engine publishes within one block; give it a moment so the reply reflects the command.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    Ok(Json(zone.state()))
+    // Reply with the state after the engine applied the command (bounded wait).
+    Ok(Json(
+        tokio::time::timeout(std::time::Duration::from_secs(2), zone.wait_acked())
+            .await
+            .unwrap_or_else(|_| zone.state()),
+    ))
 }
 
 async fn volume(
@@ -572,6 +579,40 @@ async fn shuffle_queue(
     zone.shuffle_upcoming();
     settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn sleep_view(s: &NodeState, zone: &ZoneId) -> SleepView {
+    let ends_at_ms = s.sleep_ends_at(zone);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    SleepView {
+        ends_at_ms,
+        remaining_ms: ends_at_ms.map(|e| e.saturating_sub(now)),
+    }
+}
+
+/// The zone's sleep timer, if any.
+async fn sleep_get(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<SleepView> {
+    let zone = zone_of(&s, &id)?;
+    Ok(Json(sleep_view(&s, zone.id())))
+}
+
+/// Pause the zone after `seconds` (`null` cancels any timer).
+async fn sleep_set(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetSleep>,
+) -> ApiResult<SleepView> {
+    let zone = zone_of(&s, &id)?;
+    if body.seconds == Some(0) {
+        return Err(ApiError::bad_request(
+            "seconds must be positive, or null to cancel",
+        ));
+    }
+    s.set_sleep(zone.clone(), body.seconds);
+    Ok(Json(sleep_view(&s, zone.id())))
 }
 
 /// Move the queue and playback position to another zone. The target stops
@@ -897,6 +938,23 @@ async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
             .expect("library poisoned")
             .list_albums_focused(p.focus, p.after, limit)?,
     ))
+}
+
+/// Release groups MusicBrainz lists for the library's artists from the last
+/// year; a background refresh starts when any artist's list is stale.
+async fn new_releases(State(s): State<Arc<NodeState>>) -> ApiResult<NewReleasesPage> {
+    Ok(Json(new_releases::page(&s)?))
+}
+
+/// Force a refresh of stale artists now (one MusicBrainz request per second).
+async fn new_releases_refresh(State(s): State<Arc<NodeState>>) -> ApiResult<NewReleasesPage> {
+    if s.contact().is_empty() {
+        return Err(ApiError::bad_request(
+            "set a contact first (Settings): MusicBrainz requires one in the User-Agent",
+        ));
+    }
+    new_releases::kick_refresh(s.clone());
+    Ok(Json(new_releases::page(&s)?))
 }
 
 /// The best file format per album, for badges and Focus in clients.
@@ -2007,6 +2065,193 @@ mod tests {
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
         let (_, pls) = call(&app, "GET", "/v1/playlists", None).await;
         assert_eq!(pls.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn new_releases_come_from_musicbrainz_for_tagged_artists() {
+        let artist_mbid = "056e4f3e-d505-4dad-8ec1-d04f521cbb56";
+        let fresh_rg = "11111111-2222-3333-4444-555555555555";
+        let owned_rg = "66666666-7777-8888-9999-000000000000";
+        let today = time::OffsetDateTime::now_utc().date();
+        let recent = (today - time::Duration::days(30)).to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let mock = Router::new().route(
+            "/release-group",
+            get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                let hits = hits2.clone();
+                let recent = recent.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    assert_eq!(q.get("artist").map(String::as_str), Some(artist_mbid));
+                    Json(serde_json::json!({"release-group-count": 4, "release-group-offset": 0, "release-groups": [
+                        {"id": fresh_rg, "title": "Brand New", "first-release-date": recent, "primary-type": "Album", "secondary-types": []},
+                        {"id": owned_rg, "title": "Already Here", "first-release-date": recent, "primary-type": "EP", "secondary-types": []},
+                        {"id": "aaaaaaaa-0000-0000-0000-000000000000", "title": "Old", "first-release-date": "2001-05-01", "primary-type": "Album", "secondary-types": []},
+                        {"id": "bbbbbbbb-0000-0000-0000-000000000000", "title": "Live", "first-release-date": recent, "primary-type": "Album", "secondary-types": ["Live"]}
+                    ]}))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.info_bases.write().unwrap().musicbrainz = format!("http://127.0.0.1:{port}");
+        s.set_contact("tests@example.org").ok();
+        {
+            let lib = s.library.lock().unwrap();
+            let mut t = pm_model::Track {
+                id: None,
+                title: "Song".into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: "Daft Punk".into(),
+                    mbid: Some(pm_model::Mbid::parse(artist_mbid).unwrap()),
+                }],
+                album: Some(pm_model::Album {
+                    id: None,
+                    title: "Already Here".into(),
+                    album_artist: Some("Daft Punk".into()),
+                    release_mbid: None,
+                    release_group_mbid: Some(pm_model::Mbid::parse(owned_rg).unwrap()),
+                    year: Some(2026),
+                    upc: None,
+                    total_discs: None,
+                }),
+                track_no: Some(1),
+                disc_no: None,
+                duration_ms: Some(1000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join("song.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(1000),
+                },
+                recording_mbid: None,
+                isrc: None,
+                acoustid: None,
+                canonical: None,
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            t.id = None;
+            lib.upsert_track(&t).unwrap();
+        }
+        let app = router(s.clone());
+        // First call: nothing cached yet, a refresh starts in the background.
+        let (st, p) = call(&app, "GET", "/v1/library/new-releases", None).await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(p["artists_total"], 1);
+        let mut page = p;
+        for _ in 0..300 {
+            if page["artists_checked"] == 1 && page["refreshing"] == false {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            page = call(&app, "GET", "/v1/library/new-releases", None).await.1;
+        }
+        assert_eq!(page["artists_checked"], 1, "{page}");
+        let items = page["items"].as_array().unwrap();
+        let titles: Vec<&str> = items.iter().map(|i| i["title"].as_str().unwrap()).collect();
+        assert_eq!(
+            titles,
+            ["Brand New", "Already Here"],
+            "old and live records are left out"
+        );
+        assert!(items[0].get("in_library").is_none());
+        assert_eq!(items[1]["in_library"]["title"], "Already Here");
+        assert_eq!(
+            items[0]["url"],
+            format!("https://musicbrainz.org/release-group/{fresh_rg}")
+        );
+        // Cached for a week: another page read does not hit MusicBrainz again.
+        let before = hits.load(std::sync::atomic::Ordering::SeqCst);
+        call(&app, "GET", "/v1/library/new-releases", None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), before);
+    }
+
+    #[tokio::test]
+    async fn a_sleep_timer_pauses_the_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("long.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "one"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(
+                serde_json::json!({"items": [{"uri": wav.to_string_lossy()}], "replace": true, "play": true}),
+            ),
+        )
+        .await;
+        let (_, v) = call(&app, "GET", &format!("/v1/zones/{zid}/sleep"), None).await;
+        assert!(v.get("ends_at_ms").is_none());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": 0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": 1})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v["remaining_ms"].as_u64().unwrap() <= 1000);
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let mut paused = false;
+        for _ in 0..400 {
+            if zone.state().transport == pm_zones::Transport::Paused {
+                paused = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(paused, "the zone did not pause: {:?}", zone.state().transport);
+        let (_, v) = call(&app, "GET", &format!("/v1/zones/{zid}/sleep"), None).await;
+        assert!(v.get("ends_at_ms").is_none(), "timer cleared after firing");
+        // Cancel: set and clear, nothing pauses later.
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": 3600})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(s.sleep_ends_at(zone.id()).is_some());
+        let (_, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": null})),
+        )
+        .await;
+        assert!(v.get("ends_at_ms").is_none());
+        assert!(s.sleep_ends_at(zone.id()).is_none());
     }
 
     #[tokio::test]

@@ -48,7 +48,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('bar:', w.document.querySelector('#np').textContent.replace(/\s+/g, ' ').trim(), '| quality:', w.document.querySelector('#quality .qtext').textContent, '| zone:', w.document.querySelector('#zonename').textContent);
   w.document.querySelector('#np').click(); await sleep(400);
   console.log('overlay hidden?', w.document.querySelector('#nowplaying').hidden, '| overlay h1:', w.document.querySelector('#nowplaying h1')?.textContent);
+  // Now Playing carries the sleep timer menu and the (hidden until loaded) lyrics panel.
+  if (!w.document.querySelector('#npsleep')) errors.push('no sleep timer button on Now Playing');
+  if (!w.document.querySelector('#nplyrics')) errors.push('no lyrics panel on Now Playing');
+  const sleepBtn = w.document.querySelector('#npsleep'); if (sleepBtn) { sleepBtn.click(); await sleep(200); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('sleep menu:', items.join(' | ')); if (!items.includes('Off')) errors.push('sleep menu incomplete'); w.document.body.click(); await sleep(100); }
   w.document.querySelector('#npclose').click();
+  // Albums: Focus chips filter the grid; "All" shows everything again.
+  w.document.querySelector('.nav-item[data-view="albums"]').click(); await sleep(900);
+  const chips = w.document.querySelectorAll('[data-focus]');
+  const allTiles = w.document.querySelectorAll('.tile').length;
+  console.log('focus chips:', [...chips].map((c) => c.textContent.trim()).join(' | '), '| tiles', allTiles);
+  for (const c of chips) { if (!c.dataset.focus) continue; c.click(); await sleep(400); const n = w.document.querySelectorAll('.tile').length; if (n > allTiles || n === 0) errors.push(`focus ${c.dataset.focus}: ${n} tiles of ${allTiles}`); }
+  const allChip = w.document.querySelector('[data-focus=""]'); if (allChip) { allChip.click(); await sleep(400); if (w.document.querySelectorAll('.tile').length !== allTiles) errors.push('focus All did not restore the grid'); }
   // search
   const s = w.document.querySelector('#search'); s.value = 'mono'; s.dispatchEvent(new w.Event('input', { bubbles: true })); await sleep(900);
   console.log('[search]', w.document.querySelector('#main h2')?.textContent, '| rows', w.document.querySelectorAll('.track').length);

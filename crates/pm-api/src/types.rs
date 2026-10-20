@@ -96,6 +96,22 @@ pub struct TransferRequest {
     pub to: String,
 }
 
+/// Sleep timer: pause the zone after `seconds`; `null` cancels.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SetSleep {
+    #[serde(default)]
+    pub seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SleepView {
+    /// Unix milliseconds when the zone pauses; absent when no timer is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRadio {
     pub on: bool,
@@ -401,6 +417,34 @@ pub struct PlaylistDetail {
     pub playlist: Playlist,
     /// One entry per item: the library track that matches its canonical URL, if any.
     pub tracks: Vec<Option<Track>>,
+}
+
+/// A release group MusicBrainz lists for one of the library's artists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewRelease {
+    pub artist_id: i64,
+    pub artist: String,
+    pub release_group_mbid: String,
+    pub title: String,
+    /// `YYYY-MM-DD` (MusicBrainz may give only a year or a month).
+    pub first_release_date: String,
+    /// `Album`, `EP` or `Single`.
+    pub kind: String,
+    pub url: String,
+    /// The library album with this release group, when you already have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_library: Option<Album>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NewReleasesPage {
+    pub items: Vec<NewRelease>,
+    /// Library artists with a MusicBrainz id (only those can be checked).
+    pub artists_total: usize,
+    pub artists_checked: usize,
+    pub refreshing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<i64>,
 }
 
 /// A track's lyrics, from its tags or a sidecar `.lrc` file.

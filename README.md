@@ -16,13 +16,14 @@ MusicBrainz ids, ISRC, ReplayGain, embedded art and genres, keeps everything in 
 full-text search, watches folders for changes, and can add or remove folders from the UI. Covers
 come from the files, a `cover.jpg`, or the Cover Art Archive; artist pages get a portrait and a
 biography from Wikidata and Wikipedia. Play history, Home (recently added and played, most played),
-favourites, genres, and search across tracks, albums, artists and genres. Lyrics come from the
+favourites, genres, new releases from your artists (MusicBrainz, for artists tagged with an MBID), and search
+across tracks, albums, artists and genres. Lyrics come from the
 files' tags or a sidecar `.lrc` and follow the position on Now Playing when they are timed.
 
 **Playback.** FLAC, ALAC, WAV, AIFF, DSF/DFF (native DSD or DoP), MP3, AAC and Vorbis. Bit-perfect
 by default: every conversion is a named stage with a quality level in the signal path. Zones with
 gapless playback, queues that survive restarts (shuffle what comes next, save as a playlist, transfer
-to another zone, library radio when they run out), grouping with drift correction, and a per-zone DSP
+to another zone, library radio when they run out, a sleep timer), grouping with drift correction, and a per-zone DSP
 chain (parametric EQ, convolution, crossfeed, ReplayGain, headroom, volume, dither, resampling only
 when an output needs it). Internet radio by URL with ICY titles, a radio-browser.info directory and
 saved stations, and two account-free streaming sources behind one `StreamingService` interface: the

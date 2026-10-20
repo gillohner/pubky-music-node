@@ -23,7 +23,7 @@ use pm_zones::{Insert, QueueItem, Transport, ZoneState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
@@ -147,6 +147,9 @@ struct App {
     album_focus: Option<pm_library::Focus>,
     /// Private files on the homeserver as last listed (`Err` = not signed in / unreachable).
     pubky_files: Option<Result<Vec<pm_pubky::homeserver::RemoteFile>, String>>,
+    /// Sleep timer for the local player (node zones keep theirs on the node).
+    local_sleep_at: Option<Instant>,
+    new_releases: Option<pm_api::types::NewReleasesPage>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -241,6 +244,8 @@ impl App {
             album_formats: HashMap::new(),
             album_focus: None,
             pubky_files: None,
+            local_sleep_at: None,
+            new_releases: None,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -403,6 +408,7 @@ impl App {
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
                 Msg::PubkyFiles(r) => self.pubky_files = Some(r),
+                Msg::NewReleases(nr) => self.new_releases = Some(*nr),
                 Msg::AlbumFormats(f) => {
                     self.album_formats = f.into_iter().map(|x| (x.album_id, x)).collect();
                 }
@@ -1185,6 +1191,47 @@ impl App {
             if !home.most_played_albums.is_empty() {
                 self.album_row(ui, "Most played albums", &home.most_played_albums, None);
             }
+            if let Some(nr) = self.new_releases.clone() {
+                if nr.artists_total > 0 {
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("New releases from your artists")
+                                .strong()
+                                .size(16.0),
+                        );
+                        ui.weak(if nr.refreshing {
+                            format!("checking {} of {} artists…", nr.artists_checked, nr.artists_total)
+                        } else {
+                            format!(
+                                "{} of {} tagged artists checked",
+                                nr.artists_checked, nr.artists_total
+                            )
+                        });
+                        if !nr.refreshing && ui.small_button("Refresh").clicked() {
+                            self.backend.send(Cmd::LoadNewReleases);
+                        }
+                    });
+                    if nr.items.is_empty() {
+                        ui.weak("Nothing from the last year yet.");
+                    }
+                    for r in nr.items.iter().take(12) {
+                        ui.horizontal(|ui| {
+                            ui.label(&r.title);
+                            ui.weak(format!("{} · {} · {}", r.kind, r.artist, r.first_release_date));
+                            if let Some(a) = &r.in_library {
+                                if let Some(id) = a.id {
+                                    if ui.small_button("In library").clicked() {
+                                        self.open_album(id);
+                                    }
+                                }
+                            } else {
+                                ui.hyperlink_to("MusicBrainz", &r.url);
+                            }
+                        });
+                    }
+                }
+            }
             if !home.most_played.is_empty() {
                 ui.add_space(14.0);
                 ui.label(egui::RichText::new("Most played tracks").strong().size(16.0));
@@ -1277,6 +1324,26 @@ impl App {
                 self.close_now_playing();
             }
             ui.weak(format!("Now playing on {}", self.zone_name(&self.settings.zone)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Sleep timer", |ui| {
+                    for m in [15u64, 30, 45, 60, 90] {
+                        if ui.button(format!("{m} minutes")).clicked() {
+                            self.set_sleep(Some(m * 60));
+                            ui.close();
+                        }
+                    }
+                    if ui.button("Off").clicked() {
+                        self.set_sleep(None);
+                        ui.close();
+                    }
+                });
+                if self.is_local() {
+                    if let Some(at) = self.local_sleep_at {
+                        let left = at.saturating_duration_since(Instant::now()).as_secs();
+                        ui.weak(format!("pausing in {} min", left.div_ceil(60)));
+                    }
+                }
+            });
         });
         let Some(np) = zone.now_playing.clone() else {
             ui.add_space(40.0);
@@ -2629,6 +2696,18 @@ impl App {
         }
     }
 
+    /// Sleep timer: the node keeps it for its zones; the local player is timed here.
+    fn set_sleep(&mut self, seconds: Option<u64>) {
+        if self.is_local() {
+            self.local_sleep_at = seconds.map(|s| Instant::now() + Duration::from_secs(s));
+        } else {
+            self.backend.send(Cmd::SetSleep {
+                zone: self.settings.zone.clone(),
+                seconds,
+            });
+        }
+    }
+
     fn queue_view(&mut self, ui: &mut egui::Ui) {
         let zone = self.current_zone();
         let items = self.queue_items();
@@ -3476,6 +3555,10 @@ impl App {
         if last_poll.elapsed() >= Duration::from_secs(2) {
             *last_poll = std::time::Instant::now();
             self.backend.send(Cmd::PubkyLoginPoll);
+        }
+        if self.local_sleep_at.is_some_and(|at| Instant::now() >= at) {
+            self.local_sleep_at = None;
+            self.local.zone.pause();
         }
         ctx.request_repaint_after(Duration::from_millis(500));
         let mut open = true;
