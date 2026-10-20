@@ -363,11 +363,13 @@ impl App {
         ui.label(egui::RichText::new("LIBRARY").small().weak());
         for (label, view) in [
             ("Albums", View::Albums),
+            ("Artists", View::Artists),
             ("Tracks", View::Tracks),
             ("Playlists", View::Playlists),
         ] {
             let selected = self.view == view
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
+                || matches!((&self.view, &view), (View::Artist(_), View::Artists))
                 || matches!((&self.view, &view), (View::Playlist(_), View::Playlists));
             if ui.selectable_label(selected, label).clicked() {
                 if view == View::Tracks && self.tracks.is_empty() {
@@ -375,6 +377,9 @@ impl App {
                 }
                 if view == View::Playlists {
                     self.backend.send(Cmd::LoadPlaylists);
+                }
+                if view == View::Artists {
+                    self.backend.send(Cmd::LoadArtists);
                 }
                 self.view = view;
             }
