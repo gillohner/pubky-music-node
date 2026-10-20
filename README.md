@@ -7,7 +7,8 @@ playlists, favourites, reviews, listening activity) kept on your Pubky homeserve
 
 The implementor handoff is the plan; `docs/PINAKES-CONTEXT.md` is its §12 and overrides §8 where
 they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.md`; the HTTP API in
-`docs/api.md`; deployment (bare metal, Docker, Umbrel) in `docs/deploy.md`.
+`docs/api.md`; deployment (bare metal, Docker, Umbrel) in `docs/deploy.md`. What changed when is in
+`docs/CHANGELOG.md`.
 
 ## What it does today
 
