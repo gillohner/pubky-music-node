@@ -138,7 +138,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     let db_path = cfg.db_path();
     let lib = pm_library::Library::open(&db_path)?;
-    let registry = outputs::discover();
+    let registry = outputs::discover_all(&cfg.outputs);
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
         tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Config => print!("{}", toml::to_string_pretty(&cfg)?),
         Cmd::Serve => serve(&cfg).await?,
         Cmd::Outputs => {
-            let registry = outputs::discover();
+            let registry = outputs::discover_all(&cfg.outputs);
             for o in registry.list() {
                 println!("{}\t{}\t{}", o.id, o.name, serde_json::to_string(&o.caps)?);
             }

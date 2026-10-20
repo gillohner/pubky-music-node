@@ -2271,6 +2271,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2685,6 +2695,21 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mdns-sd"
+version = "0.21.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8562654710f72a9cbce4b0d5b7c366a2f94330ba1ce3740f15e932ea2d37b161"
+dependencies = [
+ "fastrand",
+ "flume 0.12.0",
+ "if-addrs",
+ "log",
+ "mio",
+ "socket-pktinfo",
+ "socket2",
+]
 
 [[package]]
 name = "memchr"
@@ -3636,6 +3661,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-endpoint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mdns-sd",
+ "pm-model",
+ "pm-out-local",
+ "pm-stream",
+ "pm-zones",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pm-library"
 version = "0.1.0"
 dependencies = [
@@ -3678,6 +3719,7 @@ dependencies = [
  "pm-library",
  "pm-model",
  "pm-out-local",
+ "pm-out-net",
  "pm-pubky",
  "pm-zones",
  "serde",
@@ -3702,6 +3744,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-out-net"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hound",
+ "mdns-sd",
+ "pm-audio",
+ "pm-endpoint",
+ "pm-model",
+ "pm-stream",
+ "pm-zones",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pm-pubky"
 version = "0.1.0"
 dependencies = [
@@ -3718,6 +3777,17 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "pm-stream"
+version = "0.1.0"
+dependencies = [
+ "pm-model",
+ "pm-zones",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4919,6 +4989,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "socket-pktinfo"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "612942246d0cc239cfd83af1dfd39be47f649208a3524e5e9da651910128e0ac"
+dependencies = [
+ "libc",
+ "socket2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

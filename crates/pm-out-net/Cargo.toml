@@ -1,0 +1,22 @@
+[package]
+name = "pm-out-net"
+description = "Network endpoint output for the Pubky Music Node (pm-stream protocol)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+pm-zones = { workspace = true }
+pm-stream = { workspace = true }
+async-trait = { workspace = true }
+mdns-sd = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pm-audio = { workspace = true }
+pm-endpoint = { workspace = true }
+hound = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true }

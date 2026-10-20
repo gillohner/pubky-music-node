@@ -49,3 +49,15 @@ app store. Points worth knowing:
 
 Image builds are not possible on the development machine (no Docker daemon); CI's `docker` job
 builds the image to catch Dockerfile drift.
+
+## Endpoints (a Pi next to a DAC)
+
+```sh
+cargo build --release -p pm-endpoint --features alsa     # on the endpoint machine
+pm-endpoint --name "Kitchen Pi"                          # 0.0.0.0:7790, advertised over mDNS
+```
+
+The node lists the endpoint's outputs next to its own (`[outputs] discover = true`, or
+`endpoints = ["192.168.1.20:7790"]` where multicast does not cross). The endpoint receives the
+negotiated format and packs it for its DAC exactly as the node would locally; its DAC buffer paces
+the stream (ADR 0007). The traffic is plain TCP on the LAN; never expose the port to the internet.

@@ -22,6 +22,7 @@ pm-audio = { workspace = true }
 pm-pubky = { workspace = true }
 pm-library = { workspace = true }
 pm-api = { workspace = true }
+pm-out-net = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

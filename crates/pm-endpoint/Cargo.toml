@@ -1,0 +1,27 @@
+[package]
+name = "pm-endpoint"
+description = "Endpoint daemon: serves this machine's outputs to a Pubky Music Node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pm-endpoint"
+path = "src/main.rs"
+
+[features]
+default = []
+alsa = ["dep:pm-out-local", "pm-out-local/alsa"]
+
+[dependencies]
+pm-model = { workspace = true }
+pm-zones = { workspace = true }
+pm-stream = { workspace = true }
+pm-out-local = { workspace = true, optional = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+mdns-sd = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

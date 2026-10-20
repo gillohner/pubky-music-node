@@ -21,13 +21,16 @@ they conflict. Decisions live in `docs/adr/`.
 | `pm-api` | native `/v1` HTTP + WebSocket API (`docs/api.md`) | M3 server side done |
 | `pm-client` | Rust client for `/v1` (HTTP + event stream) | done |
 | `pm-app` | native controller and player (egui): Roon-style browse, queue, transport, signal path; plays locally through its own DAC | first cut, needs a desktop to run |
-| `pm-node` | the binary: CLI plus `serve` (API, one zone per output) | CLI and daemon |
+| `pm-stream` | node ↔ endpoint wire protocol (ADR 0007): endpoint-paced push, no conversion | done |
+| `pm-endpoint` | the endpoint daemon ("our RoonBridge"): local outputs over `pm-stream`, mDNS advertised | loopback bit-exact; Pi test pending |
+| `pm-out-net` | node-side `Output` for endpoints, mDNS discovery | done |
+| `pm-node` | the binary: CLI plus `serve` (API, one zone per output incl. endpoints) | CLI and daemon |
 
 Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
 Roon: `sidecars/roon-bridge` scrobbles Roon playback to the node and imports Roon playlists through
 the official Extension API (untested against a Core so far).
 
-Not started: `pm-sources`, `pm-out-oaat`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
+Not started: `pm-sources`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
 `pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.
 
 ## Build
@@ -59,6 +62,7 @@ pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001
 pm-node discover trends                     # live Pinakes facets and music cards
 pm-node -c node.toml serve                  # API + zones; then: cargo run -p pm-app (PM_NODE, PM_TOKEN)
 pm-node -c node.toml upload a.flac b.flac   # to the homeserver's private storage (needs a session)
+pm-endpoint --name "Kitchen Pi"            # on another machine; the node finds it over mDNS
 ```
 
 ## Upstream etiquette

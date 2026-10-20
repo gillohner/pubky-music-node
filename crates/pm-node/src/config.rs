@@ -15,6 +15,7 @@ pub struct NodeConfig {
     /// Pinakes, Nexus and network settings (see `pm_pubky::PmPubkyConfig`).
     pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
+    pub outputs: OutputsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,6 +47,7 @@ impl Default for NodeConfig {
             library: LibraryConfig::default(),
             pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
+            outputs: OutputsConfig::default(),
         }
     }
 }
@@ -56,6 +58,28 @@ impl Default for LibraryConfig {
             folders: Vec::new(),
             watch: true,
             watch_quiet_secs: 15,
+        }
+    }
+}
+
+/// Network endpoints (`pm-endpoint`) this node plays to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OutputsConfig {
+    /// Endpoint addresses (`host:port`) to connect to at start, besides discovery.
+    pub endpoints: Vec<String>,
+    /// Browse mDNS for endpoints at start.
+    pub discover: bool,
+    /// How long to listen for mDNS answers.
+    pub discover_ms: u64,
+}
+
+impl Default for OutputsConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            discover: true,
+            discover_ms: 1500,
         }
     }
 }
