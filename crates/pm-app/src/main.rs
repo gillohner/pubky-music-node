@@ -369,7 +369,19 @@ impl App {
                 }
                 Msg::PubkyLoginDone(user) => {
                     self.login = None;
+                    if let Some(u) = &user {
+                        if self.friends_viewer.trim().is_empty() {
+                            self.friends_viewer = u.clone();
+                        }
+                    }
                     self.toast(format!("node signed in as {}", user.unwrap_or_default()));
+                }
+                Msg::PubkyUser(user) => {
+                    if let Some(u) = user {
+                        if self.friends_viewer.trim().is_empty() {
+                            self.friends_viewer = u;
+                        }
+                    }
                 }
                 Msg::Dsp(z, cfg) => {
                     if z == self.settings.zone {
@@ -1926,7 +1938,7 @@ impl App {
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.friends_viewer)
-                    .hint_text("your pubky (z32) for friends' activity")
+                    .hint_text("your pubky (z32); filled in when the node is signed in")
                     .desired_width(300.0),
             );
             if ui.button("Friends").clicked() && self.friends_viewer.trim().len() == 52 {

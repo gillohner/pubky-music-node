@@ -177,6 +177,8 @@ pub enum Msg {
     /// A node-side Pubky Ring sign-in: the URL to show, or the signed-in user.
     PubkyLoginUrl(String),
     PubkyLoginDone(Option<String>),
+    /// The node's signed-in Pubky user, if any (at connect).
+    PubkyUser(Option<String>),
     Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
     Genres(Vec<pm_library::GenreSummary>),
@@ -329,6 +331,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
         c.home(12).await.map(|h| Msg::Home(Box::new(h))),
         c.favourites().await.map(|f| Msg::Favourites(Box::new(f))),
         c.playlists().await.map(Msg::Playlists),
+        c.pubky_status().await.map(|p| Msg::PubkyUser(p.user)),
     ] {
         match r {
             Ok(m) => out.send(m),
