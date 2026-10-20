@@ -81,24 +81,144 @@ enum Reply {
     Raw(Response),
 }
 
-fn envelope(status: &str, mut body: Map<String, Value>) -> Response {
+/// Response format: Subsonic's default is XML; `f=json` (what most modern
+/// clients send) selects JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fmt {
+    Json,
+    Xml,
+}
+
+fn fmt_of(p: &Params) -> Fmt {
+    match p.get("f").map(String::as_str) {
+        Some("json") | Some("jsonp") => Fmt::Json,
+        _ => Fmt::Xml,
+    }
+}
+
+fn envelope(fmt: Fmt, status: &str, mut body: Map<String, Value>) -> Response {
     body.insert("status".into(), json!(status));
     body.insert("version".into(), json!(API_VERSION));
     body.insert("type".into(), json!("pubky-music-node"));
     body.insert("serverVersion".into(), json!(env!("CARGO_PKG_VERSION")));
     body.insert("openSubsonic".into(), json!(true));
-    let doc = json!({ "subsonic-response": Value::Object(body) });
-    (
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        doc.to_string(),
-    )
-        .into_response()
+    match fmt {
+        Fmt::Json => {
+            let doc = json!({ "subsonic-response": Value::Object(body) });
+            (
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                doc.to_string(),
+            )
+                .into_response()
+        }
+        Fmt::Xml => (
+            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+            to_xml(&body),
+        )
+            .into_response(),
+    }
 }
 
-fn error_response(e: SubErr) -> Response {
+fn error_response(fmt: Fmt, e: SubErr) -> Response {
     let mut m = Map::new();
     m.insert("error".into(), json!({ "code": e.code, "message": e.message }));
-    envelope("failed", m)
+    envelope(fmt, "failed", m)
+}
+
+// ---- XML rendering of the same shapes ----
+
+fn xml_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            '\'' => o.push_str("&apos;"),
+            c if (c as u32) < 0x20 && c != '\n' && c != '\t' && c != '\r' => {}
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+fn scalar_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Subsonic XML convention: scalars become attributes, arrays become
+/// repeated child elements, objects become child elements. A `value`
+/// string inside an object becomes the element's text.
+fn xml_element(out: &mut String, name: &str, v: &Value) {
+    match v {
+        Value::Object(m) => {
+            out.push('<');
+            out.push_str(name);
+            let mut children: Vec<(&String, &Value)> = Vec::new();
+            let mut text: Option<String> = None;
+            for (k, val) in m {
+                match val {
+                    Value::Array(_) | Value::Object(_) => children.push((k, val)),
+                    Value::Null => {}
+                    _ if k == "value" => text = scalar_text(val),
+                    _ => {
+                        if let Some(t) = scalar_text(val) {
+                            out.push(' ');
+                            out.push_str(k);
+                            out.push_str("=\"");
+                            out.push_str(&xml_escape(&t));
+                            out.push('"');
+                        }
+                    }
+                }
+            }
+            if children.is_empty() && text.is_none() {
+                out.push_str("/>");
+                return;
+            }
+            out.push('>');
+            if let Some(t) = text {
+                out.push_str(&xml_escape(&t));
+            }
+            for (k, val) in children {
+                xml_element(out, k, val);
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+        }
+        Value::Array(items) => {
+            for it in items {
+                xml_element(out, name, it);
+            }
+        }
+        other => {
+            if let Some(t) = scalar_text(other) {
+                out.push('<');
+                out.push_str(name);
+                out.push('>');
+                out.push_str(&xml_escape(&t));
+                out.push_str("</");
+                out.push_str(name);
+                out.push('>');
+            }
+        }
+    }
+}
+
+fn to_xml(body: &Map<String, Value>) -> String {
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    let mut root = body.clone();
+    root.insert("xmlns".into(), json!("http://subsonic.org/restapi"));
+    xml_element(&mut out, "subsonic-response", &Value::Object(root));
+    out
 }
 
 async fn rest(
@@ -119,13 +239,14 @@ async fn rest(
         }
     }
     let method = method.trim_end_matches(".view").to_string();
+    let fmt = fmt_of(&params);
     if let Err(e) = authenticate(&s, &params) {
-        return error_response(e);
+        return error_response(fmt, e);
     }
     match dispatch(&s, &method, &params, &headers).await {
-        Ok(Reply::Json(m)) => envelope("ok", m),
+        Ok(Reply::Json(m)) => envelope(fmt, "ok", m),
         Ok(Reply::Raw(r)) => r,
-        Err(e) => error_response(e),
+        Err(e) => error_response(fmt, e),
     }
 }
 
@@ -855,5 +976,55 @@ fn ranged(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -> Response {
             Body::from(bytes),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xml_follows_the_subsonic_conventions() {
+        let mut m = Map::new();
+        m.insert(
+            "artists".into(),
+            json!({"ignoredArticles": "", "index": [
+                {"name": "D", "artist": [{"id": "ar-1", "name": "Daft <Punk> & co", "albumCount": 1}]},
+                {"name": "N", "artist": [{"id": "ar-2", "name": "New Order", "albumCount": 1, "musicBrainzId": null}]}
+            ]}),
+        );
+        m.insert("status".into(), json!("ok"));
+        let xml = to_xml(&m);
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><subsonic-response"));
+        assert!(xml.contains("xmlns=\"http://subsonic.org/restapi\""));
+        assert!(xml.contains("status=\"ok\""));
+        // Attribute order follows the JSON map (alphabetical); check pieces.
+        assert!(xml.contains("<artists ignoredArticles=\"\"><index"));
+        assert!(xml.contains("name=\"Daft &lt;Punk&gt; &amp; co\""));
+        assert!(xml.contains("albumCount=\"1\""));
+        assert!(xml.contains("/></index>"));
+        assert_eq!(xml.matches("<index ").count(), 2);
+        assert_eq!(xml.matches("<artist ").count(), 2);
+        assert!(!xml.contains("musicBrainzId"), "nulls are omitted");
+        let mut e = Map::new();
+        e.insert("error".into(), json!({"code": 40, "message": "Wrong \"creds\""}));
+        let xml = to_xml(&e);
+        assert!(
+            xml.contains("<error code=\"40\" message=\"Wrong &quot;creds&quot;\"/>"),
+            "{xml}"
+        );
+        let mut t = Map::new();
+        t.insert("lyrics".into(), json!({"artist": "x", "value": "line one"}));
+        assert!(to_xml(&t).contains("<lyrics artist=\"x\">line one</lyrics>"));
+    }
+
+    #[test]
+    fn format_selection() {
+        let mut p = Params::new();
+        assert_eq!(fmt_of(&p), Fmt::Xml);
+        p.insert("f".into(), "json".into());
+        assert_eq!(fmt_of(&p), Fmt::Json);
+        p.insert("f".into(), "xml".into());
+        assert_eq!(fmt_of(&p), Fmt::Xml);
     }
 }

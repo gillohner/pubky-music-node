@@ -143,6 +143,18 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let r = call(&app, "/rest/ping?u=bob&p=pw&v=1.16.1&c=test&f=json").await;
     assert_eq!(r["error"]["code"], 40);
 
+    // Without f=json the answer is XML (Subsonic's default), with the same auth.
+    let (st, h, bytes) = get(&app, "/rest/ping.view?u=alice&p=pw&v=1.16.1&c=test", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(h["content-type"].to_str().unwrap().starts_with("application/xml"));
+    let xml = String::from_utf8(bytes).unwrap();
+    assert!(
+        xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><subsonic-response "),
+        "{xml}"
+    );
+    assert!(xml.contains("xmlns=\"http://subsonic.org/restapi\""), "{xml}");
+    assert!(xml.contains("status=\"ok\""));
+
     // Scan through the Subsonic verb, then browse by ID3.
     call(&app, &format!("/rest/startScan?{auth}")).await;
     for _ in 0..500 {
