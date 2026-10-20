@@ -33,8 +33,8 @@ Internet Archive's audio collections (live recordings, netlabels, public domain)
 **Outputs.** Local ALSA devices on the node, `pm-endpoint` daemons on other machines (own protocol,
 ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, and any browser.
 
-**Controllers.** A built-in web UI at `/` (phone-friendly, keyboard shortcuts, Now Playing with the
-signal path), a native Rust app (`pm-app`, egui) that also plays through the computer it runs on, an
+**Controllers.** A built-in web UI at `/` (phone-friendly and installable to the home screen, keyboard
+shortcuts, media keys, Now Playing with the signal path and lyrics), a native Rust app (`pm-app`, egui) that also plays through the computer it runs on, an
 OpenSubsonic server for Symfonium, Feishin, Amperfy and friends, and a `/v1` API with a WebSocket
 event stream for anything else.
 

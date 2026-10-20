@@ -72,6 +72,9 @@ works until the Pubky transport exists (ADR 0008):
 
 ## Phones and desktops without the native app
 
+The web UI ships a web app manifest: on a phone, "Add to Home Screen" installs it as a standalone
+app with the node's icon, and the lock screen's media keys drive browser playback.
+
 Any OpenSubsonic client (Symfonium, Feishin, Amperfy, play:Sub, Supersonic) connects to the node's
 address with user `[api] subsonic_user` and the API token as password, and gets browsing, search,
 playlists, cover art and bit-exact file streaming (`docs/api.md`).

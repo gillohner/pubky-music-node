@@ -193,6 +193,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/app/", get(web_ui))
         .route("/app.css", get(web_css))
         .route("/app.js", get(web_js))
+        .route("/manifest.webmanifest", get(web_manifest))
+        .route("/icon.svg", get(web_icon))
         .nest("/v1", v1)
         .merge(subsonic::router(state))
 }
@@ -254,6 +256,28 @@ async fn web_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("../static/app.js"),
+    )
+        .into_response()
+}
+
+async fn web_manifest() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/manifest.webmanifest"),
+    )
+        .into_response()
+}
+
+async fn web_icon() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("../static/icon.svg"),
     )
         .into_response()
 }
@@ -2545,6 +2569,8 @@ mod tests {
             ("/app/", "<title>Pubky Music</title>"),
             ("/app.css", ".player"),
             ("/app.js", "/v1/events"),
+            ("/manifest.webmanifest", "\"display\": \"standalone\""),
+            ("/icon.svg", "<svg"),
         ] {
             let resp = app
                 .clone()
