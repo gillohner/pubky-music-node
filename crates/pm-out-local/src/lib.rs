@@ -29,6 +29,51 @@ pub fn is_direct_hw_name(name: &str) -> bool {
     name.starts_with("hw:")
 }
 
+/// Silence alsa-lib's own stderr chatter ("Found no matching channel map"
+/// for every plugin it enumerates). The node reports device errors itself;
+/// call once at start of any process that opens ALSA devices.
+#[cfg(feature = "alsa")]
+pub fn quiet_alsa_lib() {
+    // alsa-lib's handler is variadic, which stable Rust cannot define. A
+    // non-variadic function that ignores every argument is ABI-compatible
+    // for the fixed arguments on every platform alsa-lib runs on (the extra
+    // arguments are simply never read), so the cast below is sound in
+    // practice and is what C programs do when they pass `(void (*)())` here.
+    unsafe extern "C" fn silent(
+        _file: *const std::os::raw::c_char,
+        _line: std::os::raw::c_int,
+        _function: *const std::os::raw::c_char,
+        _err: std::os::raw::c_int,
+        _fmt: *const std::os::raw::c_char,
+    ) {
+    }
+    type Fixed = unsafe extern "C" fn(
+        *const std::os::raw::c_char,
+        std::os::raw::c_int,
+        *const std::os::raw::c_char,
+        std::os::raw::c_int,
+        *const std::os::raw::c_char,
+    );
+    // SAFETY: see above; the handler never touches its arguments.
+    unsafe {
+        let handler: alsa_sys::snd_lib_error_handler_t = Some(std::mem::transmute::<
+            Fixed,
+            unsafe extern "C" fn(
+                *const std::os::raw::c_char,
+                std::os::raw::c_int,
+                *const std::os::raw::c_char,
+                std::os::raw::c_int,
+                *const std::os::raw::c_char,
+                ...
+            ),
+        >(silent as Fixed));
+        alsa_sys::snd_lib_error_set_handler(handler);
+    }
+}
+
+#[cfg(not(feature = "alsa"))]
+pub fn quiet_alsa_lib() {}
+
 #[cfg(test)]
 mod tests {
     #[test]

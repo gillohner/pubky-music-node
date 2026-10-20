@@ -4135,6 +4135,7 @@ name = "pm-out-local"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "alsa-sys",
  "async-trait",
  "cpal",
  "pm-model",

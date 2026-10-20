@@ -29,6 +29,8 @@ fn main() -> eframe::Result {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    #[cfg(feature = "alsa")]
+    pm_out_local::quiet_alsa_lib();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Pubky Music")
@@ -1103,7 +1105,7 @@ impl App {
                     ui.small(egui::RichText::new(format!("● {}", info.name)).color(theme::OK));
                 }
                 Conn::Connecting => {
-                    ui.small(egui::RichText::new("○ connecting…").weak());
+                    ui.small(egui::RichText::new("● connecting…").weak());
                 }
                 Conn::Failed(e) => {
                     ui.small(egui::RichText::new("● not connected").color(theme::BAD))
@@ -1131,7 +1133,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .selectable_label(self.show_queue, "☰ Queue")
+                    .selectable_label(self.show_queue, "≡ Queue")
                     .on_hover_text("Toggle the queue panel (Q)")
                     .clicked()
                 {
@@ -3147,14 +3149,14 @@ impl App {
                     }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        if ui.button("⏮").on_hover_text("Previous").clicked() {
+                        if ui.button("◀◀").on_hover_text("Previous").clicked() {
                             transport = Some((id.clone(), TransportAction::Previous));
                         }
                         let playing = z.transport == pm_zones::Transport::Playing;
                         if ui.add(theme::primary(if playing { "⏸" } else { "▶" })).clicked() {
                             transport = Some((id.clone(), TransportAction::Toggle));
                         }
-                        if ui.button("⏭").on_hover_text("Next").clicked() {
+                        if ui.button("▶▶").on_hover_text("Next").clicked() {
                             transport = Some((id.clone(), TransportAction::Next));
                         }
                         let hw = outputs
@@ -3905,14 +3907,14 @@ impl App {
                 |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space((ui.available_width() - 136.0).max(0.0) / 2.0);
-                        if theme::icon_button(ui, 36.0, "⏮", "Previous").clicked() {
+                        if theme::icon_button(ui, 36.0, "◀◀", "Previous").clicked() {
                             self.transport(TransportAction::Previous);
                         }
                         let playing = zone.transport == Transport::Playing;
                         if theme::play_button(ui, 44.0, playing).clicked() {
                             self.transport(TransportAction::Toggle);
                         }
-                        if theme::icon_button(ui, 36.0, "⏭", "Next").clicked() {
+                        if theme::icon_button(ui, 36.0, "▶▶", "Next").clicked() {
                             self.transport(TransportAction::Next);
                         }
                     });

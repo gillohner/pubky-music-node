@@ -10,7 +10,7 @@ license.workspace = true
 default = []
 # Needs libasound2-dev at build time. Off by default so the workspace builds on machines
 # without ALSA headers (this one); enable on the node: `--features pm-out-local/alsa`.
-alsa = ["dep:alsa"]
+alsa = ["dep:alsa", "dep:alsa-sys"]
 # Cross-platform shared-mode output (CoreAudio, WASAPI, ALSA) for desktops; not bit-perfect.
 cpal = ["dep:cpal"]
 
@@ -21,4 +21,5 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 alsa = { version = "0.9", optional = true }
+alsa-sys = { version = "0.3", optional = true }
 cpal = { version = "0.15", optional = true }
