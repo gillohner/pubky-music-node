@@ -120,7 +120,7 @@ struct App {
     album_tracks: HashMap<i64, Vec<Track>>,
     tracks: Vec<Track>,
     search: String,
-    results: Option<(String, Vec<Track>)>,
+    results: Option<(String, pm_api::types::SearchResults)>,
     queues: HashMap<String, Vec<QueueItem>>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
@@ -293,9 +293,9 @@ impl App {
                     self.remember_tracks(t.iter());
                     self.tracks = t;
                 }
-                Msg::SearchResults(q, t) => {
-                    self.remember_tracks(t.iter());
-                    self.results = Some((q, t));
+                Msg::SearchResults(q, r) => {
+                    self.remember_tracks(r.tracks.iter());
+                    self.results = Some((q, *r));
                 }
                 Msg::Queue(z, q) => {
                     self.queues.insert(z, q);
@@ -828,16 +828,46 @@ impl App {
                 self.track_table(ui, &tracks, true);
             }
             View::Search => {
-                let Some((q, tracks)) = self.results.clone() else {
+                let Some((q, r)) = self.results.clone() else {
                     ui.weak("Type a query and press Enter.");
                     return;
                 };
                 ui.heading(format!("Results for “{q}”"));
-                if tracks.is_empty() {
-                    ui.weak("Nothing matched.");
-                } else {
-                    self.track_table(ui, &tracks, true);
+                if r.tracks.is_empty() && r.albums.is_empty() && r.artists.is_empty() && r.genres.is_empty() {
+                    ui.weak("Nothing matched. Search looks at titles, artists, albums and genres.");
+                    return;
                 }
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    if !r.albums.is_empty() {
+                        self.album_row(ui, "Albums", &r.albums, None);
+                    }
+                    if !r.artists.is_empty() || !r.genres.is_empty() {
+                        ui.add_space(14.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for a in &r.artists {
+                                if ui.add(theme::secondary(&a.name)).clicked() {
+                                    if !self.artist_details.contains_key(&a.id) {
+                                        self.backend.send(Cmd::LoadArtist(a.id));
+                                    }
+                                    self.view = View::Artist(a.id);
+                                }
+                            }
+                            for g in &r.genres {
+                                if ui.add(theme::secondary(&format!("#{}", g.name))).clicked() {
+                                    if !self.genre_details.contains_key(&g.id) {
+                                        self.backend.send(Cmd::LoadGenre(g.id));
+                                    }
+                                    self.view = View::Genre(g.id);
+                                }
+                            }
+                        });
+                    }
+                    if !r.tracks.is_empty() {
+                        ui.add_space(14.0);
+                        ui.label(egui::RichText::new("Tracks").strong().size(16.0));
+                        self.track_table(ui, &r.tracks, true);
+                    }
+                });
             }
             View::Queue => self.queue_view(ui),
             View::Settings => self.settings_view(ui),

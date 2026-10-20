@@ -3,7 +3,8 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
-    Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Tags, TransportAction,
+    Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, SearchResults, Tags,
+    TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -147,7 +148,7 @@ pub enum Msg {
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
-    SearchResults(String, Vec<Track>),
+    SearchResults(String, Box<SearchResults>),
     Queue(String, Vec<QueueItem>),
     LibraryChanged,
     ScanStarted,
@@ -371,8 +372,8 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::LoadAlbumTracks(id) => out.send(Msg::AlbumTracks(id, c.album_tracks(id).await?)),
         Cmd::LoadTracks => out.send(Msg::Tracks(c.tracks(None, 1000).await?)),
         Cmd::Search(q) => {
-            let r = c.search(&q, 200).await?;
-            out.send(Msg::SearchResults(q, r));
+            let r = c.search_all(&q, 200).await?;
+            out.send(Msg::SearchResults(q, Box::new(r)));
         }
         Cmd::Queue(z) => {
             let q = c.queue(&z).await?;

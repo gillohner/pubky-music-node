@@ -28,7 +28,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/stats` | | `LibraryStats` |
 | GET | `/v1/library/tracks` | `?after=<id>&limit=` | `{tracks}` |
 | GET | `/v1/library/tracks/{id}` | | `Track` |
-| GET | `/v1/library/search` | `?q=&limit=` | `{tracks}` (FTS5) |
+| GET | `/v1/library/search` | `?q=&limit=` | `{tracks, albums, artists, genres}`: tracks by full text (title, artist, album, genre words), albums by title, artists and genres by name |
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |

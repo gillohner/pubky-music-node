@@ -621,14 +621,35 @@ async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Res
         .into_response())
 }
 
-async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<Tracks> {
+async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
     let limit = q.limit.unwrap_or(50).min(500);
-    let tracks = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .search_tracks(&q.q, limit)?;
-    Ok(Json(Tracks { tracks }))
+    let needle = q.q.trim().to_lowercase();
+    let lib = s.library.lock().expect("library poisoned");
+    let tracks = lib.search_tracks(&q.q, limit)?;
+    let albums = if needle.is_empty() {
+        Vec::new()
+    } else {
+        lib.search_albums(&q.q, 24)?
+    };
+    let contains = |name: &str| !needle.is_empty() && name.to_lowercase().contains(&needle);
+    let artists = lib
+        .list_artists()?
+        .into_iter()
+        .filter(|a| contains(&a.name))
+        .take(24)
+        .collect();
+    let genres = lib
+        .list_genres()?
+        .into_iter()
+        .filter(|g| contains(&g.name))
+        .take(12)
+        .collect();
+    Ok(Json(SearchResults {
+        tracks,
+        albums,
+        artists,
+        genres,
+    }))
 }
 
 async fn artists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::ArtistSummary>> {

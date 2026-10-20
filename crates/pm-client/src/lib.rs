@@ -320,14 +320,17 @@ impl NodeClient {
         self.get("library/home", &[("limit", limit.to_string())]).await
     }
 
+    /// Matching tracks only (see [`Self::search_all`] for albums, artists and genres too).
     pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<Track>> {
-        Ok(self
-            .get::<Tracks>(
-                "library/search",
-                &[("q", q.to_string()), ("limit", limit.to_string())],
-            )
-            .await?
-            .tracks)
+        Ok(self.search_all(q, limit).await?.tracks)
+    }
+
+    pub async fn search_all(&self, q: &str, limit: u32) -> Result<SearchResults> {
+        self.get(
+            "library/search",
+            &[("q", q.to_string()), ("limit", limit.to_string())],
+        )
+        .await
     }
 
     pub async fn genres(&self) -> Result<Vec<pm_library::GenreSummary>> {

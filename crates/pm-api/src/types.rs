@@ -111,6 +111,19 @@ pub struct Tracks {
     pub tracks: Vec<Track>,
 }
 
+/// Everything a query matched: tracks by full text, albums by title,
+/// artists and genres by name.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearchResults {
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub albums: Vec<Album>,
+    #[serde(default)]
+    pub artists: Vec<ArtistSummary>,
+    #[serde(default)]
+    pub genres: Vec<pm_library::GenreSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limit {
     pub limit: Option<u32>,

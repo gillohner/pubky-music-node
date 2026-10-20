@@ -498,6 +498,19 @@ async fn playlist_lifecycle() {
     assert_eq!(mine["tags"].as_array().unwrap().len(), 1);
     assert_eq!(mine["tags"][0]["label"], "funk");
 
+    // Search spans tracks, albums, artists and genres.
+    let (st, sr) = call(&app, "GET", "/v1/library/search?q=lists", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!sr["albums"].as_array().unwrap().is_empty(), "{sr}");
+    let (_, sr) = call(&app, "GET", "/v1/library/search?q=tester", None).await;
+    assert_eq!(sr["artists"][0]["name"], "Tester");
+    let (_, sr) = call(&app, "GET", "/v1/library/search?q=disco", None).await;
+    assert_eq!(sr["genres"][0]["name"], "Disco");
+    assert!(
+        !sr["tracks"].as_array().unwrap().is_empty(),
+        "genre words reach the track search too"
+    );
+
     // Genres come from the files' tags, split on separators.
     let (st, genres) = call(&app, "GET", "/v1/library/genres", None).await;
     assert_eq!(st, StatusCode::OK);

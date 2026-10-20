@@ -323,7 +323,7 @@
     try {
       const r = await api('GET', '/library/search?q=' + encodeURIComponent(q) + '&limit=200');
       if (search.value.trim() !== q) return;
-      setView('search', { q, tracks: r.tracks });
+      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [] });
     } catch (e) { toast(e.message, 'error'); }
   };
   search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 280); });
@@ -544,9 +544,15 @@
           break;
         }
         case 'search': {
-          const { q, tracks } = state.viewArg || { q: '', tracks: [] };
-          main.innerHTML = pageHead(`Results for “${q}”`, tracks.length) + (tracks.length ? trackRows(tracks, { key: 'search' }) : emptyState('search', 'Nothing matched', 'Search looks at titles, artists and albums in your library.'));
+          const { q, tracks, albums, artists, genres } = { tracks: [], albums: [], artists: [], genres: [], ...(state.viewArg || { q: '' }) };
+          const none = !tracks.length && !albums.length && !artists.length && !genres.length;
+          main.innerHTML = pageHead(`Results for “${q}”`, none ? null : `${tracks.length} tracks · ${albums.length} albums · ${artists.length} artists`)
+            + (none ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library.') : '')
+            + (albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div><div class="strip">${albums.map(tile).join('')}</div></section>` : '')
+            + (artists.length || genres.length ? `<section class="section"><div class="section-head"><h3>${artists.length ? 'Artists' : ''}${artists.length && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div><div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
+            + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '');
           lists.search = tracks;
+          $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
           break;
         }
         case 'playlists': {
