@@ -1240,7 +1240,7 @@ impl App {
                         ui.label(egui::RichText::new("Tracks").strong().size(16.0));
                         self.track_table(ui, &r.tracks, true);
                     }
-                    // Streaming services answer in the same search (TIDAL when configured).
+                    // Streaming services answer in the same search (TIDAL when configured, Deezer always).
                     for src in &r.sources {
                         if src.items.is_empty() {
                             continue;
@@ -1252,7 +1252,11 @@ impl App {
                                     .strong()
                                     .size(16.0),
                             );
-                            ui.weak("streams from your account");
+                            ui.weak(if src.source == "deezer" {
+                                "30-second previews, no account needed"
+                            } else {
+                                "streams from your account"
+                            });
                         });
                         let mut open: Option<String> = None;
                         let mut play: Option<(pm_api::types::SourceHit, bool)> = None;
@@ -2516,10 +2520,11 @@ impl App {
                                     ui.close();
                                 }
                                 if tracks[i].isrc.is_some()
-                                    && tidal_on
                                     && ui
-                                        .button("Stream from TIDAL")
-                                        .on_hover_text("The same recording (by ISRC) from your TIDAL account")
+                                        .button(if tidal_on { "Stream from TIDAL" } else { "Stream a version" })
+                                        .on_hover_text(
+                                            "The same recording (by ISRC) from TIDAL when you are signed in, else a Deezer preview",
+                                        )
                                         .clicked()
                                 {
                                     action = Some((i, "version"));
