@@ -75,6 +75,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       if (cfg.headroom_db !== -3 || cfg.eq.length !== 1 || cfg2.eq.length !== 0) errors.push('dsp editor round trip failed');
     } else errors.push('dsp editor did not open');
   }
+  // Queue editing on the browser zone: add two tracks, move, remove.
+  w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
+  const adds = w.document.querySelectorAll('.track [data-act="add"]');
+  if (adds.length >= 2) { adds[0].click(); await sleep(200); adds[1].click(); await sleep(200); }
+  w.document.querySelector('.nav-item[data-view="queue"]').click(); await sleep(700);
+  const before = w.document.querySelectorAll('.list.queue .list-row').length;
+  const down = w.document.querySelector('[data-qdown="0"]'); if (down) { down.click(); await sleep(400); }
+  const rm = w.document.querySelector('[data-qrm="0"]'); if (rm) { rm.click(); await sleep(400); }
+  const after = w.document.querySelectorAll('.list.queue .list-row').length;
+  console.log('queue rows before/after:', before, after);
+  if (before < 2 || after !== before - 1) errors.push('queue editing failed');
   // Track ⋯ menu opens with playlist entries.
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
   const more = w.document.querySelector('.track [data-act="more"]');

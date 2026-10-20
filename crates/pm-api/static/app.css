@@ -397,6 +397,16 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .card.genre { border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform 0.15s var(--ease), border-color 0.15s var(--ease); }
 .card.genre:hover { transform: translateY(-2px); border-color: var(--line-strong); }
 
+/* ---- queue ---- */
+.list.queue .list-row { padding: 6px 10px 6px 6px; }
+.list.queue .num { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.list.queue .q-actions { opacity: 0; display: inline-flex; gap: 2px; transition: opacity 0.12s; }
+.list.queue .list-row:hover .q-actions, .list.queue .list-row:focus-within .q-actions { opacity: 1; }
+.list.queue .q-actions .icon-btn { width: 30px; height: 30px; }
+.list.queue .q-actions .icon-btn .ic { width: 16px; height: 16px; }
+.list.queue .ic.up { transform: rotate(180deg); }
+.list.queue .icon-btn:disabled { opacity: 0.3; cursor: default; }
+
 /* ---- DSP editor ---- */
 .dsp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 16px; align-items: end; }
 .dsp-grid label span, .eq-row span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }

@@ -715,8 +715,25 @@
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           main.innerHTML = pageHead('Queue', z ? z.name : '', q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '')
-            + (q.length ? `<div class="list">${q.map((it, i) => `<div class="list-row clickable ${z && z.queue_index === i ? 'cur' : ''}" data-qi="${i}"><span class="muted small" style="width:24px;text-align:right">${z && z.queue_index === i ? '▶' : i + 1}</span><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(it.title || it.uri)}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${fmt(it.duration_ms)}</span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(it.title || it.uri)}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${fmt(it.duration_ms)}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
+          const qedit = async (i, op) => {
+            if (isBrowser()) {
+              const bq = state.browserQueue; const j = op === 'up' ? i - 1 : op === 'down' ? i + 1 : null;
+              if (op === 'rm') { bq.splice(i, 1); if (state.browserIndex === i) browserPlay(Math.min(i, bq.length - 1)); else if (state.browserIndex > i) state.browserIndex--; }
+              else if (j != null && j >= 0 && j < bq.length) { const [it] = bq.splice(i, 1); bq.splice(j, 0, it); if (state.browserIndex === i) state.browserIndex = j; else if (state.browserIndex === j) state.browserIndex = i; }
+              render(); return;
+            }
+            const it = q[i]; if (!it) return;
+            try {
+              if (op === 'rm') await api('DELETE', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`);
+              else await api('PUT', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`, { to_index: op === 'up' ? i - 1 : i + 1 });
+              refreshQueue();
+            } catch (e) { toast(e.message, 'error'); }
+          };
+          $$('[data-qup]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qup), 'up'));
+          $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
+          $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
           const qc = $('#qclear'); if (qc) qc.onclick = async () => { try { await api('DELETE', `/zones/${state.zone}/queue`); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
           break;
         }
