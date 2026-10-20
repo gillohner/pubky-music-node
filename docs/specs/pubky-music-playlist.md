@@ -67,8 +67,10 @@ Common fields: `type` (one of the three below) and `v` (currently `1`; readers r
 
 ### `pubky.music/review`
 
-`target_uri` (canonical music URL), optional `rating` 1–5, `text` 1–2000 characters, `created_at`.
-Posts have timestamp ids, so "one review per target" is a reader rule: the newest wins.
+`target_uri` (canonical music URL), optional `rating` 1–5, `text` ≤ 2000 characters (may be empty
+when a `rating` is present; required otherwise), `created_at`. Posts have timestamp ids, so "one
+review per target" is a reader rule: the newest wins. The node edits a review in place (same id,
+`created_at` kept) and tombstones the post on removal.
 
 ### `pubky.music/activity`
 
@@ -77,8 +79,18 @@ Posts have timestamp ids, so "one review per target" is a reader rule: the newes
 
 Optional fields are omitted when absent (JS style); readers accept `null` too.
 
+## Favourites and tags (not posts)
+
+| Object | Type | Path | Visibility |
+| :-- | :-- | :-- | :-- |
+| favourite ("heart") | `PubkyAppBookmark { uri, created_at }`, id = the spec's hash of `uri` | `/priv/pubky.app/bookmarks/<id>` | private by default (ADR 0010); the public path is the spec's own |
+| tag | `PubkyAppTag { uri, label, created_at }`, id = the spec's hash of `uri:label` | `/pub/pubky.app/tags/<id>` | public, written only on explicit user action (ADR 0011) |
+
+Both use the same canonical music URLs as the envelopes above; an object without a MusicBrainz id
+(or ISRC fallback) cannot be hearted or tagged.
+
 ## For Nexus / Pinakes
 
-Nothing to index yet: private posts are invisible to indexers by design. When an object goes
+Tags are the indexable part today (public, standard `PubkyAppTag`s on canonical URLs). Private posts and bookmarks are invisible to indexers by design. When an object goes
 public it is an ordinary post; a `content` starting with `{"type":"pubky.music/` marks it as one
 of these envelopes. Playlist items then count as references to their canonical URLs.
