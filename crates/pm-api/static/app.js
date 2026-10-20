@@ -1130,7 +1130,7 @@
             try {
               const r = await api('GET', '/outputs/discovery');
               box.innerHTML = (r.notes.length ? r.notes.map((n) => `<div class="notice">${esc(n)}</div>`).join('') : '')
-                + `<p class="muted small">Audio is fetched from <code>${esc(r.public_url)}</code>${r.local_address ? ` · this node's address: <code>${esc(r.local_address)}</code>` : ''}</p>`
+                + `<p class="muted small">Scanned from <strong>${esc(r.node || '')}</strong>${r.local_address ? ` at <code>${esc(r.local_address)}</code>` : ''} · audio is fetched from <code>${esc(r.public_url)}</code></p>`
                 + (r.upnp.length ? `<div class="list">${r.upnp.map((d) => `<div class="list-row"><div class="grow"><div class="name">${esc(d.friendly_name || d.location)}</div><div class="sub">${esc(d.from)}${d.server ? ' · ' + esc(d.server) : ''}</div></div><span class="pill ${d.renderer ? 'ok' : ''}">${d.renderer ? (d.output ? 'renderer · output' : 'renderer') : 'not a renderer'}</span></div>`).join('')}</div>` : (r.upnp_enabled ? '' : '<p class="muted small">UPnP discovery is off.</p>'))
                 + (r.cast.length ? `<div class="list">${r.cast.map((d) => `<div class="list-row"><div class="grow"><div class="name">${esc(d.friendly_name)}</div><div class="sub">${esc(d.addr)}</div></div><span class="pill ok">Cast</span></div>`).join('')}</div>` : '');
             } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }

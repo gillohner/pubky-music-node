@@ -477,6 +477,9 @@ pub struct DiscoveryReport {
     /// Renderer addresses added by hand (`POST /v1/outputs/upnp`).
     #[serde(default)]
     pub saved_addresses: Vec<String>,
+    /// Which node scanned (people run more than one).
+    #[serde(default)]
+    pub node: String,
 }
 
 /// `POST /v1/outputs/upnp`: a renderer by IP, `ip:port` or description URL.

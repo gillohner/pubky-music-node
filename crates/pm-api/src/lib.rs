@@ -480,6 +480,7 @@ async fn discovery_report(
         upnp_enabled: s.upnp,
         cast_enabled: s.cast,
         saved_addresses: s.upnp_addresses(),
+        node: s.name.clone(),
     }))
 }
 
