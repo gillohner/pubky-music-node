@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("migrations/0003_album_art.sql")),
     (4, include_str!("migrations/0004_settings.sql")),
     (5, include_str!("migrations/0005_plays.sql")),
+    (6, include_str!("migrations/0006_favourites.sql")),
 ];
 
 pub struct Library {
@@ -44,6 +45,17 @@ pub struct ArtistSummary {
     pub mbid: Option<Mbid>,
     pub albums: u64,
     pub tracks: u64,
+}
+
+/// A favourite as stored locally (a v1 bookmark of a canonical music URL).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FavouriteRow {
+    pub id: String,
+    pub uri: String,
+    /// Microseconds.
+    pub created_at: i64,
+    pub synced_at: Option<i64>,
+    pub deleted: bool,
 }
 
 /// One entry of the play history.
@@ -435,6 +447,109 @@ impl Library {
             .query_map(params![limit as i64, offset as i64], row_to_album)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         v.into_iter().collect()
+    }
+
+    // ----- favourites -------------------------------------------------------
+
+    /// Add (or revive) a favourite; returns the row. Idempotent.
+    pub fn add_favourite(&self, id: &str, uri: &str, created_at: i64) -> Result<FavouriteRow> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO favourites(id, uri, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, NULL, 0)
+             ON CONFLICT(uri) DO UPDATE SET deleted = 0,
+                 synced_at = CASE WHEN favourites.deleted = 1 THEN NULL ELSE favourites.synced_at END",
+            params![id, uri, created_at],
+        )?;
+        drop(conn);
+        Ok(self.favourite_by_uri(uri)?.expect("just inserted"))
+    }
+
+    /// Tombstone a favourite until the remote delete succeeds. `false` when unknown.
+    pub fn remove_favourite(&self, uri: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE favourites SET deleted = 1, synced_at = NULL WHERE uri = ?1 AND deleted = 0",
+            params![uri],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn favourite_by_uri(&self, uri: &str) -> Result<Option<FavouriteRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE uri = ?1",
+            params![uri],
+            row_to_favourite,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Live favourites, newest first.
+    pub fn list_favourites(&self) -> Result<Vec<FavouriteRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE deleted = 0 ORDER BY created_at DESC",
+        )?;
+        let v = stmt
+            .query_map([], row_to_favourite)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Rows to push: never synced, changed since, or tombstoned.
+    pub fn unsynced_favourites(&self) -> Result<Vec<FavouriteRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE synced_at IS NULL ORDER BY created_at",
+        )?;
+        let v = stmt
+            .query_map([], row_to_favourite)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Mark pushed; a pushed tombstone is purged.
+    pub fn mark_favourite_synced(&self, id: &str, at_micros: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM favourites WHERE id = ?1 AND deleted = 1",
+            params![id],
+        )?;
+        conn.execute(
+            "UPDATE favourites SET synced_at = ?2 WHERE id = ?1",
+            params![id, at_micros],
+        )?;
+        Ok(())
+    }
+
+    /// The album with this release MBID, if any.
+    pub fn album_by_release_mbid(&self, mbid: Mbid) -> Result<Option<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE release_mbid = ?1 LIMIT 1",
+        )?;
+        let v = stmt
+            .query_map(params![mbid.to_string()], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().next().transpose()
+    }
+
+    /// The artist with this MBID, if any.
+    pub fn artist_by_mbid(&self, mbid: Mbid) -> Result<Option<ArtistSummary>> {
+        let id: Option<i64> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT id FROM artists WHERE mbid = ?1 LIMIT 1",
+                params![mbid.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
+        match id {
+            Some(id) => self.get_artist(id),
+            None => Ok(None),
+        }
     }
 
     /// Tracks whose file name (last path segment) is `name`.
@@ -1031,6 +1146,16 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
     Ok(track)
 }
 
+fn row_to_favourite(r: &Row<'_>) -> rusqlite::Result<FavouriteRow> {
+    Ok(FavouriteRow {
+        id: r.get(0)?,
+        uri: r.get(1)?,
+        created_at: r.get(2)?,
+        synced_at: r.get(3)?,
+        deleted: r.get::<_, i64>(4)? != 0,
+    })
+}
+
 fn row_to_album(r: &Row<'_>) -> rusqlite::Result<Result<Album>> {
     let release: Option<String> = r.get(3)?;
     let rg: Option<String> = r.get(4)?;
@@ -1120,7 +1245,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 5);
+        assert_eq!(lib.schema_version().unwrap(), 6);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -1273,5 +1398,47 @@ mod play_history_tests {
         // Removing the track removes its plays.
         assert!(lib.remove_track(a).unwrap());
         assert_eq!(lib.history(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn favourites_lifecycle() {
+        let lib = Library::open_in_memory().unwrap();
+        let t = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
+        let track = lib.get_track(t).unwrap().unwrap();
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        assert!(lib.list_favourites().unwrap().is_empty());
+        let row = lib.add_favourite("id1", uri, 1_000).unwrap();
+        assert_eq!(row.synced_at, None);
+        assert_eq!(lib.unsynced_favourites().unwrap().len(), 1);
+        lib.mark_favourite_synced("id1", 2_000).unwrap();
+        assert!(lib.unsynced_favourites().unwrap().is_empty());
+        // Adding again is a no-op that keeps the sync state.
+        let again = lib.add_favourite("id1", uri, 5_000).unwrap();
+        assert_eq!(again.created_at, 1_000);
+        assert_eq!(again.synced_at, Some(2_000));
+        assert_eq!(lib.list_favourites().unwrap().len(), 1);
+        // Remove → tombstone → push → purged.
+        assert!(lib.remove_favourite(uri).unwrap());
+        assert!(!lib.remove_favourite(uri).unwrap());
+        assert!(lib.list_favourites().unwrap().is_empty());
+        let pending = lib.unsynced_favourites().unwrap();
+        assert!(pending[0].deleted);
+        lib.mark_favourite_synced("id1", 3_000).unwrap();
+        assert!(lib.favourite_by_uri(uri).unwrap().is_none());
+        // Re-adding after a purge starts fresh.
+        let fresh = lib.add_favourite("id1", uri, 9_000).unwrap();
+        assert_eq!(fresh.created_at, 9_000);
+        // Album / artist lookups by MBID.
+        let album = track.album.as_ref().unwrap();
+        let found = lib
+            .album_by_release_mbid(album.release_mbid.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.title, album.title);
+        let artist = lib
+            .artist_by_mbid(track.artists[0].mbid.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(artist.name, "Daft Punk");
     }
 }

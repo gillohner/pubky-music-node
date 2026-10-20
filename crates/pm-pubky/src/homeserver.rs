@@ -14,7 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, MusicPost, Playlist, Review, Visibility};
+use crate::schemas::{Activity, Favourite, MusicPost, Playlist, Review, Visibility};
 use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
@@ -79,7 +79,19 @@ impl NodeHomeserver {
         visibility: Visibility,
         session: Option<&PubkySession>,
     ) -> Result<Vec<String>, HomeserverError> {
-        let dir = visibility.posts_dir();
+        self.list_dir(user, &visibility.posts_dir(), visibility, session)
+            .await
+    }
+
+    /// Every entry path directly under `dir`, following the listing cursor.
+    async fn list_dir(
+        &self,
+        user: &PublicKey,
+        dir: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let dir = dir.to_string();
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -149,6 +161,32 @@ impl NodeHomeserver {
                 Ok(Some(post)) => out.push((path, post)),
                 Ok(None) => {}
                 Err(source) => tracing::warn!(%path, %source, "skipping invalid music post"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The user's favourites (music bookmarks) under `visibility`; other
+    /// bookmarks (of posts) are skipped.
+    pub async fn read_favourites(
+        &self,
+        user_z32: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<(String, Favourite)>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        let dir = Favourite::dir(visibility);
+        let mut out = Vec::new();
+        for path in self.list_dir(&user, &dir, visibility, session).await? {
+            let id = path.rsplit('/').next().unwrap_or("").to_string();
+            let bytes = self.fetch(&user, &path, visibility, session).await?;
+            match serde_json::from_slice::<pubky_app_specs::PubkyAppBookmark>(&bytes) {
+                Ok(b) => {
+                    if let Some(f) = Favourite::from_bookmark(&id, &b) {
+                        out.push((path, f));
+                    }
+                }
+                Err(e) => tracing::warn!(%path, error = %e, "skipping invalid bookmark"),
             }
         }
         Ok(out)

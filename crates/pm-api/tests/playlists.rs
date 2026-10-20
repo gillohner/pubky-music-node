@@ -257,4 +257,141 @@ async fn playlist_lifecycle() {
     assert_eq!(st, StatusCode::NOT_FOUND);
     let (_, list) = call(&app, "GET", "/v1/playlists", None).await;
     assert!(list.as_array().unwrap().is_empty());
+
+    // Favourites: a tagged track hearts by id; an untagged one and the
+    // album (no release id) are refused with a reason; the list joins back.
+    let (st, tracks) = call(&app, "GET", "/v1/library/tracks?limit=50", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let tracks = tracks["tracks"].as_array().unwrap().clone();
+    let tagged = tracks
+        .iter()
+        .find(|t| t["canonical"].is_object() || t["canonical"].is_array())
+        .unwrap_or(&tracks[0]);
+    let tagged_id = tagged["id"].as_i64().unwrap();
+    let untagged = tracks.iter().find(|t| t["canonical"].is_null());
+    let (st, f) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": tagged_id})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], true);
+    let uri = f["uri"].as_str().unwrap().to_string();
+    assert!(uri.starts_with("https://musicbrainz.org/"), "{uri}");
+    if let Some(u) = untagged {
+        let (st, e) = call(
+            &app,
+            "PUT",
+            "/v1/favourites",
+            Some(serde_json::json!({"track_id": u["id"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    }
+    let album_id = tagged["album"]["id"].as_i64().unwrap();
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"album_id": album_id})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the test album has no release id"
+    );
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": 999_999})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(&app, "PUT", "/v1/favourites", Some(serde_json::json!({}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // By canonical URL too, idempotent; an unknown URL lands in `other`.
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"uri": uri})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(
+            serde_json::json!({"uri": "https://musicbrainz.org/artist/833f00e1-781f-4edd-90e4-e52712618862"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(favs["tracks"].as_array().unwrap().len(), 1, "{favs}");
+    assert_eq!(favs["tracks"][0]["id"], tagged_id);
+    assert_eq!(favs["other"].as_array().unwrap().len(), 1);
+    assert_eq!(favs["uris"].as_array().unwrap().len(), 2);
+    let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(home["favourite_albums"].is_array());
+    // Un-heart by id through the query form.
+    let (st, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], false);
+    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    assert!(favs["tracks"].as_array().unwrap().is_empty());
+    // Subsonic sees the same hearts.
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/rest/star?id={tagged_id}&f=json&u=pubky&p=x&v=1.16.1&c=t"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, sub) = call(
+        &app,
+        "GET",
+        "/rest/getStarred2?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        sub["subsonic-response"]["starred2"]["song"][0]["id"],
+        tagged_id.to_string(),
+        "{sub}"
+    );
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/rest/unstar?id={tagged_id}&f=json&u=pubky&p=x&v=1.16.1&c=t"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getStarred2?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert!(sub["subsonic-response"]["starred2"]["song"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }

@@ -11,7 +11,7 @@ use crate::types::SyncReport;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pm_pubky::schemas::post::TYPE_PLAYLIST;
-use pm_pubky::{MusicContent, MusicPost, Network, Visibility};
+use pm_pubky::{Favourite, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
 use std::sync::{Arc, Mutex};
 
@@ -136,6 +136,59 @@ impl PubkySync {
                 .lock()
                 .expect("library poisoned")
                 .mark_music_post_synced(&row.id, now_micros())?;
+        }
+
+        // Favourites: push bookmarks and tombstones the same way.
+        let pending = library.lock().expect("library poisoned").unsynced_favourites()?;
+        for row in pending {
+            let path = Favourite::path(&row.id, Visibility::Private);
+            if row.deleted {
+                match self.homeserver.delete(&self.session, &path).await {
+                    Ok(()) => report.deleted += 1,
+                    Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => report.deleted += 1,
+                    Err(e) => {
+                        report.errors.push(format!("delete {path}: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                let Ok(uri) = pm_model::MusicUri::parse(&row.uri) else {
+                    report
+                        .errors
+                        .push(format!("{}: not a canonical music URL", row.uri));
+                    continue;
+                };
+                let b = Favourite {
+                    id: row.id.clone(),
+                    uri,
+                    created_at: row.created_at,
+                }
+                .to_bookmark();
+                if let Err(e) = self.homeserver.write_object(&self.session, &path, &b).await {
+                    report.errors.push(format!("write {path}: {e}"));
+                    continue;
+                }
+                report.pushed += 1;
+            }
+            library
+                .lock()
+                .expect("library poisoned")
+                .mark_favourite_synced(&row.id, now_micros())?;
+        }
+        let remote_favs = self
+            .homeserver
+            .read_favourites(&self.z32, Visibility::Private, Some(&self.session))
+            .await?;
+        {
+            let lib = library.lock().expect("library poisoned");
+            for (_, f) in remote_favs {
+                let url = f.uri.to_url();
+                if lib.favourite_by_uri(&url)?.is_none() {
+                    lib.add_favourite(&f.id, &url, f.created_at)?;
+                    lib.mark_favourite_synced(&f.id, now_micros())?;
+                    report.pulled += 1;
+                }
+            }
         }
 
         // Pull what the homeserver has that we do not (or has newer).

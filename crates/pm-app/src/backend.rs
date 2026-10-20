@@ -2,8 +2,8 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, HomePage, Info,
-    PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
+    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
+    Favourites, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
 };
 use pm_client::NodeClient;
 use pm_model::{Album, Track, Volume};
@@ -24,6 +24,11 @@ pub enum Cmd {
     },
     Refresh,
     LoadHome,
+    LoadFavourites,
+    SetFavourite {
+        what: FavouriteRef,
+        on: bool,
+    },
     /// A play on this computer's own zone, for the node's history.
     RecordPlay(i64),
     LoadAlbums,
@@ -116,6 +121,7 @@ pub enum Msg {
     Outputs(Vec<OutputInfo>),
     Albums(Vec<Album>),
     Home(Box<HomePage>),
+    Favourites(Box<Favourites>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
     SearchResults(String, Vec<Track>),
@@ -277,6 +283,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
         c.outputs().await.map(Msg::Outputs),
         c.albums(None, 500).await.map(Msg::Albums),
         c.home(12).await.map(|h| Msg::Home(Box::new(h))),
+        c.favourites().await.map(|f| Msg::Favourites(Box::new(f))),
         c.playlists().await.map(Msg::Playlists),
     ] {
         match r {
@@ -295,6 +302,16 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadAlbums => out.send(Msg::Albums(c.albums(None, 500).await?)),
         Cmd::LoadHome => out.send(Msg::Home(Box::new(c.home(12).await?))),
+        Cmd::LoadFavourites => out.send(Msg::Favourites(Box::new(c.favourites().await?))),
+        Cmd::SetFavourite { what, on } => {
+            let r = c.set_favourite(&what, on).await?;
+            out.send(Msg::Notice(if r.favourite {
+                "Added to favourites".into()
+            } else {
+                "Removed from favourites".into()
+            }));
+            out.send(Msg::Favourites(Box::new(c.favourites().await?)));
+        }
         Cmd::RecordPlay(id) => c.record_play(id, Some("local")).await?,
         Cmd::LoadAlbumTracks(id) => out.send(Msg::AlbumTracks(id, c.album_tracks(id).await?)),
         Cmd::LoadTracks => out.send(Msg::Tracks(c.tracks(None, 1000).await?)),

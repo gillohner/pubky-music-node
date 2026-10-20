@@ -770,9 +770,51 @@ async fn dispatch(
             } else {
                 "starred"
             };
-            m.insert(key.into(), json!({"artist": [], "album": [], "song": []}));
+            let lib = s.library.lock().expect("library poisoned");
+            let f = crate::favourites::collect(&lib).map_err(|e| SubErr::new(0, e.message))?;
+            let albums = f
+                .albums
+                .iter()
+                .map(|a| album_json(&lib, a))
+                .collect::<Result<Vec<_>, _>>()?;
+            m.insert(
+                key.into(),
+                json!({
+                    "artist": f.artists.iter().map(artist_json).collect::<Vec<_>>(),
+                    "album": albums,
+                    "song": f.tracks.iter().map(song_json).collect::<Vec<_>>(),
+                }),
+            );
         }
-        "star" | "unstar" | "setRating" | "savePlayQueue" => {}
+        "star" | "unstar" => {
+            let mut refs = Vec::new();
+            if let Some(id) = p.get("id").and_then(|v| v.parse::<i64>().ok()) {
+                refs.push(crate::types::FavouriteRef::track(id));
+            }
+            if let Some(id) = p.get("albumId").and_then(|v| parse_id(v, "al-")) {
+                refs.push(crate::types::FavouriteRef::album(id));
+            }
+            if let Some(id) = p.get("artistId").and_then(|v| parse_id(v, "ar-")) {
+                refs.push(crate::types::FavouriteRef::artist(id));
+            }
+            if refs.is_empty() {
+                return Err(SubErr::new(10, "Required parameter is missing"));
+            }
+            {
+                let lib = s.library.lock().expect("library poisoned");
+                for r in &refs {
+                    let uri =
+                        crate::favourites::canonical_for(&lib, r).map_err(|e| SubErr::new(70, e.message))?;
+                    if method == "star" {
+                        crate::favourites::add(&lib, uri)?;
+                    } else {
+                        lib.remove_favourite(&uri.to_url())?;
+                    }
+                }
+            }
+            s.notify_library();
+        }
+        "setRating" | "savePlayQueue" => {}
         "getPlayQueue" => {}
         "getNowPlaying" => {
             m.insert("nowPlaying".into(), json!({"entry": []}));

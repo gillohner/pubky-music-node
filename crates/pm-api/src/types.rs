@@ -129,9 +129,71 @@ pub struct History {
     pub plays: Vec<pm_library::PlayEntry>,
 }
 
+/// A favourite by canonical URL or by library id (one of them).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct FavouriteRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+}
+
+impl FavouriteRef {
+    pub fn uri(uri: impl Into<String>) -> Self {
+        Self {
+            uri: Some(uri.into()),
+            ..Default::default()
+        }
+    }
+    pub fn track(id: i64) -> Self {
+        Self {
+            track_id: Some(id),
+            ..Default::default()
+        }
+    }
+    pub fn album(id: i64) -> Self {
+        Self {
+            album_id: Some(id),
+            ..Default::default()
+        }
+    }
+    pub fn artist(id: i64) -> Self {
+        Self {
+            artist_id: Some(id),
+            ..Default::default()
+        }
+    }
+}
+
+/// Favourites joined to the library; `other` are canonical URLs the library
+/// has no object for (favourited elsewhere, or not scanned here).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Favourites {
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Album>,
+    pub artists: Vec<ArtistSummary>,
+    #[serde(default)]
+    pub other: Vec<String>,
+    /// Every favourited canonical URL, for quick "is this a favourite" checks.
+    #[serde(default)]
+    pub uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FavouriteChanged {
+    pub uri: String,
+    pub favourite: bool,
+}
+
 /// What the Home screen shows: the Roon-style landing page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomePage {
+    #[serde(default)]
+    pub favourite_albums: Vec<Album>,
     pub recently_added: Vec<Album>,
     pub recently_played: Vec<Album>,
     pub most_played_albums: Vec<Album>,

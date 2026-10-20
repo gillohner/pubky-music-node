@@ -15,7 +15,7 @@ use backend::{Backend, Cmd, DiscoverKind, Msg};
 use local::{LocalPlayer, LOCAL_ZONE_ID};
 use pm_api::sources::NodeSources;
 use pm_api::types::{
-    ArtistDetail, DiscoverPage, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
+    ArtistDetail, DiscoverPage, FavouriteRef, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
 };
 use pm_model::{Album, Quality, SignalPath, Track, Volume};
 use pm_zones::{Insert, QueueItem, Transport, ZoneState};
@@ -64,6 +64,7 @@ impl Default for Settings {
 enum View {
     Home,
     NowPlaying,
+    Favourites,
     Albums,
     Album(i64),
     Artists,
@@ -94,6 +95,9 @@ struct App {
     outputs: Vec<pm_zones::OutputInfo>,
     albums: Vec<Album>,
     home: Option<pm_api::types::HomePage>,
+    favourites: Option<pm_api::types::Favourites>,
+    /// Canonical URLs the user has hearted.
+    fav_uris: std::collections::HashSet<String>,
     /// Tracks the app has seen, by library id, to find covers for queue items.
     known_tracks: HashMap<i64, Track>,
     /// Last local-zone item reported to the node's history (queue item id, uri).
@@ -162,6 +166,8 @@ impl App {
             outputs: Vec::new(),
             albums: Vec::new(),
             home: None,
+            favourites: None,
+            fav_uris: std::collections::HashSet::new(),
             known_tracks: HashMap::new(),
             last_local_play: None,
             prev_view: None,
@@ -236,6 +242,11 @@ impl App {
                 }
                 Msg::Outputs(o) => self.outputs = o,
                 Msg::Albums(a) => self.albums = a,
+                Msg::Favourites(f) => {
+                    self.fav_uris = f.uris.iter().cloned().collect();
+                    self.remember_tracks(f.tracks.iter());
+                    self.favourites = Some(*f);
+                }
                 Msg::Home(h) => {
                     self.remember_tracks(h.most_played.iter().map(|p| &p.track));
                     self.remember_tracks(h.history.iter().map(|p| &p.track));
@@ -260,6 +271,7 @@ impl App {
                     self.scanning = false;
                     self.backend.send(Cmd::LoadAlbums);
                     self.backend.send(Cmd::LoadHome);
+                    self.backend.send(Cmd::LoadFavourites);
                     if self.view == View::Tracks {
                         self.backend.send(Cmd::LoadTracks);
                     }
@@ -404,6 +416,43 @@ impl App {
         }
     }
 
+    fn is_favourite_uri(&self, uri: Option<&pm_model::MusicUri>) -> bool {
+        uri.is_some_and(|u| self.fav_uris.contains(&u.to_url()))
+    }
+
+    /// A heart button; `uri` is the object's canonical URL when it has one.
+    /// Returns `Some(on)` when clicked. Objects without an identity get a
+    /// disabled heart that explains why.
+    fn heart(&mut self, ui: &mut egui::Ui, uri: Option<pm_model::MusicUri>, what: FavouriteRef) {
+        match uri {
+            Some(u) => {
+                let on = self.fav_uris.contains(&u.to_url());
+                let label = if on { "♥" } else { "♡" };
+                let btn = egui::Button::new(egui::RichText::new(label).size(16.0).color(if on {
+                    egui::Color32::from_rgb(230, 80, 110)
+                } else {
+                    ui.visuals().weak_text_color()
+                }))
+                .frame(false);
+                if ui
+                    .add(btn)
+                    .on_hover_text(if on {
+                        "Remove from favourites"
+                    } else {
+                        "Add to favourites"
+                    })
+                    .clicked()
+                {
+                    self.backend.send(Cmd::SetFavourite { what, on: !on });
+                }
+            }
+            None => {
+                ui.add_enabled(false, egui::Button::new("♡").frame(false))
+                    .on_disabled_hover_text("No MusicBrainz id yet, so this cannot be a favourite");
+            }
+        }
+    }
+
     fn open_now_playing(&mut self) {
         if self.view != View::NowPlaying {
             self.prev_view = Some(self.view.clone());
@@ -528,6 +577,7 @@ impl App {
         ui.label(egui::RichText::new("LIBRARY").small().weak());
         for (label, view) in [
             ("Home", View::Home),
+            ("Favourites", View::Favourites),
             ("Albums", View::Albums),
             ("Artists", View::Artists),
             ("Tracks", View::Tracks),
@@ -549,6 +599,9 @@ impl App {
                 }
                 if view == View::Home {
                     self.backend.send(Cmd::LoadHome);
+                }
+                if view == View::Favourites {
+                    self.backend.send(Cmd::LoadFavourites);
                 }
                 self.view = view;
             }
@@ -638,6 +691,7 @@ impl App {
         match self.view.clone() {
             View::Home => self.home_view(ui),
             View::NowPlaying => self.now_playing_view(ui),
+            View::Favourites => self.favourites_view(ui),
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
@@ -688,6 +742,9 @@ impl App {
                 ui.add_space(8.0);
                 ui.weak("The library is empty. Add folders to the node config and run a scan from Settings.");
                 return;
+            }
+            if !home.favourite_albums.is_empty() {
+                self.album_row(ui, "Favourites", &home.favourite_albums, Some(View::Favourites));
             }
             if !home.recently_added.is_empty() {
                 self.album_row(ui, "Recently added", &home.recently_added, Some(View::Albums));
@@ -874,6 +931,69 @@ impl App {
         });
     }
 
+    fn favourites_view(&mut self, ui: &mut egui::Ui) {
+        let Some(f) = self.favourites.clone() else {
+            ui.weak("Loading…");
+            return;
+        };
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Favourites");
+                ui.weak(format!(
+                    "{} albums · {} tracks · {} artists",
+                    f.albums.len(),
+                    f.tracks.len(),
+                    f.artists.len()
+                ));
+            });
+            ui.small(
+                egui::RichText::new(
+                    "Hearts are v1 Pubky bookmarks of canonical music URLs, kept in your private homeserver folder.",
+                )
+                .weak(),
+            );
+            if f.albums.is_empty() && f.tracks.is_empty() && f.artists.is_empty() && f.other.is_empty() {
+                ui.add_space(10.0);
+                ui.weak("Nothing hearted yet. Use ♡ on a track, album or artist.");
+                return;
+            }
+            if !f.albums.is_empty() {
+                self.album_row(ui, "Albums", &f.albums, None);
+            }
+            if !f.artists.is_empty() {
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new("Artists").strong().size(16.0));
+                ui.horizontal_wrapped(|ui| {
+                    for a in &f.artists {
+                        if ui.button(&a.name).clicked() {
+                            if !self.artist_details.contains_key(&a.id) {
+                                self.backend.send(Cmd::LoadArtist(a.id));
+                            }
+                            self.view = View::Artist(a.id);
+                        }
+                    }
+                });
+            }
+            if !f.tracks.is_empty() {
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Tracks").strong().size(16.0));
+                    if ui.small_button("▶ Play all").clicked() {
+                        self.play_tracks(&f.tracks, true, QueueAt::End);
+                    }
+                });
+                self.track_table(ui, &f.tracks, true);
+            }
+            if !f.other.is_empty() {
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new("Not in this library").strong().size(16.0));
+                for u in &f.other {
+                    ui.weak(short_uri(u));
+                }
+            }
+        });
+    }
+
     fn albums_view(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Albums");
@@ -953,6 +1073,13 @@ impl App {
                     if ui.button("Add to queue").clicked() {
                         self.play_tracks(&tracks, false, QueueAt::End);
                     }
+                    self.heart(
+                        ui,
+                        album
+                            .release_mbid
+                            .map(|mbid| pm_model::MusicUri::Release { mbid }),
+                        FavouriteRef::album(id),
+                    );
                 });
             });
         });
@@ -969,6 +1096,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let mut action: Option<(usize, &str)> = None;
             let mut playlist_add: Option<(usize, usize)> = None;
+            let mut fav_toggle: Option<(i64, bool)> = None;
             egui::Grid::new(("tracks", show_album))
                 .num_columns(if show_album { 5 } else { 4 })
                 .striped(true)
@@ -1002,6 +1130,31 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.weak(t.duration_ms.map(fmt_duration).unwrap_or_default());
                             ui.small(egui::RichText::new(t.file.format.to_string()).weak());
+                            if let Some(id) = t.id {
+                                let uri = t.publishable_uri().cloned();
+                                let on = self.is_favourite_uri(uri.as_ref());
+                                let label = if on { "♥" } else { "♡" };
+                                let resp = ui.add_enabled(
+                                    uri.is_some(),
+                                    egui::Button::new(egui::RichText::new(label).color(if on {
+                                        egui::Color32::from_rgb(230, 80, 110)
+                                    } else {
+                                        ui.visuals().weak_text_color()
+                                    }))
+                                    .frame(false),
+                                );
+                                if resp
+                                    .on_hover_text(if on {
+                                        "Remove from favourites"
+                                    } else {
+                                        "Add to favourites"
+                                    })
+                                    .on_disabled_hover_text("No MusicBrainz id or ISRC yet")
+                                    .clicked()
+                                {
+                                    fav_toggle = Some((id.0, !on));
+                                }
+                            }
                             ui.menu_button("⋯", |ui| {
                                 if ui.button("Play next").clicked() {
                                     action = Some((i, "next"));
@@ -1032,6 +1185,12 @@ impl App {
                     "next" => self.play_tracks(&tracks[i..=i], false, QueueAt::Next),
                     _ => self.play_tracks(&tracks[i..=i], false, QueueAt::End),
                 }
+            }
+            if let Some((tid, on)) = fav_toggle {
+                self.backend.send(Cmd::SetFavourite {
+                    what: FavouriteRef::track(tid),
+                    on,
+                });
             }
             if let Some((i, pi)) = playlist_add {
                 if let Some(tid) = tracks[i].id {
@@ -1088,7 +1247,14 @@ impl App {
             return;
         };
         ui.add_space(6.0);
-        ui.heading(egui::RichText::new(&d.artist.name).size(26.0).strong());
+        ui.horizontal(|ui| {
+            ui.heading(egui::RichText::new(&d.artist.name).size(26.0).strong());
+            self.heart(
+                ui,
+                d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),
+                FavouriteRef::artist(id),
+            );
+        });
         ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
         ui.add_space(8.0);
         let tile = 168.0;

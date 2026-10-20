@@ -45,6 +45,9 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |
 | DELETE | `/v1/playlists/{id}/items/{index}` | | `PlaylistDetail` |
 | POST | `/v1/playlists/{id}/play` | `{zone, replace?}` | `{queued, missing}` |
+| GET | `/v1/favourites` | | `{tracks, albums, artists, other: [url], uris: [url]}`: hearts joined to the library (ADR 0010) |
+| PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`; 422 when the object has no MusicBrainz id or ISRC |
+| DELETE | `/v1/favourites` | `?uri=` or `?track_id=` / `?album_id=` / `?artist_id=` | `{uri, favourite: false}` |
 | POST | `/v1/playlists/import` | `{name, description?, tracks: [{title, artist?, album?, uri?, path?}]}` | `{id, name, parsed, imported, unresolved}`; items resolve through the library (canonical URL, exact path, file name, title + artist) to canonical URLs |
 | POST | `/v1/playlists/import/file` | `?file=<name>&name=&format=` raw body: M3U/M3U8, CSV (Exportify, Soundiiz, Roon export saved as CSV) or Roon's Excel export (.xlsx) | same report; 422 when nothing matched |
 | GET / POST | `/v1/activity` | POST: `{track: {title, artist?, album?, uri?}, source, duration_ms?}` | plays as private activity posts; 422 when nothing canonical resolves |

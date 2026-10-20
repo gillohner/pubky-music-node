@@ -11,6 +11,7 @@
 
 pub mod activity;
 pub mod discover;
+pub mod favourites;
 pub mod files;
 pub mod playlists;
 pub mod sources;
@@ -117,6 +118,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
         .route("/activity", get(activity::list).post(activity::record))
+        .route(
+            "/favourites",
+            get(favourites::list)
+                .put(favourites::put)
+                .delete(favourites::delete),
+        )
         .route(
             "/playlists/{id}",
             get(playlists::get)
@@ -641,7 +648,13 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
 async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<HomePage> {
     let limit = p.limit.unwrap_or(12).min(100);
     let lib = s.library.lock().expect("library poisoned");
+    let favourite_albums = favourites::collect(&lib)?
+        .albums
+        .into_iter()
+        .take(limit as usize)
+        .collect();
     Ok(Json(HomePage {
+        favourite_albums,
         recently_added: lib.recent_albums(0, limit)?,
         recently_played: lib.recently_played_albums(limit)?,
         most_played_albums: lib.most_played_albums(limit)?,

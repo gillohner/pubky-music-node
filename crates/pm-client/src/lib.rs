@@ -457,6 +457,38 @@ impl NodeClient {
         .await
     }
 
+    // ---- favourites ----
+
+    pub async fn favourites(&self) -> Result<Favourites> {
+        self.get("favourites", &[]).await
+    }
+
+    /// Heart or un-heart a track, album, artist or canonical URL.
+    pub async fn set_favourite(&self, r: &FavouriteRef, on: bool) -> Result<FavouriteChanged> {
+        if on {
+            self.send(reqwest::Method::PUT, "favourites", Some(r)).await
+        } else {
+            let mut url = self.url("favourites");
+            {
+                let mut q = url.query_pairs_mut();
+                if let Some(u) = &r.uri {
+                    q.append_pair("uri", u);
+                }
+                if let Some(i) = r.track_id {
+                    q.append_pair("track_id", &i.to_string());
+                }
+                if let Some(i) = r.album_id {
+                    q.append_pair("album_id", &i.to_string());
+                }
+                if let Some(i) = r.artist_id {
+                    q.append_pair("artist_id", &i.to_string());
+                }
+            }
+            let resp = self.authed(self.http.delete(url)).send().await?;
+            Self::finish(resp).await
+        }
+    }
+
     /// Import described tracks as a new private playlist.
     pub async fn import_playlist(&self, req: &ImportPlaylist) -> Result<ImportedPlaylist> {
         self.send(reqwest::Method::POST, "playlists/import", Some(req))
