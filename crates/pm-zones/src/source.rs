@@ -55,5 +55,11 @@ pub trait Processor: Send {
 /// Opens queue items and plans chains. Shared by every zone of a node.
 pub trait SourceFactory: Send + Sync {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError>;
-    fn plan(&self, source: AudioFormat, caps: &OutputCaps) -> Result<Box<dyn Processor>, SourceError>;
+    /// Plan the chain for `output` (per-zone DSP keys on it).
+    fn plan(
+        &self,
+        source: AudioFormat,
+        caps: &OutputCaps,
+        output: &crate::sink::OutputId,
+    ) -> Result<Box<dyn Processor>, SourceError>;
 }

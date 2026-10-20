@@ -45,6 +45,8 @@ pub struct NodeState {
     pub token: Option<String>,
     pub subsonic_user: String,
     pub discovery: Option<Arc<pm_pubky::Discovery>>,
+    /// The zones' source factory, also the per-output DSP registry.
+    pub sources: Arc<NodeSources>,
     pub events: broadcast::Sender<ApiEvent>,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
@@ -80,7 +82,8 @@ impl NodeState {
             art_dir: settings.art_dir,
             mirror_dir: settings.mirror_dir,
             outputs,
-            zones: Zones::new(sources),
+            zones: Zones::new(sources.clone()),
+            sources,
             token: settings.token,
             subsonic_user: settings.subsonic_user,
             discovery,

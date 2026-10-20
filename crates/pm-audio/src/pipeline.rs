@@ -25,7 +25,8 @@ use pm_model::{
     SignalPath,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DsdMode {
     /// Native if the output takes it, else DoP, else fail.
     #[default]
@@ -36,7 +37,8 @@ pub enum DsdMode {
     ToPcm,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PipelineConfig {
     /// Pre-DSP attenuation in dB (negative), applied in float.
     pub headroom_db: Option<f32>,
@@ -48,6 +50,8 @@ pub struct PipelineConfig {
     /// Resample (64-bit float FFT sinc, shown as a `Lossy` stage) when the
     /// output cannot take the source rate. Off → `ConversionRequired`.
     pub resample: bool,
+    /// Parametric EQ bands (M8); empty keeps the path bit-perfect.
+    pub eq: Vec<crate::dsp::EqBand>,
 }
 
 impl Default for PipelineConfig {
@@ -58,13 +62,16 @@ impl Default for PipelineConfig {
             dither: true,
             dsd_mode: DsdMode::Auto,
             resample: true,
+            eq: Vec::new(),
         }
     }
 }
 
 impl PipelineConfig {
     fn wants_float(&self) -> bool {
-        self.headroom_db.is_some_and(|d| d != 0.0) || self.volume_db.is_some_and(|d| d != 0.0)
+        self.headroom_db.is_some_and(|d| d != 0.0)
+            || self.volume_db.is_some_and(|d| d != 0.0)
+            || self.eq.iter().any(|b| b.enabled)
     }
 }
 
@@ -90,6 +97,7 @@ pub enum PipelineError {
 
 enum Stage {
     Resample(Box<crate::resample::Resampler>),
+    Eq(Box<crate::dsp::Equalizer>),
     Gain {
         gain: f64,
     },
@@ -245,6 +253,14 @@ impl Plan {
                     PathStage::new("headroom", cur, fbits, Quality::Lossy)
                         .with_note(format!("{db:+.1} dB in 64-bit float")),
                 );
+                cur = fbits;
+            }
+            if cfg.eq.iter().any(|b| b.enabled) {
+                let eq = crate::dsp::Equalizer::new(&cfg.eq, fbits.rate_hz, source.channels as usize)
+                    .map_err(PipelineError::InvalidFormat)?;
+                let note = format!("{} in 64-bit float", eq.describe());
+                stages.push(Stage::Eq(Box::new(eq)));
+                path.push(PathStage::new("eq", cur, fbits, Quality::Enhanced).with_note(note));
                 cur = fbits;
             }
             if let Some(db) = cfg.volume_db.filter(|d| *d != 0.0) {
@@ -455,6 +471,13 @@ impl Plan {
                         }
                         _ => return Err(PipelineError::InvalidFormat("resample expects PCM".into())),
                     }
+                }
+                Stage::Eq(eq) => {
+                    let mut b = block.to_f64();
+                    if let Samples::PcmF64(v) = &mut b.samples {
+                        eq.process(v);
+                    }
+                    b
                 }
                 Stage::Gain { gain } => {
                     let mut b = block.to_f64();
@@ -734,6 +757,48 @@ mod tests {
         // A supported rate never resamples.
         let plan = Plan::negotiate(AudioFormat::pcm(48_000, 24, 2), &c, &PipelineConfig::default()).unwrap();
         assert!(plan.is_bit_perfect());
+    }
+
+    #[test]
+    fn eq_is_an_enhanced_float_stage_and_absent_by_default() {
+        let src = AudioFormat::pcm(48_000, 24, 2);
+        let cfg = PipelineConfig {
+            eq: vec![crate::dsp::EqBand::peaking(100.0, -3.0, 1.0)],
+            ..Default::default()
+        };
+        let mut plan = Plan::negotiate(src, &OutputCaps::unlimited(), &cfg).unwrap();
+        let names: Vec<_> = plan
+            .signal_path()
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["decode", "eq", "requantize", "output"]);
+        let eq_stage = &plan.signal_path().stages[1];
+        assert_eq!(eq_stage.quality, Quality::Enhanced);
+        assert!(eq_stage.note.as_deref().unwrap().contains("peak 100 Hz -3.0 dB"));
+        assert!(!plan.is_bit_perfect());
+        let out = plan.process(random_block(src, 1000)).unwrap();
+        assert_eq!(out.format, src);
+        // A disabled band changes nothing.
+        let mut off = crate::dsp::EqBand::peaking(100.0, -3.0, 1.0);
+        off.enabled = false;
+        let plan = Plan::negotiate(
+            src,
+            &OutputCaps::unlimited(),
+            &PipelineConfig {
+                eq: vec![off],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(plan.is_bit_perfect());
+        // Invalid bands are refused at negotiation.
+        let bad = PipelineConfig {
+            eq: vec![crate::dsp::EqBand::peaking(40_000.0, 1.0, 1.0)],
+            ..Default::default()
+        };
+        assert!(Plan::negotiate(src, &OutputCaps::unlimited(), &bad).is_err());
     }
 
     #[test]

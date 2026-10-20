@@ -131,7 +131,12 @@ impl SourceFactory for Factory {
         }))
     }
 
-    fn plan(&self, source: AudioFormat, caps: &OutputCaps) -> Result<Box<dyn Processor>, SourceError> {
+    fn plan(
+        &self,
+        source: AudioFormat,
+        caps: &OutputCaps,
+        _output: &OutputId,
+    ) -> Result<Box<dyn Processor>, SourceError> {
         if !caps.accepts(&source) {
             return Err(SourceError::Negotiate {
                 format: source,

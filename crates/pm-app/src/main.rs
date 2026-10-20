@@ -107,6 +107,9 @@ struct App {
     new_zone_name: String,
     new_zone_outputs: Vec<String>,
     show_queue: bool,
+    show_dsp: bool,
+    /// DSP editor state: zone id it belongs to and the config being edited.
+    dsp_edit: Option<(String, pm_audio::PipelineConfig)>,
     /// Last queue version seen per remote zone, to refetch the queue on change.
     queue_versions: HashMap<String, u64>,
     new_playlist_name: String,
@@ -162,6 +165,8 @@ impl App {
             new_zone_name: String::new(),
             new_zone_outputs: Vec::new(),
             show_queue: true,
+            show_dsp: false,
+            dsp_edit: None,
             queue_versions: HashMap::new(),
             new_playlist_name: String::new(),
             covers: HashMap::new(),
@@ -234,6 +239,11 @@ impl App {
                     self.toast("scan started");
                 }
                 Msg::Artists(a) => self.artists = a,
+                Msg::Dsp(z, cfg) => {
+                    if z == self.settings.zone {
+                        self.dsp_edit = Some((z, *cfg));
+                    }
+                }
                 Msg::Discovered(kind, page) => {
                     self.discover_loading = false;
                     self.discover = Some((kind, *page));
@@ -1427,6 +1437,13 @@ impl App {
                 {
                     self.show_path = !self.show_path;
                 }
+                if ui
+                    .add(egui::Button::new("DSP").frame(false))
+                    .on_hover_text("EQ, headroom, volume for this zone")
+                    .clicked()
+                {
+                    self.open_dsp();
+                }
                 if let Some(n) = np.as_ref().map(|n| &n.members).filter(|m| m.len() > 1) {
                     let worst = n.iter().map(|m| m.drift_ms.abs()).max().unwrap_or(0);
                     ui.weak(format!("group · {} outputs · drift ≤ {worst} ms", n.len()));
@@ -1462,6 +1479,159 @@ impl App {
                 }
             });
         });
+    }
+
+    fn open_dsp(&mut self) {
+        self.show_dsp = true;
+        let zone = self.settings.zone.clone();
+        if self.is_local() {
+            self.dsp_edit = Some((zone, self.local.dsp()));
+        } else {
+            self.dsp_edit = None;
+            self.backend.send(Cmd::LoadDsp(zone));
+        }
+    }
+
+    fn dsp_window(&mut self, ctx: &egui::Context) {
+        if !self.show_dsp {
+            return;
+        }
+        let mut open = self.show_dsp;
+        let zone_name = self.zone_name(&self.settings.zone);
+        let mut apply = false;
+        let mut reset = false;
+        egui::Window::new(format!("DSP · {zone_name}"))
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let Some((_, cfg)) = self.dsp_edit.as_mut() else {
+                    ui.spinner();
+                    return;
+                };
+                ui.weak("Changes apply from the next track. Every stage shows in the signal path.");
+                ui.add_space(6.0);
+                egui::Grid::new("dsp-gains")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Headroom");
+                        let mut h = cfg.headroom_db.unwrap_or(0.0);
+                        if ui
+                            .add(egui::Slider::new(&mut h, -12.0..=0.0).suffix(" dB"))
+                            .changed()
+                        {
+                            cfg.headroom_db = (h != 0.0).then_some(h);
+                        }
+                        ui.end_row();
+                        ui.label("Software volume");
+                        let mut v = cfg.volume_db.unwrap_or(0.0);
+                        if ui
+                            .add(egui::Slider::new(&mut v, -60.0..=0.0).suffix(" dB"))
+                            .changed()
+                        {
+                            cfg.volume_db = (v != 0.0).then_some(v);
+                        }
+                        ui.end_row();
+                        ui.label("Resample when needed");
+                        ui.checkbox(&mut cfg.resample, "");
+                        ui.end_row();
+                        ui.label("Dither on bit reduction");
+                        ui.checkbox(&mut cfg.dither, "");
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Parametric EQ").strong());
+                    if ui.small_button("+ band").clicked() {
+                        cfg.eq.push(pm_audio::EqBand::peaking(1000.0, 0.0, 1.0));
+                    }
+                });
+                let mut remove = None;
+                egui::Grid::new("dsp-eq")
+                    .num_columns(6)
+                    .striped(true)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.weak("on");
+                        ui.weak("type");
+                        ui.weak("Hz");
+                        ui.weak("dB");
+                        ui.weak("Q");
+                        ui.weak("");
+                        ui.end_row();
+                        for (i, b) in cfg.eq.iter_mut().enumerate() {
+                            ui.checkbox(&mut b.enabled, "");
+                            egui::ComboBox::from_id_salt(("kind", i))
+                                .selected_text(format!("{:?}", b.kind))
+                                .width(110.0)
+                                .show_ui(ui, |ui| {
+                                    for k in [
+                                        pm_audio::BandKind::Peaking,
+                                        pm_audio::BandKind::LowShelf,
+                                        pm_audio::BandKind::HighShelf,
+                                        pm_audio::BandKind::LowPass,
+                                        pm_audio::BandKind::HighPass,
+                                    ] {
+                                        ui.selectable_value(&mut b.kind, k, format!("{k:?}"));
+                                    }
+                                });
+                            ui.add(
+                                egui::DragValue::new(&mut b.freq_hz)
+                                    .range(10.0..=20_000.0)
+                                    .speed(5.0)
+                                    .max_decimals(0),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut b.gain_db)
+                                    .range(-24.0..=24.0)
+                                    .speed(0.1)
+                                    .max_decimals(1),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut b.q)
+                                    .range(0.1..=20.0)
+                                    .speed(0.02)
+                                    .max_decimals(2),
+                            );
+                            if ui.small_button("✕").clicked() {
+                                remove = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if let Some(i) = remove {
+                    cfg.eq.remove(i);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Reset to default").clicked() {
+                        reset = true;
+                    }
+                });
+            });
+        self.show_dsp = open;
+        if apply {
+            if let Some((zone, cfg)) = self.dsp_edit.clone() {
+                if self.is_local() {
+                    self.local.set_dsp(cfg);
+                    self.toast("DSP saved; applies from the next track");
+                } else {
+                    self.backend.send(Cmd::SetDsp(zone, Box::new(cfg)));
+                }
+            }
+        }
+        if reset {
+            if self.is_local() {
+                self.local.set_dsp(pm_audio::PipelineConfig::default());
+                self.dsp_edit = Some((self.settings.zone.clone(), pm_audio::PipelineConfig::default()));
+            } else {
+                self.backend.send(Cmd::ResetDsp(self.settings.zone.clone()));
+            }
+        }
     }
 
     fn signal_path_window(&mut self, ctx: &egui::Context) {
@@ -1559,6 +1729,7 @@ impl eframe::App for App {
             .show(ui, |ui| self.content(ui));
         let ctx = ui.ctx().clone();
         self.signal_path_window(&ctx);
+        self.dsp_window(&ctx);
     }
 }
 

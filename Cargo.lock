@@ -3688,6 +3688,8 @@ dependencies = [
  "pm-model",
  "pm-zones",
  "rubato",
+ "serde",
+ "serde_json",
  "symphonia",
  "tempfile",
  "thiserror 2.0.21",

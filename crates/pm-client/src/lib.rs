@@ -249,6 +249,24 @@ impl NodeClient {
         .await
     }
 
+    pub async fn dsp(&self, zone: &str) -> Result<pm_audio::PipelineConfig> {
+        self.get(&format!("zones/{zone}/dsp"), &[]).await
+    }
+
+    pub async fn set_dsp(
+        &self,
+        zone: &str,
+        cfg: &pm_audio::PipelineConfig,
+    ) -> Result<pm_audio::PipelineConfig> {
+        self.send(reqwest::Method::PUT, &format!("zones/{zone}/dsp"), Some(cfg))
+            .await
+    }
+
+    pub async fn reset_dsp(&self, zone: &str) -> Result<()> {
+        self.send::<(), ()>(reqwest::Method::DELETE, &format!("zones/{zone}/dsp"), None)
+            .await
+    }
+
     pub async fn set_repeat(&self, zone: &str, repeat: Repeat) -> Result<()> {
         self.send(
             reqwest::Method::PUT,

@@ -95,6 +95,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/transport", post(transport))
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
+        .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
@@ -380,6 +381,44 @@ async fn repeat(
     Json(body): Json<SetRepeat>,
 ) -> Result<StatusCode, ApiError> {
     zone_of(&s, &id)?.set_repeat(body.repeat);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- handlers: DSP per zone ----
+
+/// The pipeline settings for the zone's output (EQ, headroom, software
+/// volume, resampling policy). Changes apply at the next track start.
+async fn dsp_get(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+) -> ApiResult<pm_audio::PipelineConfig> {
+    let zone = zone_of(&s, &id)?;
+    Ok(Json(s.sources.dsp_for(&zone.output().id())))
+}
+
+async fn dsp_put(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(cfg): Json<pm_audio::PipelineConfig>,
+) -> ApiResult<pm_audio::PipelineConfig> {
+    let zone = zone_of(&s, &id)?;
+    for b in &cfg.eq {
+        // Validate against a common rate; the real plan validates again per track.
+        b.validate(48_000).map_err(ApiError::bad_request)?;
+    }
+    if cfg.headroom_db.is_some_and(|d| !(-30.0..=0.0).contains(&d)) {
+        return Err(ApiError::bad_request("headroom_db must be between -30 and 0"));
+    }
+    if cfg.volume_db.is_some_and(|d| !(-90.0..=0.0).contains(&d)) {
+        return Err(ApiError::bad_request("volume_db must be between -90 and 0"));
+    }
+    s.sources.set_dsp(&zone.output().id(), Some(cfg.clone()))?;
+    Ok(Json(cfg))
+}
+
+async fn dsp_reset(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    let zone = zone_of(&s, &id)?;
+    s.sources.set_dsp(&zone.output().id(), None)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -12,6 +12,7 @@
 
 pub mod decode;
 pub mod dsd;
+pub mod dsp;
 pub mod error;
 pub mod pipeline;
 pub mod play;
@@ -21,6 +22,7 @@ pub mod zone;
 
 pub use decode::Decoder;
 pub use dsd::DsdReader;
+pub use dsp::{BandKind, EqBand, Equalizer};
 pub use error::AudioError;
 pub use pipeline::{DsdMode, PipelineConfig, PipelineError, Plan};
 pub use play::{play_file, play_to_sink, PlayReport};

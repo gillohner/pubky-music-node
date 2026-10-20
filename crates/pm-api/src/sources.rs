@@ -5,22 +5,78 @@
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_library::Library;
 use pm_model::{AudioFormat, OutputCaps, TrackId};
-use pm_zones::{FrameSource, Processor, QueueItem, SourceError, SourceFactory};
-use std::sync::{Arc, Mutex};
+use pm_zones::{FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 pub const TRACK_SCHEME: &str = "track:";
+/// Settings key prefix for per-output DSP configs.
+pub const DSP_KEY_PREFIX: &str = "dsp/";
 
 pub struct NodeSources {
     library: Arc<Mutex<Library>>,
     files: LocalFiles,
+    default_cfg: PipelineConfig,
+    /// Per-output pipeline settings (DSP); the default applies otherwise.
+    dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
 }
 
 impl NodeSources {
     pub fn new(library: Arc<Mutex<Library>>, cfg: PipelineConfig) -> Self {
+        // Restore persisted per-output configs.
+        let mut dsp = HashMap::new();
+        if let Ok(lib) = library.lock() {
+            if let Ok(rows) = lib.settings_with_prefix(DSP_KEY_PREFIX) {
+                for (k, v) in rows {
+                    if let Ok(c) = serde_json::from_str::<PipelineConfig>(&v) {
+                        dsp.insert(OutputId(k[DSP_KEY_PREFIX.len()..].to_string()), c);
+                    }
+                }
+            }
+        }
         Self {
             library,
-            files: LocalFiles::new(cfg),
+            files: LocalFiles::new(cfg.clone()),
+            default_cfg: cfg,
+            dsp: RwLock::new(dsp),
         }
+    }
+
+    /// The pipeline settings in force for `output`.
+    pub fn dsp_for(&self, output: &OutputId) -> PipelineConfig {
+        self.dsp
+            .read()
+            .expect("dsp lock")
+            .get(output)
+            .cloned()
+            .unwrap_or_else(|| self.default_cfg.clone())
+    }
+
+    /// Set (and persist) the settings for `output`; takes effect at the next track start.
+    pub fn set_dsp(
+        &self,
+        output: &OutputId,
+        cfg: Option<PipelineConfig>,
+    ) -> Result<(), pm_library::LibraryError> {
+        let key = format!("{DSP_KEY_PREFIX}{}", output.0);
+        let lib = self.library.lock().expect("library poisoned");
+        match &cfg {
+            Some(c) => lib.set_setting(&key, &serde_json::to_string(c).expect("config serializes"))?,
+            None => {
+                lib.delete_setting(&key)?;
+            }
+        }
+        drop(lib);
+        let mut map = self.dsp.write().expect("dsp lock");
+        match cfg {
+            Some(c) => {
+                map.insert(output.clone(), c);
+            }
+            None => {
+                map.remove(output);
+            }
+        }
+        Ok(())
     }
 
     /// `track:<id>` for a library track.
@@ -67,7 +123,17 @@ impl SourceFactory for NodeSources {
         self.files.open(&file_item)
     }
 
-    fn plan(&self, source: AudioFormat, caps: &OutputCaps) -> Result<Box<dyn Processor>, SourceError> {
-        self.files.plan(source, caps)
+    fn plan(
+        &self,
+        source: AudioFormat,
+        caps: &OutputCaps,
+        output: &OutputId,
+    ) -> Result<Box<dyn Processor>, SourceError> {
+        let cfg = self.dsp_for(output);
+        let plan = pm_audio::Plan::negotiate(source, caps, &cfg).map_err(|e| SourceError::Negotiate {
+            format: source,
+            reason: e.to_string(),
+        })?;
+        Ok(Box::new(plan))
     }
 }

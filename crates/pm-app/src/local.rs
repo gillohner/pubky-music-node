@@ -18,6 +18,7 @@ pub const LOCAL_ZONE_ID: &str = "local";
 pub struct LocalPlayer {
     pub zone: Arc<Zone>,
     pub output_name: String,
+    factory: Arc<RemoteTracks>,
 }
 
 impl LocalPlayer {
@@ -34,14 +35,28 @@ impl LocalPlayer {
             handle,
             cache,
             files: LocalFiles::new(PipelineConfig::default()),
+            cfg: RwLock::new(PipelineConfig::default()),
         });
         let zone = Arc::new(Zone::new(
             ZoneId::new(LOCAL_ZONE_ID),
             "This computer",
             output,
-            factory,
+            factory.clone(),
         ));
-        Self { zone, output_name }
+        Self {
+            zone,
+            output_name,
+            factory,
+        }
+    }
+
+    /// DSP settings of the local zone (applied at the next track start).
+    pub fn dsp(&self) -> PipelineConfig {
+        self.factory.cfg.read().expect("cfg lock").clone()
+    }
+
+    pub fn set_dsp(&self, cfg: PipelineConfig) {
+        *self.factory.cfg.write().expect("cfg lock") = cfg;
     }
 }
 
@@ -63,6 +78,7 @@ struct RemoteTracks {
     handle: tokio::runtime::Handle,
     cache: PathBuf,
     files: LocalFiles,
+    cfg: RwLock<PipelineConfig>,
 }
 
 impl RemoteTracks {
@@ -131,7 +147,17 @@ impl SourceFactory for RemoteTracks {
         self.files.open(&local)
     }
 
-    fn plan(&self, source: AudioFormat, caps: &OutputCaps) -> Result<Box<dyn Processor>, SourceError> {
-        self.files.plan(source, caps)
+    fn plan(
+        &self,
+        source: AudioFormat,
+        caps: &OutputCaps,
+        _output: &pm_zones::OutputId,
+    ) -> Result<Box<dyn Processor>, SourceError> {
+        let cfg = self.cfg.read().expect("cfg lock").clone();
+        let plan = pm_audio::Plan::negotiate(source, caps, &cfg).map_err(|e| SourceError::Negotiate {
+            format: source,
+            reason: e.to_string(),
+        })?;
+        Ok(Box::new(plan))
     }
 }

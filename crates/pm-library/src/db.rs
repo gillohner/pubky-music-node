@@ -16,6 +16,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/0001_init.sql")),
     (2, include_str!("migrations/0002_music_posts.sql")),
     (3, include_str!("migrations/0003_album_art.sql")),
+    (4, include_str!("migrations/0004_settings.sql")),
 ];
 
 pub struct Library {
@@ -428,6 +429,39 @@ impl Library {
             .query_map(params![like, limit as i64], row_to_album)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         v.into_iter().collect()
+    }
+
+    // ----- settings (JSON key/value) ---------------------------------------
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .lock()
+            .execute("DELETE FROM settings WHERE key = ?1", [key])?
+            > 0)
+    }
+
+    /// All settings whose key starts with `prefix`.
+    pub fn settings_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare("SELECT key, value FROM settings WHERE key LIKE ?1 || '%' ORDER BY key")?;
+        let rows = st.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // ----- album art -----------------------------------------------------
@@ -876,7 +910,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 3);
+        assert_eq!(lib.schema_version().unwrap(), 4);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

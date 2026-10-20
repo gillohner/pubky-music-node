@@ -366,7 +366,9 @@ impl Engine {
 
     fn open(&self, item: &QueueItem) -> Result<Opened, SourceError> {
         let source = self.factory.open(item)?;
-        let proc = self.factory.plan(source.format(), self.output.caps())?;
+        let proc = self
+            .factory
+            .plan(source.format(), self.output.caps(), &self.output.id())?;
         Ok((source, proc))
     }
 

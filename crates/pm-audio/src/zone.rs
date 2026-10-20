@@ -112,7 +112,12 @@ impl SourceFactory for LocalFiles {
         Ok(Box::new(src))
     }
 
-    fn plan(&self, source: AudioFormat, caps: &OutputCaps) -> Result<Box<dyn Processor>, SourceError> {
+    fn plan(
+        &self,
+        source: AudioFormat,
+        caps: &OutputCaps,
+        _output: &pm_zones::OutputId,
+    ) -> Result<Box<dyn Processor>, SourceError> {
         let plan = Plan::negotiate(source, caps, &self.cfg).map_err(|e| SourceError::Negotiate {
             format: source,
             reason: e.to_string(),

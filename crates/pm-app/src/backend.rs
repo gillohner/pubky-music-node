@@ -83,6 +83,9 @@ pub enum Cmd {
     },
     DeleteZone(String),
     RescanOutputs,
+    LoadDsp(String),
+    SetDsp(String, Box<pm_audio::PipelineConfig>),
+    ResetDsp(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,7 @@ pub enum Msg {
     PlaylistDeleted(String),
     Notice(String),
     Artists(Vec<pm_library::ArtistSummary>),
+    Dsp(String, Box<pm_audio::PipelineConfig>),
     Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
@@ -386,6 +390,20 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             };
             out.send(Msg::Notice(format!("zone “{}” created", z.name)));
             out.send(Msg::Zones(c.zones().await?));
+        }
+        Cmd::LoadDsp(z) => {
+            let cfg = c.dsp(&z).await?;
+            out.send(Msg::Dsp(z, Box::new(cfg)));
+        }
+        Cmd::SetDsp(z, cfg) => {
+            let cfg = c.set_dsp(&z, &cfg).await?;
+            out.send(Msg::Notice("DSP saved; applies from the next track".into()));
+            out.send(Msg::Dsp(z, Box::new(cfg)));
+        }
+        Cmd::ResetDsp(z) => {
+            c.reset_dsp(&z).await?;
+            let cfg = c.dsp(&z).await?;
+            out.send(Msg::Dsp(z, Box::new(cfg)));
         }
         Cmd::RescanOutputs => {
             let outs = c.rescan_outputs().await?;
