@@ -281,6 +281,8 @@ jobs:
             type=raw,value=edge,enable=${{ needs.meta.outputs.channel == 'edge' }}
             type=sha
       - uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -300,6 +302,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
+          # Only this workflow's files: build-push-action's build record is
+          # an artifact too, and it does not download.
+          pattern: "{app,binaries}-*"
           path: dist
           merge-multiple: true
       - name: checksums
