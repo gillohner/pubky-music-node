@@ -5,6 +5,8 @@ version: "3.7"
 # so there is no app_proxy in front of it. Keep APP_PUBKY_MUSIC_TOKEN secret.
 services:
   node:
+    # Version tags come from `git tag v0.1.0` (release.yml); for a test install use
+    # ghcr.io/gillohner/pubky-music-node:edge, published by running the workflow by hand.
     image: ghcr.io/gillohner/pubky-music-node:0.1.0
     restart: on-failure
     stop_grace_period: 10s
