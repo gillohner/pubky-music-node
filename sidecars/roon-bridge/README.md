@@ -23,6 +23,7 @@ Authorize "Pubky Music Bridge" once in Roon → Settings → Extensions.
 
 Status: the logic (`lib.js`) is unit-tested against fake zones, a fake Browse API shaped like Roon's
 responses and a fake node; the Roon wiring (`index.js`) loads the real RoonLabs packages but has not
-been paired with a Core yet. The Browse walk (which items are tracks, pagination) is the part to
+been paired with a Core yet (it starts, brings up SOOD discovery and reaches the node; verified by
+running it against a live node without a Core on the network). The Browse walk (which items are tracks, pagination) is the part to
 verify first on a real Core.
 Nothing here touches RAAT or any undocumented Roon protocol (constraint 1).

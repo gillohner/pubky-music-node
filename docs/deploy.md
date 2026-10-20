@@ -51,6 +51,19 @@ app store. Points worth knowing:
 Image builds are not possible on the development machine (no Docker daemon); CI's `docker` job
 builds the image to catch Dockerfile drift.
 
+## Reaching the node from outside the house
+
+The node speaks plain HTTPS/WebSocket and expects a bearer token, so any private network layer
+works until the Pubky transport exists (ADR 0008):
+
+- **Tailscale / WireGuard**: install on the node and the phone or laptop; use the node's tailnet
+  address in the app, the web UI and Subsonic clients. Nothing to expose.
+- **Cloudflare Tunnel / a reverse proxy with TLS**: terminate TLS in front of port 7788 and keep the
+  token. Set `[api] public_url` to the public origin so pull-stream URLs handed to renderers are
+  right. Do not put the node on the open internet without TLS and a strong token.
+- **Pubky**: a signed-in node publishes its address privately on your homeserver; the app's
+  "Find my node via Pubky" reads it, so a moved or re-addressed node is found again without typing.
+
 ## Phones and desktops without the native app
 
 Any OpenSubsonic client (Symfonium, Feishin, Amperfy, play:Sub, Supersonic) connects to the node's
