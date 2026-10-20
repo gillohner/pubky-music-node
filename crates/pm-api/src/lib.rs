@@ -13,6 +13,7 @@ pub mod activity;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
+pub mod audius;
 pub mod discover;
 pub mod favourites;
 pub mod files;
@@ -21,6 +22,7 @@ pub mod radio;
 pub mod reviews;
 pub mod sources;
 pub mod state;
+pub mod streaming;
 pub mod subsonic;
 pub mod sync;
 pub mod tags;
@@ -159,9 +161,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/uri", get(discover::on_pubky))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
-        .route("/sources", get(archive::list))
-        .route("/sources/archive/search", get(archive::search))
-        .route("/sources/archive/items/{id}", get(archive::item))
+        .route("/sources", get(streaming::list))
+        .route("/sources/{source}/search", get(streaming::search))
+        .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/radio/search", get(radio::search))
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
@@ -1615,6 +1617,82 @@ mod tests {
             "POST",
             &format!("/v1/zones/{zid}/queue"),
             Some(serde_json::json!({"items": [{"uri": url, "title": "One", "album": "Fixture Set"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+    }
+
+    /// Audius against a local mock: the discovery host is configured, a search
+    /// yields track hits, an item has one streamable track, and it plays.
+    #[tokio::test]
+    async fn audius_source_searches_and_plays() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let track = serde_json::json!({"id": "W0NJ0", "title": "Ambient Piano Interlude", "user": {"name": "Techwipe"}, "duration": 5,
+            "permalink": "/techwipe/ambient-piano-interlude-353852", "artwork": {"480x480": "https://img/480"}, "play_count": 3});
+        let t1 = track.clone();
+        let t2 = track.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/tracks/search",
+                get(move || {
+                    let t = t1.clone();
+                    async move { Json(serde_json::json!({"data": [t]})) }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}",
+                get(move || {
+                    let t = t2.clone();
+                    async move { Json(serde_json::json!({"data": t})) }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}/stream",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.audius_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(sources.as_array().unwrap().iter().any(|x| x["id"] == "audius"));
+        let (st, _) = call(&app, "GET", "/v1/sources/nope/search?q=x", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, r) = call(&app, "GET", "/v1/sources/audius/search?q=ambient", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["source"], "audius");
+        assert_eq!(r["items"][0]["kind"], "track");
+        assert_eq!(
+            r["items"][0]["url"],
+            "https://audius.co/techwipe/ambient-piano-interlude-353852"
+        );
+        let (st, it) = call(&app, "GET", "/v1/sources/audius/items/W0NJ0", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        let url = it["tracks"][0]["url"].as_str().unwrap().to_string();
+        assert!(
+            url.ends_with("/v1/tracks/W0NJ0/stream?app_name=pubky-music-node"),
+            "{url}"
+        );
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": url, "title": "Ambient Piano Interlude"}], "replace": true, "play": true})),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{q}");

@@ -68,9 +68,9 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |
-| GET | `/v1/sources` | | streaming sources the node can play from besides its library (`archive` today) |
-| GET | `/v1/sources/archive/search` | `?q=&limit=` | Internet Archive audio items by downloads: `{items: [{id, title, creator?, year?, downloads?, url}]}` |
-| GET | `/v1/sources/archive/items/{id}` | | `{id, title, creator?, year?, description?, licence?, url, tracks: [{title, track_no?, duration_ms?, format, url, artist?}]}`, one best-format file per recording (FLAC first); play by enqueueing the track URLs |
+| GET | `/v1/sources` | | streaming sources the node can search and play: `[{id, name, description, status}]` (`archive` = Internet Archive, `audius` = Audius; subscription services plug in here) |
+| GET | `/v1/sources/{source}/search` | `?q=&limit=` | `{source, items: [{id, title, creator?, year?, downloads?, image?, kind: item\|track, url}]}` |
+| GET | `/v1/sources/{source}/items/{id}` | | `{source, id, title, creator?, year?, description?, licence?, image?, url, tracks: [{title, track_no?, duration_ms?, format, url, artist?}]}`; play by enqueueing the track URLs (the archive gives one best-format file per recording, FLAC first; Audius one MP3 stream per track) |
 | GET | `/v1/radio/search` | `?q=&tag=&country=&limit=` | `{stations: [{id, name, url, homepage?, favicon?, codec?, bitrate?, country?, tags}]}` from radio-browser.info, most voted first; 400 without a term, 502 when the directory fails |
 | GET / PUT | `/v1/radio/stations` | PUT: a `Station` | saved stations (node-local settings); PUT adds or updates by id/url |
 | DELETE | `/v1/radio/stations/{id}` | | remaining stations; 404 when unknown |

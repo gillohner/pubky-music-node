@@ -643,8 +643,9 @@ pub struct SourceInfo {
     pub status: String,
 }
 
+/// One search result of a streaming source: an album-like item or a single track.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ArchiveHit {
+pub struct SourceHit {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -653,16 +654,27 @@ pub struct ArchiveHit {
     pub year: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// `item` (several tracks) or `track`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// The source's own page for it.
     pub url: String,
 }
 
+fn default_kind() -> String {
+    "item".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ArchiveResults {
-    pub items: Vec<ArchiveHit>,
+pub struct SourceResults {
+    pub source: String,
+    pub items: Vec<SourceHit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ArchiveTrack {
+pub struct SourceTrack {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_no: Option<u32>,
@@ -677,7 +689,8 @@ pub struct ArchiveTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchiveItem {
+pub struct SourceItem {
+    pub source: String,
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -688,8 +701,10 @@ pub struct ArchiveItem {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub licence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub url: String,
-    pub tracks: Vec<ArchiveTrack>,
+    pub tracks: Vec<SourceTrack>,
 }
 
 /// What Pubky (via Nexus) knows about one canonical URL: who tagged it and how.

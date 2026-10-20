@@ -535,18 +535,18 @@ impl NodeClient {
         self.get("sources", &[]).await
     }
 
-    pub async fn archive_search(&self, q: &str, limit: u32) -> Result<Vec<ArchiveHit>> {
+    pub async fn source_search(&self, source: &str, q: &str, limit: u32) -> Result<Vec<SourceHit>> {
         Ok(self
-            .get::<ArchiveResults>(
-                "sources/archive/search",
+            .get::<SourceResults>(
+                &format!("sources/{source}/search"),
                 &[("q", q.to_string()), ("limit", limit.to_string())],
             )
             .await?
             .items)
     }
 
-    pub async fn archive_item(&self, id: &str) -> Result<ArchiveItem> {
-        self.get(&format!("sources/archive/items/{id}"), &[]).await
+    pub async fn source_item(&self, source: &str, id: &str) -> Result<SourceItem> {
+        self.get(&format!("sources/{source}/items/{id}"), &[]).await
     }
 
     // ---- internet radio ----

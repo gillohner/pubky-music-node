@@ -67,7 +67,7 @@ enum View {
     NowPlaying,
     Favourites,
     Radio,
-    Archive,
+    Sources,
     Albums,
     Album(i64),
     Artists,
@@ -118,10 +118,12 @@ struct App {
     radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
     radio_searching: bool,
     stations: Vec<pm_client::RadioStation>,
+    sources: Vec<pm_api::types::SourceInfo>,
+    source_id: String,
     archive_query: String,
-    archive_results: Option<(String, Vec<pm_api::types::ArchiveHit>)>,
+    archive_results: Option<(String, Vec<pm_api::types::SourceHit>)>,
     archive_searching: bool,
-    archive_item: Option<pm_api::types::ArchiveItem>,
+    archive_item: Option<pm_api::types::SourceItem>,
     archive_loading: Option<String>,
     /// Canonical URLs the user has hearted.
     fav_uris: std::collections::HashSet<String>,
@@ -210,6 +212,8 @@ impl App {
             radio_results: None,
             radio_searching: false,
             stations: Vec::new(),
+            sources: Vec::new(),
+            source_id: "archive".into(),
             archive_query: String::new(),
             archive_results: None,
             archive_searching: false,
@@ -299,11 +303,19 @@ impl App {
                     self.radio_results = Some((q, r));
                 }
                 Msg::Stations(st) => self.stations = st,
-                Msg::ArchiveResults(q, r) => {
+                Msg::Sources(v) => {
+                    if !v.iter().any(|x| x.id == self.source_id) {
+                        if let Some(first) = v.first() {
+                            self.source_id = first.id.clone();
+                        }
+                    }
+                    self.sources = v;
+                }
+                Msg::SourceResults(q, r) => {
                     self.archive_searching = false;
                     self.archive_results = Some((q, r));
                 }
-                Msg::ArchiveItem(it) => {
+                Msg::SourceItem(it) => {
                     self.archive_loading = None;
                     self.archive_item = Some(*it);
                 }
@@ -942,7 +954,7 @@ impl App {
             ("Tracks", View::Tracks),
             ("Playlists", View::Playlists),
             ("Radio", View::Radio),
-            ("Internet Archive", View::Archive),
+            ("Sources", View::Sources),
         ] {
             let selected = self.view == view
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
@@ -970,6 +982,9 @@ impl App {
                 }
                 if view == View::Radio {
                     self.backend.send(Cmd::LoadStations);
+                }
+                if view == View::Sources && self.sources.is_empty() {
+                    self.backend.send(Cmd::LoadSources);
                 }
                 self.view = view;
             }
@@ -1055,7 +1070,7 @@ impl App {
             View::NowPlaying => self.now_playing_view(ui),
             View::Favourites => self.favourites_view(ui),
             View::Radio => self.radio_view(ui),
-            View::Archive => self.archive_view(ui),
+            View::Sources => self.archive_view(ui),
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
@@ -1391,7 +1406,7 @@ impl App {
     }
 
     /// Play Internet Archive tracks: queue items with their stream URLs.
-    fn play_archive(&mut self, item: &pm_api::types::ArchiveItem, from: usize, replace: bool) {
+    fn play_archive(&mut self, item: &pm_api::types::SourceItem, from: usize, replace: bool) {
         let items: Vec<QueueItem> = item
             .tracks
             .iter()
@@ -1418,7 +1433,7 @@ impl App {
             });
         }
         self.toast(if replace {
-            "Playing from the Internet Archive"
+            "Playing from the source"
         } else {
             "Added to queue"
         });
@@ -1432,7 +1447,15 @@ impl App {
                 }
             });
             ui.add_space(6.0);
-            theme::eyebrow(ui, "Internet Archive");
+            theme::eyebrow(
+                ui,
+                &self
+                    .sources
+                    .iter()
+                    .find(|x| x.id == item.source)
+                    .map(|x| x.name.clone())
+                    .unwrap_or_else(|| item.source.clone()),
+            );
             ui.heading(egui::RichText::new(&item.title).size(26.0).strong());
             let mut facts = Vec::new();
             if let Some(c) = &item.creator {
@@ -1470,7 +1493,7 @@ impl App {
                         }
                     }
                 });
-                ui.hyperlink_to("archive.org ↗", &item.url);
+                ui.hyperlink_to("open ↗", &item.url);
                 if let Some(l) = &item.licence {
                     ui.hyperlink_to("licence", l);
                 }
@@ -1518,15 +1541,17 @@ impl App {
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.archive_query)
-                    .hint_text("Search (Grateful Dead 1977, Bach, netlabel…)")
+                    .hint_text("Search this source…")
                     .desired_width(360.0),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.add(theme::primary("Search")).clicked() || enter) && !self.archive_query.trim().is_empty()
             {
                 self.archive_searching = true;
-                self.backend
-                    .send(Cmd::ArchiveSearch(self.archive_query.trim().to_string()));
+                self.backend.send(Cmd::SourceSearch {
+                    source: self.source_id.clone(),
+                    q: self.archive_query.trim().to_string(),
+                });
             }
             if self.archive_searching || self.archive_loading.is_some() {
                 ui.spinner();
@@ -1534,7 +1559,7 @@ impl App {
         });
         let Some((q, hits)) = self.archive_results.clone() else {
             ui.add_space(20.0);
-            ui.weak("Search above. Results come from archive.org's audio collections.");
+            ui.weak("Search above.");
             return;
         };
         ui.add_space(12.0);
@@ -1554,7 +1579,10 @@ impl App {
                         .clicked()
                     {
                         self.archive_loading = Some(h.id.clone());
-                        self.backend.send(Cmd::LoadArchiveItem(h.id.clone()));
+                        self.backend.send(Cmd::LoadSourceItem {
+                            source: self.source_id.clone(),
+                            id: h.id.clone(),
+                        });
                     }
                     let mut facts = Vec::new();
                     if let Some(c) = &h.creator {

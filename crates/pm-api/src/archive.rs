@@ -7,22 +7,13 @@
 //! MusicBrainz entities, so they cannot be hearted or tagged (constraint 4).
 
 use crate::state::NodeState;
+use crate::streaming::StreamingService;
 use crate::types::*;
-use crate::{ApiError, ApiResult};
-use axum::extract::{Path, Query, State};
+use crate::ApiError;
 use axum::http::StatusCode;
-use axum::Json;
 use pm_zones::QueueItem;
-use std::sync::Arc;
 
 pub const SOURCE_ID: &str = "archive";
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-pub struct ArchiveSearch {
-    pub q: String,
-    #[serde(default)]
-    pub limit: Option<u32>,
-}
 
 fn base(s: &NodeState) -> String {
     s.archive_base
@@ -32,73 +23,65 @@ fn base(s: &NodeState) -> String {
         .to_string()
 }
 
+/// The Internet Archive as a [`StreamingService`].
+pub struct InternetArchive;
+
+#[async_trait::async_trait]
+impl StreamingService for InternetArchive {
+    fn info(&self) -> SourceInfo {
+        SourceInfo {
+            id: SOURCE_ID.into(),
+            name: "Internet Archive".into(),
+            description: "Live Music Archive, netlabels and public-domain recordings; no account needed"
+                .into(),
+            status: "ready".into(),
+        }
+    }
+
+    async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError> {
+        let query = format!("({}) AND mediatype:(audio)", lucene(term));
+        let url = format!("{}/advancedsearch.php", base(s));
+        let resp = s
+            .http_client()
+            .get(&url)
+            .query(&[
+                ("q", query.as_str()),
+                ("fl[]", "identifier"),
+                ("fl[]", "title"),
+                ("fl[]", "creator"),
+                ("fl[]", "year"),
+                ("fl[]", "downloads"),
+                ("sort[]", "downloads desc"),
+                ("rows", &limit.to_string()),
+                ("page", "1"),
+                ("output", "json"),
+            ])
+            .send()
+            .await
+            .map_err(upstream)?;
+        if !resp.status().is_success() {
+            return Err(upstream(format!("search answered {}", resp.status())));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(upstream)?;
+        Ok(parse_search(&v))
+    }
+
+    async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
+        if id.trim().is_empty() || id.contains('/') {
+            return Err(ApiError::bad_request("bad item id"));
+        }
+        let url = format!("{}/metadata/{}", base(s), id);
+        let resp = s.http_client().get(&url).send().await.map_err(upstream)?;
+        if !resp.status().is_success() {
+            return Err(upstream(format!("metadata answered {}", resp.status())));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(upstream)?;
+        parse_item(id, &v, &base(s)).ok_or_else(|| ApiError::not_found(format!("no audio in item {id}")))
+    }
+}
+
 fn upstream(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, format!("internet archive: {e}"))
-}
-
-/// `GET /v1/sources`: what the node can stream from besides its library.
-pub(crate) async fn list(State(_s): State<Arc<NodeState>>) -> ApiResult<Vec<SourceInfo>> {
-    Ok(Json(vec![SourceInfo {
-        id: SOURCE_ID.into(),
-        name: "Internet Archive".into(),
-        description: "Live Music Archive, netlabels and public-domain recordings; no account needed".into(),
-        status: "ready".into(),
-    }]))
-}
-
-/// `GET /v1/sources/archive/search?q=&limit=`: audio items by relevance.
-pub(crate) async fn search(
-    State(s): State<Arc<NodeState>>,
-    Query(q): Query<ArchiveSearch>,
-) -> ApiResult<ArchiveResults> {
-    let term = q.q.trim();
-    if term.is_empty() {
-        return Err(ApiError::bad_request("q is required"));
-    }
-    let limit = q.limit.unwrap_or(30).clamp(1, 100);
-    let query = format!("({}) AND mediatype:(audio)", lucene(term));
-    let url = format!("{}/advancedsearch.php", base(&s));
-    let resp = s
-        .http_client()
-        .get(&url)
-        .query(&[
-            ("q", query.as_str()),
-            ("fl[]", "identifier"),
-            ("fl[]", "title"),
-            ("fl[]", "creator"),
-            ("fl[]", "year"),
-            ("fl[]", "downloads"),
-            ("sort[]", "downloads desc"),
-            ("rows", &limit.to_string()),
-            ("page", "1"),
-            ("output", "json"),
-        ])
-        .send()
-        .await
-        .map_err(upstream)?;
-    if !resp.status().is_success() {
-        return Err(upstream(format!("search answered {}", resp.status())));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(upstream)?;
-    Ok(Json(ArchiveResults {
-        items: parse_search(&v),
-    }))
-}
-
-/// `GET /v1/sources/archive/items/{id}`: the item with playable tracks.
-pub(crate) async fn item(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<ArchiveItem> {
-    if id.trim().is_empty() || id.contains('/') {
-        return Err(ApiError::bad_request("bad item id"));
-    }
-    let url = format!("{}/metadata/{}", base(&s), id);
-    let resp = s.http_client().get(&url).send().await.map_err(upstream)?;
-    if !resp.status().is_success() {
-        return Err(upstream(format!("metadata answered {}", resp.status())));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(upstream)?;
-    let item = parse_item(&id, &v, &base(&s))
-        .ok_or_else(|| ApiError::not_found(format!("no audio in item {id}")))?;
-    Ok(Json(item))
 }
 
 /// Escape a user term for the archive's Lucene query.
@@ -122,15 +105,17 @@ fn str_or_first(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-pub(crate) fn parse_search(v: &serde_json::Value) -> Vec<ArchiveHit> {
+pub(crate) fn parse_search(v: &serde_json::Value) -> Vec<SourceHit> {
     v["response"]["docs"]
         .as_array()
         .map(|docs| {
             docs.iter()
                 .filter_map(|d| {
                     let id = d["identifier"].as_str()?.to_string();
-                    Some(ArchiveHit {
+                    Some(SourceHit {
                         url: format!("https://archive.org/details/{id}"),
+                        image: Some(format!("https://archive.org/services/img/{id}")),
+                        kind: "item".into(),
                         title: str_or_first(&d["title"]).unwrap_or_else(|| id.clone()),
                         creator: str_or_first(&d["creator"]),
                         year: str_or_first(&d["year"])
@@ -169,7 +154,7 @@ fn parse_duration_secs(s: &str) -> Option<f64> {
     Some(secs)
 }
 
-pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<ArchiveItem> {
+pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<SourceItem> {
     let meta = &v["metadata"];
     let files = v["files"].as_array()?;
     // One entry per "original" (or per name stem): keep the best format.
@@ -197,7 +182,7 @@ pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<
     if best.is_empty() {
         return None;
     }
-    let mut tracks: Vec<ArchiveTrack> = best
+    let mut tracks: Vec<SourceTrack> = best
         .into_values()
         .map(|(_, f)| {
             let name = f["name"].as_str().unwrap_or("").to_string();
@@ -207,7 +192,7 @@ pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<
                     .unwrap_or(&name)
                     .replace('_', " ")
             });
-            ArchiveTrack {
+            SourceTrack {
                 title,
                 track_no: str_or_first(&f["track"])
                     .and_then(|t| t.split('/').next()?.trim().parse::<u32>().ok()),
@@ -226,8 +211,10 @@ pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<
             .cmp(&b.track_no.unwrap_or(u32::MAX))
             .then_with(|| a.title.cmp(&b.title))
     });
-    Some(ArchiveItem {
+    Some(SourceItem {
+        source: SOURCE_ID.into(),
         id: id.to_string(),
+        image: Some(format!("https://archive.org/services/img/{id}")),
         title: str_or_first(&meta["title"]).unwrap_or_else(|| id.to_string()),
         creator: str_or_first(&meta["creator"]),
         year: str_or_first(&meta["year"])
@@ -275,9 +262,9 @@ fn urlencode_path(name: &str) -> String {
     out
 }
 
-impl ArchiveTrack {
+impl SourceTrack {
     /// The queue item that streams this track.
-    pub fn queue_item(&self, item: &ArchiveItem) -> QueueItem {
+    pub fn queue_item(&self, item: &SourceItem) -> QueueItem {
         let mut q = QueueItem::new(self.url.clone());
         q.title = Some(self.title.clone());
         q.artist = self.artist.clone().or_else(|| item.creator.clone());

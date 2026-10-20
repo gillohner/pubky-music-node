@@ -149,6 +149,8 @@ pub enum Service {
     Audiomack,
     /// archive.org items (Live Music Archive, netlabels, public domain).
     InternetArchive,
+    /// audius.co tracks and artists.
+    Audius,
 }
 
 impl Service {
@@ -166,6 +168,7 @@ impl Service {
             Service::SoundCloud => "soundcloud",
             Service::Bandcamp => "bandcamp",
             Service::InternetArchive => "internet-archive",
+            Service::Audius => "audius",
             Service::Audiomack => "audiomack",
         }
     }
@@ -388,6 +391,7 @@ mod service {
             "soundcloud.com" | "m.soundcloud.com" | "on.soundcloud.com" => soundcloud(segs),
             "audiomack.com" => audiomack(segs),
             "archive.org" | "www.archive.org" => archive(segs),
+            "audius.co" | "www.audius.co" => audius(segs),
             h if h.starts_with("music.amazon.") => amazon(url, host, segs),
             h if h.ends_with(".bandcamp.com") => bandcamp(host, segs),
             _ => None,
@@ -787,6 +791,37 @@ mod service {
         }
     }
 
+    /// `audius.co/<handle>/<slug>` is a track; `audius.co/<handle>` an artist.
+    fn audius(segs: &[&str]) -> Option<ServiceLink> {
+        let ok = |s: &str| !s.is_empty() && !s.starts_with('?');
+        match segs {
+            [handle, slug] if ok(handle) && ok(slug) && *handle != "album" && *handle != "playlist" => link(
+                Service::Audius,
+                ServiceLinkKind::Track,
+                None,
+                format!("https://audius.co/{handle}/{slug}"),
+            ),
+            [handle, "album", slug] | [handle, "playlist", slug] if ok(handle) && ok(slug) => link(
+                Service::Audius,
+                ServiceLinkKind::Album,
+                None,
+                format!("https://audius.co/{handle}/{}/{slug}", segs[1]),
+            ),
+            [handle]
+                if ok(handle)
+                    && !matches!(*handle, "trending" | "explore" | "feed" | "signup" | "search") =>
+            {
+                link(
+                    Service::Audius,
+                    ServiceLinkKind::Artist,
+                    None,
+                    format!("https://audius.co/{handle}"),
+                )
+            }
+            _ => None,
+        }
+    }
+
     fn audiomack(segs: &[&str]) -> Option<ServiceLink> {
         match segs {
             [artist, "song", slug, ..] => link(
@@ -876,6 +911,20 @@ mod tests {
     fn upc() {
         assert_eq!(Upc::parse("0 60254 71795 5").unwrap().as_str(), "060254717955");
         assert!(Upc::parse("abc").is_err());
+    }
+
+    #[test]
+    fn audius_links() {
+        let t = svc("https://audius.co/techwipe/ambient-piano-interlude-353852?utm=x");
+        assert_eq!(t.service, Service::Audius);
+        assert_eq!(t.kind, ServiceLinkKind::Track);
+        assert_eq!(t.url, "https://audius.co/techwipe/ambient-piano-interlude-353852");
+        assert_eq!(svc("https://audius.co/techwipe").kind, ServiceLinkKind::Artist);
+        assert_eq!(
+            svc("https://audius.co/techwipe/album/night-drive").kind,
+            ServiceLinkKind::Album
+        );
+        assert!(MusicUri::parse("https://audius.co/trending").is_err());
     }
 
     #[test]

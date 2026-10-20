@@ -2,9 +2,10 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, ArchiveHit, ArchiveItem, ArtistDetail, ArtistInfo, CreatePlaylist,
-    DiscoverPage, Enqueue, FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky,
-    PlaylistDetail, PlaylistSummary, QueueAt, Reviews, SearchResults, Tags, TransportAction, UpdatePlaylist,
+    AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
+    FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
+    PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags, TransportAction,
+    UpdatePlaylist,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -27,8 +28,15 @@ pub enum Cmd {
     LoadHome,
     LoadFavourites,
     RadioSearch(String),
-    ArchiveSearch(String),
-    LoadArchiveItem(String),
+    SourceSearch {
+        source: String,
+        q: String,
+    },
+    LoadSourceItem {
+        source: String,
+        id: String,
+    },
+    LoadSources,
     LoadStations,
     SaveStation(Box<RadioStation>),
     DeleteStation(String),
@@ -179,8 +187,9 @@ pub enum Msg {
     /// `None` when discovery is off on the node (no contact configured).
     OnPubky(Option<Box<OnPubky>>),
     RadioResults(String, Vec<RadioStation>),
-    ArchiveResults(String, Vec<ArchiveHit>),
-    ArchiveItem(Box<ArchiveItem>),
+    SourceResults(String, Vec<SourceHit>),
+    SourceItem(Box<SourceItem>),
+    Sources(Vec<pm_api::types::SourceInfo>),
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
@@ -384,11 +393,14 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             out.send(Msg::RadioResults(q, r));
         }
         Cmd::LoadStations => out.send(Msg::Stations(c.radio_stations().await?)),
-        Cmd::ArchiveSearch(q) => {
-            let r = c.archive_search(&q, 40).await?;
-            out.send(Msg::ArchiveResults(q, r));
+        Cmd::SourceSearch { source, q } => {
+            let r = c.source_search(&source, &q, 40).await?;
+            out.send(Msg::SourceResults(q, r));
         }
-        Cmd::LoadArchiveItem(id) => out.send(Msg::ArchiveItem(Box::new(c.archive_item(&id).await?))),
+        Cmd::LoadSourceItem { source, id } => {
+            out.send(Msg::SourceItem(Box::new(c.source_item(&source, &id).await?)))
+        }
+        Cmd::LoadSources => out.send(Msg::Sources(c.sources().await?)),
         Cmd::SaveStation(st) => {
             out.send(Msg::Stations(c.save_station(&st).await?));
             out.send(Msg::Notice(format!("Saved “{}”", st.name)));

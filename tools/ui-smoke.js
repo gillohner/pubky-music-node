@@ -32,7 +32,7 @@ w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   await sleep(1500);
-  const views = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'archive', 'discover', 'queue', 'settings'];
+  const views = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'discover', 'queue', 'settings'];
   for (const v of views) {
     w.document.querySelector(`.nav-item[data-view="${v}"]`).click();
     await sleep(900);
