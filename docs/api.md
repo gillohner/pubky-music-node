@@ -75,7 +75,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private
 homeserver folder when `pubky.session_secret_file` is set. Items are canonical music URLs only.
 
-Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`; ICY titles arrive as `now_playing.stream_title`). Subscription streaming services add schemes later.
+Queues (items and repeat mode) are saved per zone on every change and restored, stopped, when the node restarts. Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`; ICY titles arrive as `now_playing.stream_title`). Subscription streaming services add schemes later.
 Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.
 Types live in `pm_api::types`; a Rust client reuses them.
 

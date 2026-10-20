@@ -128,14 +128,32 @@ impl NodeState {
     }
 
     /// Create a zone and forward its state and events to the API stream.
-    /// Call from inside a tokio runtime.
+    /// Call from inside a tokio runtime. The zone's last queue (saved in the
+    /// library settings on every queue change) is restored, stopped.
     pub fn create_zone(self: &Arc<Self>, name: &str, output: Arc<dyn Output>) -> Arc<Zone> {
         let zone = self.zones.create(name, output);
+        self.restore_queue(&zone);
         let events = self.events.clone();
+        let library = self.library.clone();
+        let key = queue_key(zone.id());
         let mut state_rx = zone.watch();
         tokio::spawn(async move {
+            let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
+                if state.queue_version != saved_version {
+                    saved_version = state.queue_version;
+                    let saved = SavedQueue {
+                        items: state.queue.clone(),
+                        repeat: state.repeat,
+                    };
+                    if let Ok(json) = serde_json::to_string(&saved) {
+                        let lib = library.lock().expect("library poisoned");
+                        if let Err(e) = lib.set_setting(&key, &json) {
+                            tracing::warn!(error = %e, "saving queue");
+                        }
+                    }
+                }
                 let _ = events.send(ApiEvent::Zone { state });
             }
         });
@@ -161,6 +179,27 @@ impl NodeState {
             }
         });
         zone
+    }
+
+    /// Put the saved queue back into a freshly created zone (no playback).
+    fn restore_queue(&self, zone: &Arc<Zone>) {
+        let json = {
+            let lib = self.library.lock().expect("library poisoned");
+            lib.get_setting(&queue_key(zone.id())).ok().flatten()
+        };
+        let Some(json) = json else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<SavedQueue>(&json) else {
+            return;
+        };
+        if saved.items.is_empty() || !zone.queue().is_empty() {
+            return;
+        }
+        let n = saved.items.len();
+        zone.enqueue(saved.items, pm_zones::Insert::End);
+        zone.set_repeat(saved.repeat);
+        tracing::info!(zone = %zone.id(), items = n, "queue restored");
     }
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
@@ -461,6 +500,17 @@ impl NodeState {
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
     }
+}
+
+fn queue_key(id: &ZoneId) -> String {
+    format!("queue.{}", id.0)
+}
+
+/// What survives a restart per zone: the items and the repeat mode.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedQueue {
+    items: Vec<pm_zones::QueueItem>,
+    repeat: pm_zones::Repeat,
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.

@@ -1362,6 +1362,72 @@ mod tests {
         assert!(tracks["tracks"].as_array().unwrap().is_empty());
     }
 
+    /// A zone's queue is saved on every change and comes back after a restart.
+    #[tokio::test]
+    async fn queues_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        let zid;
+        {
+            let s = state(dir.path(), None).await;
+            let app = router(s.clone());
+            call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+            for _ in 0..500 {
+                if !s.is_scanning() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+            let id = tracks["tracks"][0]["id"].as_i64().unwrap();
+            let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+            zid = zones[0]["id"].as_str().unwrap().to_string();
+            let (st, _) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"track_ids": [id], "items": [{"uri": "https://radio.example/live", "title": "Live"}], "play": false})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, _) = call(
+                &app,
+                "PUT",
+                &format!("/v1/zones/{zid}/repeat"),
+                Some(serde_json::json!({"repeat": "all"})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            // The save happens on the state watch; give it a moment.
+            let key = format!("queue.{zid}");
+            let mut saved = None;
+            for _ in 0..200 {
+                saved = s.library.lock().unwrap().get_setting(&key).unwrap();
+                if saved
+                    .as_deref()
+                    .is_some_and(|j| j.contains("radio.example") && j.contains("\"all\""))
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(saved.is_some(), "queue was not saved");
+        }
+        // "Restart": a new node state over the same database and outputs.
+        let s2 = state(dir.path(), None).await;
+        let app2 = router(s2.clone());
+        let (st, q) = call(&app2, "GET", &format!("/v1/zones/{zid}/queue"), None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let q = q.as_array().unwrap();
+        assert_eq!(q.len(), 2, "{q:?}");
+        assert_eq!(q[0]["title"], "one");
+        assert_eq!(q[1]["uri"], "https://radio.example/live");
+        let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(z["repeat"], "all");
+        assert_eq!(z["transport"], "stopped", "restored queues do not start playing");
+    }
+
     #[tokio::test]
     async fn web_ui_is_served_without_a_token() {
         let dir = tempfile::tempdir().unwrap();
