@@ -756,9 +756,19 @@
           loading();
           const tracks = await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks);
           if (state.view !== 'tracks') return;
-          main.innerHTML = pageHead('Tracks', tracks.length, (tracks.length > 12 ? filterBox('Filter tracks') : '') + (tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (tracks.length ? trackRows(tracks, { key: 'all' }) : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
-          lists.all = tracks;
-          bindFilter('.track');
+          // Big libraries: render 500 rows at a time; the filter searches all of them.
+          const PAGE = 500;
+          const matches = (t, q) => !q || [t.title, artists(t), t.album && t.album.title].filter(Boolean).some((x) => x.toLowerCase().includes(q));
+          main.innerHTML = pageHead('Tracks', tracks.length, (tracks.length > 12 ? filterBox('Filter tracks') : '') + (tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (tracks.length ? `<div id="tracklist"></div>` : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          const renderList = (subset, all) => {
+            const box = $('#tracklist'); if (!box) return;
+            const shown = all ? subset : subset.slice(0, PAGE);
+            lists.all = shown;
+            box.innerHTML = trackRows(shown, { key: 'all' }) + (shown.length < subset.length ? `<div class="actions" style="margin-top:12px"><button class="btn" id="showall">Show all ${subset.length}</button><span class="muted small">${shown.length} of ${subset.length} shown</span></div>` : '');
+            const sa = $('#showall'); if (sa) sa.onclick = () => renderList(subset, true);
+          };
+          renderList(tracks, false);
+          const f = $('#filter'); if (f) { f.oninput = () => { const q = f.value.trim().toLowerCase(); renderList(q ? tracks.filter((t) => matches(t, q)) : tracks, false); }; f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } }; }
           const sh = $('#shuffle'); if (sh) sh.onclick = () => playTracks(tracks, true);
           break;
         }
