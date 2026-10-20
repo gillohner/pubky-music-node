@@ -13,13 +13,16 @@ Pubky Music Node:
 
 ```sh
 cd sidecars/roon-bridge
-npm install
+npm install          # the Roon API packages come from RoonLabs' GitHub repos (they are not on npm)
+npm test             # node:test: scrobble rule, 422 handling, Browse walk, API client, no Core needed
 PM_NODE=http://node:7788 PM_TOKEN=... npm start              # scrobble
 PM_NODE=http://node:7788 PM_TOKEN=... node index.js --import-playlists
 ```
 
 Authorize "Pubky Music Bridge" once in Roon → Settings → Extensions.
 
-Status: written against the Extension API documentation; it has not been run against a Roon
-Core yet. The Browse walk (which items are tracks, pagination) is the part to verify first.
+Status: the logic (`lib.js`) is unit-tested against fake zones, a fake Browse API shaped like Roon's
+responses and a fake node; the Roon wiring (`index.js`) loads the real RoonLabs packages but has not
+been paired with a Core yet. The Browse walk (which items are tracks, pagination) is the part to
+verify first on a real Core.
 Nothing here touches RAAT or any undocumented Roon protocol (constraint 1).

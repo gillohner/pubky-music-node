@@ -5,15 +5,20 @@
   "description": "Roon Extension that scrobbles Roon playback to a Pubky Music Node and imports Roon playlists",
   "type": "module",
   "main": "index.js",
-  "bin": { "pm-roon-bridge": "index.js" },
-  "scripts": {
-    "start": "node index.js"
+  "bin": {
+    "pm-roon-bridge": "index.js"
   },
-  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "node-roon-api": "^1.2.0",
-    "node-roon-api-browse": "^1.0.1",
-    "node-roon-api-status": "^1.0.1",
-    "node-roon-api-transport": "^1.0.1"
+    "node-roon-api": "github:RoonLabs/node-roon-api",
+    "node-roon-api-browse": "github:RoonLabs/node-roon-api-browse",
+    "node-roon-api-status": "github:RoonLabs/node-roon-api-status",
+    "node-roon-api-transport": "github:RoonLabs/node-roon-api-transport"
   }
 }
