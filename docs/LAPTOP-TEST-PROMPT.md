@@ -30,6 +30,13 @@ C. Local playback in the app: select "This computer". It downloads the track fro
    ~/.cache/pubky-music and plays through the first ALSA device the app finds. Verify which device
    it picked (it should be the KA17 when PipeWire is stopped) and that the signal path is
    BitPerfect/Lossless with the same stages as on the node.
+C2. Queue tools (web UI Queue page and the app's queue view): with an album playing on the KA17
+   zone, press Shuffle (the playing track and the ones before it must not move), Save as playlist
+   (a new private playlist appears; untagged files are reported as skipped), and Transfer… to
+   the Laptop endpoint zone once D is up (playback continues there from the same position, the
+   KA17 zone is left empty). From a track's ⋯ menu choose Start radio: the track plays and when
+   it ends the queue grows with similar tracks. Media keys on the laptop must drive browser
+   playback in the web UI (MediaSession).
 D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
    127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96

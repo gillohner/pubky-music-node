@@ -20,7 +20,8 @@ favourites, genres, and search across tracks, albums, artists and genres.
 
 **Playback.** FLAC, ALAC, WAV, AIFF, DSF/DFF (native DSD or DoP), MP3, AAC and Vorbis. Bit-perfect
 by default: every conversion is a named stage with a quality level in the signal path. Zones with
-gapless playback, queues that survive restarts, grouping with drift correction, and a per-zone DSP
+gapless playback, queues that survive restarts (shuffle what comes next, save as a playlist, transfer
+to another zone, library radio when they run out), grouping with drift correction, and a per-zone DSP
 chain (parametric EQ, convolution, crossfeed, ReplayGain, headroom, volume, dither, resampling only
 when an output needs it). Internet radio by URL with ICY titles, a radio-browser.info directory and
 saved stations, and two account-free streaming sources behind one `StreamingService` interface: the

@@ -1934,6 +1934,7 @@ impl App {
 
     fn track_table(&mut self, ui: &mut egui::Ui, tracks: &[Track], show_album: bool) {
         let playlists = self.playlists.clone();
+        let local = self.is_local();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let mut action: Option<(usize, &str)> = None;
             let mut playlist_add: Option<(usize, usize)> = None;
@@ -2001,6 +2002,15 @@ impl App {
                                     action = Some((i, "add"));
                                     ui.close();
                                 }
+                                if !local
+                                    && ui
+                                        .button("Start radio")
+                                        .on_hover_text("Play this track, then keep going with similar music from the library")
+                                        .clicked()
+                                {
+                                    action = Some((i, "radio"));
+                                    ui.close();
+                                }
                                 ui.separator();
                                 for (pi, p) in playlists.iter().enumerate() {
                                     if ui.button(format!("Add to “{}”", p.name)).clicked() {
@@ -2020,6 +2030,13 @@ impl App {
                 match what {
                     "play" => self.play_tracks(&tracks[i..], true, QueueAt::End),
                     "next" => self.play_tracks(&tracks[i..=i], false, QueueAt::Next),
+                    "radio" => {
+                        self.play_tracks(&tracks[i..=i], true, QueueAt::End);
+                        self.backend.send(Cmd::SetRadio {
+                            zone: self.settings.zone.clone(),
+                            on: true,
+                        });
+                    }
                     _ => self.play_tracks(&tracks[i..=i], false, QueueAt::End),
                 }
             }

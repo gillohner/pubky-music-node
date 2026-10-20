@@ -113,9 +113,25 @@
     audio.src = it.stream ? it.stream : `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
     audio.play().catch((e) => toast('Browser playback: ' + e.message, 'error'));
     if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    mediaSessionUpdate(it);
     renderBar();
     if (state.view === 'queue') render();
   };
+  // Hardware media keys and lock-screen controls for browser playback.
+  const hasMediaSession = typeof navigator !== 'undefined' && 'mediaSession' in navigator && typeof MediaMetadata === 'function';
+  const mediaSessionUpdate = (it) => {
+    if (!hasMediaSession) return;
+    try {
+      const albumId = albumIdOf(it);
+      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
+    } catch { /* metadata is a nicety */ }
+  };
+  if (hasMediaSession) {
+    const handlers = { play: () => audio.play().catch(() => {}), pause: () => audio.pause(), nexttrack: () => browserPlay(state.browserIndex + 1), previoustrack: () => browserPlay(Math.max(0, state.browserIndex - 1)), seekto: (d) => { if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime; } };
+    for (const [k, f] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(k, f); } catch { /* unsupported action */ } }
+    audio.addEventListener('play', () => { try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ignore */ } });
+    audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
+  }
   audio.addEventListener('ended', () => browserPlay(state.browserIndex + 1));
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
   audio.addEventListener('play', () => renderBar());
@@ -443,10 +459,12 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const single = tracks.length === 1 ? tracks[0] : null;
     const favItem = single && trackHasId(single) ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const radioItem = single && trackHasId(single) && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playTracks([single], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${single.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const items = [
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
+      ...radioItem,
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
       { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },

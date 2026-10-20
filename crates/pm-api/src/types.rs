@@ -407,7 +407,7 @@ pub struct PlaylistFromQueue {
     pub zone: Option<String>,
     #[serde(default)]
     pub uris: Vec<String>,
-    /// Defaults to "Queue · <zone>" or "Queue".
+    /// Defaults to `Queue · <zone name>` or `Queue`.
     #[serde(default)]
     pub name: Option<String>,
 }
