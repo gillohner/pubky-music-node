@@ -5,7 +5,8 @@ name: release
 # nothing, which is how changes to this file are tried before they merge.
 #
 # - the app (pm-desktop, Tauri 2): macOS universal .dmg, Windows .msi and
-#   setup .exe, Linux .AppImage and .deb for x86_64 and arm64;
+#   setup .exe, Linux .AppImage and .deb for x86_64 and arm64, Android .apk
+#   (arm64-v8a and universal) and .aab, signed with the repo's release key;
 # - pm-node and pm-endpoint for Linux x86_64, arm64 and armv7 (Raspberry Pi),
 #   plus Windows and macOS, with the egui pm-app where it was released before
 #   (frozen, ADR 0012);
@@ -35,6 +36,7 @@ jobs:
       channel: ${{ steps.m.outputs.channel }}
       version: ${{ steps.m.outputs.version }}
       publish: ${{ steps.m.outputs.publish }}
+      android_version_code: ${{ steps.m.outputs.android_version_code }}
     steps:
       - uses: actions/checkout@v6
       - id: m
@@ -52,8 +54,21 @@ jobs:
           else
             channel=dev; publish=false
           fi
-          echo "channel=$channel version=$version publish=$publish"
-          { echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
+          # Android versionCode: the version (MMMmmmppp) times 1000, plus the run
+          # number for edge builds and 999 for releases, so a release always
+          # installs over the edge builds of its version.
+          IFS=. read -r major minor patch <<< "${version%%-*}"
+          base=$(( (major * 1000000 + minor * 1000 + patch) * 1000 ))
+          if [ "$channel" = edge ] || [ "$channel" = dev ]; then
+            code=$(( base + GITHUB_RUN_NUMBER % 999 ))
+          else
+            code=$(( base + 999 ))
+          fi
+          echo "channel=$channel version=$version publish=$publish android_version_code=$code"
+          {
+            echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"
+            echo "android_version_code=$code"
+          } >> "$GITHUB_OUTPUT"
 
   app:
     name: app (${{ matrix.platform }})
@@ -114,6 +129,56 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: app-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  android:
+    needs: meta
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/pm-desktop
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/pm-desktop
+          key: android
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      # The runner image has the Android SDK and NDK; gen/android is not
+      # committed, so generate it, then apply our changes to it.
+      - name: generate the Android project
+        run: |
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npm ci --no-audit --no-fund
+          npx tauri android init --ci --skip-targets-install
+          npx tauri icon ../pm-api/static/icon.svg
+          python3 -I ../../tools/release/android-patch.py .
+      - name: build
+        run: |
+          echo '{"version":"${{ needs.meta.outputs.version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
+          npx tauri android build --ci --apk --aab \
+            --target aarch64 --target armv7 --target x86_64 --config release.conf.json
+      - name: sign
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ../../tools/release/android-sign.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-android
           path: dist/*
           if-no-files-found: error
 
@@ -226,7 +291,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   publish:
-    needs: [meta, app, binaries, image]
+    needs: [meta, app, android, binaries, image]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -257,7 +322,7 @@ jobs:
             echo "| \`pubky-music-macos-universal.dmg\` | the app on macOS (Apple silicon and Intel); unsigned: right-click → Open the first time |"
             echo "| \`pubky-music-windows-x86_64-setup.exe\` or \`.msi\` | the app on Windows; unsigned: SmartScreen → More info → Run anyway |"
             echo "| \`pubky-music-linux-x86_64.AppImage\` or \`.deb\` (also \`arm64\`) | the app on Linux |"
-            echo "| \`pubky-music-android-universal.apk\`, \`pubky-music-android-arm64.apk\` | the app on Android (when built) |"
+            echo "| \`pubky-music-android-arm64.apk\` (most phones), \`-universal.apk\`, \`.aab\` | the app on Android and Google TV |"
             echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node and endpoint (armv7: 32-bit Raspberry Pi OS) |"
             echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the node image (amd64, arm64) |"
             echo

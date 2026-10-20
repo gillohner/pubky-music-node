@@ -43,6 +43,12 @@ pm-endpoint = { path = "../pm-endpoint", features = ["alsa", "cpal"] }
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
 
+# Android: the TLS platform verifier needs the JVM (see src/android.rs).
+# Versions match what pkarr's reqwest resolves, so there is one verifier.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+rustls-platform-verifier = "0.7"
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

@@ -9,6 +9,8 @@
 //! machine's DACs to the node as a `pm-endpoint` and registers them, so they
 //! are zones like any other.
 
+#[cfg(target_os = "android")]
+mod android;
 mod node;
 #[cfg(desktop)]
 mod player;
@@ -326,7 +328,10 @@ pub fn run() {
                     .inner_size(1280.0, 840.0)
                     .min_inner_size(420.0, 600.0);
             }
-            builder.build()?;
+            #[allow(unused_variables)]
+            let window = builder.build()?;
+            #[cfg(target_os = "android")]
+            android::init_tls(&window);
             Ok(())
         })
         .build(tauri::generate_context!());
