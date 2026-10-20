@@ -238,6 +238,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/app", get(web_ui))
         .route("/app/", get(web_ui))
         .route("/app.css", get(web_css))
+        .route("/ux/", get(ux_index))
+        .route("/ux/{*path}", get(ux_file))
         .route("/app.js", get(web_js))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
@@ -296,6 +298,36 @@ async fn auth(
 
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
+/// `/ux/`: the UX wireframes in `docs/ux/` (steward brief 2026-10-20), read
+/// from the source tree on debug builds only; release builds answer 404.
+async fn ux_index() -> Response {
+    ux_file(Path("index.html".to_string())).await
+}
+
+async fn ux_file(Path(path): Path<String>) -> Response {
+    if !cfg!(debug_assertions) || path.contains("..") || path.starts_with('/') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ux");
+    let file = root.join(&path);
+    let mime = match file.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("png") => "image/png",
+        Some("md") => "text/markdown; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    match tokio::fs::read(&file).await {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-cache")],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn web_css() -> Response {
     (
         [

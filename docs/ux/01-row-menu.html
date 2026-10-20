@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 1 · Track row and its menu</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 1 of 5 · a track row and its one menu.</b> Data: Pinakes card <code>a14a55b5…</code> for tidal.com/track/534050211 (live 8092, 2026-10-20) and this node's connected sources. Provider marks in rows are monochrome; colour appears only inside "Open on".</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">queen bohemian</span><span class="crumbs">Search · 4 songs on Pubky</span></div>
+<h1>Results</h1>
+<div class="list">
+  <div class="list-row">
+    <span class="no">1</span><img class="cover" src="https://i.scdn.co/image/ab67616d0000b27315ebbedaacef61af244262a8" alt="" onerror="this.removeAttribute('src')">
+    <div><div class="name">Never Gonna Give You Up</div><div class="sub">Rick Astley · Whenever You Need Somebody · 1987</div></div>
+    <span class="marks"><span class="mark" data-s="tidal" title="TIDAL"></span><span class="mark" data-s="spotify" title="Spotify"></span><span class="mark" data-s="youtube" title="YouTube"></span><span class="muted small">+3</span></span>
+    <span class="dur">3:33</span><button class="icon-btn" title="More">⋯</button>
+  </div>
+  <div class="list-row active" style="z-index:3">
+    <span class="no">2</span><img class="cover" src="https://resources.tidal.com/images/93df7b69/9743/49bd/949a/e115007f7b93/640x640.jpg" alt="">
+    <div><div class="name">Bohemian Rhapsody</div><div class="sub">Queen · A Night at the Opera · 1975</div></div>
+    <span class="marks"><span class="mark" data-s="local" title="In your library (FLAC 24/96)"></span><span class="mark" data-s="tidal" title="TIDAL · tagged on Pubky"><span class="tagged"></span></span><span class="mark" data-s="spotify" title="Spotify"></span><span class="mark" data-s="deezer" title="Deezer"></span><span class="mark" data-s="youtube" title="YouTube"></span></span>
+    <span class="dur">5:55</span><button class="icon-btn" title="More" aria-expanded="true">⋯</button>
+    <!-- the one menu: same order everywhere (row ⋯, right-click, long-press) -->
+    <div class="menu" id="menu" style="right:12px; top:44px" role="menu">
+      <div class="head">Bohemian Rhapsody · Queen</div>
+      <div class="mi" role="menuitem">▶ Play now<span class="k">Enter</span></div>
+      <div class="mi" role="menuitem">⤼ Play next<span class="k">N</span></div>
+      <div class="mi" role="menuitem">≡ Add to queue<span class="k">Q</span></div>
+      <div class="sep"></div>
+      <div class="mi" role="menuitem">＋ Add to playlist<span class="chev">›</span></div>
+      <div class="sep"></div>
+      <div class="mi focus" role="menuitem" aria-haspopup="true" aria-expanded="true" style="position:relative">↗ Open on<span class="chev">›</span>
+        <div class="menu submenu" role="menu" style="min-width:260px">
+          <div class="head">Your services</div>
+          <div class="mi"><span class="mark solid" data-s="tidal"><span class="tagged"></span></span>TIDAL<span class="ok">✓ connected</span></div>
+          <div class="mi"><span class="mark solid" data-s="spotify"></span>Spotify<span class="ok">✓ connected</span></div>
+          <div class="mi"><span class="mark solid" data-s="local"></span>This node · FLAC 24/96<span class="ok">✓ local</span></div>
+          <div class="head">Also on</div>
+          <div class="mi"><span class="mark solid" data-s="deezer"></span>Deezer<span class="k">previews</span></div>
+          <div class="mi"><span class="mark solid" data-s="youtube"></span>YouTube<span class="k">tagged</span></div>
+          <div class="sep"></div>
+          <div class="mi">⧉ Copy link<span class="k">musicbrainz.org/recording/b1a9c0e9…</span></div>
+        </div>
+      </div>
+      <div class="sep"></div>
+      <div class="mi" role="menuitem"># Tag…</div>
+      <div class="mi" role="menuitem">✎ Review…</div>
+      <div class="sep"></div>
+      <div class="mi" role="menuitem">⧖ Versions…<span class="k">5 in group</span></div>
+    </div>
+  </div>
+  <div class="list-row">
+    <span class="no">3</span><span class="cover"></span>
+    <div><div class="name">Cut To The Feeling</div><div class="sub">Carly Rae Jepsen · E·MO·TION: Side B · 2017</div></div>
+    <span class="marks"><span class="mark" data-s="spotify" title="Spotify"></span><span class="mark" data-s="deezer" title="Deezer"></span><span class="mark" data-s="tidal" title="TIDAL"></span></span>
+    <span class="dur">3:28</span><button class="icon-btn" title="More">⋯</button>
+  </div>
+  <div class="list-row">
+    <span class="no">4</span><span class="cover"></span>
+    <div><div class="name">Dracula (with JENNIE)</div><div class="sub">Tame Impala &amp; JENNIE · 2025</div></div>
+    <span class="marks"><span class="mark" data-s="tidal" title="TIDAL"></span><span class="mark" data-s="spotify" title="Spotify"></span><span class="mark" data-s="youtube" title="YouTube"></span><span class="muted small">+2</span></span>
+    <span class="dur">3:46</span><button class="icon-btn" title="More">⋯</button>
+  </div>
+</div>
+<p class="muted small" style="margin-top:14px">Keyboard: <span class="kbd">↑↓</span> move, <span class="kbd">→</span> opens a submenu, <span class="kbd">Esc</span> closes. The dot on a mark means a person on Pubky tagged that exact link.</p>
+</div><script src="ux.js"></script></body></html>

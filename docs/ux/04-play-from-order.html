@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 4 · Play-from order</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 4 of 5 · where a playlist plays from.</b> Left: this playlist's order (defaults to the global one; "Use my default" resets). Right: the global order in Settings › Sources. Drag to reorder; services you have not connected sit greyed at the bottom with a Connect link. Local files are not a row: they always win when the recording matches, unless turned off here.</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span><span class="crumbs">Playlists › Queen, deep and loud › Play from</span></div>
+<div class="two">
+<div>
+  <h2>This playlist plays from</h2>
+  <ul class="order">
+    <li><span class="grip">⋮⋮</span><span class="pos">1</span><span class="mark solid" data-s="tidal"></span>TIDAL<span class="st">connected · up to 24/192</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">2</span><span class="mark solid" data-s="local"></span>This node's files<span class="st">bit-perfect · <label><input type="checkbox" checked> prefer when present</label></span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">3</span><span class="mark solid" data-s="qobuz"></span>Qobuz<span class="st">connected · up to 24/192</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">4</span><span class="mark solid" data-s="spotify"></span>Spotify<span class="st">plays on a Connect device</span></li>
+    <li class="off"><span class="grip">⋮⋮</span><span class="pos">–</span><span class="mark outline" data-s="deezer"></span>Deezer<span class="st">previews only</span></li>
+    <li class="off"><span class="grip">⋮⋮</span><span class="pos">–</span><span class="mark outline" data-s="apple"></span>Apple Music<span class="st"><a href="#">Connect</a></span></li>
+  </ul>
+  <div class="row" style="gap:8px; margin-top:8px"><button class="btn primary">Save for this playlist</button><button class="btn">Use my default</button><span class="muted small">Pinned items keep their pin.</span></div>
+  <p class="muted small">Stored on the playlist as <code>source_order: ["tidal","local","qobuz","spotify"]</code> (optional; readers ignore it). Shared lists: each listener's node applies their own connected services.</p>
+</div>
+<div>
+  <h2>Settings › Sources · default order</h2>
+  <ul class="order">
+    <li><span class="grip">⋮⋮</span><span class="pos">1</span><span class="mark solid" data-s="local"></span>This node's files<span class="st">bit-perfect first</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">2</span><span class="mark solid" data-s="tidal"></span>TIDAL<span class="st">connected</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">3</span><span class="mark solid" data-s="qobuz"></span>Qobuz<span class="st">connected</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">4</span><span class="mark solid" data-s="spotify"></span>Spotify<span class="st">connected · Connect devices</span></li>
+    <li><span class="grip">⋮⋮</span><span class="pos">5</span><span class="mark solid" data-s="archive"></span>Internet Archive<span class="st">free</span></li>
+    <li class="off"><span class="grip">⋮⋮</span><span class="pos">–</span><span class="mark outline" data-s="deezer"></span>Deezer<span class="st">previews only · <a href="#">Connect</a></span></li>
+    <li class="off"><span class="grip">⋮⋮</span><span class="pos">–</span><span class="mark outline" data-s="apple"></span>Apple Music<span class="st"><a href="#">Connect</a></span></li>
+  </ul>
+  <div class="card" style="margin-top:8px">
+    <label class="row" style="gap:8px"><input type="checkbox" checked> Prefer the highest quality version the service offers (Max, Hi-Res)</label>
+    <label class="row" style="gap:8px; margin-top:6px"><input type="checkbox"> Never fall back to previews</label>
+    <div class="muted small" style="margin-top:8px">Changing this re-resolves every playlist and the queue (cached per item).</div>
+  </div>
+</div>
+</div>
+</div><script src="ux.js"></script></body></html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX 3 · Mixed playlist</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf">
+<p class="wf-note"><b>Wireframe 3 of 5 · a mixed playlist.</b> Every row shows the source chip it will play from (the resolver's answer, never a surprise). Row 2 is pinned to TIDAL by the user; row 7 is unavailable; the source popover is open on row 4. Items are canonical (MusicBrainz first) so the list works for anyone; a pin is a suggestion stored with the item.</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span><span class="crumbs">Playlists › Queen, deep and loud</span></div>
+<div class="header" style="align-items:center">
+  <span class="cover lg" style="width:120px;height:120px"></span>
+  <div class="meta"><h1>Queen, deep and loud</h1><div class="by">12 tracks · 54 min · <span class="muted">Play from: TIDAL › this node › Qobuz › Spotify</span> <a href="04-play-from-order.html">change</a></div>
+  <div class="actions"><button class="btn primary">▶ Play</button><button class="btn">⇄ Shuffle</button><button class="btn ghost">⋯</button></div></div>
+</div>
+<div class="summary">
+  <span class="f on">12 tracks</span>
+  <span class="f"><span class="mark" data-s="tidal"></span>7 TIDAL</span>
+  <span class="f"><span class="mark" data-s="local"></span>3 this node</span>
+  <span class="f"><span class="mark" data-s="spotify"></span>1 Spotify</span>
+  <span class="f bad">1 unavailable</span>
+  <span class="muted small" style="margin-left:auto">each part filters the list</span>
+</div>
+<div class="list">
+  <div class="list-row"><span class="no">1</span><img class="cover" src="https://resources.tidal.com/images/93df7b69/9743/49bd/949a/e115007f7b93/640x640.jpg" alt=""><div><div class="name">Bohemian Rhapsody</div><div class="sub">Queen · A Night at the Opera</div></div><span class="chip"><span class="mark" data-s="local"></span>This node · FLAC 24/96</span><span class="dur">5:55</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">2</span><span class="cover"></span><div><div class="name">The Prophet's Song</div><div class="sub">Queen · A Night at the Opera</div></div><span class="chip pinned" title="Pinned by you"><span class="mark" data-s="tidal"></span>TIDAL · 16/44.1 <span class="pin">📌</span></span><span class="dur">8:21</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">3</span><span class="cover"></span><div><div class="name">Brighton Rock</div><div class="sub">Queen · Sheer Heart Attack</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL · 24/96</span><span class="dur">5:08</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row active" style="z-index:3"><span class="no">4</span><span class="cover"></span><div><div class="name">Stone Cold Crazy</div><div class="sub">Queen · Sheer Heart Attack</div></div><span class="chip" aria-expanded="true"><span class="mark" data-s="tidal"></span>TIDAL · 16/44.1 ▾</span><span class="dur">2:14</span><button class="icon-btn">⋯</button>
+    <div class="popover" style="right:60px; top:46px">
+      <div class="head muted small" style="padding:4px 10px 8px">Play "Stone Cold Crazy" from</div>
+      <div class="opt sel"><span class="mark" data-s="tidal"></span><div>Auto · follows the playlist<div class="q">now: TIDAL (playlist order) · re-checked when your services change</div></div><span class="r">✓</span></div>
+      <div class="opt"><span class="mark solid" data-s="local"></span><div>This node · FLAC 16/44.1<div class="q">/music/Queen/Sheer Heart Attack/05 Stone Cold Crazy.flac · same recording (MBID)</div></div><span class="r">bit-perfect</span></div>
+      <div class="opt"><span class="mark solid" data-s="tidal"></span><div>TIDAL · 16/44.1<div class="q">tidal.com/track/77640617 · tagged on Pubky</div></div><span class="r"></span></div>
+      <div class="opt"><span class="mark solid" data-s="spotify"></span><div>Spotify<div class="q">via ISRC GBUM71029573 · plays on a Connect device</div></div><span class="r"></span></div>
+      <div class="opt"><span class="mark" data-s="deezer"></span><div>Deezer<div class="q">30 s preview only</div></div><span class="r muted">preview</span></div>
+      <div class="opt"><span class="mark" data-s="mb"></span><div>Other versions…<div class="q">2011 remaster, live versions (Pinakes group · MusicBrainz)</div></div><span class="r">›</span></div>
+      <div class="foot">Picking one pins it for this playlist (📌 on the chip). Pins travel with the shared playlist as a hint; other listeners resolve with their own services.</div>
+    </div>
+  </div>
+  <div class="list-row"><span class="no">5</span><span class="cover"></span><div><div class="name">Tie Your Mother Down</div><div class="sub">Queen · A Day at the Races</div></div><span class="chip"><span class="mark" data-s="local"></span>This node · FLAC 16/44.1</span><span class="dur">4:48</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">6</span><span class="cover"></span><div><div class="name">Fat Bottomed Girls</div><div class="sub">Queen · Jazz</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL · 24/96</span><span class="dur">4:16</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row unavailable"><span class="no">7</span><span class="cover"></span><div><div class="name">Let Me Entertain You (live, Montréal 1981)</div><div class="sub">Queen · Queen Rock Montreal <span class="reason">· not on your connected services</span></div></div><span class="chip unavail"><span class="mark" data-s="youtube"></span>Unavailable · <u>Find another version</u></span><span class="dur">3:23</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">8</span><span class="cover"></span><div><div class="name">Dragon Attack</div><div class="sub">Queen · The Game</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL · 24/96</span><span class="dur">4:18</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">9</span><span class="cover"></span><div><div class="name">Hammer to Fall</div><div class="sub">Queen · The Works</div></div><span class="chip"><span class="mark" data-s="spotify"></span>Spotify · Connect</span><span class="dur">4:28</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">10</span><span class="cover"></span><div><div class="name">Sheer Heart Attack</div><div class="sub">Queen · News of the World</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL · 16/44.1</span><span class="dur">3:26</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">11</span><span class="cover"></span><div><div class="name">Ogre Battle</div><div class="sub">Queen · Queen II</div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL · 16/44.1</span><span class="dur">4:10</span><button class="icon-btn">⋯</button></div>
+  <div class="list-row"><span class="no">12</span><span class="cover"></span><div><div class="name">Innuendo</div><div class="sub">Queen · Innuendo</div></div><span class="chip"><span class="mark" data-s="local"></span>This node · FLAC 24/96</span><span class="dur">6:31</span><button class="icon-btn">⋯</button></div>
+</div>
+<p class="muted small" style="margin-top:14px">Resolution per item, cached: 1 pin if that service is connected → 2 a local file of the same recording (MBID/ISRC; bit-perfect wins) → 3 the playlist's order, else the global order (Pinakes <code>also_on</code> / <code>key=isrc:</code>, then the provider's own ISRC lookup) → 4 unavailable.</p>
+</div><script src="ux.js"></script></body></html>

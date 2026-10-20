@@ -100,6 +100,7 @@ fn main() -> anyhow::Result<()> {
     let settings = std::env::var("PM_NODE").ok().map(|node_url| Settings {
         node_url,
         token: std::env::var("PM_TOKEN").unwrap_or_default(),
+        player_address: String::new(),
     });
     let settings = settings.or_else(load_settings);
     let player_port = start_player();
