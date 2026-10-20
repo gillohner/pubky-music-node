@@ -108,6 +108,8 @@ struct App {
     new_zone_outputs: Vec<String>,
     show_queue: bool,
     show_dsp: bool,
+    /// Pubky Ring sign-in on the node: the URL to show and its QR texture.
+    login: Option<(String, Option<egui::TextureHandle>, std::time::Instant)>,
     /// DSP editor state: zone id it belongs to and the config being edited.
     dsp_edit: Option<(String, pm_audio::PipelineConfig)>,
     /// Last queue version seen per remote zone, to refetch the queue on change.
@@ -166,6 +168,7 @@ impl App {
             new_zone_outputs: Vec::new(),
             show_queue: true,
             show_dsp: false,
+            login: None,
             dsp_edit: None,
             queue_versions: HashMap::new(),
             new_playlist_name: String::new(),
@@ -239,6 +242,14 @@ impl App {
                     self.toast("scan started");
                 }
                 Msg::Artists(a) => self.artists = a,
+                Msg::PubkyLoginUrl(url) => {
+                    let tex = qr_texture(&self.cover_ctx, &url);
+                    self.login = Some((url, tex, std::time::Instant::now()));
+                }
+                Msg::PubkyLoginDone(user) => {
+                    self.login = None;
+                    self.toast(format!("node signed in as {}", user.unwrap_or_default()));
+                }
                 Msg::Dsp(z, cfg) => {
                     if z == self.settings.zone {
                         self.dsp_edit = Some((z, *cfg));
@@ -1242,6 +1253,13 @@ impl App {
             {
                 self.backend.send(Cmd::PubkySync);
             }
+            if ui
+                .button("Sign in node with Pubky Ring")
+                .on_hover_text("Starts a sign-in on the node and shows the QR to scan")
+                .clicked()
+            {
+                self.backend.send(Cmd::PubkyLoginStart);
+            }
         });
         if let Conn::Failed(e) = &self.conn {
             ui.colored_label(egui::Color32::from_rgb(220, 90, 90), e);
@@ -1693,6 +1711,37 @@ impl App {
         }
     }
 
+    fn login_window(&mut self, ctx: &egui::Context) {
+        let Some((url, tex, last_poll)) = self.login.as_mut() else {
+            return;
+        };
+        if last_poll.elapsed() >= Duration::from_secs(2) {
+            *last_poll = std::time::Instant::now();
+            self.backend.send(Cmd::PubkyLoginPoll);
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+        let mut open = true;
+        let url_text = url.clone();
+        let tex = tex.clone();
+        egui::Window::new("Sign in with Pubky Ring")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("Scan with Pubky Ring, or paste the URL there. Waiting for approval…");
+                if let Some(t) = &tex {
+                    ui.add(egui::Image::new(t).fit_to_exact_size(egui::vec2(260.0, 260.0)));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(&url_text).small().weak()).wrap());
+                if ui.button("Copy URL").clicked() {
+                    ui.ctx().copy_text(url_text.clone());
+                }
+            });
+        if !open {
+            self.login = None;
+        }
+    }
+
     fn signal_path_window(&mut self, ctx: &egui::Context) {
         if !self.show_path {
             return;
@@ -1789,6 +1838,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.signal_path_window(&ctx);
         self.dsp_window(&ctx);
+        self.login_window(&ctx);
     }
 }
 
@@ -1944,6 +1994,27 @@ fn fmt_duration(ms: u64) -> String {
     } else {
         format!("{}:{:02}", s / 60, s % 60)
     }
+}
+
+/// Render a QR code of `text` as a black-on-white texture.
+fn qr_texture(ctx: &egui::Context, text: &str) -> Option<egui::TextureHandle> {
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let w = code.width();
+    let quiet = 4;
+    let size = w + 2 * quiet;
+    let mut rgba = vec![255u8; size * size * 4];
+    for y in 0..w {
+        for x in 0..w {
+            if code[(x, y)] == qrcode::Color::Dark {
+                let i = ((y + quiet) * size + (x + quiet)) * 4;
+                rgba[i] = 0;
+                rgba[i + 1] = 0;
+                rgba[i + 2] = 0;
+            }
+        }
+    }
+    let img = egui::ColorImage::from_rgba_unmultiplied([size, size], &rgba);
+    Some(ctx.load_texture("pubky-login-qr", img, egui::TextureOptions::NEAREST))
 }
 
 fn dsd_name(rate: u32) -> String {

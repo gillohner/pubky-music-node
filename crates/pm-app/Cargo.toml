@@ -27,6 +27,7 @@ pm-out-local = { workspace = true, optional = true }
 anyhow = { workspace = true }
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "persistence"] }
 egui = "0.37"
+qrcode = { version = "0.14", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

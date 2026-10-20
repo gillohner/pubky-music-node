@@ -488,6 +488,16 @@ impl NodeClient {
             .await
     }
 
+    /// Start a Pubky Ring sign-in on the node; returns the pubkyauth URL.
+    pub async fn pubky_login_start(&self) -> Result<LoginStarted> {
+        self.send::<LoginStarted, ()>(reqwest::Method::POST, "pubky/login", None)
+            .await
+    }
+
+    pub async fn pubky_login_poll(&self) -> Result<LoginStatus> {
+        self.get("pubky/login", &[]).await
+    }
+
     pub async fn pubky_sync(&self) -> Result<SyncReport> {
         self.send::<SyncReport, ()>(reqwest::Method::POST, "pubky/sync", None)
             .await

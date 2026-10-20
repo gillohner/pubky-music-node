@@ -3678,6 +3678,7 @@ dependencies = [
  "pm-out-local",
  "pm-pubky",
  "pm-zones",
+ "qrcode",
  "serde",
  "serde_json",
  "tokio",

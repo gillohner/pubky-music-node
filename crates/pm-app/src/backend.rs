@@ -83,6 +83,8 @@ pub enum Cmd {
     },
     DeleteZone(String),
     RescanOutputs,
+    PubkyLoginStart,
+    PubkyLoginPoll,
     LoadDsp(String),
     SetDsp(String, Box<pm_audio::PipelineConfig>),
     ResetDsp(String),
@@ -120,6 +122,9 @@ pub enum Msg {
     Notice(String),
     Artists(Vec<pm_library::ArtistSummary>),
     Dsp(String, Box<pm_audio::PipelineConfig>),
+    /// A node-side Pubky Ring sign-in: the URL to show, or the signed-in user.
+    PubkyLoginUrl(String),
+    PubkyLoginDone(Option<String>),
     Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
@@ -390,6 +395,16 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             };
             out.send(Msg::Notice(format!("zone “{}” created", z.name)));
             out.send(Msg::Zones(c.zones().await?));
+        }
+        Cmd::PubkyLoginStart => {
+            let r = c.pubky_login_start().await?;
+            out.send(Msg::PubkyLoginUrl(r.url));
+        }
+        Cmd::PubkyLoginPoll => {
+            let st = c.pubky_login_poll().await?;
+            if st.status == "signed_in" {
+                out.send(Msg::PubkyLoginDone(st.user));
+            }
         }
         Cmd::LoadDsp(z) => {
             let cfg = c.dsp(&z).await?;
