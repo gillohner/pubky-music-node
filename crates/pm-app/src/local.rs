@@ -140,6 +140,9 @@ impl RemoteTracks {
 
 impl SourceFactory for RemoteTracks {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
+        if pm_api::sources::is_http_uri(&item.uri) {
+            return pm_api::sources::open_http_stream(&item.uri);
+        }
         let Some(id) = item.uri.strip_prefix(pm_api::sources::TRACK_SCHEME) else {
             return self.files.open(item);
         };

@@ -31,6 +31,15 @@ impl Source {
         }
     }
 
+    /// A PCM source over any media source (streams); see [`Decoder::from_media_source`].
+    pub fn from_media_source(
+        source: Box<dyn symphonia::core::io::MediaSource>,
+        ext: Option<&str>,
+        name: &str,
+    ) -> Result<Self, AudioError> {
+        Ok(Source::Pcm(Decoder::from_media_source(source, ext, name)?))
+    }
+
     pub fn format(&self) -> AudioFormat {
         match self {
             Source::Pcm(d) => d.format(),

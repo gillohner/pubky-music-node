@@ -4,6 +4,8 @@
 //! remote-access layer (M5) only changes how the socket is reached.
 
 use futures_util::StreamExt;
+pub use pm_api::radio::Station as RadioStation;
+use pm_api::radio::{PlayStation, RadioSearch, Station, Stations};
 use pm_api::types::*;
 use pm_model::{Album, Track, Volume};
 use pm_zones::{OutputInfo, QueueItem, Repeat, ZoneState};
@@ -455,6 +457,53 @@ impl NodeClient {
             None,
         )
         .await
+    }
+
+    // ---- internet radio ----
+
+    /// Search the radio-browser directory by name, tag or country.
+    pub async fn radio_search(&self, q: &RadioSearch) -> Result<Vec<Station>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = &q.q {
+            params.push(("q", v.clone()));
+        }
+        if let Some(v) = &q.tag {
+            params.push(("tag", v.clone()));
+        }
+        if let Some(v) = &q.country {
+            params.push(("country", v.clone()));
+        }
+        if let Some(v) = q.limit {
+            params.push(("limit", v.to_string()));
+        }
+        Ok(self.get::<Stations>("radio/search", &params).await?.stations)
+    }
+
+    pub async fn radio_stations(&self) -> Result<Vec<Station>> {
+        Ok(self.get::<Stations>("radio/stations", &[]).await?.stations)
+    }
+
+    pub async fn save_station(&self, st: &Station) -> Result<Vec<Station>> {
+        Ok(self
+            .send::<Stations, _>(reqwest::Method::PUT, "radio/stations", Some(st))
+            .await?
+            .stations)
+    }
+
+    pub async fn delete_station(&self, id: &str) -> Result<Vec<Station>> {
+        Ok(self
+            .send::<Stations, ()>(reqwest::Method::DELETE, &format!("radio/stations/{id}"), None)
+            .await?
+            .stations)
+    }
+
+    /// Replace the zone's queue with the station and start it.
+    pub async fn play_station(&self, zone: &str, st: &Station) -> Result<Enqueued> {
+        let req = PlayStation {
+            zone: zone.to_string(),
+            station: st.clone(),
+        };
+        self.send(reqwest::Method::POST, "radio/play", Some(&req)).await
     }
 
     // ---- favourites ----

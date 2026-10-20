@@ -1,5 +1,7 @@
 //! The node's [`SourceFactory`]: queue items are library tracks
-//! (`track:<id>`), local paths or `file://` URLs. Streaming services (M12)
+//! (`track:<id>`), local paths, `file://` URLs and `http(s)://` streams
+//! (internet radio, direct file URLs; M3U/PLS playlists are followed once).
+//! Streaming services (M12)
 //! plug in here as further URI schemes.
 
 use pm_audio::{LocalFiles, PipelineConfig};
@@ -96,8 +98,146 @@ impl NodeSources {
     }
 }
 
+/// Blocking HTTP client for stream sources, built on first use on the audio
+/// thread (never inside a tokio runtime). No overall timeout: a live stream
+/// never ends. A stalled server keeps the zone waiting until it stops it.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(None)
+            .build()
+            .expect("http client")
+    })
+}
+
+/// `Read` over a blocking response, `Send + Sync` for symphonia.
+struct HttpBody(std::sync::Mutex<reqwest::blocking::Response>);
+
+impl std::io::Read for HttpBody {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.get_mut().expect("body lock").read(buf)
+    }
+}
+
+/// Container hint from a `Content-Type`.
+pub(crate) fn ext_for_mime(mime: &str) -> Option<&'static str> {
+    let m = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    Some(match m.as_str() {
+        "audio/mpeg" | "audio/mp3" | "audio/mpa" => "mp3",
+        "audio/aac" | "audio/aacp" | "audio/x-aac" => "aac",
+        "audio/mp4" | "audio/x-m4a" | "video/mp4" => "m4a",
+        "audio/ogg" | "application/ogg" | "audio/vorbis" => "ogg",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        _ => return None,
+    })
+}
+
+/// Container hint from a URL's extension.
+pub(crate) fn ext_for_url(url: &str) -> Option<&'static str> {
+    let path = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    let e = path.rsplit('.').next().unwrap_or("");
+    Some(match e {
+        "mp3" => "mp3",
+        "aac" => "aac",
+        "m4a" | "mp4" => "m4a",
+        "ogg" | "oga" | "opus" => "ogg",
+        "flac" => "flac",
+        "wav" => "wav",
+        _ => return None,
+    })
+}
+
+/// Is this a playlist file (M3U/PLS) rather than audio?
+pub(crate) fn is_playlist(url: &str, mime: &str) -> bool {
+    let m = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let path = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        m.as_str(),
+        "audio/x-mpegurl"
+            | "application/vnd.apple.mpegurl"
+            | "audio/mpegurl"
+            | "audio/x-scpls"
+            | "application/pls+xml"
+    ) || path.ends_with(".m3u")
+        || path.ends_with(".m3u8")
+        || path.ends_with(".pls")
+}
+
+/// The first stream URL in an M3U or PLS body.
+pub(crate) fn first_stream_url(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let candidate = match l.split_once('=') {
+            Some((k, v)) if k.trim().to_ascii_lowercase().starts_with("file") => v.trim(),
+            Some(_) if !l.starts_with("http") => continue,
+            _ => l,
+        };
+        if candidate.starts_with("http://") || candidate.starts_with("https://") {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Open an HTTP(S) stream (internet radio, a direct file URL) as a frame
+/// source. Playlist URLs (M3U/PLS) are followed once to their first stream.
+/// Blocking; call from an audio thread. Shared by the node and the app's
+/// local zone.
+pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> {
+    {
+        let err = |reason: String| SourceError::Open {
+            uri: uri.to_string(),
+            reason,
+        };
+        let mut url = uri.to_string();
+        for hop in 0..2 {
+            let resp = http_client()
+                .get(&url)
+                .header("Icy-MetaData", "0")
+                .send()
+                .map_err(|e| err(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(err(format!("HTTP {}", resp.status())));
+            }
+            let mime = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            if is_playlist(&url, &mime) && hop == 0 {
+                let text = resp.text().map_err(|e| err(e.to_string()))?;
+                url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
+                continue;
+            }
+            let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url));
+            let body = HttpBody(std::sync::Mutex::new(resp));
+            let media = symphonia::core::io::ReadOnlySource::new(body);
+            let src = pm_audio::play::Source::from_media_source(Box::new(media), ext, &url)
+                .map_err(|e| err(e.to_string()))?;
+            return Ok(Box::new(src));
+        }
+        Err(err("too many playlist redirections".into()))
+    }
+}
+
+/// `http://` or `https://`.
+pub fn is_http_uri(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://")
+}
+
 impl SourceFactory for NodeSources {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
+        if is_http_uri(&item.uri) {
+            return open_http_stream(&item.uri);
+        }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);
         };
@@ -153,5 +293,32 @@ impl SourceFactory for NodeSources {
             );
         }
         Ok(Box::new(plan))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playlist_bodies_and_mime_hints() {
+        assert_eq!(
+            first_stream_url("#EXTM3U\n#EXTINF:-1,Jazz\nhttps://radio.example/stream.mp3\n").as_deref(),
+            Some("https://radio.example/stream.mp3")
+        );
+        assert_eq!(
+            first_stream_url("[playlist]\nNumberOfEntries=1\nFile1=http://radio.example:8000/\nTitle1=X\n")
+                .as_deref(),
+            Some("http://radio.example:8000/")
+        );
+        assert_eq!(first_stream_url("nothing here"), None);
+        assert!(is_playlist("http://x/y.pls", ""));
+        assert!(is_playlist("http://x/y", "audio/x-mpegurl; charset=utf-8"));
+        assert!(!is_playlist("http://x/stream", "audio/mpeg"));
+        assert_eq!(ext_for_mime("audio/mpeg"), Some("mp3"));
+        assert_eq!(ext_for_mime("audio/aacp"), Some("aac"));
+        assert_eq!(ext_for_mime("text/html"), None);
+        assert_eq!(ext_for_url("http://x/stream.AAC?x=1"), Some("aac"));
+        assert_eq!(ext_for_url("http://x/live"), None);
     }
 }

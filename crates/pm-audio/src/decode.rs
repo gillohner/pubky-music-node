@@ -55,15 +55,28 @@ impl Decoder {
             path: path.to_path_buf(),
             source,
         })?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let ext = path.extension().and_then(|e| e.to_str());
+        Self::from_media_source(Box::new(file), ext, &path.display().to_string())
+    }
+
+    /// Decode any `MediaSource` (a file, an HTTP body wrapped in
+    /// `ReadOnlySource`, …). `ext` is a container hint (`mp3`, `aac`, `ogg`,
+    /// `flac`); `name` only labels errors. Non-seekable sources cannot seek
+    /// and usually report no duration (internet radio).
+    pub fn from_media_source(
+        source: Box<dyn symphonia::core::io::MediaSource>,
+        ext: Option<&str>,
+        name: &str,
+    ) -> Result<Self, AudioError> {
+        let mss = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = ext {
             hint.with_extension(ext);
         }
         let format = symphonia::default::get_probe()
             .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
             .map_err(|e| match e {
-                SymError::Unsupported(m) => AudioError::Unsupported(format!("{}: {m}", path.display())),
+                SymError::Unsupported(m) => AudioError::Unsupported(format!("{name}: {m}")),
                 other => AudioError::from(other),
             })?;
         Self::from_reader(format)

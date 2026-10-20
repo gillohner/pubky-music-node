@@ -54,6 +54,10 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |
+| GET | `/v1/radio/search` | `?q=&tag=&country=&limit=` | `{stations: [{id, name, url, homepage?, favicon?, codec?, bitrate?, country?, tags}]}` from radio-browser.info, most voted first; 400 without a term, 502 when the directory fails |
+| GET / PUT | `/v1/radio/stations` | PUT: a `Station` | saved stations (node-local settings); PUT adds or updates by id/url |
+| DELETE | `/v1/radio/stations/{id}` | | remaining stations; 404 when unknown |
+| POST | `/v1/radio/play` | `{zone, station}` | replaces the zone's queue with the stream and plays it |
 | GET | `/v1/pubky` | | `{user, unsynced}` |
 | POST / GET | `/v1/pubky/login` | | POST starts a Pubky Ring sign-in and returns `{url}` (`pubkyauth://…`); GET polls `{status: none\|pending\|signed_in, user?, url?}`. On approval the node stores the session secret, publishes its record and syncs |
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
@@ -64,7 +68,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private
 homeserver folder when `pubky.session_secret_file` is set. Items are canonical music URLs only.
 
-Queue item URIs: `track:<library id>`, a local path, or `file://`. Streaming services add schemes later.
+Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`). Subscription streaming services add schemes later.
 Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.
 Types live in `pm_api::types`; a Rust client reuses them.
 

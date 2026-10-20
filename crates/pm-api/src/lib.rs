@@ -14,6 +14,7 @@ pub mod discover;
 pub mod favourites;
 pub mod files;
 pub mod playlists;
+pub mod radio;
 pub mod sources;
 pub mod state;
 pub mod subsonic;
@@ -139,6 +140,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/trends", get(discover::trends))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
+        .route("/radio/search", get(radio::search))
+        .route("/radio/stations", get(radio::saved).put(radio::save))
+        .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
+        .route("/radio/play", post(radio::play))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))
@@ -1104,6 +1109,95 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(z["transport"], "stopped");
+    }
+
+    /// Serve the FLAC fixture over HTTP (directly and behind a PLS playlist)
+    /// and play both through a zone: the HTTP stream source end to end.
+    #[tokio::test]
+    async fn http_streams_play_like_files() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pls =
+            format!("[playlist]\nNumberOfEntries=1\nFile1=http://127.0.0.1:{port}/a.flac\nTitle1=Fixture\n");
+        let files = Router::new()
+            .route(
+                "/a.flac",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            )
+            .route(
+                "/list.pls",
+                get(move || {
+                    let pls = pls.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/x-scpls")], pls) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, files).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        for uri in [
+            format!("http://127.0.0.1:{port}/a.flac"),
+            format!("http://127.0.0.1:{port}/list.pls"),
+        ] {
+            let (st, q) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"items": [{"uri": uri, "title": "Fixture radio"}], "replace": true, "play": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{q}");
+            let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+            let st = zone.wait_stopped().await;
+            assert_eq!(st.error, None, "{uri}");
+        }
+        // Saved stations round trip; playing one goes through the same path.
+        let (st, saved) = call(
+            &app,
+            "PUT",
+            "/v1/radio/stations",
+            Some(serde_json::json!({"id": "", "name": "Fixture FM", "url": format!("http://127.0.0.1:{port}/a.flac"), "tags": ["test"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{saved}");
+        let id = saved["stations"][0]["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("url-"));
+        let (st, played) = call(
+            &app,
+            "POST",
+            "/v1/radio/play",
+            Some(serde_json::json!({"zone": zid, "station": saved["stations"][0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{played}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        let (_, q) = call(&app, "GET", &format!("/v1/zones/{zid}/queue"), None).await;
+        assert_eq!(q[0]["title"], "Fixture FM");
+        assert_eq!(q[0]["album"], "Internet radio");
+        let (st, _) = call(&app, "DELETE", &format!("/v1/radio/stations/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&app, "DELETE", &format!("/v1/radio/stations/{id}"), None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (_, left) = call(&app, "GET", "/v1/radio/stations", None).await;
+        assert!(left["stations"].as_array().unwrap().is_empty());
+        let (st, _) = call(&app, "GET", "/v1/radio/search", None).await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "search without terms is refused before any network call"
+        );
     }
 
     #[tokio::test]

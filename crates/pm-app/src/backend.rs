@@ -5,7 +5,7 @@ use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, FavouriteRef,
     Favourites, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
 };
-use pm_client::NodeClient;
+use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
 use pm_zones::{OutputInfo, QueueItem, Repeat, ZoneId, ZoneState};
 use std::sync::{Arc, RwLock};
@@ -25,6 +25,15 @@ pub enum Cmd {
     Refresh,
     LoadHome,
     LoadFavourites,
+    RadioSearch(String),
+    LoadStations,
+    SaveStation(Box<RadioStation>),
+    DeleteStation(String),
+    /// Play a station on a node zone (the local zone plays it itself).
+    PlayStation {
+        zone: String,
+        station: Box<RadioStation>,
+    },
     SetFavourite {
         what: FavouriteRef,
         on: bool,
@@ -122,6 +131,8 @@ pub enum Msg {
     Albums(Vec<Album>),
     Home(Box<HomePage>),
     Favourites(Box<Favourites>),
+    RadioResults(String, Vec<RadioStation>),
+    Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
     Tracks(Vec<Track>),
     SearchResults(String, Vec<Track>),
@@ -303,6 +314,25 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::LoadAlbums => out.send(Msg::Albums(c.albums(None, 500).await?)),
         Cmd::LoadHome => out.send(Msg::Home(Box::new(c.home(12).await?))),
         Cmd::LoadFavourites => out.send(Msg::Favourites(Box::new(c.favourites().await?))),
+        Cmd::RadioSearch(q) => {
+            let r = c
+                .radio_search(&pm_api::radio::RadioSearch {
+                    q: Some(q.clone()),
+                    limit: Some(40),
+                    ..Default::default()
+                })
+                .await?;
+            out.send(Msg::RadioResults(q, r));
+        }
+        Cmd::LoadStations => out.send(Msg::Stations(c.radio_stations().await?)),
+        Cmd::SaveStation(st) => {
+            out.send(Msg::Stations(c.save_station(&st).await?));
+            out.send(Msg::Notice(format!("Saved “{}”", st.name)));
+        }
+        Cmd::DeleteStation(id) => out.send(Msg::Stations(c.delete_station(&id).await?)),
+        Cmd::PlayStation { zone, station } => {
+            c.play_station(&zone, &station).await?;
+        }
         Cmd::SetFavourite { what, on } => {
             let r = c.set_favourite(&what, on).await?;
             out.send(Msg::Notice(if r.favourite {

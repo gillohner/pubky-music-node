@@ -66,6 +66,7 @@ enum View {
     Home,
     NowPlaying,
     Favourites,
+    Radio,
     Albums,
     Album(i64),
     Artists,
@@ -97,6 +98,10 @@ struct App {
     albums: Vec<Album>,
     home: Option<pm_api::types::HomePage>,
     favourites: Option<pm_api::types::Favourites>,
+    radio_query: String,
+    radio_results: Option<(String, Vec<pm_client::RadioStation>)>,
+    radio_searching: bool,
+    stations: Vec<pm_client::RadioStation>,
     /// Canonical URLs the user has hearted.
     fav_uris: std::collections::HashSet<String>,
     /// Tracks the app has seen, by library id, to find covers for queue items.
@@ -165,6 +170,10 @@ impl App {
             albums: Vec::new(),
             home: None,
             favourites: None,
+            radio_query: String::new(),
+            radio_results: None,
+            radio_searching: false,
+            stations: Vec::new(),
             fav_uris: std::collections::HashSet::new(),
             known_tracks: HashMap::new(),
             last_local_play: None,
@@ -240,6 +249,11 @@ impl App {
                 }
                 Msg::Outputs(o) => self.outputs = o,
                 Msg::Albums(a) => self.albums = a,
+                Msg::RadioResults(q, r) => {
+                    self.radio_searching = false;
+                    self.radio_results = Some((q, r));
+                }
+                Msg::Stations(st) => self.stations = st,
                 Msg::Favourites(f) => {
                     self.fav_uris = f.uris.iter().cloned().collect();
                     self.remember_tracks(f.tracks.iter());
@@ -586,6 +600,7 @@ impl App {
             ("Artists", View::Artists),
             ("Tracks", View::Tracks),
             ("Playlists", View::Playlists),
+            ("Radio", View::Radio),
         ] {
             let selected = self.view == view
                 || matches!((&self.view, &view), (View::Album(_), View::Albums))
@@ -606,6 +621,9 @@ impl App {
                 }
                 if view == View::Favourites {
                     self.backend.send(Cmd::LoadFavourites);
+                }
+                if view == View::Radio {
+                    self.backend.send(Cmd::LoadStations);
                 }
                 self.view = view;
             }
@@ -688,6 +706,7 @@ impl App {
             View::Home => self.home_view(ui),
             View::NowPlaying => self.now_playing_view(ui),
             View::Favourites => self.favourites_view(ui),
+            View::Radio => self.radio_view(ui),
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
@@ -921,6 +940,114 @@ impl App {
                     }
                 }
             });
+        });
+    }
+
+    /// Play a station on the current zone: node zones through the API, the
+    /// local zone through its own HTTP stream source.
+    fn play_station(&mut self, st: &pm_client::RadioStation) {
+        if self.is_local() {
+            self.local.zone.stop();
+            self.local.zone.clear();
+            self.local.zone.enqueue(vec![st.queue_item()], Insert::End);
+            self.local.zone.play_index(0);
+        } else {
+            self.backend.send(Cmd::PlayStation {
+                zone: self.settings.zone.clone(),
+                station: Box::new(st.clone()),
+            });
+        }
+        self.toast(format!("Tuning to {}", st.name));
+    }
+
+    fn station_row(&mut self, ui: &mut egui::Ui, st: &pm_client::RadioStation, saved: bool) {
+        ui.horizontal(|ui| {
+            if theme::icon_button(ui, 30.0, "▶", "Play").clicked() {
+                self.play_station(st);
+            }
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(&st.name).strong());
+                let mut facts = Vec::new();
+                if let Some(c) = &st.country {
+                    facts.push(c.clone());
+                }
+                if let Some(c) = &st.codec {
+                    facts.push(match st.bitrate {
+                        Some(b) => format!("{c} {b} kbps"),
+                        None => c.clone(),
+                    });
+                }
+                if !st.tags.is_empty() {
+                    facts.push(st.tags.iter().take(4).cloned().collect::<Vec<_>>().join(", "));
+                }
+                ui.small(egui::RichText::new(facts.join(" · ")).weak());
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if saved {
+                    if ui.add(theme::secondary("Remove")).clicked() {
+                        self.backend.send(Cmd::DeleteStation(st.id.clone()));
+                    }
+                } else if self.stations.iter().any(|x| x.url == st.url) {
+                    ui.weak("saved");
+                } else if ui.add(theme::secondary("Save")).clicked() {
+                    self.backend.send(Cmd::SaveStation(Box::new(st.clone())));
+                }
+            });
+        });
+    }
+
+    fn radio_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Radio");
+            ui.weak("internet radio via radio-browser.info");
+        });
+        ui.small(
+            egui::RichText::new("Streams play on any zone; lossy codecs show as Lossy in the signal path.")
+                .weak(),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.radio_query)
+                    .hint_text("Search stations by name (jazz, FIP, BBC 6…)")
+                    .desired_width(360.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(theme::primary("Search")).clicked() || enter) && !self.radio_query.trim().is_empty() {
+                self.radio_searching = true;
+                self.backend
+                    .send(Cmd::RadioSearch(self.radio_query.trim().to_string()));
+            }
+            if self.radio_searching {
+                ui.spinner();
+            }
+        });
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if !self.stations.is_empty() {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Saved stations").strong().size(16.0));
+                let saved = self.stations.clone();
+                for st in &saved {
+                    self.station_row(ui, st, true);
+                }
+            }
+            if let Some((q, results)) = self.radio_results.clone() {
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(format!("Results for “{q}”"))
+                        .strong()
+                        .size(16.0),
+                );
+                if results.is_empty() {
+                    ui.weak("No stations matched.");
+                }
+                for st in &results {
+                    self.station_row(ui, st, false);
+                }
+            } else if self.stations.is_empty() {
+                ui.add_space(20.0);
+                ui.weak("Search for a station above, or save one to see it here.");
+            }
         });
     }
 

@@ -30,7 +30,8 @@ they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.m
 | `pm-node` | the binary: CLI plus `serve` (API, one zone per output incl. endpoints) | CLI and daemon |
 
 Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
-Migration: `pm-node import-playlist <file>` (also the app's Playlists screen and the web UI) takes
+Internet radio: any `http(s)://` stream plays on any zone (search radio-browser.info from the Radio screen,
+save stations); lossy streams are shown as Lossy. Migration: `pm-node import-playlist <file>` (also the app's Playlists screen and the web UI) takes
 M3U/M3U8, CSV and Roon's Excel export (Roon → select tracks or a playlist → Export → Excel) and
 matches entries to the library by path, file name, then title and artist, listing what it could not
 match. Roon: `sidecars/roon-bridge` scrobbles Roon playback to the node and imports Roon playlists through

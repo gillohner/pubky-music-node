@@ -11,6 +11,8 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "query"] }
+symphonia = { workspace = true }
 pm-pubky = { workspace = true }
 pm-out-upnp = { workspace = true }
 pm-out-slimproto = { workspace = true }
