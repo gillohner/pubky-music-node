@@ -54,6 +54,23 @@ pub struct PipelineConfig {
     pub eq: Vec<crate::dsp::EqBand>,
     /// ReplayGain application, when the track carries values.
     pub loudness: Loudness,
+    /// Room correction: convolve with an impulse response (M8).
+    pub convolution: Option<ConvolutionConfig>,
+}
+
+/// An impulse response file (WAV at the stream's rate; mono or one channel
+/// per stream channel) and a make-up gain.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConvolutionConfig {
+    pub path: String,
+    #[serde(default)]
+    pub gain_db: f32,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -89,6 +106,7 @@ impl Default for PipelineConfig {
             resample: true,
             eq: Vec::new(),
             loudness: Loudness::Off,
+            convolution: None,
         }
     }
 }
@@ -98,6 +116,7 @@ impl PipelineConfig {
         self.headroom_db.is_some_and(|d| d != 0.0)
             || self.volume_db.is_some_and(|d| d != 0.0)
             || self.eq.iter().any(|b| b.enabled)
+            || self.convolution.as_ref().is_some_and(|c| c.enabled)
     }
 }
 
@@ -124,6 +143,7 @@ pub enum PipelineError {
 enum Stage {
     Resample(Box<crate::resample::Resampler>),
     Eq(Box<crate::dsp::Equalizer>),
+    Convolve(Box<crate::convolve::Convolver>),
     Gain {
         gain: f64,
     },
@@ -316,6 +336,19 @@ impl Plan {
                 path.push(PathStage::new("eq", cur, fbits, Quality::Enhanced).with_note(note));
                 cur = fbits;
             }
+            if let Some(conv) = cfg.convolution.as_ref().filter(|c| c.enabled) {
+                let ir = crate::convolve::ImpulseResponse::from_wav(std::path::Path::new(&conv.path))?;
+                let c = crate::convolve::Convolver::new(
+                    &ir,
+                    fbits.rate_hz,
+                    source.channels as usize,
+                    conv.gain_db,
+                )?;
+                let note = format!("{} in 64-bit float", c.describe());
+                stages.push(Stage::Convolve(Box::new(c)));
+                path.push(PathStage::new("convolution", cur, fbits, Quality::Enhanced).with_note(note));
+                cur = fbits;
+            }
             if let Some(db) = cfg.volume_db.filter(|d| *d != 0.0) {
                 stages.push(Stage::Gain { gain: db_to_gain(db) });
                 path.push(
@@ -480,29 +513,63 @@ impl Plan {
         self.run_from(0, block)
     }
 
-    /// Flush stages with internal delay (the resampler) at the end of a
-    /// track; `None` when there is nothing to flush.
+    /// Flush stages with internal delay (resampler, convolver) at the end of
+    /// a track, in order, each tail running through the stages after it;
+    /// `None` when there is nothing to flush.
     pub fn finish(&mut self) -> Result<Option<AudioBlock>, PipelineError> {
-        let Some(idx) = self.stages.iter().position(|s| matches!(s, Stage::Resample(_))) else {
-            return Ok(None);
-        };
-        let (rate, tail) = match &mut self.stages[idx] {
-            Stage::Resample(r) => (r.out_rate(), r.finish()?),
-            _ => unreachable!(),
-        };
-        if tail.is_empty() {
-            return Ok(None);
+        let mut out: Option<AudioBlock> = None;
+        for idx in 0..self.stages.len() {
+            let tail = match &mut self.stages[idx] {
+                Stage::Resample(r) => {
+                    let rate = r.out_rate();
+                    let v = r.finish()?;
+                    (!v.is_empty()).then_some((rate, v))
+                }
+                Stage::Convolve(c) => {
+                    let v = c.finish()?;
+                    (!v.is_empty()).then(|| (self.current_rate_before(idx), v))
+                }
+                _ => None,
+            };
+            let Some((rate, samples)) = tail else {
+                continue;
+            };
+            let fmt = AudioFormat {
+                rate_hz: rate,
+                bits: 32,
+                ..self.source
+            };
+            let block = self.run_from(
+                idx + 1,
+                AudioBlock {
+                    format: fmt,
+                    samples: Samples::PcmF64(samples),
+                },
+            )?;
+            if block.is_empty() {
+                continue;
+            }
+            match &mut out {
+                None => out = Some(block),
+                Some(acc) => acc
+                    .append(&block)
+                    .map_err(|e| PipelineError::InvalidFormat(e.to_string()))?,
+            }
         }
-        let fmt = AudioFormat {
-            rate_hz: rate,
-            bits: 32,
-            ..self.source
-        };
-        let block = AudioBlock {
-            format: fmt,
-            samples: Samples::PcmF64(tail),
-        };
-        self.run_from(idx + 1, block).map(Some)
+        Ok(out)
+    }
+
+    /// The sample rate of the stream entering stage `idx` (after any
+    /// resampler before it).
+    fn current_rate_before(&self, idx: usize) -> u32 {
+        self.stages[..idx]
+            .iter()
+            .rev()
+            .find_map(|s| match s {
+                Stage::Resample(r) => Some(r.out_rate()),
+                _ => None,
+            })
+            .unwrap_or(self.source.rate_hz)
     }
 
     fn run_from(&mut self, start: usize, block: AudioBlock) -> Result<AudioBlock, PipelineError> {
@@ -523,6 +590,16 @@ impl Plan {
                             }
                         }
                         _ => return Err(PipelineError::InvalidFormat("resample expects PCM".into())),
+                    }
+                }
+                Stage::Convolve(c) => {
+                    let b = block.to_f64();
+                    match b.samples {
+                        Samples::PcmF64(v) => AudioBlock {
+                            format: b.format,
+                            samples: Samples::PcmF64(c.push(&v)?),
+                        },
+                        _ => return Err(PipelineError::InvalidFormat("convolution expects PCM".into())),
                     }
                 }
                 Stage::Eq(eq) => {
@@ -890,6 +967,65 @@ mod tests {
         // No tags → no stage, still bit-perfect.
         let plan = Plan::negotiate_for(src, &OutputCaps::unlimited(), &cfg, None).unwrap();
         assert!(plan.is_bit_perfect());
+    }
+
+    #[test]
+    fn convolution_with_a_delta_is_transparent_and_flushes_its_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("delta.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&ir_path, spec).unwrap();
+        w.write_sample(i32::MAX).unwrap();
+        w.write_sample(0).unwrap();
+        w.write_sample(0).unwrap();
+        w.finalize().unwrap();
+        let src = AudioFormat::pcm(48_000, 24, 2);
+        let cfg = PipelineConfig {
+            convolution: Some(ConvolutionConfig {
+                path: ir_path.to_string_lossy().into_owned(),
+                gain_db: 0.0,
+                enabled: true,
+            }),
+            dither: false,
+            ..Default::default()
+        };
+        let mut plan = Plan::negotiate(src, &OutputCaps::unlimited(), &cfg).unwrap();
+        let names: Vec<_> = plan
+            .signal_path()
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["decode", "convolution", "requantize", "output"]);
+        assert_eq!(plan.signal_path().stages[1].quality, Quality::Enhanced);
+        let input = random_block(src, 10_000);
+        let mut out = plan.process(input.clone()).unwrap();
+        if let Some(tail) = plan.finish().unwrap() {
+            out.append(&tail).unwrap();
+        }
+        // Delta IR of 3 taps: same samples back, plus 2 frames of (near) silence.
+        assert_eq!(out.frames(), 10_002);
+        if let (Samples::PcmI32(o), Samples::PcmI32(i)) = (&out.samples, &input.samples) {
+            let mismatches = o.iter().zip(i).filter(|(a, b)| (**a - **b).abs() > 1).count();
+            assert_eq!(mismatches, 0, "delta convolution must be transparent to the LSB");
+        } else {
+            panic!();
+        }
+        // A missing IR file fails negotiation, not playback.
+        let bad = PipelineConfig {
+            convolution: Some(ConvolutionConfig {
+                path: dir.path().join("nope.wav").to_string_lossy().into_owned(),
+                gain_db: 0.0,
+                enabled: true,
+            }),
+            ..Default::default()
+        };
+        assert!(Plan::negotiate(src, &OutputCaps::unlimited(), &bad).is_err());
     }
 
     #[test]

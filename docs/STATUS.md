@@ -13,7 +13,7 @@ implemented with automated tests but not yet exercised outside this repository's
 | M5 | Remote access by pubkey | partial | Node publishes its address privately on the homeserver; app finds it from a session secret (ADR 0008). No Pubky live transport or relay exists yet; wire stays HTTPS. |
 | M6 | OpenHome / UPnP (Linn DSM) | not started | |
 | M7 | Slimproto, AirPlay 2, Chromecast | not started | |
-| M8 | DSP engine | partial | Sample-rate conversion (`Lossy`, FFT sinc), parametric EQ (`Enhanced`), headroom, software volume, TPDF dither; per-zone, persisted, editable in the app. Missing: convolution, crossfeed, loudness, PCM↔DSD, drift correction. Bypass is bit-perfect (tested). |
+| M8 | DSP engine | partial | Sample-rate conversion (`Lossy`, FFT sinc), parametric EQ, convolution from an IR WAV, ReplayGain loudness (all `Enhanced`), headroom, software volume, TPDF dither; per-zone, persisted, editable in the app. Missing: crossfeed, PCM↔DSD, drift correction, selectable SRC filters. Bypass is bit-perfect (tested). |
 | M9 | Pubky social | partial | Objects are v1 `PubkyAppPost` envelopes in `/priv/pubky.app/posts/` (ADR 0006); playlists, reviews, activity; private sync with the homeserver; private audio files. Sign-in is by exported session secret; Pubky Ring flow and public publishing wait for the social primitives. |
 | M10 | Pinakes integration | partial | Trends, tags, friends' activity joined to the library in the app. Depends on Pinakes' music step (`key=`, `sort=trending`) landing upstream; client falls back meanwhile. |
 | M11 | Roon bridge | built, untested | `sidecars/roon-bridge` (official Extension API): scrobble to `/v1/activity`, playlist import via `/v1/playlists/import`. Needs a Roon Core. |

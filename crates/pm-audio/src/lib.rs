@@ -10,6 +10,7 @@
 //! * [`play`]: a blocking decode → negotiate → sink loop, used by the CLI and
 //!   by the M1 byte-identical test.
 
+pub mod convolve;
 pub mod decode;
 pub mod dsd;
 pub mod dsp;
@@ -20,11 +21,12 @@ pub mod probe;
 pub mod resample;
 pub mod zone;
 
+pub use convolve::{Convolver, ImpulseResponse};
 pub use decode::Decoder;
 pub use dsd::DsdReader;
 pub use dsp::{BandKind, EqBand, Equalizer};
 pub use error::AudioError;
-pub use pipeline::{DsdMode, Loudness, PipelineConfig, PipelineError, Plan};
+pub use pipeline::{ConvolutionConfig, DsdMode, Loudness, PipelineConfig, PipelineError, Plan};
 pub use play::{play_file, play_to_sink, PlayReport};
 pub use probe::{probe_file, FileInfo};
 pub use zone::LocalFiles;

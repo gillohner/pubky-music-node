@@ -1542,6 +1542,35 @@ impl App {
                                 ui.selectable_value(&mut cfg.loudness, pm_audio::Loudness::Album, "Album");
                             });
                         ui.end_row();
+                        ui.label("Room correction IR");
+                        ui.horizontal(|ui| {
+                            let mut conv = cfg.convolution.clone().unwrap_or(pm_audio::ConvolutionConfig {
+                                path: String::new(),
+                                gain_db: 0.0,
+                                enabled: true,
+                            });
+                            let mut changed = false;
+                            changed |= ui.checkbox(&mut conv.enabled, "").changed();
+                            changed |= ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut conv.path)
+                                        .hint_text("path to a WAV impulse response on the node")
+                                        .desired_width(260.0),
+                                )
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut conv.gain_db)
+                                        .range(-24.0..=12.0)
+                                        .speed(0.1)
+                                        .suffix(" dB"),
+                                )
+                                .changed();
+                            if changed {
+                                cfg.convolution = (!conv.path.trim().is_empty()).then_some(conv);
+                            }
+                        });
+                        ui.end_row();
                         ui.label("Resample when needed");
                         ui.checkbox(&mut cfg.resample, "");
                         ui.end_row();
