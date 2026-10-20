@@ -115,6 +115,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
   const more = w.document.querySelector('.track [data-act="more"]');
   if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('New playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
+  // Discover: the chart tabs render; with a contact set the rows carry site badges and a details menu.
+  w.document.querySelector('.nav-item[data-view="discover"]').click(); await sleep(2500);
+  const dtabs = [...w.document.querySelectorAll('#main .tabs .chip')].map((c) => c.textContent.trim());
+  console.log('discover tabs:', dtabs.join(' | '), '| rows', w.document.querySelectorAll('#main [data-ditem]').length);
+  if (!dtabs.includes('Top tracks') || !dtabs.includes('Search Pubky')) errors.push('discover tabs incomplete');
+  const drow = w.document.querySelector('#main [data-dmore]');
+  if (drow) { drow.click(); await sleep(300); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('discover menu:', items.join(' | ')); if (!items.some((t) => t.startsWith('Details'))) errors.push('discover row menu lacks details'); w.document.body.click(); await sleep(100); }
+  const first = w.document.querySelector('#main [data-ditem]');
+  if (first) { first.click(); await sleep(3000); const h1 = w.document.querySelector('#main h1'); console.log('discover item:', h1 && h1.textContent, '| also on rows', w.document.querySelectorAll('#main [data-vplay], #main .list-row').length, '| tag input', !!w.document.querySelector('#tagadd')); if (!h1) errors.push('discover item page did not render'); }
   // heart on first track row (fixtures have no ids → disabled)
   const h = w.document.querySelector('.track .heart'); console.log('heart disabled (no ids):', h && h.disabled);
   console.log('errors:', errors.length ? errors : 'none');

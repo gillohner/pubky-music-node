@@ -412,9 +412,9 @@
     const q = search.value.trim();
     if (!q) { if (state.view === 'search') setView('home'); return; }
     try {
-      const r = await api('GET', '/library/search?q=' + encodeURIComponent(q) + '&limit=200');
+      const [r, pubky] = await Promise.all([api('GET', '/library/search?q=' + encodeURIComponent(q) + '&limit=200'), api('GET', '/discover/search?q=' + encodeURIComponent(q) + '&limit=12').catch(() => null)]);
       if (search.value.trim() !== q) return;
-      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [], sources: r.sources || [] });
+      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [], sources: r.sources || [], pubky: pubky ? pubky.items : [] });
     } catch (e) { toast(e.message, 'error'); }
   };
   search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 280); });
@@ -605,6 +605,14 @@
     });
     $$('.tile[data-album]', main).forEach((el) => el.onclick = () => setView('album', Number(el.dataset.album)));
     $$('[data-more]', main).forEach((b) => b.onclick = () => setView(b.dataset.more));
+  };
+  // Discover rows: a Pinakes card joined to the library. Play what you own, else the service page the node can stream, else "Play on…".
+  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const playable = it.in_library || it.playable || it.also_on.some((v) => v.uri); return `<div class="list-row clickable" data-ditem="${i}">${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(it.title || it.uri)} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.kind !== 'track' ? it.kind : null, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}</div></div><span class="row-actions">${playable ? `<button class="icon-btn" data-dplay="${i}" title="Play">${icon('play')}</button>` : ''}<button class="icon-btn" data-dmore="${i}" title="More">${icon('more')}</button></span></div>`; }).join('')}</div>`;
+  const discoverPlay = (it, v) => { if (!v && it.in_library) return playTracks([it.in_library], true); const uri = v ? v.uri : it.playable || (it.also_on.find((x) => x.uri) || {}).uri; if (!uri) return toast('Nothing to stream here; open the link instead', 'error'); playSourceItems([{ uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], true); };
+  const bindDiscoverRows = (items) => {
+    $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('button')) return; setView('discover-item', { uri: items[Number(row.dataset.ditem)].uri }); });
+    $$('[data-dplay]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); discoverPlay(items[Number(b.dataset.dplay)]); });
+    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => window.open(it.uri, '_blank', 'noopener') }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const pageHead = (title, count, actions = '') => `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
@@ -814,7 +822,7 @@
         }
         case 'search': {
           if ((!state.viewArg || !state.viewArg.q) && search.value.trim()) { runSearch(); return; }
-          const { q, tracks, albums, artists, genres, sources } = { tracks: [], albums: [], artists: [], genres: [], sources: [], ...(state.viewArg || { q: '' }) };
+          const { q, tracks, albums, artists, genres, sources, pubky } = { tracks: [], albums: [], artists: [], genres: [], sources: [], pubky: [], ...(state.viewArg || { q: '' }) };
           // Every source in one page: library first, then streaming hits that are not already owned.
           const srcHits = (sources || []).flatMap((s) => s.items.map((h) => ({ ...h, source: s.source })));
           const tAlbums = srcHits.filter((h) => h.kind === 'album' && !h.library_album_id); const tTracks = srcHits.filter((h) => h.kind === 'track' && !h.library_track_id); const tArtists = srcHits.filter((h) => h.kind === 'artist' && !h.library_artist_id);
@@ -826,8 +834,10 @@
             + (artists.length || genres.length || tArtists.length ? `<section class="section"><div class="section-head"><h3>${artists.length || tArtists.length ? 'Artists' : ''}${(artists.length || tArtists.length) && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div>${tArtists.length ? `<div class="chips" style="margin-bottom:8px">${tArtists.map((h) => `<button class="chip" data-sartist="${esc(h.id)}" data-src="${esc(h.source)}">${h.image ? `<img class="chip-avatar" src="${esc(h.image)}" alt="">` : ''}${esc(h.title)} <span class="src-badge">${esc(h.source.toUpperCase())}</span></button>`).join('')}</div>` : ''}<div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
             + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '')
             + (tTracks.length ? `<section class="section"><div class="section-head"><h3>${tracks.length ? 'More tracks on streaming' : 'Tracks on streaming'}</h3><span class="muted small">${tTracks.some((h) => h.source === 'deezer') ? 'your accounts · Deezer plays 30 s previews' : 'from your accounts'}</span></div><div class="list">${tTracks.map((h, i) => `<div class="list-row"><button class="icon-btn" data-tplay="${i}" title="Play">${icon('play')}</button>${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(h.title)} <span class="src-badge">${esc(h.source.toUpperCase())}</span></div><div class="sub">${esc([h.creator, h.year, h.duration_ms ? fmt(h.duration_ms) : null].filter(Boolean).join(' · '))}</div></div><span class="row-actions"><button class="icon-btn" data-tnext="${i}" title="Play next">${icon('playnext')}</button><button class="icon-btn" data-tadd="${i}" title="Add to queue">${icon('plus')}</button></span></div>`).join('')}</div></section>` : '')
+            + (pubky.length ? `<section class="section"><div class="section-head"><h3>On Pubky</h3><span class="muted small">tagged by people, via Pinakes</span></div>${discoverRows(pubky)}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Elsewhere</h3></div><div class="actions"><button class="btn" id="s-archive">${icon('archive')} Search the Internet Archive for “${esc(q)}”</button><button class="btn" id="s-audius">${icon('archive')} Search Audius for “${esc(q)}”</button><button class="btn" id="s-radio">${icon('radio')} Find radio stations named “${esc(q)}”</button></div></section>`;
           lists.search = tracks;
+          bindDiscoverRows(pubky);
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: b.dataset.src || 'tidal', id: b.dataset.sitem }));
           $$('[data-sartist]', main).forEach((b) => b.onclick = () => setView('source-artist', { source: b.dataset.src || 'tidal', id: b.dataset.sartist }));
           $$('[data-tplay]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tplay)])], true));
@@ -985,23 +995,68 @@
         case 'discover': {
           loading();
           const tag = state.viewArg && state.viewArg.tag;
-          const mode = tag ? 'tag' : (state.viewArg && state.viewArg.mode) || 'trending';
-          const tabs = `<div class="chips tabs">${[['trending', 'Trending'], ['friends', 'Friends']].map(([m, l]) => `<button class="chip ${mode === m ? 'on' : ''}" data-dmode="${m}">${l}</button>`).join('')}</div>`;
-          const bindTabs = () => $$('[data-dmode]', main).forEach((b) => b.onclick = () => setView('discover', { mode: b.dataset.dmode }));
+          const arg = state.viewArg || {};
+          const mode = tag ? 'tag' : arg.mode || 'tracks';
+          const window_ = arg.window || '7d';
+          const tabs = `<div class="chips tabs">${[['tracks', 'Top tracks'], ['albums', 'Top albums'], ['tags', 'Tags'], ['friends', 'Friends'], ['search', 'Search Pubky']].map(([m, l]) => `<button class="chip ${mode === m ? 'on' : ''}" data-dmode="${m}">${l}</button>`).join('')}</div>`;
+          const windows = (mode === 'tracks' || mode === 'albums') ? `<div class="chips">${[['24h', 'Today'], ['7d', 'This week'], ['30d', 'This month']].map(([w, l]) => `<button class="chip ${window_ === w ? 'on' : ''}" data-dwin="${w}">${l}</button>`).join('')}</div>` : '';
+          const head = (sub) => pageHead(tag ? `#${tag}` : 'Discover', sub) + (tag ? '' : tabs + windows);
+          const bindTabs = () => { $$('[data-dmode]', main).forEach((b) => b.onclick = () => setView('discover', { mode: b.dataset.dmode, window: window_ })); $$('[data-dwin]', main).forEach((b) => b.onclick = () => setView('discover', { mode, window: b.dataset.dwin })); };
           let pk = null;
           if (mode === 'friends') {
             try { pk = await api('GET', '/pubky'); } catch { pk = null; }
-            if (!pk || !pk.user) { main.innerHTML = pageHead('Discover', 'via Pinakes') + tabs + emptyState('artist', 'Friends need a Pubky session', 'Sign in with Pubky Ring in Settings; then this tab shows what the people you follow are tagging.', { view: 'settings', label: 'Open settings' }); bindTabs(); break; }
+            if (!pk || !pk.user) { main.innerHTML = head('via Pinakes') + emptyState('artist', 'Friends need a Pubky session', 'Sign in with Pubky Ring in Settings; then this tab shows what the people you follow are tagging.', { view: 'settings', label: 'Open settings' }); bindTabs(); break; }
+          }
+          if (mode === 'search') {
+            const q = arg.q || '';
+            main.innerHTML = head('music tagged on Pubky, via Pinakes') + `<div class="row" style="gap:8px;margin:6px 0 14px"><input id="dsq" value="${esc(q)}" placeholder="Artist, album or song on Pubky…" style="flex:1;min-width:200px"><button class="btn primary" id="dsgo">${icon('search')} Search</button></div><div id="dsout">${q ? '<p class="muted small">Searching…</p>' : '<p class="muted small">Searches every music link people tagged on Pubky, on any service, and joins hits to your library.</p>'}</div>`;
+            bindTabs();
+            const go = () => { const v = $('#dsq').value.trim(); if (v) setView('discover', { mode: 'search', q: v }); };
+            $('#dsgo').onclick = go; $('#dsq').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+            if (q) {
+              try { const page = await api('GET', `/discover/search?q=${encodeURIComponent(q)}&limit=40`); if (state.view !== 'discover') return; $('#dsout').innerHTML = page.items.length ? discoverRows(page.items) : emptyState('search', 'Nothing on Pubky yet', 'Nobody has tagged this on Pubky. Tag it from your library and it shows up here.'); bindDiscoverRows(page.items); }
+              catch (e) { $('#dsout').innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
+            }
+            break;
           }
           let page;
-          try { page = await api('GET', tag ? `/discover/tag/${encodeURIComponent(tag)}?limit=40` : mode === 'friends' ? `/discover/friends/${encodeURIComponent(pk.user)}?limit=40` : '/discover/trends?window=7d&limit=40'); }
-          catch (e) { main.innerHTML = pageHead('Discover', 'via Pinakes') + tabs + `<div class="notice warn">${esc(e.message)}</div><p class="muted">Discover reads music tagged on Pubky through Pinakes. Set the upstream contact in Settings so the requests carry a contact address.</p>`; bindTabs(); break; }
+          const url = tag ? `/discover/tag/${encodeURIComponent(tag)}?limit=40` : mode === 'friends' ? `/discover/friends/${encodeURIComponent(pk.user)}?limit=40` : mode === 'tags' ? '/discover/trends?window=30d&limit=40' : `/discover/charts?type=${mode}&window=${window_}&limit=40`;
+          try { page = await api('GET', url); }
+          catch (e) { main.innerHTML = head('via Pinakes') + `<div class="notice warn">${esc(e.message)}</div><p class="muted">Discover reads music tagged on Pubky through Pinakes. Set the upstream contact in Settings so the requests carry a contact address.</p>`; bindTabs(); break; }
           if (state.view !== 'discover') return;
-          main.innerHTML = (tag ? backBtn('discover', 'Trending') : '') + pageHead(tag ? `#${tag}` : 'Discover', tag ? 'tagged on Pubky, via Pinakes' : mode === 'friends' ? 'what the people you follow are tagging' : 'trending this week via Pinakes') + (tag ? '' : tabs)
-            + (page.facets.length ? `<div class="chips">${page.facets.slice(0, 30).map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : '')
-            + (page.items.length ? `<div class="list">${page.items.map((it, i) => `<div class="list-row"><div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div><div class="grow"><div class="name">${esc(it.title || (it.in_library && it.in_library.title) || it.uri)}</div><div class="sub">${esc(it.artist || '')}${it.taggers != null ? ` · ${it.taggers} taggers` : ''}</div></div>${it.in_library ? `<button class="btn sm" data-dplay="${i}">${icon('play')} In library</button>` : '<span class="pill">not in library</span>'}<a class="icon-btn" href="${esc(it.uri)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></div>`).join('')}</div>` : emptyState('compass', 'Nothing trending yet', 'Pinakes has not indexed music tags for this window.'));
-          $$('[data-dplay]', main).forEach((b) => b.onclick = () => playTracks([page.items[Number(b.dataset.dplay)].in_library], true));
+          const sub = tag ? 'tagged on Pubky, via Pinakes' : mode === 'friends' ? 'what the people you follow are tagging' : mode === 'tags' ? 'labels people put on music' : `${mode === 'albums' ? 'albums' : 'songs'} most tagged ${window_ === '24h' ? 'today' : window_ === '30d' ? 'this month' : 'this week'} · one row per song across services`;
+          main.innerHTML = (tag ? backBtn('discover', 'Discover') : '') + head(sub)
+            + (page.facets.length ? `<div class="chips">${page.facets.slice(0, 40).map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '')
+            + (mode === 'tags' && !tag ? '' : (page.items.length ? discoverRows(page.items) : emptyState('compass', 'Nothing here yet', mode === 'friends' ? 'The people you follow have not tagged music yet.' : 'No tagged music in this window yet.')));
+          bindDiscoverRows(page.items);
+          $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           bindTabs();
+          break;
+        }
+        case 'discover-item': {
+          loading();
+          const uri = state.viewArg && state.viewArg.uri;
+          let d;
+          try { d = await api('GET', `/discover/item?uri=${encodeURIComponent(uri)}`); }
+          catch (e) { main.innerHTML = backBtn('discover', 'Discover') + `<div class="notice warn">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'discover-item') return;
+          const it = d.item;
+          const ref = { uri: it.uri };
+          let myTags = [], myReview = null;
+          try { myTags = (await api('GET', `/tags?uri=${encodeURIComponent(it.uri)}`)).tags; } catch { /* no identity */ }
+          try { myReview = ((await api('GET', `/reviews?uri=${encodeURIComponent(it.uri)}`)).reviews || [])[0] || null; } catch { /* no identity */ }
+          const facts = [d.mbid ? `<a class="chip" href="https://musicbrainz.org/${it.kind === 'artist' ? 'artist' : it.kind === 'album' ? 'release' : 'recording'}/${esc(d.mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a>` : '', ...(d.isrcs || []).slice(0, 3).map((i) => `<span class="chip" title="ISRC">${esc(i)}</span>`), d.upc ? `<span class="chip" title="Barcode">UPC ${esc(d.upc)}</span>` : '', d.duration_secs ? `<span class="chip">${fmt(d.duration_secs * 1000)}</span>` : '', d.artist_type ? `<span class="chip">${esc(d.artist_type)}</span>` : ''].filter(Boolean).join('');
+          const playOn = it.also_on.filter((v) => v.uri);
+          main.innerHTML = backBtn('discover', 'Discover') + `<div class="hero"><div class="art">${it.image ? `<img src="${esc(it.image)}" alt="" style="width:100%;border-radius:12px">` : `<div class="art placeholder"></div>`}</div><div><div class="eyebrow">${esc(it.kind)} · ${esc(it.site || '')}${it.group_size ? ` · on ${it.group_size} services` : ''}</div><h1>${esc(it.title || it.uri)}</h1><p class="sub">${esc([it.artist, d.album || d.original_album].filter(Boolean).join(' · '))}</p><div class="chips facts">${facts}</div>
+            <div class="actions" style="margin-top:12px">${it.in_library ? `<button class="btn primary" id="dplay">${icon('play')} Play from library</button>` : it.playable ? `<button class="btn primary" id="dplay">${icon('play')} Play${it.site ? ' on ' + esc(it.site) : ''}</button>` : ''}${playOn.length ? `<button class="btn" id="dplayon">${icon('zone')} Play on…</button>` : ''}<a class="btn" href="${esc(it.uri)}" target="_blank" rel="noopener">${icon('external')} Open on ${esc(it.site || 'the service')}</a>${d.in_library_album ? `<button class="btn" data-album="${d.in_library_album}">${icon('disc')} In your library</button>` : ''}</div></div></div>`
+            + (it.also_on.length ? `<section class="section"><div class="section-head"><h3>Also on</h3><span class="muted small">tagged links first; derived links may differ by country</span></div><div class="list">${it.also_on.map((v, i) => `<div class="list-row"><div class="grow"><div class="name"><span class="src-badge">${esc(v.source.toUpperCase())}</span> ${esc(v.label)}</div><div class="sub">${esc(v.url)}</div></div><span class="row-actions">${v.uri ? `<button class="icon-btn" data-vplay="${i}" title="Play">${icon('play')}</button>` : ''}<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></span></div>`).join('')}</div></section>` : '')
+            + `<section class="section"><div class="section-head"><h3>On Pubky</h3></div>${d.on_pubky ? `<p class="muted small">${d.on_pubky.taggers} ${d.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${d.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">Not indexed on Pubky yet.</p>'}${tagRow(myTags, ref)}${reviewRow(myReview)}</section>`;
+          $('#dplay') && ($('#dplay').onclick = () => it.in_library ? playTracks([it.in_library], true) : playSourceItems([{ uri: it.playable, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true));
+          $('#dplayon') && ($('#dplayon').onclick = (e) => showMenu(e.currentTarget, playOn.map((v) => ({ label: v.label, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true) }))));
+          $$('[data-vplay]', main).forEach((b) => b.onclick = () => { const v = it.also_on[Number(b.dataset.vplay)]; playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true); });
+          $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+          $$('[data-album]', main).forEach((b) => b.onclick = () => setView('album', { id: Number(b.dataset.album) }));
+          bindTagRow(ref); bindReviewRow(ref, myReview);
           break;
         }
         case 'queue': {
