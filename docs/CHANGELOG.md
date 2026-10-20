@@ -5,7 +5,7 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-20
 
 - Queue tools in both UIs: shuffle what comes next, save the queue as a playlist, transfer playback
-  to another zone, Start radio from a track or an artist page, sleep timer per zone.
+  to another zone, Start radio from a track, an album or an artist page, sleep timer per zone.
 - Lyrics from tags or a sidecar `.lrc` (synced lines follow the position); Subsonic `getLyrics` and
   `getLyricsBySongId`.
 - Focus: filter albums by hi-res, DSD, CD quality, lossless or lossy, with format badges on tiles.
