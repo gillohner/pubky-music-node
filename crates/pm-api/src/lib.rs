@@ -432,11 +432,7 @@ async fn discovery_report(
             .iter()
             .any(|o| o.id.0.contains(loc) || o.name.contains(loc))
     };
-    let local_address = std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|u| u.connect("1.1.1.1:80").map(|_| u))
-        .and_then(|u| u.local_addr())
-        .ok()
-        .map(|a| a.ip().to_string());
+    let local_address = local_address();
     let mut notes = Vec::new();
     if !s.upnp && !s.cast {
         notes.push("UPnP and Cast discovery are both off in the node config.".into());
@@ -487,6 +483,15 @@ async fn discovery_report(
     }))
 }
 
+/// The address this node talks to the network from.
+fn local_address() -> Option<String> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|u| u.connect("1.1.1.1:80").map(|_| u))
+        .and_then(|u| u.local_addr())
+        .ok()
+        .map(|a| a.ip().to_string())
+}
+
 /// `POST /v1/outputs/upnp {address}`: add a renderer multicast cannot find
 /// (another subnet or VLAN); the address is kept for the next start.
 async fn add_upnp_output(
@@ -497,7 +502,12 @@ async fn add_upnp_output(
     let found = tokio::task::spawn_blocking(move || st.add_upnp_address(&body.address))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| {
+            // Say which node tried: people run several (a cloud workspace has no
+            // route to a renderer at home).
+            let from = local_address().unwrap_or_else(|| "this node".into());
+            ApiError::bad_request(format!("{e} (asked from {} at {from})", s.name))
+        })?;
     let names: Vec<&str> = found.iter().map(|r| r.friendly_name.as_str()).collect();
     tracing::info!(?names, "renderers added by address");
     Ok(Json(s.outputs.list()))
