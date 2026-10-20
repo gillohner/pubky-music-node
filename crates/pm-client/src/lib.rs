@@ -338,6 +338,15 @@ impl NodeClient {
         self.get(&format!("library/tracks/{id}"), &[]).await
     }
 
+    /// The track's lyrics, `None` when it has none.
+    pub async fn lyrics(&self, id: i64) -> Result<Option<Lyrics>> {
+        match self.get(&format!("library/tracks/{id}/lyrics"), &[]).await {
+            Ok(l) => Ok(Some(l)),
+            Err(ClientError::Api { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Newest plays first, across all zones.
     pub async fn history(&self, limit: u32) -> Result<Vec<pm_library::PlayEntry>> {
         Ok(self

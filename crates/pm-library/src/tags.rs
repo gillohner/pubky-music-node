@@ -50,6 +50,8 @@ pub struct TagSet {
     pub replaygain_album_gain_db: Option<f32>,
     /// Genres, split on `;`, `/`, `,` and NUL, trimmed, de-duplicated case-insensitively.
     pub genres: Vec<String>,
+    /// Embedded lyrics (Vorbis `LYRICS`/`UNSYNCEDLYRICS`, ID3 `USLT`, MP4 `©lyr`).
+    pub lyrics: Option<String>,
 }
 
 impl TagSet {
@@ -287,7 +289,8 @@ impl TagSet {
             upc,
             acoustid,
             replaygain_track_gain_db,
-            replaygain_album_gain_db
+            replaygain_album_gain_db,
+            lyrics
         );
         if !other.genres.is_empty() {
             self.genres = other.genres;
@@ -363,6 +366,9 @@ impl TagSet {
             "acoustidid" => self.acoustid = Some(value.trim().to_string()),
             "replaygaintrackgain" => self.replaygain_track_gain_db = parse_gain(value),
             "replaygainalbumgain" => self.replaygain_album_gain_db = parse_gain(value),
+            "lyrics" | "unsyncedlyrics" | "unsynced lyrics" | "©lyr" if !value.trim().is_empty() => {
+                self.lyrics = Some(value.to_string());
+            }
             _ => {}
         }
     }
@@ -467,6 +473,11 @@ fn merge_symphonia_tags(tags: &mut TagSet, list: &[Tag]) {
                 }
                 StandardTag::AcoustIdId(s) => tags.acoustid = Some(s.to_string()),
                 StandardTag::Genre(s) => tags.push_genre(s),
+                StandardTag::Lyrics(s) => {
+                    if !s.trim().is_empty() {
+                        tags.lyrics = Some(s.to_string());
+                    }
+                }
                 StandardTag::ReplayGainTrackGain(s) => tags.replaygain_track_gain_db = parse_gain(s),
                 StandardTag::ReplayGainAlbumGain(s) => tags.replaygain_album_gain_db = parse_gain(s),
                 _ => {}
@@ -525,6 +536,9 @@ pub fn from_id3(t: &id3::Tag) -> TagSet {
     }
     for et in t.extended_texts() {
         tags.apply_named(&et.description, &et.value);
+    }
+    if let Some(l) = t.lyrics().find(|l| !l.text.trim().is_empty()) {
+        tags.lyrics = Some(l.text.clone());
     }
     for pic in t.pictures() {
         if pic.data.is_empty() {

@@ -22,6 +22,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("migrations/0006_favourites.sql")),
     (7, include_str!("migrations/0007_tags.sql")),
     (8, include_str!("migrations/0008_genres.sql")),
+    (9, include_str!("migrations/0009_lyrics.sql")),
 ];
 
 pub struct Library {
@@ -602,6 +603,39 @@ impl Library {
             push(self.random_tracks((limit * 2) as u32)?, &mut out);
         }
         Ok(out)
+    }
+
+    // ----- lyrics -----------------------------------------------------------
+
+    /// Store (or clear, with `None`) the lyrics of a track; `source` is
+    /// `"lrc"` for a sidecar file or `"tag"` for embedded text.
+    pub fn set_lyrics(&self, track: TrackId, lyrics: Option<(&str, &str)>) -> Result<()> {
+        let conn = self.lock();
+        match lyrics {
+            Some((text, source)) => {
+                conn.execute(
+                    "INSERT INTO lyrics(track_id, text, source) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(track_id) DO UPDATE SET text = excluded.text, source = excluded.source",
+                    params![track.0, text, source],
+                )?;
+            }
+            None => {
+                conn.execute("DELETE FROM lyrics WHERE track_id = ?1", params![track.0])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The stored lyrics of a track as `(text, source)`.
+    pub fn lyrics(&self, track: TrackId) -> Result<Option<(String, String)>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT text, source FROM lyrics WHERE track_id = ?1",
+                params![track.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     // ----- genres -----------------------------------------------------------
@@ -1560,7 +1594,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 8);
+        assert_eq!(lib.schema_version().unwrap(), 9);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

@@ -399,6 +399,18 @@ pub struct PlaylistDetail {
     pub tracks: Vec<Option<Track>>,
 }
 
+/// A track's lyrics, from its tags or a sidecar `.lrc` file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Lyrics {
+    pub track_id: i64,
+    /// `lrc` (sidecar file) or `tag` (embedded).
+    pub source: String,
+    /// True when the lines carry timestamps.
+    pub synced: bool,
+    pub text: String,
+    pub lines: Vec<pm_library::LyricLine>,
+}
+
 /// Save a play queue as a playlist: either a zone's queue or an explicit
 /// list of queue URIs (`track:<id>`, local paths, canonical music URLs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

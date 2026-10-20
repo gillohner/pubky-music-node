@@ -10,6 +10,7 @@
     token: localStorage.getItem('pm.token') || '',
     zone: localStorage.getItem('pm.zone') || '',
     zones: {},
+    lyrics: new Map(),
     view: 'home',
     viewArg: null,
     albums: null,
@@ -300,6 +301,7 @@
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Browser decode'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
               ${np.signal_path ? np.signal_path.stages.map((s) => `<div class="path-row"><span class="pd" style="background:${colour[s.quality]}"></span><span class="pn">${esc(s.name)}</span><span class="pf">${esc(fmtFormat(s.in_format))} → ${esc(fmtFormat(s.out_format))}</span>${s.note ? `<span class="pnote">${esc(s.note)}</span>` : ''}</div>`).join('') : `<div class="path-row"><span class="pd" style="background:var(--muted)"></span><span class="pn">browser</span><span class="pf">the original file, decoded by this browser</span></div>`}
             </div>
+            <div class="lyrics" id="nplyrics" hidden></div>
             ${next.length ? `<div class="upnext"><h3>Up next</h3><div class="list">${next.map((n) => `<div class="list-row"><div class="grow"><div class="name">${esc(n.title || n.uri)}</div><div class="sub">${esc(n.artist || '')}</div></div><span class="muted small">${fmt(n.duration_ms)}</span></div>`).join('')}</div></div>` : ''}
           </div>
         </div>
@@ -310,6 +312,31 @@
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npq').onclick = () => { toggleNowPlaying(); setView('queue'); };
     const npd = $('#npdsp'); if (npd) npd.onclick = () => { toggleNowPlaying(); state.dspOpen = state.zone; setView('settings'); };
+    loadLyrics(it);
+  };
+  // Lyrics for the playing library track (tags or a sidecar .lrc); synced lines follow the position.
+  const trackIdOf = (it) => { const m = /^track:(\d+)$/.exec(it && it.uri || ''); return m ? Number(m[1]) : null; };
+  const renderLyrics = (l) => {
+    const box = $('#nplyrics'); if (!box) return;
+    if (!l) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || '♪'}</p>`).join('')}</div>`;
+  };
+  const loadLyrics = async (it) => {
+    const id = trackIdOf(it);
+    if (id == null) { renderLyrics(null); return; }
+    if (state.lyrics.has(id)) { renderLyrics(state.lyrics.get(id)); return; }
+    let l = null;
+    try { l = await api('GET', `/library/tracks/${id}/lyrics`); } catch { l = null; }
+    state.lyrics.set(id, l);
+    if (trackIdOf(currentNowPlayingItem()) === id) renderLyrics(l);
+  };
+  const currentNowPlayingItem = () => { const z = currentZone(); return z && z.now_playing ? z.now_playing.item : null; };
+  const followLyrics = (positionMs) => {
+    const lines = $$('#nplyrics .lyric-line[data-ms]'); if (!lines.length) return;
+    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= positionMs) cur = ln; else break; }
+    for (const ln of lines) ln.classList.toggle('on', ln === cur);
+    if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* jsdom */ } }
   };
   // Keep the overlay's progress moving without rebuilding it on every tick.
   setInterval(() => {
@@ -319,6 +346,7 @@
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     s.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(s);
     const p = $('#nppos'); if (p) p.textContent = fmt(np.position_ms);
+    followLyrics(np.position_ms);
     renderNowPlaying.lastItem = np.item;
   }, 500);
 

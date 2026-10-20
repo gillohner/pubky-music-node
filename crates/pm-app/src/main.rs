@@ -21,7 +21,7 @@ use pm_api::types::{
 use pm_model::{Album, Quality, SignalPath, Track, Volume};
 use pm_zones::{Insert, QueueItem, Transport, ZoneState};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -140,6 +140,9 @@ struct App {
     search: String,
     results: Option<(String, pm_api::types::SearchResults)>,
     queues: HashMap<String, Vec<QueueItem>>,
+    /// Lyrics by track id; `None` once the node said there are none.
+    lyrics: HashMap<i64, Option<Box<pm_api::types::Lyrics>>>,
+    lyrics_requested: HashSet<i64>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -229,6 +232,8 @@ impl App {
             search: String::new(),
             results: None,
             queues: HashMap::new(),
+            lyrics: HashMap::new(),
+            lyrics_requested: HashSet::new(),
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -390,6 +395,9 @@ impl App {
                 }
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
+                Msg::Lyrics(id, l) => {
+                    self.lyrics.insert(id, l);
+                }
                 Msg::ArtistInfo(id, info, img) => {
                     let tex = img.map(|(w, h, rgba)| {
                         let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
@@ -1346,6 +1354,45 @@ impl App {
                             ui.label(it.title.clone().unwrap_or_else(|| it.uri.clone()));
                             ui.weak(it.artist.clone().unwrap_or_default());
                         });
+                    }
+                }
+                if let Some(tid) = np
+                    .item
+                    .uri
+                    .strip_prefix("track:")
+                    .and_then(|s| s.parse::<i64>().ok())
+                {
+                    if !self.is_local() && self.lyrics_requested.insert(tid) {
+                        self.backend.send(Cmd::LoadLyrics(tid));
+                    }
+                    if let Some(Some(l)) = self.lyrics.get(&tid) {
+                        ui.add_space(14.0);
+                        let title = if l.synced { "Lyrics · synced" } else { "Lyrics" };
+                        egui::CollapsingHeader::new(title)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let current = l
+                                    .lines
+                                    .iter()
+                                    .rposition(|line| line.ms.is_some_and(|ms| ms <= pos));
+                                egui::ScrollArea::vertical()
+                                    .id_salt("lyrics")
+                                    .max_height(280.0)
+                                    .show(ui, |ui| {
+                                        for (i, line) in l.lines.iter().enumerate() {
+                                            let on = current == Some(i);
+                                            let text = if line.text.is_empty() { "♪" } else { &line.text };
+                                            let r = if on {
+                                                ui.label(egui::RichText::new(text).strong().size(17.0))
+                                            } else {
+                                                ui.weak(text)
+                                            };
+                                            if on && l.synced {
+                                                r.scroll_to_me(Some(egui::Align::Center));
+                                            }
+                                        }
+                                    });
+                            });
                     }
                 }
             });

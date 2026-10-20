@@ -36,7 +36,8 @@ C2. Queue tools (web UI Queue page and the app's queue view): with an album play
    the Laptop endpoint zone once D is up (playback continues there from the same position, the
    KA17 zone is left empty). From a track's ⋯ menu choose Start radio: the track plays and when
    it ends the queue grows with similar tracks. Media keys on the laptop must drive browser
-   playback in the web UI (MediaSession).
+   playback in the web UI (MediaSession). Drop a `.lrc` next to one track (same file stem), rescan:
+   Now Playing in both UIs shows the lyrics and highlights the current line as it plays.
 D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
    127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96

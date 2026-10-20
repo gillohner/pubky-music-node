@@ -1,7 +1,8 @@
 //! The folder scanner: walks a root, probes new or changed files, upserts
 //! them into the catalogue, and flags files that disappeared.
 //!
-//! Change detection is by `(size_bytes, mtime_unix)`; an unchanged file is
+//! Change detection is by `(size_bytes, mtime_unix)` where the mtime is the
+//! newer of the audio file and its sidecar `.lrc`; an unchanged file is
 //! skipped without opening it. Files that vanish are **kept** with
 //! `files.missing = 1` (see the schema) so that playlists, history and
 //! canonical-URI lookups still resolve; a later scan that finds the path
@@ -128,6 +129,9 @@ impl<'a> Scanner<'a> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            // A sidecar .lrc is part of the fingerprint: adding, editing or
+            // removing one re-reads the track without touching the audio.
+            let mtime = mtime.max(crate::lyrics::sidecar_mtime(&path).unwrap_or(0));
 
             let existing = self.lib.file_by_path(&path)?;
             if let Some(row) = &existing {
@@ -180,6 +184,12 @@ impl<'a> Scanner<'a> {
         let mut track = track_from_tags(file, &tagset);
         track.id = existing;
         let id = self.lib.upsert_track(&track)?;
+        // A sidecar .lrc (usually synchronised) wins over embedded text.
+        let lyrics = crate::lyrics::sidecar(path)
+            .map(|t| (t, "lrc"))
+            .or_else(|| tagset.lyrics.clone().map(|t| (t, "tag")));
+        self.lib
+            .set_lyrics(id, lyrics.as_ref().map(|(t, s)| (t.as_str(), *s)))?;
         if has_album && self.art_dir.is_some() {
             if let Some(album_id) = self.lib.get_track(id)?.and_then(|t| t.album.and_then(|a| a.id)) {
                 if let Err(e) = self.cover_for(path, album_id, &tagset) {
@@ -386,6 +396,25 @@ mod tests {
         assert_eq!(r.files_updated + r.files_unchanged, 2);
         assert_eq!(lib.stats().unwrap().missing_files, 0);
         assert!(!lib.file_by_path(&b).unwrap().unwrap().missing);
+
+        // A sidecar .lrc that is newer than the audio re-indexes the track
+        // and lands as lyrics; removing it clears them again.
+        let id = lib.file_by_path(&a).unwrap().unwrap().track_id;
+        assert!(lib.lyrics(id).unwrap().is_none());
+        let lrc = sub.join("01 - one.lrc");
+        fs::write(&lrc, "[00:01.00]Hello").unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        fs::File::open(&lrc).unwrap().set_modified(future).unwrap();
+        let r = scanner.scan(dir.path()).unwrap();
+        assert_eq!(r.files_updated, 1);
+        assert_eq!(
+            lib.lyrics(id).unwrap(),
+            Some(("[00:01.00]Hello".to_string(), "lrc".to_string()))
+        );
+        fs::remove_file(&lrc).unwrap();
+        let r = scanner.scan(dir.path()).unwrap();
+        assert_eq!(r.files_updated, 1);
+        assert!(lib.lyrics(id).unwrap().is_none());
     }
 
     #[test]

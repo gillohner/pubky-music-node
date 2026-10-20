@@ -3,7 +3,7 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
-    FavouriteRef, Favourites, GenreDetail, HomePage, Info, NodeSettingsView, OnPubky, PlaylistDetail,
+    FavouriteRef, Favourites, GenreDetail, HomePage, Info, Lyrics, NodeSettingsView, OnPubky, PlaylistDetail,
     PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags,
     TransportAction, UpdatePlaylist,
 };
@@ -162,6 +162,7 @@ pub enum Cmd {
     LoadGenres,
     LoadGenre(i64),
     LoadArtistInfo(i64),
+    LoadLyrics(i64),
     Discover(DiscoverKind),
     CreateZone {
         name: String,
@@ -232,6 +233,7 @@ pub enum Msg {
     Genres(Vec<pm_library::GenreSummary>),
     /// Info plus the decoded portrait (width, height, rgba) when there is one.
     ArtistInfo(i64, Box<ArtistInfo>, Option<(usize, usize, Vec<u8>)>),
+    Lyrics(i64, Option<Box<Lyrics>>),
     Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
@@ -748,6 +750,10 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),
         Cmd::LoadArtistTracks(id) => out.send(Msg::ArtistTracks(c.artist_tracks(id).await?)),
         Cmd::LoadGenres => out.send(Msg::Genres(c.genres().await?)),
+        Cmd::LoadLyrics(id) => {
+            let l = c.lyrics(id).await?;
+            out.send(Msg::Lyrics(id, l.map(Box::new)));
+        }
         Cmd::LoadArtistInfo(id) => {
             let info = c.artist_info(id).await?;
             let decoded = if info.image {

@@ -31,6 +31,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, dither, dsd_mode, resample, loudness: off\|track\|album, eq: [{kind, freq_hz, gain_db, q, enabled}], convolution?: {path, gain_db, enabled}, crossfeed?: {level_db, cutoff_hz, delay_us, enabled}}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
 | GET | `/v1/library/stats` | | `LibraryStats` |
 | GET | `/v1/library/tracks` | `?after=<id>&limit=` | `{tracks}` |
+| GET | `/v1/library/tracks/{id}/lyrics` | | `{track_id, source: lrc\|tag, synced, text, lines: [{ms?, text}]}` from the file's tags or a sidecar `.lrc`; 404 when none |
 | GET | `/v1/library/tracks/{id}` | | `Track` |
 | GET | `/v1/library/search` | `?q=&limit=` | `{tracks, albums, artists, genres}`: tracks by full text (title, artist, album, genre words), albums by title, artists and genres by name |
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |

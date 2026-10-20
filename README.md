@@ -16,7 +16,8 @@ MusicBrainz ids, ISRC, ReplayGain, embedded art and genres, keeps everything in 
 full-text search, watches folders for changes, and can add or remove folders from the UI. Covers
 come from the files, a `cover.jpg`, or the Cover Art Archive; artist pages get a portrait and a
 biography from Wikidata and Wikipedia. Play history, Home (recently added and played, most played),
-favourites, genres, and search across tracks, albums, artists and genres.
+favourites, genres, and search across tracks, albums, artists and genres. Lyrics come from the
+files' tags or a sidecar `.lrc` and follow the position on Now Playing when they are timed.
 
 **Playback.** FLAC, ALAC, WAV, AIFF, DSF/DFF (native DSD or DoP), MP3, AAC and Vorbis. Bit-perfect
 by default: every conversion is a named stage with a quality level in the signal path. Zones with

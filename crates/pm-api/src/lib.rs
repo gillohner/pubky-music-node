@@ -114,6 +114,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
+        .route("/library/tracks/{id}/lyrics", get(lyrics))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
         .route("/library/artists", get(artists))
@@ -459,6 +460,7 @@ async fn enqueue(
             zone.play();
         }
     }
+    settle(&zone).await;
     Ok(Json(Enqueued { ids }))
 }
 
@@ -469,14 +471,23 @@ async fn clear_queue(
     let zone = zone_of(&s, &id)?;
     zone.stop();
     zone.clear();
+    settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Wait (bounded) until the engine has applied every command sent so far,
+/// so that a read right after a write sees the new state.
+async fn settle(zone: &Zone) {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), zone.wait_acked()).await;
 }
 
 async fn remove_item(
     State(s): State<Arc<NodeState>>,
     Path((id, item)): Path<(String, u64)>,
 ) -> Result<StatusCode, ApiError> {
-    if zone_of(&s, &id)?.remove(item) {
+    let zone = zone_of(&s, &id)?;
+    if zone.remove(item) {
+        settle(&zone).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!("no queue item {item}")))
@@ -488,7 +499,9 @@ async fn move_item(
     Path((id, item)): Path<(String, u64)>,
     Json(body): Json<MoveItem>,
 ) -> Result<StatusCode, ApiError> {
-    if zone_of(&s, &id)?.move_item(item, body.to_index) {
+    let zone = zone_of(&s, &id)?;
+    if zone.move_item(item, body.to_index) {
+        settle(&zone).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!("no queue item {item}")))
@@ -530,7 +543,9 @@ async fn repeat(
     Path(id): Path<String>,
     Json(body): Json<SetRepeat>,
 ) -> Result<StatusCode, ApiError> {
-    zone_of(&s, &id)?.set_repeat(body.repeat);
+    let zone = zone_of(&s, &id)?;
+    zone.set_repeat(body.repeat);
+    settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -540,7 +555,9 @@ async fn radio(
     Path(id): Path<String>,
     Json(body): Json<SetRadio>,
 ) -> Result<StatusCode, ApiError> {
-    zone_of(&s, &id)?.set_radio(body.on);
+    let zone = zone_of(&s, &id)?;
+    zone.set_radio(body.on);
+    settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -549,7 +566,9 @@ async fn shuffle_queue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    zone_of(&s, &id)?.shuffle_upcoming();
+    let zone = zone_of(&s, &id)?;
+    zone.shuffle_upcoming();
+    settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -678,6 +697,22 @@ async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
     Ok(Json(t))
+}
+
+/// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
+async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Lyrics> {
+    let found = s.library.lock().expect("library poisoned").lyrics(TrackId(id))?;
+    let Some((text, source)) = found else {
+        return Err(ApiError::not_found(format!("no lyrics for track {id}")));
+    };
+    let (lines, synced) = pm_library::lyrics::parse(&text);
+    Ok(Json(Lyrics {
+        track_id: id,
+        source,
+        synced,
+        text,
+        lines,
+    }))
 }
 
 /// The track's audio file as stored, for a controller that plays locally
@@ -1788,6 +1823,59 @@ mod tests {
 
     /// Library radio: with the flag on, a zone that runs out of queue gets
     /// similar tracks appended and keeps playing.
+    #[tokio::test]
+    async fn lyrics_come_from_a_sidecar_lrc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/song.wav"), 4410);
+        std::fs::write(
+            dir.path().join("music/song.lrc"),
+            "[ti:Song]\n[00:01.00]Hello\n[00:02.50]World\n",
+        )
+        .unwrap();
+        write_wav(&dir.path().join("music/mute.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        let id_of = |name: &str| {
+            tracks["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["file"]["path"].as_str().unwrap().ends_with(name))
+                .map(|t| t["id"].as_i64().unwrap())
+                .unwrap()
+        };
+        let (st, l) = call(
+            &app,
+            "GET",
+            &format!("/v1/library/tracks/{}/lyrics", id_of("song.wav")),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(l["source"], "lrc");
+        assert_eq!(l["synced"], true);
+        assert_eq!(l["lines"].as_array().unwrap().len(), 2);
+        assert_eq!(l["lines"][1]["ms"], 2500);
+        assert_eq!(l["lines"][1]["text"], "World");
+        let (st, _) = call(
+            &app,
+            "GET",
+            &format!("/v1/library/tracks/{}/lyrics", id_of("mute.wav")),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn a_queue_can_be_saved_as_a_playlist() {
         let dir = tempfile::tempdir().unwrap();
