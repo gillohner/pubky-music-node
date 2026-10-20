@@ -730,6 +730,7 @@ impl StreamingService for Tidal {
                 image: album.and_then(|a| artwork_url(&inc, a)),
                 url: tidal_url("track", tid),
                 tracks: vec![track],
+                library_album_id: None,
             });
         }
         let Some(aid) = id.strip_prefix("album:") else {
@@ -788,6 +789,18 @@ impl StreamingService for Tidal {
             let no = meta["trackNumber"].as_u64().map(|n| n as u32);
             tracks.push(source_track(&all_inc, t, no, creator.as_deref()));
         }
+        let library_album_id = album["attributes"]["barcodeId"]
+            .as_str()
+            .and_then(|u| pm_model::Upc::parse(u).ok())
+            .and_then(|u| {
+                s.library
+                    .lock()
+                    .expect("library poisoned")
+                    .album_by_upc(&u)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|a| a.id);
         Ok(SourceItem {
             source: SOURCE_ID.into(),
             id: id.to_string(),
@@ -801,6 +814,7 @@ impl StreamingService for Tidal {
             image: artwork_url(&inc, album),
             url: tidal_url("album", aid),
             tracks,
+            library_album_id,
         })
     }
 }
@@ -1098,9 +1112,36 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
     Ok(hits)
 }
 
-/// `GET /v1/sources/tidal/collection`: the user's favourite tracks and albums.
-pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<TidalCollection> {
+const COLLECTION_KEY: &str = "tidal.collection";
+const COLLECTION_TTL_SECS: i64 = 15 * 60;
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct CollectionQuery {
+    #[serde(default)]
+    refresh: Option<u8>,
+}
+
+/// `GET /v1/sources/tidal/collection?refresh=`: the user's favourite tracks
+/// and albums, cached for a quarter hour (it is many calls to TIDAL).
+pub(crate) async fn collection(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<CollectionQuery>,
+) -> ApiResult<TidalCollection> {
     signed_in_user(&s)?;
+    if q.refresh.unwrap_or(0) == 0 {
+        let cached = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(COLLECTION_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<(i64, TidalCollection)>(&j).ok())
+            .filter(|(at, _)| now_unix() - at < COLLECTION_TTL_SECS);
+        if let Some((_, c)) = cached {
+            return Ok(Json(c));
+        }
+    }
     // The collection resources take `me` for the signed-in user.
     let track_ids = relationship_ids(
         &s,
@@ -1114,9 +1155,18 @@ pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<Tid
         &[("sort", "-addedAt".into())],
     )
     .await?;
-    let (tracks, _) = track_hits(&s, &track_ids).await?;
-    let albums = album_hits(&s, &album_ids).await?;
-    Ok(Json(TidalCollection { tracks, albums }))
+    let (mut tracks, _) = track_hits(&s, &track_ids).await?;
+    let mut albums = album_hits(&s, &album_ids).await?;
+    let lib = s.library.lock().expect("library poisoned");
+    for h in tracks.iter_mut().chain(albums.iter_mut()) {
+        crate::streaming::mark_library(&lib, h);
+    }
+    let c = TidalCollection { tracks, albums };
+    let _ = lib.set_setting(
+        COLLECTION_KEY,
+        &serde_json::to_string(&(now_unix(), &c)).expect("serializes"),
+    );
+    Ok(Json(c))
 }
 
 /// `POST /v1/sources/tidal/collection/import`: the collection as node

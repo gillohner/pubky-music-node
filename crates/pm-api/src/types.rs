@@ -835,6 +835,9 @@ pub struct SourceItem {
     pub image: Option<String>,
     pub url: String,
     pub tracks: Vec<SourceTrack>,
+    /// The library album with the same UPC, when you already have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_album_id: Option<i64>,
 }
 
 /// What Pubky (via Nexus) knows about one canonical URL: who tagged it and how.

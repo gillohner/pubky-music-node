@@ -232,6 +232,7 @@ pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<
         licence: str_or_first(&meta["licenseurl"]),
         url: format!("https://archive.org/details/{id}"),
         tracks,
+        library_album_id: None,
     })
 }
 

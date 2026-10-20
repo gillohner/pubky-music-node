@@ -118,6 +118,7 @@ pub(crate) fn item(host: &str, t: &serde_json::Value) -> Option<SourceItem> {
         image: h.image.clone(),
         url: h.url.clone(),
         tracks: vec![track],
+        library_album_id: None,
     })
 }
 
