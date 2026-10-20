@@ -46,6 +46,7 @@ async fn client_round_trip() {
             pipeline: PipelineConfig::default(),
             token: Some("tok".into()),
             subsonic_user: "pubky".into(),
+            pubky: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,

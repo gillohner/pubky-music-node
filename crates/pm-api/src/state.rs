@@ -26,6 +26,8 @@ pub struct NodeSettings {
     pub token: Option<String>,
     /// Username OpenSubsonic clients log in with (password = token).
     pub subsonic_user: String,
+    /// Pinakes/Nexus settings; discovery is enabled when the contact validates.
+    pub pubky: pm_pubky::PmPubkyConfig,
 }
 
 pub struct NodeState {
@@ -42,6 +44,7 @@ pub struct NodeState {
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
     pub subsonic_user: String,
+    pub discovery: Option<Arc<pm_pubky::Discovery>>,
     pub events: broadcast::Sender<ApiEvent>,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
@@ -55,6 +58,16 @@ impl NodeState {
         let library = Arc::new(Mutex::new(library));
         let sources = Arc::new(NodeSources::new(library.clone(), settings.pipeline));
         let (events, _) = broadcast::channel(1024);
+        let discovery = match settings.pubky.validate_contact() {
+            Ok(()) => match (
+                pm_pubky::PinakesClient::new(&settings.pubky),
+                pm_pubky::NexusClient::new(&settings.pubky),
+            ) {
+                (Ok(p), Ok(n)) => Some(Arc::new(pm_pubky::Discovery::new(p, n))),
+                _ => None,
+            },
+            Err(_) => None,
+        };
         Arc::new(Self {
             name: settings.name,
             version: settings.version,
@@ -67,6 +80,7 @@ impl NodeState {
             zones: Zones::new(sources),
             token: settings.token,
             subsonic_user: settings.subsonic_user,
+            discovery,
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),

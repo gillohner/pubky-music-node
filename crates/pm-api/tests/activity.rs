@@ -84,6 +84,7 @@ async fn record_and_import_resolve_through_the_library() {
             pipeline: PipelineConfig::default(),
             token: None,
             subsonic_user: "pubky".into(),
+            pubky: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

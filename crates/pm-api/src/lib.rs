@@ -10,6 +10,7 @@
 //! by pubkey (M5) wraps this API rather than replacing it.
 
 pub mod activity;
+pub mod discover;
 pub mod files;
 pub mod playlists;
 pub mod sources;
@@ -121,6 +122,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::delete(playlists::remove_item),
         )
         .route("/playlists/{id}/play", post(playlists::play))
+        .route("/discover/trends", get(discover::trends))
+        .route("/discover/tag/{label}", get(discover::by_tag))
+        .route("/discover/friends/{viewer}", get(discover::friends))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
         .route("/pubky/files", get(files::list).post(files::upload))
@@ -632,6 +636,7 @@ mod tests {
                 pipeline: PipelineConfig::default(),
                 token: token.map(str::to_string),
                 subsonic_user: "pubky".into(),
+                pubky: Default::default(),
             },
             lib,
             outputs,

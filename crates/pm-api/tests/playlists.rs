@@ -96,6 +96,7 @@ async fn playlist_lifecycle() {
             pipeline: PipelineConfig::default(),
             token: None,
             subsonic_user: "pubky".into(),
+            pubky: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,

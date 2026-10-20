@@ -36,6 +36,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             pipeline: PipelineConfig::default(),
             token: None,
             subsonic_user: "pubky".into(),
+            pubky: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

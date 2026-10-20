@@ -11,10 +11,12 @@
 mod backend;
 mod local;
 
-use backend::{Backend, Cmd, Msg};
+use backend::{Backend, Cmd, DiscoverKind, Msg};
 use local::{LocalPlayer, LOCAL_ZONE_ID};
 use pm_api::sources::NodeSources;
-use pm_api::types::{ArtistDetail, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction};
+use pm_api::types::{
+    ArtistDetail, DiscoverPage, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction,
+};
 use pm_model::{Album, Quality, SignalPath, Track, Volume};
 use pm_zones::{Insert, QueueItem, Transport, ZoneState};
 use serde::{Deserialize, Serialize};
@@ -62,6 +64,7 @@ enum View {
     Artist(i64),
     Playlists,
     Playlist(String),
+    Discover,
     Tracks,
     Search,
     Queue,
@@ -93,6 +96,10 @@ struct App {
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
     artist_details: HashMap<i64, ArtistDetail>,
+    discover_kind: DiscoverKind,
+    discover: Option<(DiscoverKind, DiscoverPage)>,
+    discover_loading: bool,
+    friends_viewer: String,
     new_playlist_name: String,
     /// Album id → texture (`None` once the node said there is no cover).
     covers: HashMap<i64, Option<egui::TextureHandle>>,
@@ -139,6 +146,10 @@ impl App {
             playlist_details: HashMap::new(),
             artists: Vec::new(),
             artist_details: HashMap::new(),
+            discover_kind: DiscoverKind::Trends,
+            discover: None,
+            discover_loading: false,
+            friends_viewer: String::new(),
             new_playlist_name: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
@@ -200,6 +211,10 @@ impl App {
                     self.toast("scan started");
                 }
                 Msg::Artists(a) => self.artists = a,
+                Msg::Discovered(kind, page) => {
+                    self.discover_loading = false;
+                    self.discover = Some((kind, *page));
+                }
                 Msg::Artist(d) => {
                     self.artist_details.insert(d.artist.id, *d);
                 }
@@ -225,7 +240,10 @@ impl App {
                     });
                     self.covers.insert(id, tex);
                 }
-                Msg::Error(e) => self.toast(e),
+                Msg::Error(e) => {
+                    self.discover_loading = false;
+                    self.toast(e)
+                }
             }
         }
     }
@@ -385,6 +403,17 @@ impl App {
             }
         }
         ui.add_space(10.0);
+        ui.label(egui::RichText::new("PUBKY").small().weak());
+        if ui
+            .selectable_label(self.view == View::Discover, "Discover")
+            .clicked()
+        {
+            self.view = View::Discover;
+            if self.discover.is_none() && !self.discover_loading {
+                self.load_discover(DiscoverKind::Trends);
+            }
+        }
+        ui.add_space(10.0);
         ui.label(egui::RichText::new("PLAYING").small().weak());
         if ui.selectable_label(self.view == View::Queue, "Queue").clicked() {
             self.view = View::Queue;
@@ -453,6 +482,7 @@ impl App {
             View::Album(id) => self.album_view(ui, id),
             View::Artists => self.artists_view(ui),
             View::Artist(id) => self.artist_view(ui, id),
+            View::Discover => self.discover_view(ui),
             View::Playlists => self.playlists_view(ui),
             View::Playlist(id) => self.playlist_view(ui, &id),
             View::Tracks => {
@@ -724,6 +754,100 @@ impl App {
                 self.view = View::Album(aid);
             }
         });
+    }
+
+    fn load_discover(&mut self, kind: DiscoverKind) {
+        self.discover_kind = kind.clone();
+        self.discover_loading = true;
+        self.backend.send(Cmd::Discover(kind));
+    }
+
+    fn discover_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Discover");
+            ui.weak("what people on Pubky tag and play, via Pinakes");
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(self.discover_kind == DiscoverKind::Trends, "Trending")
+                .clicked()
+            {
+                self.load_discover(DiscoverKind::Trends);
+            }
+            ui.separator();
+            ui.add(
+                egui::TextEdit::singleline(&mut self.friends_viewer)
+                    .hint_text("your pubky (z32) for friends' activity")
+                    .desired_width(300.0),
+            );
+            if ui.button("Friends").clicked() && self.friends_viewer.trim().len() == 52 {
+                let v = self.friends_viewer.trim().to_string();
+                self.load_discover(DiscoverKind::Friends(v));
+            }
+            if self.discover_loading {
+                ui.spinner();
+            }
+        });
+        let Some((kind, page)) = self.discover.clone() else {
+            if !self.discover_loading {
+                ui.weak("Nothing loaded. Discovery needs `contact` set in the node config.");
+            }
+            return;
+        };
+        if let DiscoverKind::Tag(t) = &kind {
+            ui.label(egui::RichText::new(format!("#{t}")).strong());
+        }
+        if !page.facets.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for (label, count) in page.facets.iter().take(30) {
+                    if ui.small_button(format!("#{label} {count}")).clicked() {
+                        self.load_discover(DiscoverKind::Tag(label.clone()));
+                    }
+                }
+            });
+        }
+        ui.add_space(6.0);
+        if page.items.is_empty() {
+            ui.weak("No music items here yet.");
+            return;
+        }
+        let mut play: Option<Track> = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("discover")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for it in &page.items {
+                        let title = it
+                            .title
+                            .clone()
+                            .or_else(|| it.in_library.as_ref().map(|t| t.title.clone()))
+                            .unwrap_or_else(|| short_uri(&it.uri));
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(title).strong());
+                            ui.small(egui::RichText::new(it.artist.clone().unwrap_or_default()).weak());
+                        });
+                        ui.weak(it.taggers.map(|n| format!("{n} taggers")).unwrap_or_default());
+                        match &it.in_library {
+                            Some(t) => {
+                                if ui.button("▶ in library").clicked() {
+                                    play = Some(t.clone());
+                                }
+                            }
+                            None => {
+                                ui.weak("not in library");
+                            }
+                        }
+                        if ui.small_button("open ↗").clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&it.uri));
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        if let Some(t) = play {
+            self.play_tracks(&[t], true, QueueAt::End);
+        }
     }
 
     fn playlists_view(&mut self, ui: &mut egui::Ui) {

@@ -154,6 +154,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             pipeline: pm_audio::PipelineConfig::default(),
             token,
             subsonic_user: cfg.api.subsonic_user.clone(),
+            pubky: cfg.pubky.clone(),
         },
         lib,
         registry,

@@ -116,6 +116,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             pipeline: PipelineConfig::default(),
             token: Some("pw".into()),
             subsonic_user: "alice".into(),
+            pubky: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

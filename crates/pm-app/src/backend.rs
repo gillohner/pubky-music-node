@@ -2,8 +2,8 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, Enqueue, Info, PlaylistDetail, PlaylistSummary,
-    QueueAt, TransportAction,
+    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, DiscoverPage, Enqueue, Info, PlaylistDetail,
+    PlaylistSummary, QueueAt, TransportAction,
 };
 use pm_client::NodeClient;
 use pm_model::{Album, Track, Volume};
@@ -72,6 +72,14 @@ pub enum Cmd {
     LoadCover(i64),
     LoadArtists,
     LoadArtist(i64),
+    Discover(DiscoverKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoverKind {
+    Trends,
+    Tag(String),
+    Friends(String),
 }
 
 #[derive(Debug)]
@@ -96,6 +104,7 @@ pub enum Msg {
     PlaylistDeleted(String),
     Notice(String),
     Artists(Vec<pm_library::ArtistSummary>),
+    Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
@@ -336,6 +345,14 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                     r.missing.len()
                 )));
             }
+        }
+        Cmd::Discover(kind) => {
+            let page = match &kind {
+                DiscoverKind::Trends => c.discover_trends("7d", 40).await?,
+                DiscoverKind::Tag(l) => c.discover_tag(l, 40).await?,
+                DiscoverKind::Friends(v) => c.discover_friends(v, 40).await?,
+            };
+            out.send(Msg::Discovered(kind, Box::new(page)));
         }
         Cmd::LoadArtists => out.send(Msg::Artists(c.artists().await?)),
         Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),

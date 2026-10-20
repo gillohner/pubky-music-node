@@ -411,6 +411,27 @@ impl NodeClient {
         .await
     }
 
+    pub async fn discover_trends(&self, window: &str, limit: usize) -> Result<DiscoverPage> {
+        self.get(
+            "discover/trends",
+            &[("window", window.to_string()), ("limit", limit.to_string())],
+        )
+        .await
+    }
+
+    pub async fn discover_tag(&self, label: &str, limit: usize) -> Result<DiscoverPage> {
+        self.get(&format!("discover/tag/{label}"), &[("limit", limit.to_string())])
+            .await
+    }
+
+    pub async fn discover_friends(&self, viewer_z32: &str, limit: usize) -> Result<DiscoverPage> {
+        self.get(
+            &format!("discover/friends/{viewer_z32}"),
+            &[("limit", limit.to_string())],
+        )
+        .await
+    }
+
     pub async fn pubky_status(&self) -> Result<PubkyStatus> {
         self.get("pubky", &[]).await
     }

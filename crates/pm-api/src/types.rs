@@ -325,3 +325,33 @@ pub struct ArtistDetail {
     pub artist: ArtistSummary,
     pub albums: Vec<Album>,
 }
+
+// ---- discovery ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoverQuery {
+    pub limit: Option<usize>,
+    /// Trending window, `1h`..`90d`.
+    pub window: Option<String>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverItem {
+    /// Canonical music URL.
+    pub uri: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub taggers: Option<u32>,
+    /// The matching library track, when the user owns it.
+    pub in_library: Option<Track>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoverPage {
+    /// Tag facets `(label, count)` when the upstream returned them.
+    pub facets: Vec<(String, i64)>,
+    pub items: Vec<DiscoverItem>,
+}
