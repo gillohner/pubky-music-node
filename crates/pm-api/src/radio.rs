@@ -1,7 +1,8 @@
 //! Internet radio: the first streaming source that needs no account. A
 //! station is a stream URL; the node plays it like any queue item (the
 //! source factory decodes HTTP streams). Discovery goes through the
-//! community directory radio-browser.info; saved stations live in the
+//! community directory radio-browser.info (HLS-only entries are left out:
+//! the node plays continuous Icecast/SHOUTcast streams); saved stations live in the
 //! library's settings (node-local for now; a `pubky.music/station` post is
 //! the obvious later home).
 
@@ -88,6 +89,9 @@ struct DirectoryStation {
     country: String,
     #[serde(default)]
     tags: String,
+    /// 1 when the stream is HLS (segmented); the node plays continuous streams only.
+    #[serde(default)]
+    hls: u8,
 }
 
 impl From<DirectoryStation> for Station {
@@ -122,6 +126,7 @@ pub(crate) fn parse_directory(json: &str) -> Result<Vec<Station>, serde_json::Er
     let rows: Vec<DirectoryStation> = serde_json::from_str(json)?;
     Ok(rows
         .into_iter()
+        .filter(|d| d.hls == 0 && !d.url_resolved.to_ascii_lowercase().contains(".m3u8"))
         .map(Station::from)
         .filter(|s| s.url.starts_with("http://") || s.url.starts_with("https://"))
         .collect())
@@ -283,9 +288,10 @@ mod tests {
     #[test]
     fn directory_rows_become_stations() {
         let json = r#"[{"stationuuid":"u1","name":" FIP ","url":"http://x/pl.m3u","url_resolved":"https://icecast.radiofrance.fr/fip-hifi.aac","homepage":"https://www.fip.fr","favicon":"","codec":"AAC","bitrate":192,"country":"France","tags":"eclectic,jazz,public radio","votes":9},
-                      {"stationuuid":"u2","name":"Broken","url":"rtsp://no","url_resolved":"","codec":"","bitrate":0,"country":"","tags":""}]"#;
+                      {"stationuuid":"u2","name":"Broken","url":"rtsp://no","url_resolved":"","codec":"","bitrate":0,"country":"","tags":""},
+                      {"stationuuid":"u3","name":"HLS only","url":"https://hls.example/x.m3u8","url_resolved":"https://hls.example/x.m3u8","hls":1,"codec":"AAC","bitrate":320,"country":"","tags":""}]"#;
         let st = parse_directory(json).unwrap();
-        assert_eq!(st.len(), 1, "non-http streams are dropped");
+        assert_eq!(st.len(), 1, "non-http and HLS streams are dropped");
         let fip = &st[0];
         assert_eq!(fip.name, "FIP");
         assert_eq!(fip.url, "https://icecast.radiofrance.fr/fip-hifi.aac");
