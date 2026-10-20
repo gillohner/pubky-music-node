@@ -136,6 +136,67 @@ pub fn ssdp_probe(timeout: Duration) -> Result<Vec<SsdpAnswer>, UpnpError> {
     Ok(found)
 }
 
+/// Renderers at one address, for devices SSDP multicast cannot reach (another
+/// subnet or VLAN): `addr` is an IP or `ip:port` that gets a unicast
+/// M-SEARCH, or an `http(s)://` device description URL fetched directly.
+pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, UpnpError> {
+    let addr = addr.trim();
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        return Ok(describe(addr)?.into_iter().collect());
+    }
+    let dest: SocketAddr = if addr.contains(':') && addr.parse::<SocketAddr>().is_ok() {
+        addr.parse().expect("checked")
+    } else {
+        let ip: std::net::IpAddr = addr
+            .parse()
+            .map_err(|_| UpnpError::Other(format!("{addr} is not an IP address or a description URL")))?;
+        SocketAddr::new(ip, 1900)
+    };
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+    let msg = format!(
+        "M-SEARCH * HTTP/1.1\r\nHOST: {dest}\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {MEDIA_RENDERER}\r\n\r\n"
+    );
+    for _ in 0..2 {
+        socket.send_to(msg.as_bytes(), dest)?;
+    }
+    let deadline = Instant::now() + timeout;
+    let mut locations: Vec<String> = Vec::new();
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                if let Some(loc) = header(&text, "LOCATION") {
+                    if !locations.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
+                        locations.push(loc);
+                    }
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if locations.is_empty() {
+        return Err(UpnpError::Other(format!(
+            "{dest} did not answer a unicast M-SEARCH; check the address, that the device is on, and that UDP 1900 is allowed between the subnets"
+        )));
+    }
+    let mut out: Vec<Renderer> = Vec::new();
+    for loc in locations {
+        match describe(&loc) {
+            Ok(Some(r)) if !out.iter().any(|x| x.udn == r.udn) => out.push(r),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(%loc, "skipping: {e}"),
+        }
+    }
+    Ok(out)
+}
+
 /// The `friendlyName` of any device description (not only renderers).
 fn friendly_name_of(location: &str) -> Option<String> {
     let text = reqwest::blocking::Client::builder()
@@ -364,6 +425,16 @@ mod tests {
             r.rendering_control.as_deref(),
             Some("http://192.168.1.20:55178/RenderingControl/control")
         );
+    }
+
+    #[test]
+    fn probe_address_rejects_garbage_and_fails_fast_on_silence() {
+        assert!(matches!(
+            probe_address("not an address", Duration::from_millis(100)),
+            Err(UpnpError::Other(_))
+        ));
+        let err = probe_address("127.0.0.1:1", Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
     }
 
     #[test]

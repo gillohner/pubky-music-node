@@ -155,15 +155,43 @@ fn login_base(s: &NodeState) -> String {
     endpoints(s).login_base.trim_end_matches('/').to_string()
 }
 
-pub(crate) fn redirect_uri(s: &NodeState) -> String {
-    format!("{}/tidal/callback", s.public_url.trim_end_matches('/'))
+/// The node's address as the browser sees it: `public_url` when it is a real
+/// address, else the origin of this request (reverse proxies set
+/// `X-Forwarded-Proto` / `X-Forwarded-Host`; plain access has `Host`).
+pub(crate) fn external_base(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+    let configured = s.public_url.trim_end_matches('/');
+    let unusable = configured.is_empty()
+        || ["0.0.0.0", "127.0.0.1", "localhost", "[::]"]
+            .iter()
+            .any(|h| configured.contains(h));
+    if !unusable {
+        return configured.to_string();
+    }
+    let h = |n: &str| {
+        headers
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    match h("x-forwarded-host").or_else(|| h("host")) {
+        Some(host) => {
+            let proto = h("x-forwarded-proto").unwrap_or_else(|| "http".into());
+            format!("{proto}://{host}")
+        }
+        None => configured.to_string(),
+    }
+}
+
+pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+    format!("{}/tidal/callback", external_base(s, headers))
 }
 
 // ---- tokens ----
 
-/// Pending sign-ins: OAuth `state` → PKCE verifier.
-fn pending() -> &'static Mutex<HashMap<String, String>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+/// Pending sign-ins: OAuth `state` → (PKCE verifier, redirect URI used).
+fn pending() -> &'static Mutex<HashMap<String, (String, String)>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String)>>> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -896,7 +924,10 @@ fn random_urlsafe(bytes: usize) -> String {
 }
 
 /// `GET /v1/sources/tidal/login`: the URL to open in a browser.
-pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<LoginUrl> {
+pub(crate) async fn login(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<LoginUrl> {
     let c = creds(&s);
     if !c.configured() {
         return Err(ApiError::new(
@@ -909,12 +940,16 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<LoginUrl
     let challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
     let state = random_urlsafe(24);
-    pending().lock().expect("pending").insert(state.clone(), verifier);
+    let redirect = redirect_uri(&s, &headers);
+    pending()
+        .lock()
+        .expect("pending")
+        .insert(state.clone(), (verifier, redirect.clone()));
     let mut url = url::Url::parse(&format!("{}/authorize", login_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", &c.client_id)
-        .append_pair("redirect_uri", &redirect_uri(&s))
+        .append_pair("redirect_uri", &redirect)
         .append_pair("scope", &c.scopes())
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &challenge)
@@ -956,13 +991,12 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Err(ApiError::bad_request("missing code or state"));
     };
-    let verifier = pending()
+    let (verifier, redirect) = pending()
         .lock()
         .expect("pending")
         .remove(&state)
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
     let c = creds(s);
-    let redirect = redirect_uri(s);
     let v = token_request(
         s,
         &[
@@ -995,7 +1029,7 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(crate) fn status_view(s: &NodeState) -> TidalStatus {
+pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> TidalStatus {
     let u = load_user(s);
     TidalStatus {
         configured: creds(s).configured(),
@@ -1004,7 +1038,7 @@ pub(crate) fn status_view(s: &NodeState) -> TidalStatus {
         country: u.as_ref().and_then(|u| u.country.clone()),
         scope: u.as_ref().map(|u| u.scope.clone()),
         expires_at: u.as_ref().map(|u| u.expires_at),
-        redirect_uri: redirect_uri(s),
+        redirect_uri: redirect_uri(s, headers),
         requested_scopes: creds(s).scopes(),
         access_tier: u.as_ref().and_then(|u| u.access_tier.clone()),
         playback_limit: s
@@ -1018,14 +1052,20 @@ pub(crate) fn status_view(s: &NodeState) -> TidalStatus {
 }
 
 /// `GET /v1/sources/tidal/status`.
-pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<TidalStatus> {
-    Ok(Json(status_view(&s)))
+pub(crate) async fn status(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<TidalStatus> {
+    Ok(Json(status_view(&s, &headers)))
 }
 
 /// `DELETE /v1/sources/tidal/session`: forget the user's tokens.
-pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<TidalStatus> {
+pub(crate) async fn logout(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<TidalStatus> {
     store_user(&s, None)?;
-    Ok(Json(status_view(&s)))
+    Ok(Json(status_view(&s, &headers)))
 }
 
 // ---- the user's collection and playlists ----

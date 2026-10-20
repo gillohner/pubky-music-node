@@ -37,7 +37,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{middleware, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pm_model::TrackId;
@@ -100,6 +100,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs", get(outputs))
         .route("/outputs/rescan", post(rescan_outputs))
         .route("/outputs/discovery", get(discovery_report))
+        .route("/outputs/upnp", post(add_upnp_output))
+        .route("/outputs/upnp/{address}", delete(remove_upnp_address))
         .route("/outputs/pull", post(create_pull))
         .route("/outputs/pull/{name}/stream.wav", get(pull_stream))
         .route("/zones", get(zones).post(create_zone))
@@ -400,9 +402,16 @@ async fn pull_stream(
 /// addresses); new ones get a zone. Returns the full list.
 /// `GET /v1/outputs/discovery`: scan the network and explain what was found,
 /// for setups where a renderer does not show up (Docker bridge, VLANs).
-async fn discovery_report(State(s): State<Arc<NodeState>>) -> ApiResult<DiscoveryReport> {
+async fn discovery_report(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<DiscoveryReport> {
     let st = s.clone();
+    let quick = q.get("quick").is_some_and(|v| v == "1");
     let (upnp, cast) = tokio::task::spawn_blocking(move || {
+        if quick {
+            return (Vec::new(), Vec::new());
+        }
         let upnp = if st.upnp {
             pm_out_upnp::ssdp_probe(std::time::Duration::from_secs(3)).unwrap_or_default()
         } else {
@@ -432,7 +441,9 @@ async fn discovery_report(State(s): State<Arc<NodeState>>) -> ApiResult<Discover
     if !s.upnp && !s.cast {
         notes.push("UPnP and Cast discovery are both off in the node config.".into());
     }
-    if s.upnp && upnp.is_empty() {
+    if quick {
+        // No scan ran; only the configuration notes below apply.
+    } else if s.upnp && upnp.is_empty() {
         notes.push("No UPnP device answered at all: multicast is not reaching this node. In Docker, run the container on the host network; on a VLAN, SSDP must be relayed.".into());
     } else if s.upnp && !upnp.iter().any(|a| a.renderer) {
         notes.push("Devices answered, but none describes itself as a MediaRenderer with AVTransport. OpenHome-only players (some Linn models) need the UPnP AV service enabled, or are reached through another renderer front-end.".into());
@@ -472,7 +483,35 @@ async fn discovery_report(State(s): State<Arc<NodeState>>) -> ApiResult<Discover
         notes,
         upnp_enabled: s.upnp,
         cast_enabled: s.cast,
+        saved_addresses: s.upnp_addresses(),
     }))
+}
+
+/// `POST /v1/outputs/upnp {address}`: add a renderer multicast cannot find
+/// (another subnet or VLAN); the address is kept for the next start.
+async fn add_upnp_output(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<AddRenderer>,
+) -> ApiResult<Vec<OutputInfo>> {
+    let st = s.clone();
+    let found = tokio::task::spawn_blocking(move || st.add_upnp_address(&body.address))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(ApiError::bad_request)?;
+    let names: Vec<&str> = found.iter().map(|r| r.friendly_name.as_str()).collect();
+    tracing::info!(?names, "renderers added by address");
+    Ok(Json(s.outputs.list()))
+}
+
+/// `DELETE /v1/outputs/upnp/{address}`: stop re-adding it at start.
+async fn remove_upnp_address(
+    State(s): State<Arc<NodeState>>,
+    Path(address): Path<String>,
+) -> ApiResult<Vec<String>> {
+    if !s.remove_upnp_address(&address) {
+        return Err(ApiError::not_found(format!("{address} is not a saved address")));
+    }
+    Ok(Json(s.upnp_addresses()))
 }
 
 async fn rescan_outputs(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<OutputInfo>> {
@@ -2654,6 +2693,104 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A renderer on another subnet is added by its description URL, becomes
+    /// an output and a zone, is remembered for the next start, and can be
+    /// forgotten again.
+    #[tokio::test]
+    async fn a_renderer_can_be_added_by_address() {
+        let desc = r#"<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <friendlyName>Living Room DSM</friendlyName>
+    <manufacturer>Linn Products Ltd.</manufacturer>
+    <UDN>uuid:4c494e4e-0026-0f21-cc3f-01234567890a</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/AVTransport/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/desc.xml",
+            get(move || async move { ([(header::CONTENT_TYPE, "text/xml")], desc) }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let address = format!("http://127.0.0.1:{port}/desc.xml");
+        let (st, outs) = call(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{outs}");
+        assert!(
+            outs.as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["name"] == "Living Room DSM"),
+            "{outs}"
+        );
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        assert!(zones
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|z| z["name"] == "Living Room DSM"));
+        let (_, rep) = call(&app, "GET", "/v1/outputs/discovery", None).await;
+        assert_eq!(rep["saved_addresses"][0], address);
+        // Adding again is idempotent; a dead address is a 400 with the reason.
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("did not answer"), "{e}");
+        let enc = address.replace('/', "%2F").replace(':', "%3A");
+        let (st, left) = call(&app, "DELETE", &format!("/v1/outputs/upnp/{enc}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{left}");
+        assert_eq!(left.as_array().unwrap().len(), 0);
+    }
+
+    /// Behind a reverse proxy with no public_url, the TIDAL redirect URI is
+    /// built from the request the browser made.
+    #[tokio::test]
+    async fn the_tidal_redirect_follows_the_request_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s);
+        let req = Request::builder()
+            .uri("/v1/sources/tidal/status")
+            .header("host", "music.example")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["redirect_uri"], "https://music.example/tidal/callback");
     }
 
     #[tokio::test]

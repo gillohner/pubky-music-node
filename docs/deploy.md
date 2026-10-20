@@ -38,6 +38,9 @@ must be public (or the NAS needs registry credentials) for the pull to succeed. 
 as uid 1000, so the data dataset must be writable by that user; the music dataset is read-only.
 Using the form instead: Repository `ghcr.io/gillohner/pubky-music-node`, Tag `edge` (no tag in
 the repository field), the `PM_*` variables, and the two storage mounts. Turn **Host Network** on:
+A renderer on another subnet or VLAN (common with UniFi "IoT" networks) never answers multicast: add it in
+Settings → Outputs → "Add renderer" with its IP (the node sends a unicast M-SEARCH to UDP 1900, so that port
+must be allowed between the networks) or its description URL; the address is remembered across restarts.
 UPnP/OpenHome renderers (Linn, Naim, …), Chromecast and endpoints are found by multicast and
 fetch audio from the node, neither of which crosses Docker's bridge network; with host networking
 no port mapping is needed and the UI is on port 7788. Set `PM_PUBLIC_URL` to

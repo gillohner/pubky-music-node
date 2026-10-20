@@ -124,6 +124,9 @@ pub struct NodeState {
     scanning: Mutex<bool>,
 }
 
+/// Library setting: JSON list of renderer addresses added by hand.
+const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
+
 impl NodeState {
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
         let library = Arc::new(Mutex::new(library));
@@ -529,31 +532,103 @@ impl NodeState {
                 return Vec::new();
             }
         };
-        let mut new = Vec::new();
-        for r in renderers {
-            let name = format!(
-                "upnp-{}",
-                r.udn
-                    .trim_start_matches("uuid:")
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                    .take(40)
-                    .collect::<String>()
-            );
-            let pull = self.pull_output(&name);
-            let out = Arc::new(pm_out_upnp::UpnpOutput::new(
-                r.clone(),
-                pull,
-                self.pull_url(&name),
+        renderers
+            .into_iter()
+            .filter_map(|r| self.register_renderer(r))
+            .collect()
+    }
+
+    /// A renderer as an output with its own pull stream and a zone; `None`
+    /// when it is already registered.
+    pub fn register_renderer(self: &Arc<Self>, r: pm_out_upnp::Renderer) -> Option<OutputId> {
+        let name = format!(
+            "upnp-{}",
+            r.udn
+                .trim_start_matches("uuid:")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(40)
+                .collect::<String>()
+        );
+        let pull = self.pull_output(&name);
+        let out = Arc::new(pm_out_upnp::UpnpOutput::new(
+            r.clone(),
+            pull,
+            self.pull_url(&name),
+        ));
+        let id = out.id();
+        if self.outputs.get(&id).is_some() {
+            return None;
+        }
+        tracing::info!(renderer = %r.friendly_name, output = %id, "UPnP renderer");
+        self.outputs.register(out.clone());
+        self.create_zone(&r.friendly_name, out);
+        Some(id)
+    }
+
+    /// Renderers the owner added by address (another subnet, VLAN, or a
+    /// device that ignores multicast); kept in the library settings.
+    pub fn upnp_addresses(&self) -> Vec<String> {
+        let lib = self.library.lock().expect("library poisoned");
+        lib.get_setting(UPNP_ADDRESSES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_upnp_addresses(&self, addrs: &[String]) {
+        let lib = self.library.lock().expect("library poisoned");
+        let _ = lib.set_setting(
+            UPNP_ADDRESSES_KEY,
+            &serde_json::to_string(addrs).expect("serializes"),
+        );
+    }
+
+    /// Probe `addr` (IP, `ip:port` or description URL), register what answers,
+    /// and remember the address for the next start. Blocking.
+    pub fn add_upnp_address(self: &Arc<Self>, addr: &str) -> Result<Vec<pm_out_upnp::Renderer>, String> {
+        let addr = addr.trim().to_string();
+        if addr.is_empty() {
+            return Err("address is required".into());
+        }
+        let found = pm_out_upnp::probe_address(&addr, std::time::Duration::from_secs(2))
+            .map_err(|e| e.to_string())?;
+        if found.is_empty() {
+            return Err(format!(
+                "{addr} answered, but nothing there is a MediaRenderer with AVTransport"
             ));
-            let id = out.id();
-            if self.outputs.get(&id).is_some() {
-                continue;
+        }
+        let mut saved = self.upnp_addresses();
+        if !saved.contains(&addr) {
+            saved.push(addr);
+            self.save_upnp_addresses(&saved);
+        }
+        for r in &found {
+            self.register_renderer(r.clone());
+        }
+        Ok(found)
+    }
+
+    /// Forget a saved address (its outputs stay until restart).
+    pub fn remove_upnp_address(&self, addr: &str) -> bool {
+        let mut saved = self.upnp_addresses();
+        let before = saved.len();
+        saved.retain(|a| a != addr.trim());
+        if saved.len() != before {
+            self.save_upnp_addresses(&saved);
+        }
+        saved.len() != before
+    }
+
+    /// Re-add the saved addresses at start. Blocking.
+    pub fn restore_upnp_addresses(self: &Arc<Self>) -> Vec<OutputId> {
+        let mut new = Vec::new();
+        for addr in self.upnp_addresses() {
+            match pm_out_upnp::probe_address(&addr, std::time::Duration::from_secs(2)) {
+                Ok(rs) => new.extend(rs.into_iter().filter_map(|r| self.register_renderer(r))),
+                Err(e) => tracing::warn!(%addr, "saved renderer address: {e}"),
             }
-            tracing::info!(renderer = %r.friendly_name, output = %id, "UPnP renderer");
-            self.outputs.register(out.clone());
-            self.create_zone(&r.friendly_name, out);
-            new.push(id);
         }
         new
     }
@@ -597,6 +672,7 @@ impl NodeState {
     /// connects, SSDP); call from `spawn_blocking`.
     pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
+        new.extend(self.restore_upnp_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;

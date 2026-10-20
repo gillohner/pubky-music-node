@@ -202,8 +202,12 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     }
     {
         let st = state.clone();
-        let found =
-            tokio::task::spawn_blocking(move || st.discover_upnp(std::time::Duration::from_secs(3))).await?;
+        let found = tokio::task::spawn_blocking(move || {
+            let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
+            found.extend(st.restore_upnp_addresses());
+            found
+        })
+        .await?;
         if !found.is_empty() {
             tracing::info!(count = found.len(), "UPnP renderers found");
         }

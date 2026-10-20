@@ -474,6 +474,15 @@ pub struct DiscoveryReport {
     pub notes: Vec<String>,
     pub upnp_enabled: bool,
     pub cast_enabled: bool,
+    /// Renderer addresses added by hand (`POST /v1/outputs/upnp`).
+    #[serde(default)]
+    pub saved_addresses: Vec<String>,
+}
+
+/// `POST /v1/outputs/upnp`: a renderer by IP, `ip:port` or description URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddRenderer {
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

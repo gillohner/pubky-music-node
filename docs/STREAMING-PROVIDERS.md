@@ -15,6 +15,12 @@ legal review.
 | Spotify | App at developer.spotify.com | yes | no raw audio (DRM); Connect / Web Playback only, lossy | browse and playlist source, Connect target |
 | Apple Music | Apple developer account, MusicKit token | yes | no raw audio (DRM) | browse and playlist source |
 
+Full-length audio is granted to the **application**, never to the person signing in: no identity scheme
+(Pubky, Nostr, a different OAuth account) changes the tier TIDAL assigned to the app, and borrowing another
+client's identifiers is the reverse-engineered route this project only takes after legal review. The TIDAL
+redirect URI follows the address the browser used when `public_url` is unset (reverse proxies: forward
+`X-Forwarded-Proto` and `X-Forwarded-Host`).
+
 What the owner provides: the credentials above, a subscription on the account used for the one
 sign-in (run on the test laptop; the browser redirect lands on the node), and a read of the
 provider's developer terms, which go into an ADR before the module is written.
