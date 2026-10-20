@@ -6,7 +6,7 @@ streamers bit-perfect, and keeps the social layer (tags, playlists, follows, lis
 on Pubky, indexed by Pinakes.
 
 The implementor handoff is the plan; `docs/PINAKES-CONTEXT.md` is its §12 and overrides §8 where
-they conflict. Decisions live in `docs/adr/`.
+they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.md`.
 
 ## Workspace
 
