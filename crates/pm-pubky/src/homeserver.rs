@@ -18,6 +18,15 @@ use crate::schemas::{Activity, Favourite, MusicPost, Playlist, Review, Visibilit
 use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
+/// The homeserver answers 404 for a directory nobody has written to yet.
+fn is_not_found(e: &pubky::Error) -> bool {
+    matches!(
+        e,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+            if *status == reqwest::StatusCode::NOT_FOUND
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -84,6 +93,8 @@ impl NodeHomeserver {
     }
 
     /// Every entry path directly under `dir`, following the listing cursor.
+    /// A directory that does not exist yet (a fresh homeserver before the
+    /// first write) lists as empty rather than failing.
     async fn list_dir(
         &self,
         user: &PublicKey,
@@ -102,7 +113,11 @@ impl NodeHomeserver {
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    b.send().await?
+                    match b.send().await {
+                        Ok(p) => p,
+                        Err(e) if is_not_found(&e) => break,
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 (Visibility::Private, Some(session)) => {
                     let storage = session.storage();
@@ -110,7 +125,11 @@ impl NodeHomeserver {
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    b.send().await?
+                    match b.send().await {
+                        Ok(p) => p,
+                        Err(e) if is_not_found(&e) => break,
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
             };
@@ -325,7 +344,11 @@ impl NodeHomeserver {
             if let Some(c) = &cursor {
                 b = b.cursor(c);
             }
-            let page = b.send().await?;
+            let page = match b.send().await {
+                Ok(p) => p,
+                Err(e) if is_not_found(&e) => break,
+                Err(e) => return Err(e.into()),
+            };
             let n = page.len();
             cursor = page.last().map(|e| e.to_pubky_url());
             for e in page {

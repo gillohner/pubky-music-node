@@ -26,4 +26,6 @@ Newest first. Dates are when the change landed on `main`.
 - Filter boxes on the Albums, Artists and Tracks pages of both UIs.
 - The native app's Albums grid is virtualised (only visible covers are fetched).
 - The web UI's Tracks page renders 500 rows at a time with a filter over the whole list.
+- Sync no longer fails on a fresh homeserver: a folder nobody has written to yet lists as
+  empty instead of a 404 error.
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
