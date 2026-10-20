@@ -56,6 +56,8 @@ pub struct PipelineConfig {
     pub loudness: Loudness,
     /// Room correction: convolve with an impulse response (M8).
     pub convolution: Option<ConvolutionConfig>,
+    /// Headphone crossfeed (stereo streams only).
+    pub crossfeed: Option<crate::dsp::CrossfeedConfig>,
 }
 
 /// An impulse response file (WAV at the stream's rate; mono or one channel
@@ -107,6 +109,7 @@ impl Default for PipelineConfig {
             eq: Vec::new(),
             loudness: Loudness::Off,
             convolution: None,
+            crossfeed: None,
         }
     }
 }
@@ -117,6 +120,7 @@ impl PipelineConfig {
             || self.volume_db.is_some_and(|d| d != 0.0)
             || self.eq.iter().any(|b| b.enabled)
             || self.convolution.as_ref().is_some_and(|c| c.enabled)
+            || self.crossfeed.as_ref().is_some_and(|c| c.enabled)
     }
 }
 
@@ -144,6 +148,7 @@ enum Stage {
     Resample(Box<crate::resample::Resampler>),
     Eq(Box<crate::dsp::Equalizer>),
     Convolve(Box<crate::convolve::Convolver>),
+    Crossfeed(Box<crate::dsp::Crossfeed>),
     Gain {
         gain: f64,
     },
@@ -348,6 +353,16 @@ impl Plan {
                 stages.push(Stage::Convolve(Box::new(c)));
                 path.push(PathStage::new("convolution", cur, fbits, Quality::Enhanced).with_note(note));
                 cur = fbits;
+            }
+            if let Some(cf) = cfg.crossfeed.as_ref().filter(|c| c.enabled) {
+                if source.channels == 2 {
+                    let f = crate::dsp::Crossfeed::new(cf, fbits.rate_hz)
+                        .map_err(PipelineError::InvalidFormat)?;
+                    let note = format!("{} in 64-bit float", f.describe());
+                    stages.push(Stage::Crossfeed(Box::new(f)));
+                    path.push(PathStage::new("crossfeed", cur, fbits, Quality::Enhanced).with_note(note));
+                    cur = fbits;
+                }
             }
             if let Some(db) = cfg.volume_db.filter(|d| *d != 0.0) {
                 stages.push(Stage::Gain { gain: db_to_gain(db) });
@@ -601,6 +616,13 @@ impl Plan {
                         },
                         _ => return Err(PipelineError::InvalidFormat("convolution expects PCM".into())),
                     }
+                }
+                Stage::Crossfeed(cf) => {
+                    let mut b = block.to_f64();
+                    if let Samples::PcmF64(v) = &mut b.samples {
+                        cf.process(v);
+                    }
+                    b
                 }
                 Stage::Eq(eq) => {
                     let mut b = block.to_f64();
@@ -1026,6 +1048,26 @@ mod tests {
             ..Default::default()
         };
         assert!(Plan::negotiate(src, &OutputCaps::unlimited(), &bad).is_err());
+    }
+
+    #[test]
+    fn crossfeed_is_a_stereo_only_enhanced_stage() {
+        let cfg = PipelineConfig {
+            crossfeed: Some(crate::dsp::CrossfeedConfig::default()),
+            ..Default::default()
+        };
+        let plan = Plan::negotiate(AudioFormat::pcm(44_100, 16, 2), &OutputCaps::unlimited(), &cfg).unwrap();
+        let names: Vec<_> = plan
+            .signal_path()
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["decode", "crossfeed", "requantize", "output"]);
+        assert_eq!(plan.signal_path().stages[1].quality, Quality::Enhanced);
+        // Mono: no crossfeed stage, but the float round trip still happens because the config asked for float.
+        let plan = Plan::negotiate(AudioFormat::pcm(44_100, 16, 1), &OutputCaps::unlimited(), &cfg).unwrap();
+        assert!(!plan.signal_path().stages.iter().any(|s| s.name == "crossfeed"));
     }
 
     #[test]

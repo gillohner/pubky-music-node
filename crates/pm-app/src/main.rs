@@ -1571,6 +1571,27 @@ impl App {
                             }
                         });
                         ui.end_row();
+                        ui.label("Headphone crossfeed");
+                        ui.horizontal(|ui| {
+                            let mut on = cfg.crossfeed.as_ref().is_some_and(|c| c.enabled);
+                            if ui.checkbox(&mut on, "").changed() {
+                                cfg.crossfeed = on.then(pm_audio::CrossfeedConfig::default);
+                            }
+                            if let Some(cf) = cfg.crossfeed.as_mut() {
+                                ui.add(
+                                    egui::Slider::new(&mut cf.level_db, -15.0..=-2.0)
+                                        .suffix(" dB")
+                                        .text("level"),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut cf.cutoff_hz)
+                                        .range(200.0..=2000.0)
+                                        .speed(5.0)
+                                        .suffix(" Hz"),
+                                );
+                            }
+                        });
+                        ui.end_row();
                         ui.label("Resample when needed");
                         ui.checkbox(&mut cfg.resample, "");
                         ui.end_row();

@@ -292,3 +292,175 @@ mod tests {
         assert!(json.contains("\"kind\":\"peaking\""));
     }
 }
+
+/// Headphone crossfeed: a little of each channel, low-passed and slightly
+/// delayed, bleeds into the other, the way loudspeakers reach both ears.
+/// Stereo only; other channel counts pass through unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CrossfeedConfig {
+    /// Level of the bled signal relative to the direct one, in dB (−3 .. −12 typical).
+    #[serde(default = "default_cf_level")]
+    pub level_db: f64,
+    /// Low-pass corner for the bled signal (the head shadows highs).
+    #[serde(default = "default_cf_cutoff")]
+    pub cutoff_hz: f64,
+    /// Interaural delay in microseconds (about 300 µs for an average head).
+    #[serde(default = "default_cf_delay")]
+    pub delay_us: f64,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn default_cf_level() -> f64 {
+    -6.0
+}
+fn default_cf_cutoff() -> f64 {
+    700.0
+}
+fn default_cf_delay() -> f64 {
+    300.0
+}
+
+impl Default for CrossfeedConfig {
+    fn default() -> Self {
+        Self {
+            level_db: default_cf_level(),
+            cutoff_hz: default_cf_cutoff(),
+            delay_us: default_cf_delay(),
+            enabled: true,
+        }
+    }
+}
+
+impl CrossfeedConfig {
+    pub fn validate(&self, rate_hz: u32) -> Result<(), String> {
+        if !(-30.0..=0.0).contains(&self.level_db) {
+            return Err(format!("crossfeed level {} dB is outside -30..0", self.level_db));
+        }
+        if !(self.cutoff_hz > 50.0 && self.cutoff_hz < rate_hz as f64 / 2.0) {
+            return Err(format!("crossfeed cutoff {} Hz is out of range", self.cutoff_hz));
+        }
+        if !(0.0..=2000.0).contains(&self.delay_us) {
+            return Err(format!("crossfeed delay {} µs is outside 0..2000", self.delay_us));
+        }
+        Ok(())
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "crossfeed {:+.1} dB, {:.0} Hz low-pass, {:.0} µs",
+            self.level_db, self.cutoff_hz, self.delay_us
+        )
+    }
+}
+
+/// The running crossfeed filter for a stereo stream.
+#[derive(Debug, Clone)]
+pub struct Crossfeed {
+    gain: f64,
+    /// Direct-path scaling so the mono sum keeps its level.
+    direct: f64,
+    lp: [Equalizer; 2],
+    delay: [std::collections::VecDeque<f64>; 2],
+    description: String,
+}
+
+impl Crossfeed {
+    pub fn new(cfg: &CrossfeedConfig, rate_hz: u32) -> Result<Self, String> {
+        cfg.validate(rate_hz)?;
+        let band = EqBand {
+            kind: BandKind::LowPass,
+            freq_hz: cfg.cutoff_hz,
+            gain_db: 0.0,
+            q: std::f64::consts::FRAC_1_SQRT_2,
+            enabled: true,
+        };
+        let lp = [
+            Equalizer::new(&[band], rate_hz, 1)?,
+            Equalizer::new(&[band], rate_hz, 1)?,
+        ];
+        let delay_frames = (cfg.delay_us * rate_hz as f64 / 1_000_000.0).round() as usize;
+        let gain = 10f64.powf(cfg.level_db / 20.0);
+        let mk = || {
+            let mut d = std::collections::VecDeque::with_capacity(delay_frames + 1);
+            d.extend(std::iter::repeat_n(0.0, delay_frames));
+            d
+        };
+        Ok(Self {
+            gain,
+            direct: 1.0 / (1.0 + gain),
+            lp,
+            delay: [mk(), mk()],
+            description: cfg.describe(),
+        })
+    }
+
+    pub fn describe(&self) -> &str {
+        &self.description
+    }
+
+    /// In place on interleaved stereo f64.
+    pub fn process(&mut self, samples: &mut [f64]) {
+        let mut one = [0.0f64];
+        for frame in samples.as_chunks_mut::<2>().0 {
+            let (l, r) = (frame[0], frame[1]);
+            // Bleed: the other channel, low-passed, delayed, attenuated.
+            one[0] = r;
+            self.lp[0].process(&mut one);
+            self.delay[0].push_back(one[0]);
+            let from_r = self.delay[0].pop_front().unwrap_or(0.0);
+            one[0] = l;
+            self.lp[1].process(&mut one);
+            self.delay[1].push_back(one[0]);
+            let from_l = self.delay[1].pop_front().unwrap_or(0.0);
+            frame[0] = (l + self.gain * from_r) * self.direct;
+            frame[1] = (r + self.gain * from_l) * self.direct;
+        }
+    }
+}
+
+#[cfg(test)]
+mod crossfeed_tests {
+    use super::*;
+
+    #[test]
+    fn hard_panned_signal_bleeds_quietly_into_the_other_side() {
+        let mut cf = Crossfeed::new(&CrossfeedConfig::default(), 48_000).unwrap();
+        // 200 Hz tone in the left channel only, one second.
+        let mut v: Vec<f64> = (0..48_000)
+            .flat_map(|i| {
+                let x = (2.0 * PI * 200.0 * i as f64 / 48_000.0).sin() * 0.5;
+                [x, 0.0]
+            })
+            .collect();
+        cf.process(&mut v);
+        let tail = &v[v.len() / 2..];
+        let rms = |step: usize| {
+            let s: Vec<f64> = tail.iter().skip(step).step_by(2).copied().collect();
+            (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt()
+        };
+        let (left, right) = (rms(0), rms(1));
+        let ratio_db = 20.0 * (right / left).log10();
+        // At 200 Hz (below the cutoff) the bleed is close to the configured -6 dB.
+        assert!((ratio_db + 6.0).abs() < 1.0, "bleed {ratio_db} dB");
+        // A centre signal keeps its level: equal channels in, equal and unscaled out.
+        let mut c: Vec<f64> = (0..4800).flat_map(|_| [0.25, 0.25]).collect();
+        let mut cf = Crossfeed::new(
+            &CrossfeedConfig {
+                delay_us: 0.0,
+                ..Default::default()
+            },
+            48_000,
+        )
+        .unwrap();
+        cf.process(&mut c);
+        let last = c[c.len() - 2];
+        assert!((last - 0.25).abs() < 0.01, "centre level {last}");
+        assert!(CrossfeedConfig {
+            level_db: 3.0,
+            ..Default::default()
+        }
+        .validate(48_000)
+        .is_err());
+    }
+}

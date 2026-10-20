@@ -24,7 +24,7 @@ pub mod zone;
 pub use convolve::{Convolver, ImpulseResponse};
 pub use decode::Decoder;
 pub use dsd::DsdReader;
-pub use dsp::{BandKind, EqBand, Equalizer};
+pub use dsp::{BandKind, Crossfeed, CrossfeedConfig, EqBand, Equalizer};
 pub use error::AudioError;
 pub use pipeline::{ConvolutionConfig, DsdMode, Loudness, PipelineConfig, PipelineError, Plan};
 pub use play::{play_file, play_to_sink, PlayReport};
