@@ -23,5 +23,5 @@ Newest first. Dates are when the change landed on `main`.
 - The browser zone's queue survives a reload.
 - Libraries beyond 1000 albums or tracks show everything: both UIs page through the API's
   `after` cursor.
-- Filter boxes on the web UI's Albums, Artists and Tracks pages.
+- Filter boxes on the Albums, Artists and Tracks pages of both UIs.
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
