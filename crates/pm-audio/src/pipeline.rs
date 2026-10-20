@@ -803,7 +803,7 @@ mod tests {
             PipelineError::ConversionRequired {
                 from: fmt,
                 to: AudioFormat::pcm(44_100, 24, 2),
-                reason: "sample-rate conversion (M8)".into()
+                reason: "sample-rate conversion is disabled (resample = false)".into()
             }
         );
         let airplay = OutputCaps {
