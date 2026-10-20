@@ -235,7 +235,8 @@
       return;
     }
     const it = np.item;
-    $('#np').innerHTML = `<div class="np-art">${art(albumIdOf(it), it.title || it.uri, 'sm')}</div><div class="np-text"><div class="np-title">${esc(it.title || it.uri)}</div><div class="np-sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div>`;
+    const live = np.stream_title;
+    $('#np').innerHTML = `<div class="np-art">${art(albumIdOf(it), it.title || it.uri, 'sm')}</div><div class="np-text"><div class="np-title">${esc(live || it.title || it.uri)}</div><div class="np-sub">${esc(live ? [it.title, it.album].filter(Boolean).join(' · ') : [it.artist, it.album].filter(Boolean).join(' · '))}</div></div>`;
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
@@ -274,9 +275,9 @@
         <div class="np-hero">
           <div class="np-big">${art(albumId, it.title || it.uri)}</div>
           <div class="np-meta">
-            <div class="eyebrow">${esc(it.album ? 'From ' + it.album : 'Track')}</div>
-            <h1>${esc(it.title || it.uri)}</h1>
-            <div class="artist">${esc(it.artist || '')}</div>
+            <div class="eyebrow">${esc(np.stream_title ? 'Live · ' + (it.title || '') : it.album ? 'From ' + it.album : 'Track')}</div>
+            <h1>${esc(np.stream_title || it.title || it.uri)}</h1>
+            <div class="artist">${esc(np.stream_title ? (it.artist || '') : (it.artist || ''))}</div>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="path">
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Browser decode'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
@@ -297,7 +298,7 @@
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
-    if (np.item.id !== (renderNowPlaying.lastItem || {}).id) { renderNowPlaying(); }
+    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     s.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(s);
     const p = $('#nppos'); if (p) p.textContent = fmt(np.position_ms);
     renderNowPlaying.lastItem = np.item;

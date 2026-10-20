@@ -59,6 +59,9 @@ impl FrameSource for WithReplayGain {
     fn lossy_source(&self) -> bool {
         self.inner.lossy_source()
     }
+    fn stream_title(&mut self) -> Option<String> {
+        self.inner.stream_title()
+    }
 }
 
 /// One decoded track. Methods block (file I/O); the zone calls them from its
@@ -83,6 +86,11 @@ pub trait FrameSource: Send {
     /// The audio went through a lossy codec; the signal path says so.
     fn lossy_source(&self) -> bool {
         false
+    }
+    /// A new in-stream title (internet radio's ICY `StreamTitle`) since the
+    /// last call; `None` when nothing changed. Polled once per block.
+    fn stream_title(&mut self) -> Option<String> {
+        None
     }
 }
 

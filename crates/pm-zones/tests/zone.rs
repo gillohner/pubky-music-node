@@ -60,6 +60,8 @@ struct PatternSource {
     total: u64,
     pos: u64,
     gate: Arc<Gate>,
+    /// An in-stream title announced after the second block (radio).
+    title: Option<String>,
 }
 
 impl FrameSource for PatternSource {
@@ -92,6 +94,13 @@ impl FrameSource for PatternSource {
 
     fn finalize(&mut self) -> Option<bool> {
         Some(true)
+    }
+
+    fn stream_title(&mut self) -> Option<String> {
+        if self.pos >= 2 * BLOCK {
+            return self.title.take();
+        }
+        None
     }
 }
 
@@ -128,6 +137,7 @@ impl SourceFactory for Factory {
             total: *total,
             pos: 0,
             gate: self.gate.clone(),
+            title: item.uri.contains("icy").then(|| "Nils Frahm - Says".to_string()),
         }))
     }
 
@@ -297,6 +307,7 @@ fn kinds(evs: &[ZoneEvent]) -> Vec<String> {
             ZoneEvent::Seeked { position_ms } => format!("seek:{position_ms}"),
             ZoneEvent::Stopped => "stopped".into(),
             ZoneEvent::QueueChanged => "queue".into(),
+            ZoneEvent::StreamTitle { title } => format!("title:{title}"),
             ZoneEvent::Error(e) => format!("error:{e}"),
         })
         .filter(|k| k != "queue")
@@ -497,6 +508,34 @@ async fn repeat_one_and_queue_edits_while_playing() {
     assert_eq!(starts[1], "start:a:true");
     assert_eq!(*starts.last().unwrap(), "start:b:true");
     assert_eq!(*r.rec.opens.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn stream_titles_reach_state_and_events() {
+    let mut r = rig(&[("icy-radio", RATE, 5 * BLOCK)]);
+    r.zone.enqueue(vec![QueueItem::new("icy-radio")], Insert::End);
+    r.zone.play_index(0);
+    // Let three blocks through: the title is announced after the second.
+    for _ in 0..3 {
+        r.gate.blocked().await;
+        r.gate.allow(1);
+    }
+    wait_for(|| {
+        r.zone
+            .state()
+            .now_playing
+            .as_ref()
+            .and_then(|n| n.stream_title.clone())
+            .is_some()
+    })
+    .await;
+    let np = r.zone.state().now_playing.unwrap();
+    assert_eq!(np.stream_title.as_deref(), Some("Nils Frahm - Says"));
+    assert_eq!(np.item.uri, "icy-radio", "the queue item itself is untouched");
+    let evs = kinds(&drain_events(&mut r.events));
+    assert!(evs.contains(&"title:Nils Frahm - Says".to_string()), "{evs:?}");
+    r.gate.allow(100);
+    r.zone.wait_stopped().await;
 }
 
 #[tokio::test]

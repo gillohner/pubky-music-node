@@ -65,6 +65,9 @@ pub struct NowPlaying {
     /// Grouped outputs and their drift; empty for a single output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<crate::sink::MemberStatus>,
+    /// The latest in-stream title (internet radio), when the stream sends one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +118,10 @@ pub enum ZoneEvent {
     },
     Stopped,
     QueueChanged,
+    /// The stream announced a new title (internet radio).
+    StreamTitle {
+        title: String,
+    },
     /// Playback stopped because of this.
     Error(String),
 }

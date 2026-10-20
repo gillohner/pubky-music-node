@@ -42,6 +42,8 @@ struct Current {
     /// `sink.frames_written()` at the last seek/resume (or track start).
     start_frame: u64,
     paused_at_ms: Option<u64>,
+    /// Latest ICY title from the source, for radio.
+    stream_title: Option<String>,
 }
 
 /// An opened track and its negotiated chain.
@@ -432,6 +434,7 @@ impl Engine {
             base_ms: 0,
             start_frame,
             paused_at_ms: None,
+            stream_title: None,
         });
         self.prefetch = None;
         self.error = None;
@@ -461,6 +464,14 @@ impl Engine {
                     }
                 }
                 self.maybe_prefetch();
+                let title = self.current.as_mut().and_then(|c| c.source.stream_title());
+                if let Some(t) = title {
+                    if let Some(c) = self.current.as_mut() {
+                        c.stream_title = Some(t.clone());
+                    }
+                    self.emit(ZoneEvent::StreamTitle { title: t });
+                    self.dirty = true;
+                }
                 if self.last_position_publish.elapsed() >= POSITION_INTERVAL {
                     self.publish();
                 }
@@ -594,6 +605,7 @@ impl Engine {
             output_format: c.proc.output_format(),
             signal_path: c.proc.signal_path().clone(),
             members: self.sink.as_ref().map(|s| s.members()).unwrap_or_default(),
+            stream_title: c.stream_title.clone(),
         });
         self.state.send_modify(|s| {
             s.transport = self.transport;

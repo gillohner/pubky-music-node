@@ -6,7 +6,7 @@
 
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_library::Library;
-use pm_model::{OutputCaps, TrackId};
+use pm_model::{AudioBlock, AudioFormat, OutputCaps, TrackId};
 use pm_zones::{FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -122,6 +122,125 @@ impl std::io::Read for HttpBody {
     }
 }
 
+/// The latest title an ICY stream announced, shared between the byte reader
+/// (which sees the metadata) and the frame source (which the zone polls).
+type SharedTitle = Arc<Mutex<Option<String>>>;
+
+/// Strips SHOUTcast/Icecast in-band metadata: after every `interval` audio
+/// bytes comes one length byte `n` and `16 * n` bytes of `key='value';`
+/// pairs. `StreamTitle` is kept, everything else dropped.
+struct IcyReader<R: std::io::Read> {
+    inner: R,
+    interval: usize,
+    /// Audio bytes left before the next metadata block.
+    remaining: usize,
+    title: SharedTitle,
+}
+
+impl<R: std::io::Read> IcyReader<R> {
+    fn new(inner: R, interval: usize, title: SharedTitle) -> Self {
+        Self {
+            inner,
+            interval,
+            remaining: interval,
+            title,
+        }
+    }
+
+    fn read_exact_or_eof(&mut self, buf: &mut [u8]) -> std::io::Result<bool> {
+        let mut got = 0;
+        while got < buf.len() {
+            let n = self.inner.read(&mut buf[got..])?;
+            if n == 0 {
+                return Ok(false);
+            }
+            got += n;
+        }
+        Ok(true)
+    }
+
+    fn skip_metadata(&mut self) -> std::io::Result<()> {
+        let mut len = [0u8; 1];
+        if !self.read_exact_or_eof(&mut len)? {
+            return Ok(());
+        }
+        let n = len[0] as usize * 16;
+        if n > 0 {
+            let mut meta = vec![0u8; n];
+            if self.read_exact_or_eof(&mut meta)? {
+                if let Some(t) = parse_icy_title(&meta) {
+                    *self.title.lock().expect("title lock") = Some(t);
+                }
+            }
+        }
+        self.remaining = self.interval;
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for IcyReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            self.skip_metadata()?;
+        }
+        let want = buf.len().min(self.remaining);
+        let n = self.inner.read(&mut buf[..want])?;
+        self.remaining -= n;
+        Ok(n)
+    }
+}
+
+/// `StreamTitle='Artist - Title';` out of a metadata block (NUL padded).
+pub(crate) fn parse_icy_title(meta: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(meta);
+    let text = text.trim_end_matches('\0');
+    let start = text.find("StreamTitle='")? + "StreamTitle='".len();
+    let rest = &text[start..];
+    let end = rest.find("';").unwrap_or(rest.len());
+    let title = rest[..end].trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// An HTTP stream as a frame source: the decoded audio plus the ICY titles.
+struct HttpStream {
+    inner: pm_audio::play::Source,
+    title: SharedTitle,
+    last: Option<String>,
+}
+
+impl FrameSource for HttpStream {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.inner.duration_ms()
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        self.inner
+            .next_block()
+            .map_err(|e| SourceError::Decode(e.to_string()))
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        self.inner
+            .seek_ms(ms)
+            .map_err(|e| SourceError::Seek(e.to_string()))
+    }
+    fn finalize(&mut self) -> Option<bool> {
+        self.inner.finalize()
+    }
+    fn lossy_source(&self) -> bool {
+        self.inner.is_lossy()
+    }
+    fn stream_title(&mut self) -> Option<String> {
+        let now = self.title.lock().expect("title lock").clone();
+        if now.is_some() && now != self.last {
+            self.last = now.clone();
+            return now;
+        }
+        None
+    }
+}
+
 /// Container hint from a `Content-Type`.
 pub(crate) fn ext_for_mime(mime: &str) -> Option<&'static str> {
     let m = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
@@ -200,7 +319,7 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
         for hop in 0..2 {
             let resp = http_client()
                 .get(&url)
-                .header("Icy-MetaData", "0")
+                .header("Icy-MetaData", "1")
                 .send()
                 .map_err(|e| err(e.to_string()))?;
             if !resp.status().is_success() {
@@ -218,11 +337,31 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
                 continue;
             }
             let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url));
+            let metaint = resp
+                .headers()
+                .get("icy-metaint")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| *n > 0);
+            let title: SharedTitle = Arc::new(Mutex::new(None));
             let body = HttpBody(std::sync::Mutex::new(resp));
-            let media = symphonia::core::io::ReadOnlySource::new(body);
-            let src = pm_audio::play::Source::from_media_source(Box::new(media), ext, &url)
-                .map_err(|e| err(e.to_string()))?;
-            return Ok(Box::new(src));
+            let inner = match metaint {
+                Some(n) => {
+                    let media =
+                        symphonia::core::io::ReadOnlySource::new(IcyReader::new(body, n, title.clone()));
+                    pm_audio::play::Source::from_media_source(Box::new(media), ext, &url)
+                }
+                None => {
+                    let media = symphonia::core::io::ReadOnlySource::new(body);
+                    pm_audio::play::Source::from_media_source(Box::new(media), ext, &url)
+                }
+            }
+            .map_err(|e| err(e.to_string()))?;
+            return Ok(Box::new(HttpStream {
+                inner,
+                title,
+                last: None,
+            }));
         }
         Err(err("too many playlist redirections".into()))
     }
@@ -320,5 +459,41 @@ mod tests {
         assert_eq!(ext_for_mime("text/html"), None);
         assert_eq!(ext_for_url("http://x/stream.AAC?x=1"), Some("aac"));
         assert_eq!(ext_for_url("http://x/live"), None);
+    }
+
+    #[test]
+    fn icy_reader_strips_metadata_and_keeps_titles() {
+        use std::io::Read;
+        // 10 audio bytes, a 32-byte metadata block, 10 audio, an empty block, 5 audio.
+        let mut meta = b"StreamTitle='Nils Frahm - Says';".to_vec();
+        meta.resize(32, 0);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&[1u8; 10]);
+        raw.push(2);
+        raw.extend_from_slice(&meta);
+        raw.extend_from_slice(&[2u8; 10]);
+        raw.push(0);
+        raw.extend_from_slice(&[3u8; 5]);
+        let title: SharedTitle = Arc::new(Mutex::new(None));
+        let mut r = IcyReader::new(std::io::Cursor::new(raw), 10, title.clone());
+        let mut out = Vec::new();
+        let mut buf = [0u8; 7];
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        let mut expect = vec![1u8; 10];
+        expect.extend_from_slice(&[2u8; 10]);
+        expect.extend_from_slice(&[3u8; 5]);
+        assert_eq!(out, expect);
+        assert_eq!(title.lock().unwrap().as_deref(), Some("Nils Frahm - Says"));
+        assert_eq!(parse_icy_title(b"StreamTitle='';StreamUrl='';\0\0"), None);
+        assert_eq!(
+            parse_icy_title(b"StreamTitle='It's Alright - X';StreamUrl='';").as_deref(),
+            Some("It's Alright - X")
+        );
     }
 }

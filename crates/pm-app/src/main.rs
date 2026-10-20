@@ -863,7 +863,13 @@ impl App {
         };
         let album = self.album_of_item(&np.item);
         let tex = album.as_ref().and_then(|a| self.cover(a.id));
-        let title = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+        let station = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+        let title = np.stream_title.clone().unwrap_or_else(|| station.clone());
+        let artist_line = if np.stream_title.is_some() {
+            station.clone()
+        } else {
+            np.item.artist.clone().unwrap_or_default()
+        };
         let queue = self.queue_items();
         let up_next: Vec<QueueItem> = queue
             .iter()
@@ -893,7 +899,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(art_size * 0.08);
                 ui.label(egui::RichText::new(&title).strong().size(28.0));
-                ui.label(egui::RichText::new(np.item.artist.clone().unwrap_or_default()).size(18.0));
+                ui.label(egui::RichText::new(artist_line).size(18.0));
                 let album_line = match (&np.item.album, album.as_ref().and_then(|a| a.year)) {
                     (Some(a), Some(y)) => format!("{a} · {y}"),
                     (Some(a), None) => a.clone(),
@@ -1982,7 +1988,13 @@ impl App {
                     if let Some(np) = &np {
                         let album = self.album_of_item(&np.item);
                         let tex = album.as_ref().and_then(|a| self.cover(a.id));
-                        let title = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+                        let station = np.item.title.clone().unwrap_or_else(|| np.item.uri.clone());
+                        let title = np.stream_title.clone().unwrap_or_else(|| station.clone());
+                        let sub = if np.stream_title.is_some() {
+                            station.clone()
+                        } else {
+                            np.item.artist.clone().unwrap_or_default()
+                        };
                         let (rect, resp) =
                             ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::click());
                         theme::cover(ui, rect, tex.as_ref(), &title, resp.hovered());
@@ -1996,7 +2008,7 @@ impl App {
                                     egui::Label::new(egui::RichText::new(&title).strong())
                                         .sense(egui::Sense::click()),
                                 );
-                                ui.weak(np.item.artist.clone().unwrap_or_default());
+                                ui.weak(sub);
                                 ui.small(
                                     egui::RichText::new(np.item.album.clone().unwrap_or_default()).weak(),
                                 );
