@@ -153,6 +153,8 @@ struct App {
     new_releases: Option<pm_api::types::NewReleasesPage>,
     /// Client-side filter shared by the Albums, Artists and Tracks lists.
     list_filter: String,
+    /// Set by the `/` shortcut; the search box takes focus on the next frame.
+    focus_search: bool,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -250,6 +252,7 @@ impl App {
             local_sleep_at: None,
             new_releases: None,
             list_filter: String::new(),
+            focus_search: false,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -1070,6 +1073,10 @@ impl App {
                     .hint_text("Search artists, albums, tracks")
                     .desired_width(360.0),
             );
+            if self.focus_search {
+                self.focus_search = false;
+                resp.request_focus();
+            }
             let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if submitted && !self.search.trim().is_empty() {
                 self.backend.send(Cmd::Search(self.search.trim().to_string()));
@@ -3901,16 +3908,28 @@ impl eframe::App for App {
         if zone.transport == Transport::Playing {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
-        // Keyboard: space play/pause, ← → previous/next, Q toggles the queue panel.
+        // Keyboard: space play/pause, ← → previous/next, Q queue panel, N now playing, / search.
         if !ui.ctx().egui_wants_keyboard_input() {
-            let (space, right, left, q) = ui.input(|i| {
+            let (space, right, left, q, n, slash) = ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::Space),
                     i.key_pressed(egui::Key::ArrowRight),
                     i.key_pressed(egui::Key::ArrowLeft),
                     i.key_pressed(egui::Key::Q),
+                    i.key_pressed(egui::Key::N),
+                    i.key_pressed(egui::Key::Slash),
                 )
             });
+            if n {
+                if self.view == View::NowPlaying {
+                    self.close_now_playing();
+                } else {
+                    self.open_now_playing();
+                }
+            }
+            if slash {
+                self.focus_search = true;
+            }
             if space {
                 self.transport(TransportAction::Toggle);
             }
