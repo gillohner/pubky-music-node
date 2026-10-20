@@ -119,6 +119,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/library/tracks/{id}/versions", get(track_versions))
+        .route("/library/albums/{id}/versions", get(album_versions))
         .route("/backup", get(backup))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
@@ -181,6 +183,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/status", get(tidal::status))
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
+        .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/tidal/collection/import", post(tidal::import_collection))
         .route("/sources/tidal/playlists", get(tidal::playlists))
         .route(
@@ -842,6 +845,28 @@ async fn backup(State(s): State<Arc<NodeState>>) -> Result<axum::response::Respo
         .into_response())
 }
 
+/// Where else a library track streams from (TIDAL by ISRC); empty when nothing is known.
+async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
+    let track = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_track(TrackId(id))?
+        .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
+    Ok(Json(tidal::track_versions(&s, &track).await.unwrap_or_default()))
+}
+
+/// Where else a library album streams from (TIDAL by UPC).
+async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
+    let album = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_album(id)?
+        .ok_or_else(|| ApiError::not_found(format!("no album {id}")))?;
+    Ok(Json(tidal::album_versions(&s, &album).await.unwrap_or_default()))
+}
+
 /// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
 async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Lyrics> {
     let found = s.library.lock().expect("library poisoned").lyrics(TrackId(id))?;
@@ -905,6 +930,12 @@ async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Res
 async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
     let limit = q.limit.unwrap_or(50).min(500);
     let needle = q.q.trim().to_lowercase();
+    // Streaming services answer alongside the library (their part is bounded in time).
+    let sources = if q.sources.unwrap_or(1) != 0 && !needle.is_empty() {
+        streaming::unified_search(&s, q.q.trim(), 12).await
+    } else {
+        Vec::new()
+    };
     let lib = s.library.lock().expect("library poisoned");
     let tracks = lib.search_tracks(&q.q, limit)?;
     let albums = if needle.is_empty() {
@@ -930,6 +961,7 @@ async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -
         albums,
         artists,
         genres,
+        sources,
     }))
 }
 
@@ -2350,7 +2382,7 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}");
         let tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let tokens2 = tokens.clone();
-        let album = serde_json::json!({"id": "20115556", "type": "albums", "attributes": {"title": "Random Access Memories", "releaseDate": "2013-05-17", "mediaTags": ["LOSSLESS"]},
+        let album = serde_json::json!({"id": "20115556", "type": "albums", "attributes": {"title": "Random Access Memories", "releaseDate": "2013-05-17", "mediaTags": ["LOSSLESS"], "barcodeId": "886443927087"},
             "relationships": {"artists": {"data": [{"id": "3996", "type": "artists"}]}, "coverArt": {"data": [{"id": "art1", "type": "artworks"}]},
                               "items": {"data": [{"id": "20115564", "type": "tracks", "meta": {"trackNumber": 8, "volumeNumber": 1}}, {"id": "20115557", "type": "tracks", "meta": {"trackNumber": 1, "volumeNumber": 1}}]}}});
         let artist =
@@ -2501,6 +2533,80 @@ mod tests {
         assert_eq!(tracks[0]["format"], "FLAC hi-res (TIDAL)");
         let (st, _) = call(&app, "GET", "/v1/sources/tidal/items/nope", None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Unified search: the library answer carries TIDAL hits, flagged when the
+        // library already has the same ISRC or UPC.
+        {
+            let lib = s.library.lock().unwrap();
+            let mut t = pm_model::Track {
+                id: None,
+                title: "Get Lucky".into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: "Daft Punk".into(),
+                    mbid: None,
+                }],
+                album: Some(pm_model::Album {
+                    id: None,
+                    title: "Random Access Memories".into(),
+                    album_artist: Some("Daft Punk".into()),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: Some(2013),
+                    upc: pm_model::Upc::parse("886443927087").ok(),
+                    total_discs: None,
+                }),
+                track_no: Some(8),
+                disc_no: None,
+                duration_ms: Some(369_000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join("get-lucky.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(369_000),
+                },
+                recording_mbid: None,
+                isrc: pm_model::Isrc::parse("USQX91300108").ok(),
+                acoustid: None,
+                canonical: Some((
+                    pm_model::MusicUri::Isrc {
+                        isrc: pm_model::Isrc::parse("USQX91300108").unwrap(),
+                    },
+                    pm_model::Confidence::TaggedIsrc,
+                )),
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            t.id = None;
+            lib.upsert_track(&t).unwrap();
+        }
+        let (st, r) = call(&app, "GET", "/v1/library/search?q=daft%20punk", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["tracks"][0]["title"], "Get Lucky");
+        let src = r["sources"].as_array().unwrap();
+        assert_eq!(src.len(), 1, "{r}");
+        assert_eq!(src[0]["source"], "tidal");
+        let tidal_hits = src[0]["items"].as_array().unwrap();
+        let track_hit = tidal_hits.iter().find(|h| h["kind"] == "track").unwrap();
+        assert_eq!(track_hit["isrc"], "USQX91300108");
+        assert!(track_hit["library_track_id"].is_i64(), "{track_hit}");
+        let album_hit = tidal_hits.iter().find(|h| h["kind"] == "album").unwrap();
+        assert_eq!(album_hit["upc"], "886443927087");
+        assert!(album_hit["library_album_id"].is_i64(), "{album_hit}");
+        let (_, r) = call(&app, "GET", "/v1/library/search?q=daft%20punk&sources=0", None).await;
+        assert!(r["sources"].as_array().unwrap().is_empty());
+        // Versions: the library album and track point back at TIDAL by UPC / ISRC.
+        let lid = track_hit["library_track_id"].as_i64().unwrap();
+        let aid = album_hit["library_album_id"].as_i64().unwrap();
+        let (st, v) = call(&app, "GET", &format!("/v1/library/albums/{aid}/versions"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v[0]["id"], "album:20115556");
+        assert!(v[0]["label"].as_str().unwrap().starts_with("TIDAL"));
+        let (st, v) = call(&app, "GET", &format!("/v1/library/tracks/{lid}/versions"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v[0]["uri"], "tidal:track:20115564");
         // Sign-in: the login URL carries PKCE, the callback exchanges the code and stores the user.
         let (st, l) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
         assert_eq!(st, StatusCode::OK);
@@ -2676,6 +2782,22 @@ mod tests {
         assert!(started, "the TIDAL track never started");
         let st = zone.wait_stopped().await;
         assert!(st.error.is_none(), "{:?}", st.error);
+        // The browser proxy serves the same segments as one body.
+        let req = Request::builder()
+            .uri("/v1/sources/tidal/stream/20115564")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("audio/mp4"));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.len(), flac.len(), "proxy body is the whole file");
         // Without a session the resolver refuses with a clear reason.
         s.library.lock().unwrap().delete_setting("tidal.user").unwrap();
         let (_, _) = call(

@@ -115,11 +115,25 @@
   setInterval(() => { try { const j = JSON.stringify(state.browserQueue.filter((it) => !it.stream)); if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); } } catch { /* storage unavailable */ } }, 2000);
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); $('#zonename').textContent = z ? z.name : 'Zone'; };
+  // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
+  const streamUrlFor = (uri) => { const m = /^tidal:track:([A-Za-z0-9]+)$/.exec(uri || ''); if (m) return `/v1/sources/tidal/stream/${m[1]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  // Source tracks (TIDAL, archive…) as queue items for the current zone.
+  const playSourceItems = async (qitems, replace = true, at = 'end') => {
+    if (!qitems.length) return;
+    if (isBrowser()) {
+      const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
+      if (replace) { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
+      if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${bitems.length} tracks added`);
+      return;
+    }
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${qitems.length} tracks added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+  };
+  const hitItem = (h, album) => ({ uri: `tidal:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: null });
   const browserPlay = (i) => {
     const it = state.browserQueue[i];
     if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; }
     state.browserIndex = i;
-    audio.src = it.stream ? it.stream : `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
     audio.play().catch((e) => toast('Browser playback: ' + e.message, 'error'));
     if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
     mediaSessionUpdate(it);
@@ -395,7 +409,7 @@
     try {
       const r = await api('GET', '/library/search?q=' + encodeURIComponent(q) + '&limit=200');
       if (search.value.trim() !== q) return;
-      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [] });
+      setView('search', { q, tracks: r.tracks, albums: r.albums || [], artists: r.artists || [], genres: r.genres || [], sources: r.sources || [] });
     } catch (e) { toast(e.message, 'error'); }
   };
   search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 280); });
@@ -518,12 +532,17 @@
     const favItem = single && trackHasId(single) ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     const seeds = tracks.filter((t) => t && trackHasId(t));
+    let versionItems = [];
+    if (single && single.id != null && single.isrc) {
+      try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); } catch { /* no versions */ }
+    }
     const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const items = [
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
       ...radioItem,
+      ...versionItems,
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Upload to homeserver' : `Upload ${tracks.length} tracks to homeserver`, icon: 'download', run: async () => { let n = 0; for (const t of tracks) { try { await api('POST', '/pubky/files', { track_id: t.id }); n++; } catch (e) { toast(`${t.title}: ${e.message}`, 'error'); break; } } if (n) toast(n === 1 ? 'Uploaded to your homeserver (private)' : `${n} tracks uploaded to your homeserver (private)`); } }] : []),
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
@@ -701,6 +720,7 @@
               <div class="sub">${esc(a.album_artist || artists(tracks[0] || {}))}</div>
               <div class="facts">${[a.year, `${tracks.length} tracks`, fmtLong(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div>
               <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn" id="albummore" title="More">${icon('more')}</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
+              <div id="versions"></div>
               ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
               ${relUrl ? reviewRow(myReview) : ''}
               ${onPubky ? `<div class="tagrow"><span class="eyebrow">On Pubky</span>${onPubky.indexed ? (onPubky.taggers ? `<span class="muted small">${onPubky.taggers} ${onPubky.taggers === 1 ? 'person' : 'people'}</span>` : '') + (onPubky.tags.length ? onPubky.tags.slice(0, 12).map(([l, n]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('') : '<span class="muted small">no tags yet</span>') : '<span class="muted small">not indexed yet</span>'}</div>` : ''}
@@ -712,6 +732,13 @@
           $('#nextall').onclick = () => playTracks(tracks, false, 'next');
           $('#addall').onclick = () => playTracks(tracks, false, 'end');
           $('#albummore').onclick = (e) => { e.stopPropagation(); trackMenu($('#albummore'), tracks); };
+          // Versions elsewhere (Roon's "Versions"): the same album on TIDAL by UPC.
+          api('GET', `/library/albums/${id}/versions`).then((vs) => {
+            const box = $('#versions'); if (!box || state.view !== 'album' || !vs.length) return;
+            box.innerHTML = `<div class="tagrow"><span class="eyebrow">Versions</span>${vs.map((v, i) => `<span class="chip"><span class="src-badge">${esc(v.source.toUpperCase())}</span> ${esc(v.label.replace(/^TIDAL · /, ''))} <button class="chiplink" data-vopen="${i}" title="Open on ${esc(v.source)}">open</button> <button class="chiplink" data-vplay="${i}" title="Play this version">play</button></span>`).join('')}</div>`;
+            $$('[data-vopen]', box).forEach((b) => b.onclick = () => setView('source-item', { source: vs[Number(b.dataset.vopen)].source, id: vs[Number(b.dataset.vopen)].id }));
+            $$('[data-vplay]', box).forEach((b) => b.onclick = async () => { const v = vs[Number(b.dataset.vplay)]; try { const it = await api('GET', `/sources/${encodeURIComponent(v.source)}/items/${encodeURIComponent(v.id)}`); playSourceItems(it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms })), true); } catch (e) { toast(e.message, 'error'); } });
+          }).catch(() => {});
           $('#heart').onclick = async () => { try { await setFavourite({ album_id: id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
           break;
         }
@@ -777,15 +804,22 @@
           break;
         }
         case 'search': {
-          const { q, tracks, albums, artists, genres } = { tracks: [], albums: [], artists: [], genres: [], ...(state.viewArg || { q: '' }) };
-          const none = !tracks.length && !albums.length && !artists.length && !genres.length;
+          const { q, tracks, albums, artists, genres, sources } = { tracks: [], albums: [], artists: [], genres: [], sources: [], ...(state.viewArg || { q: '' }) };
+          const tidalHits = ((sources || []).find((s) => s.source === 'tidal') || { items: [] }).items;
+          const tAlbums = tidalHits.filter((h) => h.kind === 'album'); const tTracks = tidalHits.filter((h) => h.kind === 'track');
+          const none = !tracks.length && !albums.length && !artists.length && !genres.length && !tidalHits.length;
           main.innerHTML = pageHead(`Results for “${q}”`, none ? null : `${tracks.length} tracks · ${albums.length} albums · ${artists.length} artists`)
             + (none ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library.') : '')
             + (albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div><div class="strip">${albums.map(tile).join('')}</div></section>` : '')
             + (artists.length || genres.length ? `<section class="section"><div class="section-head"><h3>${artists.length ? 'Artists' : ''}${artists.length && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div><div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
             + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '')
+            + (tidalHits.length ? `<section class="section"><div class="section-head"><h3>On TIDAL</h3><span class="muted small">streams from your TIDAL account</span></div>${tAlbums.length ? `<div class="strip">${tAlbums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}<span class="src-badge">TIDAL</span>${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : ''}${tTracks.length ? `<div class="list">${tTracks.map((h, i) => `<div class="list-row"><button class="icon-btn" data-tplay="${i}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(h.title)} <span class="src-badge">TIDAL</span>${h.library_track_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="row-actions"><button class="icon-btn" data-tnext="${i}" title="Play next">${icon('playnext')}</button><button class="icon-btn" data-tadd="${i}" title="Add to queue">${icon('plus')}</button></span></div>`).join('')}</div>` : ''}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Elsewhere</h3></div><div class="actions"><button class="btn" id="s-archive">${icon('archive')} Search the Internet Archive for “${esc(q)}”</button><button class="btn" id="s-audius">${icon('archive')} Search Audius for “${esc(q)}”</button><button class="btn" id="s-radio">${icon('radio')} Find radio stations named “${esc(q)}”</button></div></section>`;
           lists.search = tracks;
+          $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
+          $$('[data-tplay]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tplay)])], true));
+          $$('[data-tnext]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tnext)])], false, 'next'));
+          $$('[data-tadd]', main).forEach((b) => b.onclick = () => playSourceItems([hitItem(tTracks[Number(b.dataset.tadd)])], false, 'end'));
           $('#s-archive').onclick = () => { state.sourceResults = null; setView('sources', { source: 'archive', q }); };
           $('#s-audius').onclick = () => { state.sourceResults = null; setView('sources', { source: 'audius', q }); };
           $('#s-radio').onclick = () => { state.radioResults = null; setView('radio', { q }); };
@@ -848,7 +882,7 @@
           const account = cur.id !== 'tidal' ? '' : !tidal || !tidal.configured ? `<div class="notice">TIDAL needs the developer app's client id and secret in the node config (<code>[tidal]</code>) or the <code>PM_TIDAL_*</code> variables in Docker.</div>`
             : tidal.signed_in ? `<div class="toolbar"><span class="pill ok">Signed in${tidal.user_id ? ' · user ' + esc(tidal.user_id) : ''}${tidal.country ? ' · ' + esc(tidal.country) : ''}${tidal.access_tier ? ' · ' + esc(tidal.access_tier) : ''}</span>${tidal.playback_limit ? `<span class="pill warn" title="TIDAL's answer to the last stream manifest">previews only · ${esc(tidal.playback_limit)}</span>` : ''}<button class="btn ghost" id="tidalout">Sign out</button></div>${tidal.playback_limit ? `<p class="muted small">TIDAL serves 30-second previews to apps on the ${esc(tidal.access_tier || 'THIRD_PARTY')} developer tier. Full tracks need a higher access tier granted by TIDAL for this app; search, albums and the collection and playlist imports are unaffected.</p>` : ''}`
             : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Connect TIDAL</button><span class="muted small">Opens TIDAL's sign-in; the app must list <code>${esc(tidal.redirect_uri)}</code> as a redirect URI. Search works without signing in; playback and your collection need it. The app must also have these scopes enabled: <code>${esc(tidal.requested_scopes || '')}</code> (change them with <code>[tidal] scopes</code> in the node config).</span></div>`;
-          main.innerHTML = pageHead('Sources', cur.id === 'tidal' ? 'your subscription, one account on this node' : 'streaming without an account') + tabs
+          main.innerHTML = pageHead('Sources', cur.id === 'tidal' ? 'your subscription, one account on this node · TIDAL also answers in the main search' : 'streaming without an account') + tabs
             + `<p class="muted small">${esc(cur.description)}</p>` + account
             + `<div class="toolbar"><input class="input" id="sq" placeholder="Search ${esc(cur.name)}…" value="${esc(results.q)}" style="width:360px"><button class="btn primary" id="ssearch">${icon('search')} Search</button><span class="muted small">Streams play on any zone; lossy formats show as Lossy in the signal path.</span></div>`
             + (results.q ? `<section class="section"><div class="section-head"><h3>Results for “${esc(results.q)}”</h3></div>${results.items.length ? `<div class="list">${results.items.map((h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}"><div class="avatar" style="background:hsl(${hue(h.title)} 35% 28%);overflow:hidden">${h.image ? `<img src="${esc(h.image)}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : esc(initials(h.title))}</div><div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year, h.kind === 'track' ? 'track' : '', h.downloads != null ? h.downloads + (h.kind === 'track' ? ' plays' : ' downloads') : ''].filter(Boolean).join(' · '))}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : '<p class="muted">Nothing matched.</p>'}</section>` : emptyState('archive', `Search ${cur.name}`, cur.description || 'Results come from the source and stream straight to your zones.'));
@@ -886,7 +920,7 @@
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);
             if (isBrowser()) {
-              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
+              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }));
               if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
               return;
             }
@@ -899,7 +933,7 @@
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {

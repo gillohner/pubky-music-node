@@ -76,6 +76,10 @@ pub(crate) fn hit(host: &str, t: &serde_json::Value) -> Option<SourceHit> {
             .or(t["artwork"]["150x150"].as_str())
             .map(str::to_string),
         kind: "track".into(),
+        isrc: None,
+        upc: None,
+        library_track_id: None,
+        library_album_id: None,
         url: if permalink.is_empty() {
             format!("{host}/v1/tracks/{id}")
         } else {

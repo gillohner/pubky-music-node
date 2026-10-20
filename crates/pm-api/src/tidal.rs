@@ -559,6 +559,10 @@ impl StreamingService for Tidal {
         SOURCE_ID
     }
 
+    fn unified(&self, s: &NodeState) -> bool {
+        creds(s).configured()
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let status = if !creds(s).configured() {
             "not configured: add [tidal] client_id and client_secret to the node config".to_string()
@@ -638,6 +642,10 @@ impl StreamingService for Tidal {
                     downloads: None,
                     image: artwork_url(&dinc, a),
                     kind: "album".into(),
+                    isrc: None,
+                    upc: at["barcodeId"].as_str().map(str::to_string),
+                    library_track_id: None,
+                    library_album_id: None,
                     url: tidal_url("album", &id),
                 });
             }
@@ -673,6 +681,10 @@ impl StreamingService for Tidal {
                     downloads: None,
                     image: album.and_then(|a| artwork_url(&dinc, a)),
                     kind: "track".into(),
+                    isrc: t["attributes"]["isrc"].as_str().map(str::to_string),
+                    upc: None,
+                    library_track_id: None,
+                    library_album_id: None,
                     url: tidal_url("track", &id),
                 });
             }
@@ -1039,6 +1051,10 @@ async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Ve
                 downloads: None,
                 image: album.and_then(|a| artwork_url(&dinc, a)),
                 kind: "track".into(),
+                isrc: t["attributes"]["isrc"].as_str().map(str::to_string),
+                upc: None,
+                library_track_id: None,
+                library_album_id: None,
                 url: tidal_url("track", &id),
             });
             docs.push(t);
@@ -1071,6 +1087,10 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
                 downloads: None,
                 image: artwork_url(&dinc, &a),
                 kind: "album".into(),
+                isrc: None,
+                upc: a["attributes"]["barcodeId"].as_str().map(str::to_string),
+                library_track_id: None,
+                library_album_id: None,
                 url: tidal_url("album", &id),
             });
         }
@@ -1234,6 +1254,189 @@ pub(crate) async fn import_playlist(
         skipped,
         playlist: Some(detail),
     }))
+}
+
+// ---- versions: where a library album or track streams from on TIDAL ----
+
+fn cache_get(s: &NodeState, key: &str) -> Option<Vec<Version>> {
+    let lib = s.library.lock().expect("library poisoned");
+    let j = lib.get_setting(key).ok().flatten()?;
+    let (at, v): (i64, Vec<Version>) = serde_json::from_str(&j).ok()?;
+    (now_unix() - at < 7 * 24 * 3600).then_some(v)
+}
+
+fn cache_put(s: &NodeState, key: &str, v: &[Version]) {
+    let lib = s.library.lock().expect("library poisoned");
+    let _ = lib.set_setting(key, &serde_json::to_string(&(now_unix(), v)).expect("serializes"));
+}
+
+/// TIDAL albums with the library album's UPC.
+pub(crate) async fn album_versions(s: &NodeState, album: &pm_model::Album) -> Result<Vec<Version>, ApiError> {
+    if !creds(s).configured() {
+        return Ok(Vec::new());
+    }
+    let Some(upc) = album.upc.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let key = format!("tidal.version.album.{}", album.id.unwrap_or(0));
+    if let Some(v) = cache_get(s, &key) {
+        return Ok(v);
+    }
+    let v = get_json(
+        s,
+        "/albums",
+        &[
+            ("countryCode", country(s)),
+            ("filter[barcodeId]", upc.to_string()),
+            ("include", "artists".into()),
+        ],
+    )
+    .await?;
+    let out: Vec<Version> = v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|al| {
+                    let id = al["id"].as_str()?;
+                    Some(Version {
+                        source: SOURCE_ID.into(),
+                        id: format!("album:{id}"),
+                        label: format!("TIDAL · {}", format_label(al).trim_end_matches(" (TIDAL)")),
+                        url: tidal_url("album", id),
+                        uri: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    cache_put(s, &key, &out);
+    Ok(out)
+}
+
+/// TIDAL tracks with the library track's ISRC.
+pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Result<Vec<Version>, ApiError> {
+    if !creds(s).configured() {
+        return Ok(Vec::new());
+    }
+    let Some(isrc) = track.isrc.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let key = format!("tidal.version.track.{}", track.id.map(|i| i.0).unwrap_or(0));
+    if let Some(v) = cache_get(s, &key) {
+        return Ok(v);
+    }
+    let v = get_json(
+        s,
+        "/tracks",
+        &[("countryCode", country(s)), ("filter[isrc]", isrc.to_string())],
+    )
+    .await?;
+    let out: Vec<Version> = v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    let id = t["id"].as_str()?;
+                    Some(Version {
+                        source: SOURCE_ID.into(),
+                        id: format!("track:{id}"),
+                        label: format!("TIDAL · {}", format_label(t).trim_end_matches(" (TIDAL)")),
+                        url: tidal_url("track", id),
+                        uri: Some(track_uri(id)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    cache_put(s, &key, &out);
+    Ok(out)
+}
+
+/// `GET /v1/sources/tidal/stream/{id}`: the track's HLS segments as one
+/// `audio/mp4` body, so browsers (the web UI's own zone) can play TIDAL
+/// without an HLS player. Same rules as node playback (sign-in, previews).
+pub(crate) async fn stream(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::bad_request("bad TIDAL track id"));
+    }
+    let token = user_token(&s).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "sign in to TIDAL on the Sources page first",
+        )
+    })?;
+    let api = api_base(&s);
+    let v: Value = s
+        .http_client()
+        .get(format!("{api}/trackManifests/{id}"))
+        .bearer_auth(&token)
+        .header(reqwest::header::ACCEPT, ACCEPT)
+        .query(&[
+            ("adaptive", "false"),
+            ("formats", "FLAC_HIRES,FLAC,AACLC"),
+            ("manifestType", "HLS"),
+            ("uriScheme", "HTTPS"),
+            ("usage", "PLAYBACK"),
+        ])
+        .send()
+        .await
+        .map_err(upstream)?
+        .json()
+        .await
+        .map_err(upstream)?;
+    let m = parse_manifest(&v).map_err(upstream)?;
+    if m.drm {
+        return Err(upstream("this track is DRM-protected"));
+    }
+    let mime = if m.formats.iter().any(|f| f.starts_with("FLAC")) {
+        "audio/mp4; codecs=\"flac\""
+    } else {
+        "audio/mp4; codecs=\"mp4a.40.2\""
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
+    let uri = m.uri.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let client = crate::sources::http_client();
+        let mut reader = match crate::hls::HlsReader::open(client, &uri) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e)));
+                return;
+            }
+        };
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx
+                        .blocking_send(Ok(bytes::Bytes::copy_from_slice(&buf[..n])))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
+        }
+    });
+    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    Ok((
+        [
+            (reqwest::header::CONTENT_TYPE.as_str(), mime.to_string()),
+            ("Cache-Control", "no-store".to_string()),
+            ("X-Tidal-Presentation", m.presentation.clone()),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 // ---- playback (audio thread, blocking) ----

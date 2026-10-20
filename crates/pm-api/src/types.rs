@@ -139,6 +139,9 @@ pub struct Page {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {
+    /// `sources=0` keeps the search to the library.
+    #[serde(default)]
+    pub sources: Option<u8>,
     pub q: String,
     pub limit: Option<u32>,
 }
@@ -159,6 +162,22 @@ pub struct SearchResults {
     pub artists: Vec<ArtistSummary>,
     #[serde(default)]
     pub genres: Vec<pm_library::GenreSummary>,
+    /// Hits from streaming services that take part in search (TIDAL when configured).
+    #[serde(default)]
+    pub sources: Vec<SourceResults>,
+}
+
+/// Where else a library album or track can be streamed from (Roon's "Versions").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Version {
+    pub source: String,
+    /// Source item id (`album:<id>` / `track:<id>`), for `/v1/sources/{source}/items/{id}`.
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    /// Queue URI when the version is a single track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -760,6 +779,16 @@ pub struct SourceHit {
     /// `item` (several tracks) or `track`.
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Identity the service exposes, for matching against the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upc: Option<String>,
+    /// The library track or album with the same identity, when you already have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_track_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_album_id: Option<i64>,
     /// The source's own page for it.
     pub url: String,
 }

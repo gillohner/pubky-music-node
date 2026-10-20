@@ -904,6 +904,18 @@ impl Library {
         v.into_iter().next().transpose()
     }
 
+    /// The album with this UPC / barcode, if any.
+    pub fn album_by_upc(&self, upc: &Upc) -> Result<Option<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE upc = ?1 LIMIT 1",
+        )?;
+        let v = stmt
+            .query_map(params![upc.to_string()], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().next().transpose()
+    }
+
     /// The album with this release-group MBID, if any.
     pub fn album_by_release_group_mbid(&self, mbid: Mbid) -> Result<Option<Album>> {
         let conn = self.lock();

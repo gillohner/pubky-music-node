@@ -16,6 +16,10 @@ pub trait StreamingService: Send + Sync {
     /// Stable id used in URLs (`archive`, `audius`, `tidal`).
     fn id(&self) -> &'static str;
     fn info(&self, s: &NodeState) -> SourceInfo;
+    /// Whether the main search should query this service alongside the library.
+    fn unified(&self, _s: &NodeState) -> bool {
+        false
+    }
     async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError>;
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError>;
 }
@@ -62,6 +66,59 @@ pub(crate) async fn search(
     let limit = q.limit.unwrap_or(30).clamp(1, 100);
     let items = svc.search(&s, term, limit).await?;
     Ok(Json(SourceResults { source, items }))
+}
+
+/// Library search companion: every unified service, queried concurrently with a
+/// time budget, hits flagged with the library items that share their identity.
+pub(crate) async fn unified_search(s: &Arc<NodeState>, term: &str, limit: u32) -> Vec<SourceResults> {
+    let svcs: Vec<Box<dyn StreamingService>> = services().into_iter().filter(|x| x.unified(s)).collect();
+    let mut out = Vec::new();
+    let futs = svcs.iter().map(|svc| {
+        let s = s.clone();
+        let term = term.to_string();
+        async move {
+            let id = svc.id().to_string();
+            match tokio::time::timeout(std::time::Duration::from_secs(6), svc.search(&s, &term, limit)).await
+            {
+                Ok(Ok(items)) => Some(SourceResults { source: id, items }),
+                Ok(Err(e)) => {
+                    tracing::debug!(source = %id, "unified search skipped: {}", e.message);
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(source = %id, "unified search timed out");
+                    None
+                }
+            }
+        }
+    });
+    for r in futures_util::future::join_all(futs).await.into_iter().flatten() {
+        out.push(r);
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    for r in &mut out {
+        for h in &mut r.items {
+            mark_library(&lib, h);
+        }
+    }
+    out
+}
+
+/// Fill `library_track_id` / `library_album_id` from the hit's ISRC or UPC.
+pub(crate) fn mark_library(lib: &pm_library::Library, h: &mut SourceHit) {
+    if let Some(isrc) = h.isrc.as_deref().and_then(|i| pm_model::Isrc::parse(i).ok()) {
+        if let Ok(ts) = lib.tracks_by_canonical(&pm_model::MusicUri::Isrc { isrc }) {
+            h.library_track_id = ts.first().and_then(|t| t.id.map(|i| i.0));
+            if h.library_album_id.is_none() {
+                h.library_album_id = ts.first().and_then(|t| t.album.as_ref().and_then(|a| a.id));
+            }
+        }
+    }
+    if let Some(upc) = h.upc.as_deref().and_then(|u| pm_model::Upc::parse(u).ok()) {
+        if let Ok(Some(a)) = lib.album_by_upc(&upc) {
+            h.library_album_id = a.id;
+        }
+    }
 }
 
 /// `GET /v1/sources/{source}/items/{id}`.
