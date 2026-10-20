@@ -44,6 +44,15 @@ F. Subsonic: install Symfonium or Feishin on a phone/desktop in the same network
    search, play a FLAC (should stream the original file), create and edit a playlist, check it
    appears in the app. Report which calls the client made that returned errors (`RUST_LOG=info`
    on the node).
+G2. Squeezelite: `apt install squeezelite` (or a Pi with squeezelite), run
+   `squeezelite -s <laptop-ip> -o hw:N,0 -n Test` with PipeWire stopped; the node logs a Slimproto
+   player and a zone "SqueezeLite (<mac>)" appears. Play 16/44.1 and 24/96 to it, check hw_params on
+   the player side and the signal path on the node (the player fetches the zone's WAV stream;
+   `squeezelite -d all=debug` shows the strm header it received). Try the volume slider (audg).
+G3. UPnP: if a WiiM, Bluesound, Linn or any DLNA renderer is on the network, it should appear as an
+   output after start (or Settings → Rescan outputs). Play to it; report whether it starts within a
+   couple of seconds, the format it shows, and whether Stop/Next behave. The web UI at
+   http://<laptop-ip>:7788/ should show the same zones; try it on a phone too.
 G. If you have a Pubky session secret (exported from Pubky Ring): set
    `pubky.session_secret_file`, restart serve, confirm the log says "Pubky session restored", then
    `pm-node upload some.flac` and check `/v1/pubky/files`; on restart the file is mirrored into
