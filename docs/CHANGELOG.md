@@ -18,4 +18,7 @@ Newest first. Dates are when the change landed on `main`.
   `"up"`, `"down"`, `{mute}`), which fixes volume from both UIs on node zones.
 - Web UI installs to a phone home screen (web app manifest) and answers media keys.
 - Multi-arch images on GHCR (`release.yml`, cross-compiled arm64).
+- Subsonic `jukeboxControl` drives a node zone from any Subsonic client; `byYear` album lists
+  honour `fromYear`/`toYear`.
+- The browser zone's queue survives a reload.
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
