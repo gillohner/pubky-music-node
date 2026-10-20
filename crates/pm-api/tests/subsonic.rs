@@ -10,7 +10,6 @@ use pm_api::{router, NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_zones::OutputRegistry;
-use std::sync::Arc;
 use tower::ServiceExt;
 
 const MB: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
