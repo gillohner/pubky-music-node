@@ -395,7 +395,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
     for r in [
         c.zones().await.map(Msg::Zones),
         c.outputs().await.map(Msg::Outputs),
-        c.albums(None, 500).await.map(Msg::Albums),
+        c.all_albums().await.map(Msg::Albums),
         c.home(12).await.map(|h| Msg::Home(Box::new(h))),
         c.favourites().await.map(|f| Msg::Favourites(Box::new(f))),
         c.playlists().await.map(Msg::Playlists),
@@ -416,7 +416,7 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
             initial_load(&c, out).await;
         }
         Cmd::LoadAlbums => {
-            out.send(Msg::Albums(c.albums(None, 500).await?));
+            out.send(Msg::Albums(c.all_albums().await?));
             if let Ok(f) = c.album_formats().await {
                 out.send(Msg::AlbumFormats(f));
             }
@@ -495,7 +495,7 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::RecordPlay(id) => c.record_play(id, Some("local")).await?,
         Cmd::LoadAlbumTracks(id) => out.send(Msg::AlbumTracks(id, c.album_tracks(id).await?)),
-        Cmd::LoadTracks => out.send(Msg::Tracks(c.tracks(None, 1000).await?)),
+        Cmd::LoadTracks => out.send(Msg::Tracks(c.all_tracks().await?)),
         Cmd::Search(q) => {
             let r = c.search_all(&q, 200).await?;
             out.send(Msg::SearchResults(q, Box::new(r)));

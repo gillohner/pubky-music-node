@@ -592,9 +592,20 @@
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
   const pubkyUser = async () => { if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
+  // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
+  const pageAll = async (path, idOf, unwrap = (r) => r) => {
+    const out = []; let after = null;
+    for (let i = 0; i < 50; i++) {
+      const rows = unwrap(await api('GET', `${path}?limit=1000${after != null ? `&after=${after}` : ''}`));
+      out.push(...rows);
+      if (rows.length < 1000) break;
+      after = idOf(rows[rows.length - 1]); if (after == null) break;
+    }
+    return out;
+  };
   const albumsAll = async () => {
     if (!state.albums) {
-      const [albums, formats] = await Promise.all([api('GET', '/library/albums?limit=1000'), api('GET', '/library/albums/formats').catch(() => [])]);
+      const [albums, formats] = await Promise.all([pageAll('/library/albums', (a) => a.id), api('GET', '/library/albums/formats').catch(() => [])]);
       state.albums = albums; state.formats = new Map(formats.map((f) => [f.album_id, f]));
     }
     return state.albums;
@@ -734,7 +745,7 @@
         }
         case 'tracks': {
           loading();
-          const tracks = (await api('GET', '/library/tracks?limit=1000')).tracks;
+          const tracks = await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks);
           if (state.view !== 'tracks') return;
           main.innerHTML = pageHead('Tracks', tracks.length, tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '') + (tracks.length ? trackRows(tracks, { key: 'all' }) : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
           lists.all = tracks;

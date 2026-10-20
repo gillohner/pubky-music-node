@@ -454,6 +454,37 @@ impl NodeClient {
         self.get("library/albums/formats", &[]).await
     }
 
+    /// Every album, paged through the `after` cursor (the API serves at most
+    /// 1000 per call).
+    pub async fn all_albums(&self) -> Result<Vec<Album>> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.albums(after, 1000).await?;
+            let n = page.len();
+            after = page.last().and_then(|a| a.id);
+            out.extend(page);
+            if n < 1000 || after.is_none() {
+                return Ok(out);
+            }
+        }
+    }
+
+    /// Every track, paged like [`Self::all_albums`].
+    pub async fn all_tracks(&self) -> Result<Vec<Track>> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.tracks(after, 1000).await?;
+            let n = page.len();
+            after = page.last().and_then(|t| t.id.map(|i| i.0));
+            out.extend(page);
+            if n < 1000 || after.is_none() {
+                return Ok(out);
+            }
+        }
+    }
+
     pub async fn albums(&self, after: Option<i64>, limit: u32) -> Result<Vec<Album>> {
         let mut q = vec![("limit", limit.to_string())];
         if let Some(a) = after {
