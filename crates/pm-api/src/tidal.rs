@@ -38,6 +38,29 @@ impl TidalCredentials {
     }
 }
 
+/// Credentials plus the three origins TIDAL is reached at (tests point them
+/// at a mock). Shared by the API handlers and the audio thread's resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TidalEndpoints {
+    pub creds: TidalCredentials,
+    pub api_base: String,
+    pub auth_base: String,
+    pub login_base: String,
+}
+
+impl Default for TidalEndpoints {
+    fn default() -> Self {
+        Self {
+            creds: TidalCredentials::default(),
+            api_base: "https://openapi.tidal.com/v2".into(),
+            auth_base: "https://auth.tidal.com".into(),
+            login_base: "https://login.tidal.com".into(),
+        }
+    }
+}
+
+pub type SharedEndpoints = Arc<std::sync::RwLock<TidalEndpoints>>;
+
 /// The signed-in user's tokens, stored as JSON under `tidal.user`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSession {
@@ -84,32 +107,24 @@ fn now_unix() -> i64 {
     pm_library::db::now_unix()
 }
 
+fn endpoints(s: &NodeState) -> TidalEndpoints {
+    s.tidal.read().expect("tidal endpoints").clone()
+}
+
 fn creds(s: &NodeState) -> TidalCredentials {
-    s.tidal.read().expect("tidal creds").clone()
+    endpoints(s).creds
 }
 
 fn api_base(s: &NodeState) -> String {
-    s.tidal_base
-        .read()
-        .expect("tidal base")
-        .trim_end_matches('/')
-        .to_string()
+    endpoints(s).api_base.trim_end_matches('/').to_string()
 }
 
 fn auth_base(s: &NodeState) -> String {
-    s.tidal_auth_base
-        .read()
-        .expect("tidal auth base")
-        .trim_end_matches('/')
-        .to_string()
+    endpoints(s).auth_base.trim_end_matches('/').to_string()
 }
 
 fn login_base(s: &NodeState) -> String {
-    s.tidal_login_base
-        .read()
-        .expect("tidal login base")
-        .trim_end_matches('/')
-        .to_string()
+    endpoints(s).login_base.trim_end_matches('/').to_string()
 }
 
 pub(crate) fn redirect_uri(s: &NodeState) -> String {
@@ -185,14 +200,15 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
     Ok(token)
 }
 
-pub(crate) fn load_user(s: &NodeState) -> Option<UserSession> {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(USER_KEY)
+fn load_user_from(lib: &pm_library::Library) -> Option<UserSession> {
+    lib.get_setting(USER_KEY)
         .ok()
         .flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
+}
+
+pub(crate) fn load_user(s: &NodeState) -> Option<UserSession> {
+    load_user_from(&s.library.lock().expect("library poisoned"))
 }
 
 fn store_user(s: &NodeState, u: Option<&UserSession>) -> Result<(), ApiError> {
@@ -833,9 +849,169 @@ pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<TidalSt
     Ok(Json(status_view(&s)))
 }
 
+// ---- playback (audio thread, blocking) ----
+
+pub const TRACK_URI_PREFIX: &str = "tidal:track:";
+
+/// What a stream manifest told us, for the signal path and the logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestInfo {
+    pub uri: String,
+    pub formats: Vec<String>,
+    pub presentation: String,
+    pub preview_reason: Option<String>,
+    pub drm: bool,
+}
+
+pub(crate) fn parse_manifest(v: &Value) -> Result<ManifestInfo, String> {
+    let a = &v["data"]["attributes"];
+    let uri = a["uri"]
+        .as_str()
+        .ok_or_else(|| {
+            v["errors"][0]["detail"]
+                .as_str()
+                .map(|d| format!("manifest refused: {d}"))
+                .unwrap_or_else(|| "manifest has no uri".to_string())
+        })?
+        .to_string();
+    Ok(ManifestInfo {
+        uri,
+        formats: a["formats"]
+            .as_array()
+            .map(|f| f.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        presentation: a["trackPresentation"].as_str().unwrap_or("FULL").to_string(),
+        preview_reason: a["previewReason"].as_str().map(str::to_string),
+        drm: a["drmData"].as_object().is_some_and(|o| !o.is_empty()),
+    })
+}
+
+/// A valid user access token for the audio thread: the stored one, or a
+/// blocking refresh when it is about to expire.
+fn user_token_blocking(
+    library: &std::sync::Mutex<pm_library::Library>,
+    ep: &TidalEndpoints,
+    client: &reqwest::blocking::Client,
+) -> Result<String, String> {
+    let u = {
+        let lib = library.lock().map_err(|_| "library poisoned")?;
+        load_user_from(&lib).ok_or("TIDAL: sign in on the Sources page first")?
+    };
+    if u.expires_at - now_unix() > 60 {
+        return Ok(u.access_token);
+    }
+    let refresh = u
+        .refresh_token
+        .clone()
+        .ok_or("TIDAL session expired; sign in again")?;
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", &refresh)
+        .append_pair("client_id", &ep.creds.client_id)
+        .finish();
+    let v: Value = client
+        .post(format!("{}/v1/oauth2/token", ep.auth_base.trim_end_matches('/')))
+        .basic_auth(&ep.creds.client_id, Some(&ep.creds.client_secret))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("TIDAL token refresh: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+    let fresh = session_from(&v, Some(&u)).map_err(|e| e.message)?;
+    let lib = library.lock().map_err(|_| "library poisoned")?;
+    lib.set_setting(
+        USER_KEY,
+        &serde_json::to_string(&fresh).expect("session serializes"),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(fresh.access_token)
+}
+
+/// Open `tidal:track:<id>` for playback: fetch the stream manifest with the
+/// user's token, then read the HLS segments as one FLAC/AAC stream.
+pub(crate) fn open_track_blocking(
+    library: &std::sync::Mutex<pm_library::Library>,
+    endpoints: &SharedEndpoints,
+    id: &str,
+) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
+    let uri = format!("{TRACK_URI_PREFIX}{id}");
+    let err = |reason: String| pm_zones::SourceError::Open {
+        uri: uri.clone(),
+        reason,
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(err("malformed TIDAL track id".into()));
+    }
+    let ep = endpoints
+        .read()
+        .map_err(|_| err("endpoints poisoned".into()))?
+        .clone();
+    if !ep.creds.configured() {
+        return Err(err("TIDAL is not configured on this node".into()));
+    }
+    let client = crate::sources::http_client();
+    let token = user_token_blocking(library, &ep, client).map_err(err)?;
+    let v: Value = client
+        .get(format!(
+            "{}/trackManifests/{id}",
+            ep.api_base.trim_end_matches('/')
+        ))
+        .bearer_auth(&token)
+        .header(reqwest::header::ACCEPT, ACCEPT)
+        .query(&[
+            ("adaptive", "false"),
+            ("formats", "FLAC_HIRES,FLAC,AACLC"),
+            ("manifestType", "HLS"),
+            ("uriScheme", "HTTPS"),
+            ("usage", "PLAYBACK"),
+        ])
+        .send()
+        .map_err(|e| err(format!("manifest request: {e}")))?
+        .json()
+        .map_err(|e| err(format!("manifest body: {e}")))?;
+    let m = parse_manifest(&v).map_err(err)?;
+    if m.drm {
+        return Err(err(
+            "TIDAL serves this track DRM-protected; bit-perfect playback is not possible".into(),
+        ));
+    }
+    if m.presentation != "FULL" {
+        tracing::warn!(
+            track = id,
+            reason = ?m.preview_reason,
+            "TIDAL serves a preview, not the full track"
+        );
+    }
+    tracing::info!(track = id, formats = ?m.formats, presentation = %m.presentation, "TIDAL manifest");
+    let reader = crate::hls::HlsReader::open(client, &m.uri).map_err(err)?;
+    let ext = if m.formats.iter().any(|f| f.starts_with("FLAC")) {
+        Some("m4a")
+    } else {
+        Some("aac")
+    };
+    crate::sources::frame_source_from_reader(Box::new(reader), ext, &uri)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifests_parse() {
+        let v = serde_json::json!({"data": {"attributes": {"uri": "https://cdn/m.m3u8", "formats": ["FLAC"], "trackPresentation": "FULL"}}});
+        let m = parse_manifest(&v).unwrap();
+        assert_eq!(m.uri, "https://cdn/m.m3u8");
+        assert!(!m.drm);
+        let v = serde_json::json!({"data": {"attributes": {"uri": "u", "trackPresentation": "PREVIEW", "previewReason": "FULL_REQUIRES_SUBSCRIPTION", "drmData": {"system": "WIDEVINE"}}}});
+        let m = parse_manifest(&v).unwrap();
+        assert!(m.drm);
+        assert_eq!(m.preview_reason.as_deref(), Some("FULL_REQUIRES_SUBSCRIPTION"));
+        assert!(parse_manifest(&serde_json::json!({"errors": [{"detail": "no"}]}))
+            .unwrap_err()
+            .contains("no"));
+    }
 
     #[test]
     fn iso_durations() {

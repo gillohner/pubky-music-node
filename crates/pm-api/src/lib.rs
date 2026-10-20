@@ -17,6 +17,7 @@ pub mod audius;
 pub mod discover;
 pub mod favourites;
 pub mod files;
+pub mod hls;
 pub mod new_releases;
 pub mod playlists;
 pub mod radio;
@@ -2401,9 +2402,12 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        *s.tidal_base.write().unwrap() = base.clone();
-        *s.tidal_auth_base.write().unwrap() = base.clone();
-        *s.tidal_login_base.write().unwrap() = base.clone();
+        {
+            let mut ep = s.tidal.write().unwrap();
+            ep.api_base = base.clone();
+            ep.auth_base = base.clone();
+            ep.login_base = base.clone();
+        }
         let app = router(s.clone());
         // Not configured: the source says so and login refuses.
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
@@ -2416,7 +2420,7 @@ mod tests {
         assert!(tidal["status"].as_str().unwrap().starts_with("not configured"));
         let (st, _) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
         assert_eq!(st, StatusCode::PRECONDITION_FAILED);
-        *s.tidal.write().unwrap() = tidal::TidalCredentials {
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "cid".into(),
             client_secret: "sec".into(),
         };
@@ -2499,6 +2503,110 @@ mod tests {
             .starts_with("/?tidal=error"));
         let (_, stv) = call(&app, "DELETE", "/v1/sources/tidal/session", None).await;
         assert_eq!(stv["signed_in"], false);
+    }
+
+    #[tokio::test]
+    async fn tidal_tracks_play_through_the_manifest_and_hls_segments() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let seg_len = flac.len().div_ceil(3);
+        let segs: Vec<Vec<u8>> = flac.chunks(seg_len).map(|c| c.to_vec()).collect();
+        let manifest_base = base.clone();
+        let mock = Router::new()
+            .route(
+                "/trackManifests/{id}",
+                get(move |Path(id): Path<String>, headers: HeaderMap| {
+                    let manifest_base = manifest_base.clone();
+                    async move {
+                        assert_eq!(id, "20115564");
+                        assert_eq!(headers.get("authorization").unwrap(), "Bearer user-token");
+                        Json(serde_json::json!({"data": {"id": id, "type": "trackManifests", "attributes": {
+                            "uri": format!("{manifest_base}/hls/master.m3u8"), "formats": ["FLAC"], "trackPresentation": "FULL", "hash": "h"}}}))
+                    }
+                }),
+            )
+            .route("/hls/master.m3u8", get(|| async { "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n" }))
+            .route("/hls/media.m3u8", get(|| async { "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\nseg/0\n#EXTINF:1.0,\nseg/1\n#EXTINF:1.0,\n/hls/seg/2\n#EXT-X-ENDLIST\n" }))
+            .route(
+                "/hls/seg/{n}",
+                get(move |Path(n): Path<usize>| {
+                    let segs = segs.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/octet-stream")], segs[n].clone()) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        {
+            let mut ep = s.tidal.write().unwrap();
+            ep.api_base = base.clone();
+            ep.auth_base = base.clone();
+            ep.creds = tidal::TidalCredentials {
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+            };
+        }
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "tidal.user",
+                &serde_json::json!({"access_token": "user-token", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": "4242", "scope": "playback"}).to_string(),
+            )
+            .unwrap();
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let mut events = zone.subscribe();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": "tidal:track:20115564", "title": "Get Lucky"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let mut started = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await {
+                Ok(Ok(pm_zones::ZoneEvent::TrackStarted { source_format, .. })) => {
+                    started = true;
+                    assert_eq!(source_format.rate_hz, 44_100);
+                }
+                Ok(Ok(pm_zones::ZoneEvent::Error(e))) => panic!("playback error: {e}"),
+                Ok(Ok(pm_zones::ZoneEvent::Stopped)) if started => break,
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+        assert!(started, "the TIDAL track never started");
+        let st = zone.wait_stopped().await;
+        assert!(st.error.is_none(), "{:?}", st.error);
+        // Without a session the resolver refuses with a clear reason.
+        s.library.lock().unwrap().delete_setting("tidal.user").unwrap();
+        let (_, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": "tidal:track:20115564"}], "replace": true, "play": true})),
+        )
+        .await;
+        let st = zone.wait_stopped().await;
+        assert!(
+            st.error.as_deref().is_some_and(|e| e.contains("sign in")),
+            "{:?}",
+            st.error
+        );
     }
 
     #[tokio::test]

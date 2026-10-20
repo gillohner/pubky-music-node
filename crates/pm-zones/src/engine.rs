@@ -241,6 +241,7 @@ impl Engine {
         self.abort_current();
         let len = self.queue.lock().expect("queue poisoned").len();
         let mut index = index;
+        let mut last_reason: Option<String> = None;
         for _ in 0..len.max(1) {
             let Some(item) = self.queue.lock().expect("queue poisoned").get(index).cloned() else {
                 break;
@@ -255,6 +256,7 @@ impl Engine {
                     return;
                 }
                 Err(e) => {
+                    last_reason = Some(e.to_string());
                     self.emit(ZoneEvent::Skipped {
                         item,
                         reason: e.to_string(),
@@ -271,7 +273,10 @@ impl Engine {
                 }
             }
         }
-        self.error = Some("nothing in the queue could be played".into());
+        self.error = Some(match last_reason {
+            Some(r) => format!("nothing in the queue could be played; last error: {r}"),
+            None => "nothing in the queue could be played".into(),
+        });
         self.stop();
     }
 

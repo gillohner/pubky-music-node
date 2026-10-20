@@ -21,10 +21,16 @@ pub struct NodeSources {
     default_cfg: PipelineConfig,
     /// Per-output pipeline settings (DSP); the default applies otherwise.
     dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
+    /// TIDAL credentials and origins, for `tidal:track:` URIs on the audio thread.
+    tidal: crate::tidal::SharedEndpoints,
 }
 
 impl NodeSources {
-    pub fn new(library: Arc<Mutex<Library>>, cfg: PipelineConfig) -> Self {
+    pub fn new(
+        library: Arc<Mutex<Library>>,
+        cfg: PipelineConfig,
+        tidal: crate::tidal::SharedEndpoints,
+    ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
         if let Ok(lib) = library.lock() {
@@ -41,6 +47,7 @@ impl NodeSources {
             files: LocalFiles::new(cfg.clone()),
             default_cfg: cfg,
             dsp: RwLock::new(dsp),
+            tidal,
         }
     }
 
@@ -101,7 +108,7 @@ impl NodeSources {
 /// Blocking HTTP client for stream sources, built on first use on the audio
 /// thread (never inside a tokio runtime). No overall timeout: a live stream
 /// never ends. A stalled server keeps the zone waiting until it stops it.
-fn http_client() -> &'static reqwest::blocking::Client {
+pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
@@ -457,6 +464,28 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
 }
 
 /// `http://` or `https://`.
+/// A byte stream (segments, a proxy body…) as a zone source: stall watchdog,
+/// symphonia probe by `ext` hint, no in-stream titles.
+pub(crate) fn frame_source_from_reader(
+    reader: Box<dyn std::io::Read + Send>,
+    ext: Option<&str>,
+    name: &str,
+) -> Result<Box<dyn FrameSource>, SourceError> {
+    let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(reader, STREAM_STALL)));
+    let media = symphonia::core::io::ReadOnlySource::new(body);
+    let inner = pm_audio::play::Source::from_media_source(Box::new(media), ext, name).map_err(|e| {
+        SourceError::Open {
+            uri: name.to_string(),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(Box::new(HttpStream {
+        inner,
+        title: Arc::new(Mutex::new(None)),
+        last: None,
+    }))
+}
+
 pub fn is_http_uri(uri: &str) -> bool {
     uri.starts_with("http://") || uri.starts_with("https://")
 }
@@ -465,6 +494,9 @@ impl SourceFactory for NodeSources {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
         if is_http_uri(&item.uri) {
             return open_http_stream(&item.uri);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::tidal::TRACK_URI_PREFIX) {
+            return crate::tidal::open_track_blocking(&self.library, &self.tidal, id);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

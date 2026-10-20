@@ -111,11 +111,9 @@ pub struct NodeState {
     pub archive_base: std::sync::RwLock<String>,
     /// Audius discovery node; empty = resolve through api.audius.co.
     pub audius_base: std::sync::RwLock<String>,
-    /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock).
-    pub tidal: std::sync::RwLock<crate::tidal::TidalCredentials>,
-    pub tidal_base: std::sync::RwLock<String>,
-    pub tidal_auth_base: std::sync::RwLock<String>,
-    pub tidal_login_base: std::sync::RwLock<String>,
+    /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock);
+    /// shared with the source factory so the audio thread can resolve `tidal:track:` URIs.
+    pub tidal: crate::tidal::SharedEndpoints,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -127,7 +125,16 @@ pub struct NodeState {
 impl NodeState {
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
         let library = Arc::new(Mutex::new(library));
-        let sources = Arc::new(NodeSources::new(library.clone(), settings.pipeline));
+        let tidal: crate::tidal::SharedEndpoints =
+            Arc::new(std::sync::RwLock::new(crate::tidal::TidalEndpoints {
+                creds: settings.tidal.clone(),
+                ..Default::default()
+            }));
+        let sources = Arc::new(NodeSources::new(
+            library.clone(),
+            settings.pipeline,
+            tidal.clone(),
+        ));
         let (events, _) = broadcast::channel(1024);
         // A contact saved through the API wins over an unset config value.
         let mut pubky = settings.pubky;
@@ -185,10 +192,7 @@ impl NodeState {
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
-            tidal: std::sync::RwLock::new(settings.tidal.clone()),
-            tidal_base: std::sync::RwLock::new("https://openapi.tidal.com/v2".into()),
-            tidal_auth_base: std::sync::RwLock::new("https://auth.tidal.com".into()),
-            tidal_login_base: std::sync::RwLock::new("https://login.tidal.com".into()),
+            tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
         })
