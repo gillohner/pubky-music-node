@@ -14,6 +14,7 @@ pub mod files;
 pub mod playlists;
 pub mod sources;
 pub mod state;
+pub mod subsonic;
 pub mod sync;
 pub mod types;
 pub mod watch;
@@ -123,8 +124,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/pubky/files/mirror", post(files::mirror))
         .route("/events", get(events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
-        .with_state(state);
-    Router::new().nest("/v1", v1)
+        .with_state(state.clone());
+    Router::new().nest("/v1", v1).merge(subsonic::router(state))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -609,6 +610,7 @@ mod tests {
                 mirror_dir: dir.join("homeserver"),
                 pipeline: PipelineConfig::default(),
                 token: token.map(str::to_string),
+                subsonic_user: "pubky".into(),
             },
             lib,
             outputs,

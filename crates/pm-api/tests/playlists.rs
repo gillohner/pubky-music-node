@@ -95,6 +95,7 @@ async fn playlist_lifecycle() {
             mirror_dir: dir.path().join("homeserver"),
             pipeline: PipelineConfig::default(),
             token: None,
+            subsonic_user: "pubky".into(),
         },
         Library::open(&db).unwrap(),
         outputs,

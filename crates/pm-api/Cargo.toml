@@ -17,6 +17,10 @@ pubky-app-specs = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 blake3 = { workspace = true }
+md-5 = "0.10"
+hex = "0.4"
+time = { workspace = true }
+url = { workspace = true }
 notify = "8"
 futures-util = { workspace = true }
 serde = { workspace = true }

@@ -18,7 +18,7 @@ they conflict. Decisions live in `docs/adr/`.
 | `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
 | `pm-pubky` | music objects as v1 `PubkyAppPost` envelopes (private folder by default, ADR 0006), Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
 | `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |
-| `pm-api` | native `/v1` HTTP + WebSocket API (`docs/api.md`) | M3 server side done |
+| `pm-api` | native `/v1` HTTP + WebSocket API and OpenSubsonic `/rest` (`docs/api.md`) | M3 server side done; M4 server side done (client runs pending) |
 | `pm-client` | Rust client for `/v1` (HTTP + event stream) | done |
 | `pm-app` | native controller and player (egui): Roon-style browse, queue, transport, signal path; plays locally through its own DAC | first cut, needs a desktop to run |
 | `pm-stream` | node ↔ endpoint wire protocol (ADR 0007): endpoint-paced push, no conversion | done |

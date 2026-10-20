@@ -83,6 +83,7 @@ async fn record_and_import_resolve_through_the_library() {
             mirror_dir: dir.path().join("homeserver"),
             pipeline: PipelineConfig::default(),
             token: None,
+            subsonic_user: "pubky".into(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

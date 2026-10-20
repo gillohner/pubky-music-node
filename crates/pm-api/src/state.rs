@@ -24,6 +24,8 @@ pub struct NodeSettings {
     pub pipeline: PipelineConfig,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
+    /// Username OpenSubsonic clients log in with (password = token).
+    pub subsonic_user: String,
 }
 
 pub struct NodeState {
@@ -39,6 +41,7 @@ pub struct NodeState {
     pub zones: Zones,
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
+    pub subsonic_user: String,
     pub events: broadcast::Sender<ApiEvent>,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
@@ -63,6 +66,7 @@ impl NodeState {
             outputs,
             zones: Zones::new(sources),
             token: settings.token,
+            subsonic_user: settings.subsonic_user,
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),

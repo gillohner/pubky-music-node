@@ -153,6 +153,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             mirror_dir: cfg.data_dir.join("homeserver"),
             pipeline: pm_audio::PipelineConfig::default(),
             token,
+            subsonic_user: cfg.api.subsonic_user.clone(),
         },
         lib,
         registry,

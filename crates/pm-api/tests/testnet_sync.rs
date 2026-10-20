@@ -35,6 +35,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
             token: None,
+            subsonic_user: "pubky".into(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

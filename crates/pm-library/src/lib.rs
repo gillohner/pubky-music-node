@@ -24,7 +24,7 @@ pub mod scan;
 pub mod tags;
 
 pub use canonical::{assign, Resolver};
-pub use db::AlbumArt;
+pub use db::{AlbumArt, ArtistSummary};
 pub use db::{Library, LibraryStats};
 pub use error::{LibraryError, Result};
 pub use posts::MusicPostRow;

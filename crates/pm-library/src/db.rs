@@ -33,6 +33,16 @@ pub struct LibraryStats {
 }
 
 /// The scanner's view of a stored file.
+/// An artist as the browse views list them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtistSummary {
+    pub id: i64,
+    pub name: String,
+    pub mbid: Option<Mbid>,
+    pub albums: u64,
+    pub tracks: u64,
+}
+
 /// Where an album's cover lives on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumArt {
@@ -305,6 +315,119 @@ impl Library {
             .query_map(params![album_id], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
         raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    // ----- browsing (artists, albums by artist, random) ----------------
+
+    /// Every artist with how many albums and tracks they appear on, by name.
+    pub fn list_artists(&self) -> Result<Vec<ArtistSummary>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT a.id, a.name, a.mbid,
+                    COUNT(DISTINCT t.album_id) AS albums, COUNT(DISTINCT t.id) AS tracks
+             FROM artists a
+             JOIN track_artists ta ON ta.artist_id = a.id
+             JOIN tracks t ON t.id = ta.track_id
+             GROUP BY a.id ORDER BY a.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, name, mbid, albums, tracks) = r?;
+            out.push(ArtistSummary {
+                id,
+                name,
+                mbid: opt_mbid(mbid, "artists.mbid")?,
+                albums: albums as u64,
+                tracks: tracks as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn get_artist(&self, id: i64) -> Result<Option<ArtistSummary>> {
+        Ok(self.list_artists()?.into_iter().find(|a| a.id == id))
+    }
+
+    /// Albums an artist appears on, by year then title.
+    pub fn artist_albums(&self, artist_id: i64) -> Result<Vec<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+             FROM albums al
+             JOIN tracks t ON t.album_id = al.id
+             JOIN track_artists ta ON ta.track_id = t.id
+             WHERE ta.artist_id = ?1 ORDER BY al.year, al.title COLLATE NOCASE",
+        )?;
+        let v = stmt
+            .query_map(params![artist_id], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
+    }
+
+    pub fn get_album(&self, id: i64) -> Result<Option<Album>> {
+        let conn = self.lock();
+        let a = conn
+            .query_row(
+                "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE id = ?1",
+                params![id],
+                row_to_album,
+            )
+            .optional()?;
+        a.transpose()
+    }
+
+    pub fn artist_tracks(&self, artist_id: i64) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} JOIN track_artists ta ON ta.track_id = t.id WHERE ta.artist_id = ?1 ORDER BY al.year, al.title, t.disc_no, t.track_no"
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![artist_id], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    pub fn random_tracks(&self, limit: u32) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} ORDER BY RANDOM() LIMIT ?1"))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![limit as i64], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    /// Albums newest-first by id (a proxy for "recently added").
+    pub fn recent_albums(&self, offset: u32, limit: u32) -> Result<Vec<Album>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let v = stmt
+            .query_map(params![limit as i64, offset as i64], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
+    }
+
+    pub fn search_albums(&self, query: &str, limit: u32) -> Result<Vec<Album>> {
+        let like = format!("%{}%", query.trim());
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums
+             WHERE title LIKE ?1 OR COALESCE(album_artist, '') LIKE ?1 ORDER BY title COLLATE NOCASE LIMIT ?2",
+        )?;
+        let v = stmt
+            .query_map(params![like, limit as i64], row_to_album)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        v.into_iter().collect()
     }
 
     // ----- album art -----------------------------------------------------

@@ -46,3 +46,18 @@ homeserver folder when `pubky.session_secret_file` is set. Items are canonical m
 Queue item URIs: `track:<library id>`, a local path, or `file://`. Streaming services add schemes later.
 Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.
 Types live in `pm_api::types`; a Rust client reuses them.
+
+## OpenSubsonic (`/rest/*`)
+
+The same server also speaks the Subsonic API (JSON, `f=json`) for existing clients: Symfonium,
+Feishin, Amperfy, play:Sub, Supersonic. Log in with `[api] subsonic_user` (default `pubky`) and the
+API token as the password (token auth `t`+`s` or plain `p`); without a token anyone can connect.
+
+Implemented: `ping`, `getLicense`, `getOpenSubsonicExtensions`, `getMusicFolders`, `getArtists`,
+`getIndexes`, `getArtist`, `getAlbum`, `getMusicDirectory`, `getAlbumList(2)` (newest, random,
+alphabetical, byYear), `getSong`, `getRandomSongs`, `search2/3`, `stream`/`download` (original
+file, `Range` supported, no transcoding), `getCoverArt`, `getPlaylists`, `getPlaylist`,
+`createPlaylist`, `updatePlaylist`, `deletePlaylist` (the same playlists as `/v1`, so tracks need a
+canonical identity), `scrobble` (private activity), `startScan`, `getScanStatus`, plus empty
+answers for stars, genres, lyrics and info calls. Ids: songs are track ids, albums `al-<id>`,
+artists `ar-<id>`, playlists `pl-<id>`.

@@ -37,6 +37,8 @@ pub struct ApiConfig {
     pub token: String,
     /// Name shown to controllers.
     pub name: String,
+    /// Username for OpenSubsonic clients; the password is `token`.
+    pub subsonic_user: String,
 }
 
 impl Default for NodeConfig {
@@ -90,6 +92,7 @@ impl Default for ApiConfig {
             listen: "127.0.0.1:7788".into(),
             token: String::new(),
             name: "Pubky Music Node".into(),
+            subsonic_user: "pubky".into(),
         }
     }
 }

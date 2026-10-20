@@ -50,6 +50,12 @@ app store. Points worth knowing:
 Image builds are not possible on the development machine (no Docker daemon); CI's `docker` job
 builds the image to catch Dockerfile drift.
 
+## Phones and desktops without the native app
+
+Any OpenSubsonic client (Symfonium, Feishin, Amperfy, play:Sub, Supersonic) connects to the node's
+address with user `[api] subsonic_user` and the API token as password, and gets browsing, search,
+playlists, cover art and bit-exact file streaming (`docs/api.md`).
+
 ## Endpoints (a Pi next to a DAC)
 
 ```sh

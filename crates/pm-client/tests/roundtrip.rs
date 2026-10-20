@@ -45,6 +45,7 @@ async fn client_round_trip() {
             mirror_dir: dir.path().join("homeserver"),
             pipeline: PipelineConfig::default(),
             token: Some("tok".into()),
+            subsonic_user: "pubky".into(),
         },
         Library::open(&db).unwrap(),
         outputs,
