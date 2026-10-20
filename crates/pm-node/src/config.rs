@@ -78,6 +78,8 @@ pub struct OutputsConfig {
     pub discover: bool,
     /// How long to listen for mDNS answers.
     pub discover_ms: u64,
+    /// Discover UPnP/OpenHome renderers (SSDP) and offer them as outputs.
+    pub upnp: bool,
 }
 
 impl Default for OutputsConfig {
@@ -86,6 +88,7 @@ impl Default for OutputsConfig {
             endpoints: Vec::new(),
             discover: true,
             discover_ms: 1500,
+            upnp: true,
         }
     }
 }

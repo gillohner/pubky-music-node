@@ -12,6 +12,7 @@ pm-zones = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
 pm-pubky = { workspace = true }
+pm-out-upnp = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
 anyhow = { workspace = true }

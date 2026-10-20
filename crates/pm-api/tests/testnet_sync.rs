@@ -37,6 +37,8 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             token: None,
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

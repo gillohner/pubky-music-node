@@ -155,11 +155,25 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             token,
             subsonic_user: cfg.api.subsonic_user.clone(),
             pubky: cfg.pubky.clone(),
+            public_url: if cfg.api.public_url.is_empty() {
+                format!("http://{}", cfg.api.listen)
+            } else {
+                cfg.api.public_url.clone()
+            },
+            upnp: cfg.outputs.upnp,
         },
         lib,
         registry,
     );
     state.zones_for_all_outputs();
+    {
+        let st = state.clone();
+        let found =
+            tokio::task::spawn_blocking(move || st.discover_upnp(std::time::Duration::from_secs(3))).await?;
+        if !found.is_empty() {
+            tracing::info!(count = found.len(), "UPnP renderers found");
+        }
+    }
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
     }

@@ -85,6 +85,8 @@ async fn record_and_import_resolve_through_the_library() {
             token: None,
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

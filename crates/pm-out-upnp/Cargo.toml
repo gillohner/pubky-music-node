@@ -1,0 +1,21 @@
+[package]
+name = "pm-out-upnp"
+description = "UPnP AV / OpenHome renderers as outputs of the Pubky Music Node (pull streams)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+pm-zones = { workspace = true }
+async-trait = { workspace = true }
+quick-xml = "0.42"
+reqwest = { workspace = true, features = ["blocking"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

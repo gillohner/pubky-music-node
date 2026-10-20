@@ -117,6 +117,8 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             token: Some("pw".into()),
             subsonic_user: "alice".into(),
             pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

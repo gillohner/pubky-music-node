@@ -12,6 +12,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/info` | | name, version, library stats, zone/output counts |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
 | POST | `/v1/outputs/rescan` | | discover again (local devices, endpoints); new outputs get zones; returns the list |
+| POST | `/v1/outputs/pull` | `{name}` | (UPnP/OpenHome renderers found by SSDP get one of these automatically, named `upnp-<udn>`, and appear as outputs `upnp:<udn>` with zones; `[outputs] upnp`, `[api] public_url`) |
 | POST | `/v1/outputs/pull` | `{name}` | a pull output and its zone `Stream <name>`; renderers, browsers or scripts fetch `GET /v1/outputs/pull/{name}/stream.wav` (live WAV of the zone's post-DSP output; the listener paces the zone; 408 when nothing plays) |
 | GET | `/v1/zones` | | `ZoneState[]` |
 | POST | `/v1/zones` | `{name, output}` or `{name, outputs: [leader, …]}` for a group | the new `ZoneState`; `now_playing.members` carries per-output drift for groups |

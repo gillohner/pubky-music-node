@@ -3,8 +3,10 @@
 
 mod group;
 mod null;
+mod pull;
 mod wav;
 
 pub use group::{intersect_caps, GroupOutput, GroupSink};
 pub use null::NullOutput;
+pub use pull::{pack_pcm, wav_header, LiveStream, PullOutput, LISTENER_TIMEOUT};
 pub use wav::{read_wav, WavFileOutput, WavSink};

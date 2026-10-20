@@ -14,6 +14,7 @@ members = [
     "crates/pm-stream",
     "crates/pm-endpoint",
     "crates/pm-out-net",
+    "crates/pm-out-upnp",
 ]
 
 [workspace.package]
@@ -35,6 +36,7 @@ pm-client = { path = "crates/pm-client" }
 pm-stream = { path = "crates/pm-stream" }
 pm-endpoint = { path = "crates/pm-endpoint" }
 pm-out-net = { path = "crates/pm-out-net" }
+pm-out-upnp = { path = "crates/pm-out-upnp" }
 
 anyhow = "1.0"
 async-trait = "0.1"

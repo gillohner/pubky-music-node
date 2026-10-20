@@ -47,6 +47,8 @@ async fn client_round_trip() {
             token: Some("tok".into()),
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
         },
         Library::open(&db).unwrap(),
         outputs,

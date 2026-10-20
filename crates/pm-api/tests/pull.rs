@@ -46,6 +46,8 @@ async fn pull_stream_is_the_exact_pcm() {
             token: None,
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

@@ -24,13 +24,14 @@ they conflict. Decisions live in `docs/adr/`; milestone status in `docs/STATUS.m
 | `pm-stream` | node ↔ endpoint wire protocol (ADR 0007): endpoint-paced push, no conversion | done |
 | `pm-endpoint` | the endpoint daemon ("our RoonBridge"): local outputs over `pm-stream`, mDNS advertised | loopback bit-exact; Pi test pending |
 | `pm-out-net` | node-side `Output` for endpoints, mDNS discovery | done |
+| `pm-out-upnp` | UPnP AV / OpenHome renderers: SSDP, AVTransport, RenderingControl over a pull WAV stream | built; needs a real renderer |
 | `pm-node` | the binary: CLI plus `serve` (API, one zone per output incl. endpoints) | CLI and daemon |
 
 Deployment: directly on hardware, Docker, or as an Umbrel app (`docs/deploy.md`, `deploy/`).
 Roon: `sidecars/roon-bridge` scrobbles Roon playback to the node and imports Roon playlists through
 the official Extension API (untested against a Core so far).
 
-Not started: `pm-sources`, `pm-out-openhome`, `pm-out-slimproto`, `pm-out-airplay`,
+Not started: `pm-sources`, `pm-out-slimproto`, `pm-out-airplay`,
 `pm-out-cast`, `pm-api`, `pm-remote`, `pm-endpoint`, `sidecars/roon-bridge`, `clients/`.
 
 ## Build

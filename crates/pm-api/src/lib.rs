@@ -13,7 +13,6 @@ pub mod activity;
 pub mod discover;
 pub mod files;
 pub mod playlists;
-pub mod pull;
 pub mod sources;
 pub mod state;
 pub mod subsonic;
@@ -224,7 +223,7 @@ async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePul
     {
         return Err(ApiError::bad_request("name must be letters, digits, '-' or '_'"));
     }
-    let out = Arc::new(pull::PullOutput::new(name));
+    let out = Arc::new(pm_zones::outputs::PullOutput::new(name));
     if s.outputs.get(&out.id()).is_some() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -254,7 +253,7 @@ async fn pull_stream(
         .get(&name)
         .cloned()
         .ok_or_else(|| ApiError::not_found(format!("no pull output {name}")))?;
-    let Some(live) = out.take_stream(pull::LISTENER_TIMEOUT).await else {
+    let Some(live) = out.take_stream(pm_zones::outputs::LISTENER_TIMEOUT).await else {
         return Err(ApiError::new(
             StatusCode::REQUEST_TIMEOUT,
             "no zone is playing into this stream; start playback to the Stream zone first",
@@ -793,6 +792,8 @@ mod tests {
                 token: token.map(str::to_string),
                 subsonic_user: "pubky".into(),
                 pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
             },
             lib,
             outputs,

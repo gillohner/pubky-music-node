@@ -29,6 +29,10 @@ pub struct NodeSettings {
     pub subsonic_user: String,
     /// Pinakes/Nexus settings; discovery is enabled when the contact validates.
     pub pubky: pm_pubky::PmPubkyConfig,
+    /// How renderers reach this node's HTTP API (pull stream URLs); empty = `http://<listen>`.
+    pub public_url: String,
+    /// Discover UPnP/OpenHome renderers and offer them as outputs.
+    pub upnp: bool,
 }
 
 pub struct NodeState {
@@ -45,6 +49,8 @@ pub struct NodeState {
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
     pub subsonic_user: String,
+    pub public_url: String,
+    pub upnp: bool,
     pub discovery: Option<Arc<pm_pubky::Discovery>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
@@ -54,7 +60,7 @@ pub struct NodeState {
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// Pull outputs by stream name (they are also in `outputs`).
-    pub pulls: Mutex<HashMap<String, Arc<crate::pull::PullOutput>>>,
+    pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -89,6 +95,8 @@ impl NodeState {
             sources,
             token: settings.token,
             subsonic_user: settings.subsonic_user,
+            public_url: settings.public_url,
+            upnp: settings.upnp,
             discovery,
             events,
             sync: Mutex::new(None),
@@ -197,14 +205,73 @@ impl NodeState {
         *self.discover.lock().expect("discover lock") = Some(f);
     }
 
-    /// Run discovery again: register outputs not seen before and give each
-    /// a zone. Returns the ids that are new. Blocking (mDNS browse, TCP
-    /// connects); call from `spawn_blocking`.
-    pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
-        let Some(f) = self.discover.lock().expect("discover lock").clone() else {
+    /// The pull-stream URL renderers fetch for `name`.
+    pub fn pull_url(&self, name: &str) -> String {
+        format!(
+            "{}/v1/outputs/pull/{name}/stream.wav",
+            self.public_url.trim_end_matches('/')
+        )
+    }
+
+    /// Create (or reuse) a pull output under `name`, registered for the HTTP route.
+    pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
+        let mut pulls = self.pulls.lock().expect("pulls lock");
+        pulls
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::new(name)))
+            .clone()
+    }
+
+    /// SSDP discovery of UPnP/OpenHome renderers; each becomes an output
+    /// playing through its own pull stream. Blocking; call from `spawn_blocking`.
+    pub fn discover_upnp(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
+        if !self.upnp {
             return Vec::new();
+        }
+        let renderers = match pm_out_upnp::discover(timeout) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("UPnP discovery failed: {e}");
+                return Vec::new();
+            }
         };
         let mut new = Vec::new();
+        for r in renderers {
+            let name = format!(
+                "upnp-{}",
+                r.udn
+                    .trim_start_matches("uuid:")
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .take(40)
+                    .collect::<String>()
+            );
+            let pull = self.pull_output(&name);
+            let out = Arc::new(pm_out_upnp::UpnpOutput::new(
+                r.clone(),
+                pull,
+                self.pull_url(&name),
+            ));
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            tracing::info!(renderer = %r.friendly_name, output = %id, "UPnP renderer");
+            self.outputs.register(out.clone());
+            self.create_zone(&r.friendly_name, out);
+            new.push(id);
+        }
+        new
+    }
+
+    /// Run discovery again: register outputs not seen before and give each
+    /// a zone. Returns the ids that are new. Blocking (mDNS browse, TCP
+    /// connects, SSDP); call from `spawn_blocking`.
+    pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
+        let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
+        let Some(f) = self.discover.lock().expect("discover lock").clone() else {
+            return new;
+        };
         for out in f() {
             let id = out.id();
             if self.outputs.get(&id).is_some() {

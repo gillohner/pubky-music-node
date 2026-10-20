@@ -1,7 +1,8 @@
 //! Pull outputs (handoff §6.4, last paragraph): some endpoints fetch a URL
 //! instead of accepting pushed frames (OpenHome/UPnP renderers, Cast,
 //! browsers). A [`PullOutput`] is an `Output` whose sink writes the zone's
-//! post-DSP PCM into an HTTP response: `GET /v1/outputs/pull/{name}/stream.wav`.
+//! post-DSP PCM, WAV-framed, into a channel that an HTTP server (pm-api:
+//! `GET /v1/outputs/pull/{name}/stream.wav`) streams to the fetcher.
 //!
 //! The listener paces the zone: the sink blocks when the bounded channel is
 //! full, so a slow fetcher slows the zone instead of dropping audio. With no
@@ -9,10 +10,9 @@
 //! never plays silently into nothing. Bit-exact: the stream is the WAV
 //! encoding of exactly the blocks the zone produced.
 
+use crate::sink::{check_block, AudioSink, BufferLevel, Output, OutputId, SinkError};
 use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Samples};
-use pm_zones::sink::check_block;
-use pm_zones::{AudioSink, BufferLevel, Output, OutputId, SinkError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
