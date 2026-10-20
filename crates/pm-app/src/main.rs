@@ -100,6 +100,8 @@ struct App {
     discover: Option<(DiscoverKind, DiscoverPage)>,
     discover_loading: bool,
     friends_viewer: String,
+    new_zone_name: String,
+    new_zone_outputs: Vec<String>,
     new_playlist_name: String,
     /// Album id → texture (`None` once the node said there is no cover).
     covers: HashMap<i64, Option<egui::TextureHandle>>,
@@ -150,6 +152,8 @@ impl App {
             discover: None,
             discover_loading: false,
             friends_viewer: String::new(),
+            new_zone_name: String::new(),
+            new_zone_outputs: Vec::new(),
             new_playlist_name: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
@@ -1134,9 +1138,54 @@ impl App {
         ui.add_space(12.0);
         ui.heading("Zones");
         ui.label(format!("This computer plays through: {}", self.local.output_name));
-        for z in self.zones.values() {
-            ui.label(format!("{} → {}", z.name, z.output));
+        let mut delete = None;
+        egui::Grid::new("zones-table")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                for z in self.zones.values() {
+                    ui.label(&z.name);
+                    ui.weak(z.output.to_string());
+                    if ui.small_button("remove").clicked() {
+                        delete = Some(z.id.0.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(id) = delete {
+            self.backend.send(Cmd::DeleteZone(id));
         }
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("New zone or group").strong());
+        ui.weak("Pick one output for a zone, several for a group (the first picked leads).");
+        let outputs = self.outputs.clone();
+        for o in &outputs {
+            let id = o.id.0.clone();
+            let mut on = self.new_zone_outputs.contains(&id);
+            if ui.checkbox(&mut on, format!("{}  ({})", o.name, id)).changed() {
+                if on {
+                    self.new_zone_outputs.push(id);
+                } else {
+                    self.new_zone_outputs.retain(|x| *x != id);
+                }
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_zone_name)
+                    .hint_text("Zone name")
+                    .desired_width(220.0),
+            );
+            let ready = !self.new_zone_name.trim().is_empty() && !self.new_zone_outputs.is_empty();
+            if ui.add_enabled(ready, egui::Button::new("Create")).clicked() {
+                self.backend.send(Cmd::CreateZone {
+                    name: self.new_zone_name.trim().to_string(),
+                    outputs: self.new_zone_outputs.clone(),
+                });
+                self.new_zone_name.clear();
+                self.new_zone_outputs.clear();
+            }
+        });
         ui.add_space(12.0);
         ui.heading("Node outputs");
         for o in &self.outputs {
@@ -1267,6 +1316,10 @@ impl App {
                     .clicked()
                 {
                     self.show_path = !self.show_path;
+                }
+                if let Some(n) = np.as_ref().map(|n| &n.members).filter(|m| m.len() > 1) {
+                    let worst = n.iter().map(|m| m.drift_ms.abs()).max().unwrap_or(0);
+                    ui.weak(format!("group · {} outputs · drift ≤ {worst} ms", n.len()));
                 }
                 ui.add_space(8.0);
                 let mut db = self.volume_db;

@@ -73,6 +73,11 @@ pub enum Cmd {
     LoadArtists,
     LoadArtist(i64),
     Discover(DiscoverKind),
+    CreateZone {
+        name: String,
+        outputs: Vec<String>,
+    },
+    DeleteZone(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +350,19 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                     r.missing.len()
                 )));
             }
+        }
+        Cmd::CreateZone { name, outputs } => {
+            let z = if outputs.len() == 1 {
+                c.create_zone(&name, &outputs[0]).await?
+            } else {
+                c.create_group_zone(&name, outputs).await?
+            };
+            out.send(Msg::Notice(format!("zone “{}” created", z.name)));
+            out.send(Msg::Zones(c.zones().await?));
+        }
+        Cmd::DeleteZone(id) => {
+            c.delete_zone(&id).await?;
+            out.send(Msg::Zones(c.zones().await?));
         }
         Cmd::Discover(kind) => {
             let page = match &kind {
