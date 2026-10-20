@@ -310,7 +310,7 @@
   const main = $('#main');
   const setView = (v, arg) => {
     state.view = v; state.viewArg = arg;
-    $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'archive-item' && b.dataset.view === 'archive')));
+    $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'archive-item' && b.dataset.view === 'archive'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
     render();
