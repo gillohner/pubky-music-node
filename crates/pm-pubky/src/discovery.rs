@@ -10,7 +10,7 @@
 //! tag is the filter.
 
 use crate::nexus::{NexusClient, NexusError};
-use crate::pinakes::{Card, PinakesClient, PinakesError, SearchQuery, TagFacet};
+use crate::pinakes::{self, Card, PinakesClient, PinakesError, SearchQuery, TagFacet};
 use pm_model::MusicUri;
 use serde::{Deserialize, Serialize};
 
@@ -166,15 +166,26 @@ impl Discovery {
     /// counted once across services (`collapse=group`). Music step, answers
     /// §3; 400 until it ships, so callers fall back to [`trends`](Self::trends).
     pub async fn trending(&self, window: &str, limit: usize) -> Result<DiscoveryPage, DiscoveryError> {
+        self.trending_of("MusicRecording", window, limit).await
+    }
+
+    /// A chart of one type: `MusicRecording` (tracks) or `MusicAlbum`.
+    pub async fn trending_of(
+        &self,
+        type_: &str,
+        window: &str,
+        limit: usize,
+    ) -> Result<DiscoveryPage, DiscoveryError> {
         self.page(SearchQuery {
-            tags: Some(MUSIC_TAG.to_string()),
-            sort: Some("trending".to_string()),
-            window: Some(window.to_string()),
-            collapse: Some("group".to_string()),
             limit: Some(limit),
-            ..Default::default()
+            ..SearchQuery::trending(type_, window)
         })
         .await
+    }
+
+    /// The card plus details (facts, the full `also_on`) for a canonical URL.
+    pub async fn resource_for(&self, url: &str) -> Result<Option<pinakes::ResourceDetail>, DiscoveryError> {
+        Ok(self.pinakes.resource_by_uri(url).await?)
     }
 
     /// Who tagged this recording: distinct taggers from Nexus, `None` if the

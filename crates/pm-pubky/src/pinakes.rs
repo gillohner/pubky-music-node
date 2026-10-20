@@ -68,15 +68,31 @@ pub struct GroupRef {
 /// exact MusicBrainz / Wikidata ids and marked `derived` with its source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlsoOn {
+    /// Pinakes resource id of the other link (music step).
+    #[serde(default)]
+    pub id: Option<String>,
     pub uri: String,
     #[serde(default)]
     pub site: Option<String>,
+    /// `true` when Pinakes derived the link (MusicBrainz, Wikidata, iTunes,
+    /// Deezer) rather than someone on Pubky tagging it; derived links can be
+    /// unavailable in some countries, which is why tagged links sort first.
     #[serde(default)]
     pub derived: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Where a derived link came from (`musicbrainz`, `wikidata`, …).
+    #[serde(default)]
+    pub via: Option<String>,
     #[serde(flatten, default)]
     pub extra: Map<String, Value>,
+}
+
+impl AlsoOn {
+    /// Tagged by someone on Pubky (has its own card), not derived.
+    pub fn is_tagged(&self) -> bool {
+        self.id.is_some() && self.derived != Some(true)
+    }
 }
 
 /// The one card every route returns. Absent values are `None`, never `""`.
@@ -128,12 +144,100 @@ pub struct Card {
     pub duration: Option<Value>,
     #[serde(default)]
     pub also_on: Vec<AlsoOn>,
+    /// Events: up to 3 listings that are possibly the same event (a hint,
+    /// never a merge).
+    #[serde(default)]
+    pub maybe_same: Vec<MaybeSame>,
     /// Any field this client does not know yet, preserved.
     #[serde(flatten, default)]
     pub extra: Map<String, Value>,
 }
 
+/// Same-event hint on event and occurrence cards: starts within 300 s,
+/// within 500 m, similar name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaybeSame {
+    pub id: String,
+    pub uri: String,
+    #[serde(default)]
+    pub site: Option<String>,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub score: Option<f64>,
+}
+
+/// `details.facts` of a music card (music step): exact identities and the
+/// few catalogue facts Pinakes carries. Everything else comes from
+/// MusicBrainz by `mbid` / `isrc`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Facts {
+    #[serde(default)]
+    pub mbid: Option<String>,
+    /// Up to 8 ISRCs, `; `-separated as Pinakes sends them; see [`Facts::isrcs`].
+    #[serde(default)]
+    pub isrc: Option<String>,
+    #[serde(default)]
+    pub upc: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    /// `Group` or `Person` for artists.
+    #[serde(default)]
+    pub artist_type: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    /// The album the recording first appeared on (not a compilation).
+    #[serde(default)]
+    pub original_album: Option<String>,
+    /// Seconds, sent as a string or a number.
+    #[serde(default)]
+    pub duration: Option<Value>,
+    #[serde(flatten, default)]
+    pub extra: Map<String, Value>,
+}
+
+impl Facts {
+    pub fn isrcs(&self) -> Vec<String> {
+        self.isrc
+            .as_deref()
+            .unwrap_or("")
+            .split([';', ','])
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    pub fn duration_secs(&self) -> Option<u64> {
+        match &self.duration {
+            Some(Value::Number(n)) => n.as_f64().map(|f| f.round() as u64),
+            Some(Value::String(s)) => s.trim().parse::<f64>().ok().map(|f| f.round() as u64),
+            _ => None,
+        }
+    }
+}
+
 impl Card {
+    /// The artist as the card describes it: the facts when the card carries
+    /// them, else the first segment of Pinakes's description
+    /// ("Queen · A Night At The Opera · 5:55").
+    pub fn artist_hint(&self) -> Option<String> {
+        if let Some(a) = self.artist.as_ref().filter(|a| !a.trim().is_empty()) {
+            return Some(a.clone());
+        }
+        if !self.is_music() || self.type_.as_deref() == Some("MusicGroup") {
+            return None;
+        }
+        let d = self.description.as_deref()?;
+        let first = d.split([' ', '\u{a0}']).collect::<Vec<_>>().join(" ");
+        let first = first
+            .split(" · ")
+            .next()
+            .and_then(|x| x.split(" - ").next())
+            .map(str::trim)
+            .filter(|x| !x.is_empty() && x.len() < 80 && !x.starts_with("Listen to"))?;
+        Some(first.to_string())
+    }
+
     pub fn is_ok(&self) -> bool {
         self.status == "ok"
     }
@@ -171,6 +275,16 @@ pub struct Details {
     pub organizer: Option<Value>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// Music step: exact identities and catalogue facts.
+    #[serde(default)]
+    pub facts: Option<Facts>,
+    /// Every other link of the group, not only the one-per-service list on
+    /// the card.
+    #[serde(default)]
+    pub also_on: Vec<AlsoOn>,
+    /// Events: up to 10 possibly-same listings.
+    #[serde(default)]
+    pub maybe_same: Vec<MaybeSame>,
     #[serde(flatten, default)]
     pub extra: Map<String, Value>,
 }
@@ -182,6 +296,45 @@ pub struct ResourceDetail {
     pub card: Card,
     #[serde(default)]
     pub details: Details,
+}
+
+impl ResourceDetail {
+    pub fn facts(&self) -> Facts {
+        self.details.facts.clone().unwrap_or_default()
+    }
+
+    pub fn mbid(&self) -> Option<String> {
+        self.details
+            .facts
+            .as_ref()
+            .and_then(|f| f.mbid.clone())
+            .or_else(|| self.card.mbid.clone())
+    }
+
+    pub fn isrcs(&self) -> Vec<String> {
+        let mut v = self.facts().isrcs();
+        if v.is_empty() {
+            v.extend(self.card.isrc.iter().map(|s| s.to_ascii_uppercase()));
+        }
+        v
+    }
+
+    pub fn upc(&self) -> Option<String> {
+        self.details
+            .facts
+            .as_ref()
+            .and_then(|f| f.upc.clone())
+            .or_else(|| self.card.upc.clone())
+    }
+
+    /// The full `also_on` list: details first, else the card's.
+    pub fn also_on(&self) -> &[AlsoOn] {
+        if self.details.also_on.is_empty() {
+            &self.card.also_on
+        } else {
+            &self.details.also_on
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,6 +402,11 @@ pub struct GroupDetail {
     pub members: Vec<GroupMember>,
     #[serde(rename = "type", default)]
     pub type_: Option<String>,
+    /// Exact keys the group joins on (`hub:mb:artist:<mbid>`, `hub:wikidata:Q…`).
+    #[serde(default)]
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub curated: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,6 +469,27 @@ impl SearchQuery {
     pub fn tags(tags: &str) -> Self {
         Self {
             tags: Some(tags.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Every tagged link carrying an exact id: `mbid:<uuid>`, `isrc:<code>`,
+    /// `upc:<barcode>`, `wikidata:<Q-id>`.
+    pub fn key(key: &str) -> Self {
+        Self {
+            key: Some(key.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// A chart: `type_` (`MusicRecording` or `MusicAlbum`) ranked by tags made
+    /// inside `window` (`24h`, `7d`, `30d`), one song across services one row.
+    pub fn trending(type_: &str, window: &str) -> Self {
+        Self {
+            type_: Some(type_.to_string()),
+            sort: Some("trending".to_string()),
+            window: Some(window.to_string()),
+            collapse: Some("group".to_string()),
             ..Default::default()
         }
     }
