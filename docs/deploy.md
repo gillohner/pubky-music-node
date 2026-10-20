@@ -34,8 +34,9 @@ curl -H 'Authorization: Bearer change-me' http://localhost:7788/v1/info
 app store. Points worth knowing:
 
 - The API is exposed on port 7788 with the bearer token (`APP_SEED`, which Umbrel generates per app)
-  instead of behind `app_proxy`, because the native controller on another machine cannot pass
-  Umbrel's web login. A browser UI would go behind `app_proxy` later.
+  instead of behind `app_proxy`, because the native controller and OpenSubsonic clients on other
+  machines cannot pass Umbrel's web login. The built-in web UI at `/` uses the same token (entered
+  once in the browser), so one port serves every client.
 - `/dev/snd` is passed through for a DAC on the Umbrel box; otherwise use a network endpoint (M2).
 - Umbrel's shared storage is mounted read-only at `/music`, so a torrent or download app writing
   there is just a scan source. The node watches its folders and rescans 15 s after the last change
