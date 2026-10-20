@@ -50,6 +50,10 @@ impl Processor for Plan {
     fn process(&mut self, block: AudioBlock) -> Result<AudioBlock, SourceError> {
         Plan::process(self, block).map_err(|e| SourceError::Decode(e.to_string()))
     }
+
+    fn finish(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        Plan::finish(self).map_err(|e| SourceError::Decode(e.to_string()))
+    }
 }
 
 /// Queue items are local files.

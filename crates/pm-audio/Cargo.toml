@@ -15,6 +15,7 @@ testutil = []
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
 symphonia = { workspace = true }
+rubato = "5"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

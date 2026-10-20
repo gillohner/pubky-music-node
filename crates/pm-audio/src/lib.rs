@@ -16,6 +16,7 @@ pub mod error;
 pub mod pipeline;
 pub mod play;
 pub mod probe;
+pub mod resample;
 pub mod zone;
 
 pub use decode::Decoder;

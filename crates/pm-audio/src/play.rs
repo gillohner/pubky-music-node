@@ -109,6 +109,10 @@ pub fn play_to_sink(
         frames += out.frames() as u64;
         sink.write(&out)?;
     }
+    if let Some(tail) = plan.finish()? {
+        frames += tail.frames() as u64;
+        sink.write(&tail)?;
+    }
     sink.drain()?;
     let verify_ok = source.finalize();
     Ok(PlayReport {
@@ -216,7 +220,11 @@ mod tests {
             pcm_rates: vec![44_100],
             ..pm_model::OutputCaps::unlimited()
         };
-        let err = plan_for(&src, &caps, &PipelineConfig::default()).err().unwrap();
+        let cfg = PipelineConfig {
+            resample: false,
+            ..Default::default()
+        };
+        let err = plan_for(&src, &caps, &cfg).err().unwrap();
         assert!(
             matches!(
                 err,

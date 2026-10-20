@@ -14,7 +14,7 @@ they conflict. Decisions live in `docs/adr/`.
 | :-- | :-- | :-- |
 | `pm-model` | shared types: formats, caps, signal path, canonical IDs, library entities | M0 done |
 | `pm-zones` | `Output` / `AudioSink` traits, registry, null and WAV outputs; zone engine (queue, transport, gapless, position, events) | M0 done; zone engine done (single output; groups at M2) |
-| `pm-audio` | decode (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path | M1 done |
+| `pm-audio` | decode (Symphonia, MD5-verified), DSF/DFF readers, DSP pipeline with signal path, sample-rate conversion when an output needs it (shown as `Lossy`) | M1 done; M8 started (SRC) |
 | `pm-library` | scanning, tag reading, SQLite (FTS5), MusicBrainz matching | M1 done (AcoustID/fuzzy later) |
 | `pm-pubky` | music objects as v1 `PubkyAppPost` envelopes (private folder by default, ADR 0006), Pinakes and Nexus clients, discovery, homeserver I/O | M9/M10 groundwork (read paths verified live) |
 | `pm-out-local` | ALSA `hw:` output (feature `alsa`, needs libasound headers) | M1 hardware test done (FiiO KA17, loopback byte-identical); native DSD silent on KA17 |

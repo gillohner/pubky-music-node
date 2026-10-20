@@ -13,9 +13,10 @@
 //!   the target LSB, `Lossy`.
 //! * Any float stage (`headroom`, `volume`) runs the block through 64-bit
 //!   float once and requantizes at the end (`Lossy` for the gain stage).
-//! * Sample-rate conversion is **not implemented yet** (M8): the plan fails
-//!   with [`PipelineError::ConversionRequired`] so the caller can pick another
-//!   output or format instead of silently converting.
+//! * Sample-rate conversion (M8 first stage) runs only when the output
+//!   cannot take the source rate: an FFT sinc resampler in 64-bit float,
+//!   shown as a `Lossy` `resample` stage. With `resample = false` the plan
+//!   fails with [`PipelineError::ConversionRequired`] instead.
 //! * DSD plays native when the output takes it, else as DoP (`Lossless`
 //!   packing into 24-bit PCM at 1/16 the DSD rate), else fails.
 
@@ -44,6 +45,9 @@ pub struct PipelineConfig {
     /// TPDF dither whenever the bit depth is reduced. Default on.
     pub dither: bool,
     pub dsd_mode: DsdMode,
+    /// Resample (64-bit float FFT sinc, shown as a `Lossy` stage) when the
+    /// output cannot take the source rate. Off → `ConversionRequired`.
+    pub resample: bool,
 }
 
 impl Default for PipelineConfig {
@@ -53,6 +57,7 @@ impl Default for PipelineConfig {
             volume_db: None,
             dither: true,
             dsd_mode: DsdMode::Auto,
+            resample: true,
         }
     }
 }
@@ -84,6 +89,7 @@ pub enum PipelineError {
 }
 
 enum Stage {
+    Resample(Box<crate::resample::Resampler>),
     Gain {
         gain: f64,
     },
@@ -171,6 +177,7 @@ impl Plan {
                 reason: "channel downmix".into(),
             });
         }
+        let mut resample_to: Option<u32> = None;
         if !rates.contains(&source.rate_hz) {
             let to_rate = rates
                 .iter()
@@ -178,17 +185,20 @@ impl Plan {
                 .find(|r| **r <= source.rate_hz)
                 .or_else(|| rates.last())
                 .copied()
-                .unwrap_or(source.rate_hz);
-            let to = AudioFormat {
-                rate_hz: to_rate,
-                bits: source.bits.min(max_bits),
-                ..source
-            };
-            return Err(PipelineError::ConversionRequired {
-                from: source,
-                to,
-                reason: "sample-rate conversion (M8)".into(),
-            });
+                .ok_or(PipelineError::NoBitDepth)?;
+            if !cfg.resample {
+                let to = AudioFormat {
+                    rate_hz: to_rate,
+                    bits: source.bits.min(max_bits),
+                    ..source
+                };
+                return Err(PipelineError::ConversionRequired {
+                    from: source,
+                    to,
+                    reason: "sample-rate conversion is disabled (resample = false)".into(),
+                });
+            }
+            resample_to = Some(to_rate);
         }
         let candidates: Vec<u8> = [16u8, 24, 32]
             .into_iter()
@@ -203,13 +213,32 @@ impl Plan {
         };
         let output = AudioFormat {
             bits: out_bits,
+            rate_hz: resample_to.unwrap_or(source.rate_hz),
             ..source
         };
         let mut stages = Vec::new();
 
-        if cfg.wants_float() {
+        if cfg.wants_float() || resample_to.is_some() {
             let mut cur = source;
-            let fbits = AudioFormat { bits: 32, ..source };
+            let fbits = AudioFormat {
+                bits: 32,
+                rate_hz: resample_to.unwrap_or(source.rate_hz),
+                ..source
+            };
+            if let Some(to) = resample_to {
+                stages.push(Stage::Resample(Box::new(crate::resample::Resampler::new(
+                    source.rate_hz,
+                    to,
+                    source.channels as usize,
+                )?)));
+                path.push(
+                    PathStage::new("resample", cur, fbits, Quality::Lossy).with_note(format!(
+                        "{} → {} Hz, FFT sinc in 64-bit float",
+                        source.rate_hz, to
+                    )),
+                );
+                cur = fbits;
+            }
             if let Some(db) = cfg.headroom_db.filter(|d| *d != 0.0) {
                 stages.push(Stage::Gain { gain: db_to_gain(db) });
                 path.push(
@@ -379,9 +408,54 @@ impl Plan {
                 block.format, self.source
             )));
         }
+        self.run_from(0, block)
+    }
+
+    /// Flush stages with internal delay (the resampler) at the end of a
+    /// track; `None` when there is nothing to flush.
+    pub fn finish(&mut self) -> Result<Option<AudioBlock>, PipelineError> {
+        let Some(idx) = self.stages.iter().position(|s| matches!(s, Stage::Resample(_))) else {
+            return Ok(None);
+        };
+        let (rate, tail) = match &mut self.stages[idx] {
+            Stage::Resample(r) => (r.out_rate(), r.finish()?),
+            _ => unreachable!(),
+        };
+        if tail.is_empty() {
+            return Ok(None);
+        }
+        let fmt = AudioFormat {
+            rate_hz: rate,
+            bits: 32,
+            ..self.source
+        };
+        let block = AudioBlock {
+            format: fmt,
+            samples: Samples::PcmF64(tail),
+        };
+        self.run_from(idx + 1, block).map(Some)
+    }
+
+    fn run_from(&mut self, start: usize, block: AudioBlock) -> Result<AudioBlock, PipelineError> {
         let mut block = block;
-        for stage in &mut self.stages {
+        for stage in self.stages.iter_mut().skip(start) {
             block = match stage {
+                Stage::Resample(r) => {
+                    let b = block.to_f64();
+                    match b.samples {
+                        Samples::PcmF64(v) => {
+                            let out = r.push(&v)?;
+                            AudioBlock {
+                                format: AudioFormat {
+                                    rate_hz: r.out_rate(),
+                                    ..b.format
+                                },
+                                samples: Samples::PcmF64(out),
+                            }
+                        }
+                        _ => return Err(PipelineError::InvalidFormat("resample expects PCM".into())),
+                    }
+                }
                 Stage::Gain { gain } => {
                     let mut b = block.to_f64();
                     if let Samples::PcmF64(v) = &mut b.samples {
@@ -621,6 +695,48 @@ mod tests {
     }
 
     #[test]
+    fn resamples_when_the_output_cannot_take_the_rate() {
+        let c = OutputCaps {
+            pcm_rates: vec![44_100, 48_000],
+            ..OutputCaps::unlimited()
+        };
+        let src = AudioFormat::pcm(96_000, 24, 2);
+        let mut plan = Plan::negotiate(src, &c, &PipelineConfig::default()).unwrap();
+        assert_eq!(plan.output_format(), AudioFormat::pcm(48_000, 24, 2));
+        assert_eq!(plan.signal_path().headline(), Quality::Lossy);
+        let names: Vec<_> = plan
+            .signal_path()
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["decode", "resample", "requantize", "output"]);
+        let mut frames_out = 0;
+        for _ in 0..24 {
+            let out = plan.process(random_block(src, 4000)).unwrap();
+            assert!(out.is_empty() || out.format == AudioFormat::pcm(48_000, 24, 2));
+            frames_out += out.frames();
+        }
+        if let Some(tail) = plan.finish().unwrap() {
+            assert_eq!(tail.format, AudioFormat::pcm(48_000, 24, 2));
+            frames_out += tail.frames();
+        }
+        assert_eq!(frames_out, 24 * 4000 / 2);
+
+        let off = PipelineConfig {
+            resample: false,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Plan::negotiate(src, &c, &off),
+            Err(PipelineError::ConversionRequired { .. })
+        ));
+        // A supported rate never resamples.
+        let plan = Plan::negotiate(AudioFormat::pcm(48_000, 24, 2), &c, &PipelineConfig::default()).unwrap();
+        assert!(plan.is_bit_perfect());
+    }
+
+    #[test]
     fn dither_down_to_16() {
         let fmt = AudioFormat::pcm(44_100, 24, 2);
         let c = caps(&[44_100], 16, None);
@@ -673,7 +789,15 @@ mod tests {
     #[test]
     fn conversion_required_for_unsupported_rate() {
         let fmt = AudioFormat::pcm(96_000, 24, 2);
-        let err = Plan::negotiate(fmt, &caps(&[44_100], 24, None), &PipelineConfig::default()).unwrap_err();
+        let err = Plan::negotiate(
+            fmt,
+            &caps(&[44_100], 24, None),
+            &PipelineConfig {
+                resample: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             PipelineError::ConversionRequired {
@@ -687,13 +811,23 @@ mod tests {
             ..OutputCaps::unlimited()
         };
         assert!(matches!(
-            Plan::negotiate(fmt, &airplay, &PipelineConfig::default()),
+            Plan::negotiate(
+                fmt,
+                &airplay,
+                &PipelineConfig {
+                    resample: false,
+                    ..Default::default()
+                }
+            ),
             Err(PipelineError::ConversionRequired { .. })
         ));
         let ok = Plan::negotiate(
             AudioFormat::pcm(44_100, 24, 2),
             &airplay,
-            &PipelineConfig::default(),
+            &PipelineConfig {
+                resample: false,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(ok.output_format().bits, 16);

@@ -495,6 +495,18 @@ impl Engine {
         let Some(mut cur) = self.current.take() else {
             return;
         };
+        // Stages with delay (resampler) hand back their tail now.
+        match cur.proc.finish() {
+            Ok(Some(tail)) if !tail.is_empty() => {
+                if let Some(sink) = self.sink.as_mut() {
+                    if let Err(e) = sink.write(&tail) {
+                        tracing::warn!(zone = %self.id, "writing tail: {e}");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(zone = %self.id, "finish: {e}"),
+        }
         let verify_ok = cur.source.finalize();
         self.emit(ZoneEvent::TrackEnded {
             item: cur.item.clone(),

@@ -46,6 +46,10 @@ pub trait Processor: Send {
     fn output_format(&self) -> AudioFormat;
     fn signal_path(&self) -> &SignalPath;
     fn process(&mut self, block: AudioBlock) -> Result<AudioBlock, SourceError>;
+    /// Flush stages with internal delay at the end of the track.
+    fn finish(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        Ok(None)
+    }
 }
 
 /// Opens queue items and plans chains. Shared by every zone of a node.
