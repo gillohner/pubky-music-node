@@ -26,7 +26,17 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/albums/{id}/tracks` | | `{tracks}` |
 | GET | `/v1/library/folders` | | `[path, present][]` |
 | POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs |
+| GET / POST | `/v1/playlists` | POST: `{name, description?, image?, uris?, track_ids?}` | `PlaylistSummary[]` / `PlaylistDetail` |
+| GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |
+| POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |
+| DELETE | `/v1/playlists/{id}/items/{index}` | | `PlaylistDetail` |
+| POST | `/v1/playlists/{id}/play` | `{zone, replace?}` | `{queued, missing}` |
+| GET | `/v1/pubky` | | `{user, unsynced}` |
+| POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
 | GET | `/v1/events` | WebSocket | first `{"type":"snapshot","zones":[...]}`, then `zone` (full state), `zone_event`, `zone_removed`, `library_changed` |
+
+Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private
+homeserver folder when `pubky.session_secret_file` is set. Items are canonical music URLs only.
 
 Queue item URIs: `track:<library id>`, a local path, or `file://`. Streaming services add schemes later.
 Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.

@@ -153,6 +153,29 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
     }
+    if let Some(file) = &cfg.pubky.session_secret_file {
+        match std::fs::read_to_string(file) {
+            Ok(secret) => match pm_api::sync::PubkySync::connect(cfg.pubky.network, &secret).await {
+                Ok(sync) => {
+                    tracing::info!(user = %sync.z32(), "Pubky session restored");
+                    let sync = std::sync::Arc::new(sync);
+                    state.set_sync(Some(sync.clone()));
+                    match sync.sync(&state.library).await {
+                        Ok(r) => tracing::info!(
+                            pushed = r.pushed,
+                            pulled = r.pulled,
+                            deleted = r.deleted,
+                            errors = r.errors.len(),
+                            "initial sync"
+                        ),
+                        Err(e) => tracing::warn!("initial sync failed: {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!(file = %file.display(), "cannot restore Pubky session: {e}"),
+            },
+            Err(e) => tracing::warn!(file = %file.display(), "cannot read session secret: {e}"),
+        }
+    }
     pm_api::serve(state, &cfg.api.listen).await
 }
 

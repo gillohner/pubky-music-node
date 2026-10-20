@@ -11,6 +11,9 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
+pm-pubky = { workspace = true }
+pubky = { workspace = true }
+pubky-app-specs = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
@@ -22,6 +25,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+id3 = { workspace = true }
 hound = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

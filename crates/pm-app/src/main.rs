@@ -14,7 +14,7 @@ mod local;
 use backend::{Backend, Cmd, Msg};
 use local::{LocalPlayer, LOCAL_ZONE_ID};
 use pm_api::sources::NodeSources;
-use pm_api::types::{Info, QueueAt, TransportAction};
+use pm_api::types::{Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction};
 use pm_model::{Album, Quality, SignalPath, Track, Volume};
 use pm_zones::{Insert, QueueItem, Transport, ZoneState};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,8 @@ impl Default for Settings {
 enum View {
     Albums,
     Album(i64),
+    Playlists,
+    Playlist(String),
     Tracks,
     Search,
     Queue,
@@ -84,6 +86,9 @@ struct App {
     search: String,
     results: Option<(String, Vec<Track>)>,
     queues: HashMap<String, Vec<QueueItem>>,
+    playlists: Vec<PlaylistSummary>,
+    playlist_details: HashMap<String, PlaylistDetail>,
+    new_playlist_name: String,
     view: View,
     show_path: bool,
     volume_db: f32,
@@ -121,6 +126,9 @@ impl App {
             search: String::new(),
             results: None,
             queues: HashMap::new(),
+            playlists: Vec::new(),
+            playlist_details: HashMap::new(),
+            new_playlist_name: String::new(),
             view: View::Albums,
             show_path: false,
             volume_db: -20.0,
@@ -178,6 +186,17 @@ impl App {
                     self.scanning = true;
                     self.toast("scan started");
                 }
+                Msg::Playlists(p) => self.playlists = p,
+                Msg::Playlist(d) => {
+                    self.playlist_details.insert(d.summary.id.clone(), *d);
+                }
+                Msg::PlaylistDeleted(id) => {
+                    self.playlist_details.remove(&id);
+                    if self.view == View::Playlist(id) {
+                        self.view = View::Playlists;
+                    }
+                }
+                Msg::Notice(n) => self.toast(n),
                 Msg::Error(e) => self.toast(e),
             }
         }
@@ -300,11 +319,20 @@ impl App {
         ui.heading(egui::RichText::new("Pubky Music").strong());
         ui.add_space(10.0);
         ui.label(egui::RichText::new("LIBRARY").small().weak());
-        for (label, view) in [("Albums", View::Albums), ("Tracks", View::Tracks)] {
-            let selected = self.view == view || matches!((&self.view, &view), (View::Album(_), View::Albums));
+        for (label, view) in [
+            ("Albums", View::Albums),
+            ("Tracks", View::Tracks),
+            ("Playlists", View::Playlists),
+        ] {
+            let selected = self.view == view
+                || matches!((&self.view, &view), (View::Album(_), View::Albums))
+                || matches!((&self.view, &view), (View::Playlist(_), View::Playlists));
             if ui.selectable_label(selected, label).clicked() {
                 if view == View::Tracks && self.tracks.is_empty() {
                     self.backend.send(Cmd::LoadTracks);
+                }
+                if view == View::Playlists {
+                    self.backend.send(Cmd::LoadPlaylists);
                 }
                 self.view = view;
             }
@@ -376,6 +404,8 @@ impl App {
         match self.view.clone() {
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
+            View::Playlists => self.playlists_view(ui),
+            View::Playlist(id) => self.playlist_view(ui, &id),
             View::Tracks => {
                 let tracks = self.tracks.clone();
                 ui.heading("Tracks");
@@ -490,8 +520,10 @@ impl App {
     }
 
     fn track_table(&mut self, ui: &mut egui::Ui, tracks: &[Track], show_album: bool) {
+        let playlists = self.playlists.clone();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let mut action: Option<(usize, &str)> = None;
+            let mut playlist_add: Option<(usize, usize)> = None;
             egui::Grid::new(("tracks", show_album))
                 .num_columns(if show_album { 5 } else { 4 })
                 .striped(true)
@@ -534,6 +566,16 @@ impl App {
                                     action = Some((i, "add"));
                                     ui.close();
                                 }
+                                ui.separator();
+                                for (pi, p) in playlists.iter().enumerate() {
+                                    if ui.button(format!("Add to “{}”", p.name)).clicked() {
+                                        playlist_add = Some((i, pi));
+                                        ui.close();
+                                    }
+                                }
+                                if playlists.is_empty() {
+                                    ui.weak("No playlists yet");
+                                }
                             });
                         });
                         ui.end_row();
@@ -546,7 +588,172 @@ impl App {
                     _ => self.play_tracks(&tracks[i..=i], false, QueueAt::End),
                 }
             }
+            if let Some((i, pi)) = playlist_add {
+                if let Some(tid) = tracks[i].id {
+                    self.backend.send(Cmd::AddToPlaylist {
+                        id: playlists[pi].id.clone(),
+                        track_ids: vec![tid.0],
+                    });
+                }
+            }
         });
+    }
+
+    fn playlists_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Playlists");
+            ui.weak(format!("{}", self.playlists.len()));
+        });
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.new_playlist_name)
+                    .hint_text("New playlist name")
+                    .desired_width(260.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Create").clicked() || enter) && !self.new_playlist_name.trim().is_empty() {
+                self.backend.send(Cmd::CreatePlaylist {
+                    name: self.new_playlist_name.trim().to_string(),
+                    track_ids: vec![],
+                });
+                self.new_playlist_name.clear();
+            }
+        });
+        ui.add_space(6.0);
+        if self.playlists.is_empty() {
+            ui.weak("No playlists yet. Create one above, then use ⋯ on any track to add it.");
+            return;
+        }
+        let lists = self.playlists.clone();
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("playlists")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for p in &lists {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new(&p.name).strong()).frame(false))
+                            .clicked()
+                        {
+                            self.backend.send(Cmd::LoadPlaylist(p.id.clone()));
+                            self.view = View::Playlist(p.id.clone());
+                        }
+                        ui.weak(p.description.clone().unwrap_or_default());
+                        ui.weak(format!("{} items", p.items));
+                        ui.horizontal(|ui| {
+                            ui.weak(if p.synced { "synced" } else { "local" });
+                            if ui.button("▶").on_hover_text("Play").clicked() {
+                                self.play_playlist(&p.id);
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn play_playlist(&mut self, id: &str) {
+        if self.is_local() {
+            // Local zone: resolve on the client from the detail's tracks.
+            if let Some(d) = self.playlist_details.get(id) {
+                let tracks: Vec<Track> = d.tracks.iter().flatten().cloned().collect();
+                self.play_tracks(&tracks, true, QueueAt::End);
+            } else {
+                self.backend.send(Cmd::LoadPlaylist(id.to_string()));
+                self.toast("loading playlist, press play again");
+            }
+        } else {
+            self.backend.send(Cmd::PlayPlaylist {
+                id: id.to_string(),
+                zone: self.settings.zone.clone(),
+            });
+        }
+    }
+
+    fn playlist_view(&mut self, ui: &mut egui::Ui, id: &str) {
+        ui.horizontal(|ui| {
+            if ui.button("‹ Playlists").clicked() {
+                self.view = View::Playlists;
+            }
+        });
+        let Some(d) = self.playlist_details.get(id).cloned() else {
+            ui.spinner();
+            return;
+        };
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            art_square(ui, &d.summary.name, 120.0);
+            ui.vertical(|ui| {
+                ui.heading(egui::RichText::new(&d.summary.name).size(26.0).strong());
+                if let Some(desc) = &d.summary.description {
+                    ui.label(desc);
+                }
+                let in_library = d.tracks.iter().filter(|t| t.is_some()).count();
+                ui.weak(format!(
+                    "{} items · {} in this library · {} · {}",
+                    d.playlist.items.len(),
+                    in_library,
+                    d.summary.visibility,
+                    if d.summary.synced {
+                        "synced to homeserver"
+                    } else {
+                        "local only"
+                    }
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("▶  Play").clicked() {
+                        self.play_playlist(id);
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.backend.send(Cmd::DeletePlaylist(id.to_string()));
+                    }
+                });
+            });
+        });
+        ui.add_space(10.0);
+        let mut remove = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("playlist-items")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (i, item) in d.playlist.items.iter().enumerate() {
+                        ui.weak(format!("{}", i + 1));
+                        match &d.tracks[i] {
+                            Some(t) => {
+                                ui.vertical(|ui| {
+                                    ui.label(&t.title);
+                                    let by = t
+                                        .artists
+                                        .iter()
+                                        .map(|a| a.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    ui.small(egui::RichText::new(by).weak());
+                                });
+                                ui.weak(t.duration_ms.map(fmt_duration).unwrap_or_default());
+                            }
+                            None => {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(short_uri(&item.uri)).weak());
+                                    ui.small(egui::RichText::new("not in this library").weak());
+                                });
+                                ui.weak("");
+                            }
+                        }
+                        if ui.small_button("✕").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        if let Some(i) = remove {
+            self.backend.send(Cmd::RemovePlaylistItem {
+                id: id.to_string(),
+                index: i,
+            });
+        }
     }
 
     fn queue_view(&mut self, ui: &mut egui::Ui) {
@@ -661,6 +868,13 @@ impl App {
             }
             if ui.button("Refresh").clicked() {
                 self.backend.send(Cmd::Refresh);
+            }
+            if ui
+                .button("Sync playlists to Pubky")
+                .on_hover_text("Needs a session on the node")
+                .clicked()
+            {
+                self.backend.send(Cmd::PubkySync);
             }
         });
         if let Conn::Failed(e) = &self.conn {
@@ -1009,6 +1223,12 @@ fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+/// `https://musicbrainz.org/recording/<mbid>` → `musicbrainz.org/recording/…`
+fn short_uri(uri: &str) -> String {
+    let s = uri.trim_start_matches("https://").trim_start_matches("http://");
+    truncate(s, 48)
 }
 
 fn truncate(s: &str, n: usize) -> String {

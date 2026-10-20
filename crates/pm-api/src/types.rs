@@ -2,6 +2,7 @@
 //! can reuse them without pulling in the server.
 
 use pm_model::{Track, Volume};
+use pm_pubky::Playlist;
 use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
 
@@ -132,4 +133,101 @@ pub enum ApiEvent {
     ZoneEvent { zone: ZoneId, event: ZoneEvent },
     ZoneRemoved { zone: ZoneId },
     LibraryChanged,
+}
+
+// ---- playlists (ADR 0006) ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub items: usize,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// `private` or `public`.
+    pub visibility: String,
+    /// Pushed to the homeserver since the last edit.
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistDetail {
+    pub summary: PlaylistSummary,
+    pub playlist: Playlist,
+    /// One entry per item: the library track that matches its canonical URL, if any.
+    pub tracks: Vec<Option<Track>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreatePlaylist {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Canonical music URLs.
+    #[serde(default)]
+    pub uris: Vec<String>,
+    /// Library tracks; each must have a canonical identity.
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdatePlaylist {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Replace the item list (order matters).
+    #[serde(default)]
+    pub uris: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AddPlaylistItems {
+    #[serde(default)]
+    pub uris: Vec<String>,
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    /// Insert position; end when omitted.
+    #[serde(default)]
+    pub at: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayPlaylist {
+    pub zone: String,
+    /// Replace the zone's queue and start (default true); false appends.
+    #[serde(default)]
+    pub replace: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayedPlaylist {
+    pub queued: usize,
+    /// Items with no matching library track.
+    pub missing: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncReport {
+    pub pushed: usize,
+    pub pulled: usize,
+    pub deleted: usize,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubkyStatus {
+    /// Signed-in user's raw z32 key, when the node has a session.
+    pub user: Option<String>,
+    pub unsynced: usize,
 }

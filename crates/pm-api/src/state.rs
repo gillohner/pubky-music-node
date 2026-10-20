@@ -34,6 +34,8 @@ pub struct NodeState {
     /// Optional bearer token; `None` = no auth (bind to localhost only).
     pub token: Option<String>,
     pub events: broadcast::Sender<ApiEvent>,
+    /// Homeserver sync, when the node has a Pubky session.
+    pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
     scanning: Mutex<bool>,
 }
 
@@ -52,6 +54,7 @@ impl NodeState {
             zones: Zones::new(sources),
             token: settings.token,
             events,
+            sync: Mutex::new(None),
             scanning: Mutex::new(false),
         })
     }
@@ -118,6 +121,19 @@ impl NodeState {
 
     pub(crate) fn end_scan(&self) {
         *self.scanning.lock().expect("scan flag poisoned") = false;
+        let _ = self.events.send(ApiEvent::LibraryChanged);
+    }
+
+    pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
+        *self.sync.lock().expect("sync lock") = sync;
+    }
+
+    pub fn sync_handle(&self) -> Option<Arc<crate::sync::PubkySync>> {
+        self.sync.lock().expect("sync lock").clone()
+    }
+
+    /// Tell event listeners that library-side data (tracks, playlists) changed.
+    pub fn notify_library(&self) {
         let _ = self.events.send(ApiEvent::LibraryChanged);
     }
 

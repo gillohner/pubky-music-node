@@ -1,7 +1,10 @@
 //! The app's connection to a node: one tokio runtime on its own thread,
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
-use pm_api::types::{ApiEvent, Enqueue, Info, QueueAt, TransportAction};
+use pm_api::types::{
+    AddPlaylistItems, ApiEvent, CreatePlaylist, Enqueue, Info, PlaylistDetail, PlaylistSummary, QueueAt,
+    TransportAction,
+};
 use pm_client::NodeClient;
 use pm_model::{Album, Track, Volume};
 use pm_zones::{OutputInfo, QueueItem, Repeat, ZoneId, ZoneState};
@@ -46,6 +49,26 @@ pub enum Cmd {
         repeat: Repeat,
     },
     Scan,
+    LoadPlaylists,
+    LoadPlaylist(String),
+    CreatePlaylist {
+        name: String,
+        track_ids: Vec<i64>,
+    },
+    AddToPlaylist {
+        id: String,
+        track_ids: Vec<i64>,
+    },
+    RemovePlaylistItem {
+        id: String,
+        index: usize,
+    },
+    DeletePlaylist(String),
+    PlayPlaylist {
+        id: String,
+        zone: String,
+    },
+    PubkySync,
 }
 
 #[derive(Debug)]
@@ -65,6 +88,10 @@ pub enum Msg {
     Queue(String, Vec<QueueItem>),
     LibraryChanged,
     ScanStarted,
+    Playlists(Vec<PlaylistSummary>),
+    Playlist(Box<PlaylistDetail>),
+    PlaylistDeleted(String),
+    Notice(String),
     Error(String),
 }
 
@@ -186,6 +213,7 @@ async fn initial_load(c: &NodeClient, out: &Emitter) {
         c.zones().await.map(Msg::Zones),
         c.outputs().await.map(Msg::Outputs),
         c.albums(None, 500).await.map(Msg::Albums),
+        c.playlists().await.map(Msg::Playlists),
     ] {
         match r {
             Ok(m) => out.send(m),
@@ -251,6 +279,71 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::Scan => {
             c.scan(vec![]).await?;
             out.send(Msg::ScanStarted);
+        }
+        Cmd::LoadPlaylists => out.send(Msg::Playlists(c.playlists().await?)),
+        Cmd::LoadPlaylist(id) => out.send(Msg::Playlist(Box::new(c.playlist(&id).await?))),
+        Cmd::CreatePlaylist { name, track_ids } => {
+            let d = c
+                .create_playlist(&CreatePlaylist {
+                    name,
+                    track_ids,
+                    ..Default::default()
+                })
+                .await?;
+            out.send(Msg::Notice(format!("created playlist “{}”", d.summary.name)));
+            out.send(Msg::Playlist(Box::new(d)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::AddToPlaylist { id, track_ids } => {
+            let d = c
+                .add_playlist_items(
+                    &id,
+                    &AddPlaylistItems {
+                        track_ids,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            out.send(Msg::Notice(format!("added to “{}”", d.summary.name)));
+            out.send(Msg::Playlist(Box::new(d)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::RemovePlaylistItem { id, index } => {
+            let d = c.remove_playlist_item(&id, index).await?;
+            out.send(Msg::Playlist(Box::new(d)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::DeletePlaylist(id) => {
+            c.delete_playlist(&id).await?;
+            out.send(Msg::PlaylistDeleted(id));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::PlayPlaylist { id, zone } => {
+            let r = c.play_playlist(&id, &zone, true).await?;
+            if r.missing.is_empty() {
+                out.send(Msg::Notice(format!("queued {} tracks", r.queued)));
+            } else {
+                out.send(Msg::Notice(format!(
+                    "queued {} tracks; {} not in the library",
+                    r.queued,
+                    r.missing.len()
+                )));
+            }
+        }
+        Cmd::PubkySync => {
+            let r = c.pubky_sync().await?;
+            out.send(Msg::Notice(format!(
+                "sync: {} pushed, {} pulled, {} deleted{}",
+                r.pushed,
+                r.pulled,
+                r.deleted,
+                if r.errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} errors", r.errors.len())
+                }
+            )));
+            out.send(Msg::Playlists(c.playlists().await?));
         }
     }
     Ok(())

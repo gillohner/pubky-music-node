@@ -21,6 +21,10 @@ pub struct PmPubkyConfig {
     /// Contact put in the `User-Agent` of every request, as upstreams ask.
     pub user_agent_contact: String,
     pub network: Network,
+    /// File holding an exported Pubky session secret (grant or cookie). When
+    /// set, the node restores the session at start and syncs its private
+    /// posts folder. Keep the file mode 0600; it is a bearer credential.
+    pub session_secret_file: Option<std::path::PathBuf>,
 }
 
 impl Default for PmPubkyConfig {
@@ -30,6 +34,7 @@ impl Default for PmPubkyConfig {
             nexus_base: "https://nexus.staging.pubky.app".into(),
             user_agent_contact: "unknown".into(),
             network: Network::Mainnet,
+            session_secret_file: None,
         }
     }
 }

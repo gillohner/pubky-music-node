@@ -19,11 +19,13 @@ pub mod dsd;
 pub mod error;
 #[cfg(feature = "musicbrainz")]
 pub mod musicbrainz;
+pub mod posts;
 pub mod scan;
 pub mod tags;
 
 pub use canonical::{assign, Resolver};
 pub use db::{Library, LibraryStats};
 pub use error::{LibraryError, Result};
+pub use posts::MusicPostRow;
 pub use scan::{ScanReport, Scanner};
 pub use tags::{probe_and_read, FileProbe, TagSet};

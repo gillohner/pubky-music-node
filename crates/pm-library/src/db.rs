@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("migrations/0001_init.sql")),
+    (2, include_str!("migrations/0002_music_posts.sql")),
+];
 
 pub struct Library {
     conn: Mutex<Connection>,
@@ -114,7 +117,7 @@ impl Library {
             })?)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -703,7 +706,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 1);
+        assert_eq!(lib.schema_version().unwrap(), 2);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

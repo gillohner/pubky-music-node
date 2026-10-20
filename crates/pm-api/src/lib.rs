@@ -9,8 +9,10 @@
 //! trusts whoever can reach the socket, so bind to localhost. Remote access
 //! by pubkey (M5) wraps this API rather than replacing it.
 
+pub mod playlists;
 pub mod sources;
 pub mod state;
+pub mod sync;
 pub mod types;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -38,16 +40,16 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
         }
     }
-    fn not_found(what: impl Into<String>) -> Self {
+    pub(crate) fn not_found(what: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, what)
     }
-    fn bad_request(what: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(what: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, what)
     }
 }
@@ -70,7 +72,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<Json<T>, ApiError>;
+pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 // ---- router ----
 
@@ -97,6 +99,21 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/folders", get(folders))
         .route("/library/scan", post(scan))
+        .route("/playlists", get(playlists::list).post(playlists::create))
+        .route(
+            "/playlists/{id}",
+            get(playlists::get)
+                .put(playlists::update)
+                .delete(playlists::delete),
+        )
+        .route("/playlists/{id}/items", post(playlists::add_items))
+        .route(
+            "/playlists/{id}/items/{index}",
+            axum::routing::delete(playlists::remove_item),
+        )
+        .route("/playlists/{id}/play", post(playlists::play))
+        .route("/pubky", get(pubky_status))
+        .route("/pubky/sync", post(pubky_sync))
         .route("/events", get(events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
@@ -458,6 +475,39 @@ async fn scan(State(s): State<Arc<NodeState>>, Json(body): Json<ScanRequest>) ->
     Ok(Json(ScanStarted {
         folders: folders.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
     }))
+}
+
+// ---- pubky ----
+
+async fn pubky_status(State(s): State<Arc<NodeState>>) -> ApiResult<PubkyStatus> {
+    let unsynced = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .unsynced_music_posts()?
+        .len();
+    Ok(Json(PubkyStatus {
+        user: s.sync_handle().map(|h| h.z32().to_string()),
+        unsynced,
+    }))
+}
+
+/// Push local changes to the private homeserver folder and pull what is missing.
+async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
+    let Some(sync) = s.sync_handle() else {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "no Pubky session: set `pubky.session_secret_file` in the node config",
+        ));
+    };
+    let report = sync
+        .sync(&s.library)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if report.pulled > 0 {
+        s.notify_library();
+    }
+    Ok(Json(report))
 }
 
 // ---- events ----

@@ -318,6 +318,65 @@ impl NodeClient {
         .await
     }
 
+    // ---- playlists ----
+
+    pub async fn playlists(&self) -> Result<Vec<PlaylistSummary>> {
+        self.get("playlists", &[]).await
+    }
+
+    pub async fn playlist(&self, id: &str) -> Result<PlaylistDetail> {
+        self.get(&format!("playlists/{id}"), &[]).await
+    }
+
+    pub async fn create_playlist(&self, req: &CreatePlaylist) -> Result<PlaylistDetail> {
+        self.send(reqwest::Method::POST, "playlists", Some(req)).await
+    }
+
+    pub async fn update_playlist(&self, id: &str, req: &UpdatePlaylist) -> Result<PlaylistDetail> {
+        self.send(reqwest::Method::PUT, &format!("playlists/{id}"), Some(req))
+            .await
+    }
+
+    pub async fn add_playlist_items(&self, id: &str, req: &AddPlaylistItems) -> Result<PlaylistDetail> {
+        self.send(reqwest::Method::POST, &format!("playlists/{id}/items"), Some(req))
+            .await
+    }
+
+    pub async fn remove_playlist_item(&self, id: &str, index: usize) -> Result<PlaylistDetail> {
+        self.send::<PlaylistDetail, ()>(
+            reqwest::Method::DELETE,
+            &format!("playlists/{id}/items/{index}"),
+            None,
+        )
+        .await
+    }
+
+    pub async fn delete_playlist(&self, id: &str) -> Result<()> {
+        self.send::<(), ()>(reqwest::Method::DELETE, &format!("playlists/{id}"), None)
+            .await
+    }
+
+    pub async fn play_playlist(&self, id: &str, zone: &str, replace: bool) -> Result<PlayedPlaylist> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("playlists/{id}/play"),
+            Some(&PlayPlaylist {
+                zone: zone.into(),
+                replace: Some(replace),
+            }),
+        )
+        .await
+    }
+
+    pub async fn pubky_status(&self) -> Result<PubkyStatus> {
+        self.get("pubky", &[]).await
+    }
+
+    pub async fn pubky_sync(&self) -> Result<SyncReport> {
+        self.send::<SyncReport, ()>(reqwest::Method::POST, "pubky/sync", None)
+            .await
+    }
+
     // ---- events ----
 
     /// Open `/v1/events`. The first item is the snapshot.
