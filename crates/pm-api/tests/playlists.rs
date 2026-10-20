@@ -366,6 +366,59 @@ async fn playlist_lifecycle() {
     let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(home["favourite_albums"].is_array());
+    // A Subsonic scrobble is a play in the history, under the client's name; the
+    // recent/frequent album lists and now-playing answer from the same data.
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/rest/scrobble?id={tagged_id}&f=json&u=pubky&p=x&v=1.16.1&c=symfonium"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, hist) = call(&app, "GET", "/v1/library/history", None).await;
+    assert_eq!(hist["plays"][0]["zone"], "subsonic:symfonium", "{hist}");
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getAlbumList2?type=frequent&f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(
+        sub["subsonic-response"]["albumList2"]["album"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{sub}"
+    );
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getAlbumList2?type=recent&f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert_eq!(
+        sub["subsonic-response"]["albumList2"]["album"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let (_, sub) = call(
+        &app,
+        "GET",
+        "/rest/getNowPlaying?f=json&u=pubky&p=x&v=1.16.1&c=t",
+        None,
+    )
+    .await;
+    assert!(sub["subsonic-response"]["nowPlaying"]["entry"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
     let (_, sub) = call(
         &app,
         "GET",
