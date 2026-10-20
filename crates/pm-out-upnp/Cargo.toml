@@ -12,6 +12,7 @@ pm-zones = { workspace = true }
 async-trait = { workspace = true }
 quick-xml = "0.42"
 reqwest = { workspace = true, features = ["blocking"] }
+if-addrs = "0.13"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

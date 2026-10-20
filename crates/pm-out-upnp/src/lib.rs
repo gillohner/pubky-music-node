@@ -82,45 +82,42 @@ pub struct SsdpAnswer {
 /// answers: shows whether multicast works at all, which devices exist,
 /// and which of them are renderers the node can use.
 pub fn ssdp_probe(timeout: Duration) -> Result<Vec<SsdpAnswer>, UpnpError> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.set_read_timeout(Some(Duration::from_millis(300)))?;
     let mx = timeout.as_secs().clamp(1, 5);
     let msg = format!(
         "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: ssdp:all\r\n\r\n"
     );
-    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
-    for _ in 0..2 {
-        socket.send_to(msg.as_bytes(), dest)?;
-    }
+    let sockets = multicast_sockets(&msg)?;
     let deadline = Instant::now() + timeout;
     let mut found: Vec<SsdpAnswer> = Vec::new();
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
-        match socket.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                let text = String::from_utf8_lossy(&buf[..n]);
-                let Some(location) = header(&text, "LOCATION") else {
-                    continue;
-                };
-                if found.iter().any(|a| a.location.eq_ignore_ascii_case(&location)) {
-                    continue;
+        for socket in &sockets {
+            match socket.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let Some(location) = header(&text, "LOCATION") else {
+                        continue;
+                    };
+                    if found.iter().any(|a| a.location.eq_ignore_ascii_case(&location)) {
+                        continue;
+                    }
+                    found.push(SsdpAnswer {
+                        from: from.to_string(),
+                        location,
+                        server: header(&text, "SERVER"),
+                        st: header(&text, "ST"),
+                        usn: header(&text, "USN"),
+                        friendly_name: None,
+                        renderer: false,
+                    });
                 }
-                found.push(SsdpAnswer {
-                    from: from.to_string(),
-                    location,
-                    server: header(&text, "SERVER"),
-                    st: header(&text, "ST"),
-                    usn: header(&text, "USN"),
-                    friendly_name: None,
-                    renderer: false,
-                });
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => return Err(e.into()),
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(e) => return Err(e.into()),
         }
     }
     for a in &mut found {
@@ -401,38 +398,88 @@ fn friendly_name_of(location: &str) -> Option<String> {
 
 /// Raw SSDP: the LOCATION headers of every MediaRenderer that answers.
 pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.set_read_timeout(Some(Duration::from_millis(300)))?;
     let mx = timeout.as_secs().clamp(1, 5);
     let msg = format!(
         "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: {MEDIA_RENDERER}\r\n\r\n"
     );
-    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
-    for _ in 0..2 {
-        socket.send_to(msg.as_bytes(), dest)?;
-    }
+    let sockets = multicast_sockets(&msg)?;
     let deadline = Instant::now() + timeout;
     let mut found: Vec<String> = Vec::new();
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
-        match socket.recv_from(&mut buf) {
-            Ok((n, _)) => {
-                let text = String::from_utf8_lossy(&buf[..n]);
-                if let Some(loc) = header(&text, "LOCATION") {
-                    if !found.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
-                        found.push(loc);
+        for socket in &sockets {
+            match socket.recv_from(&mut buf) {
+                Ok((n, _)) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    if let Some(loc) = header(&text, "LOCATION") {
+                        if !found.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
+                            found.push(loc);
+                        }
                     }
                 }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => return Err(e.into()),
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(e) => return Err(e.into()),
         }
     }
     Ok(found)
+}
+
+/// Every IPv4 interface this host has (loopback excluded), so a node on
+/// several subnets or VLANs searches all of them.
+pub fn local_ipv4_addrs() -> Vec<Ipv4Addr> {
+    let mut v: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .map(|ifs| {
+            ifs.into_iter()
+                .filter(|i| !i.is_loopback())
+                .filter_map(|i| match i.ip() {
+                    std::net::IpAddr::V4(a) => Some(a),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// One socket per interface, each sending `msg` to the SSDP group through
+/// that interface (the kernel otherwise uses the default route only). Falls
+/// back to a single unbound socket when the interfaces cannot be listed.
+fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
+    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
+    let mut sockets = Vec::new();
+    for ip in local_ipv4_addrs() {
+        let Ok(socket) = UdpSocket::bind((ip, 0)) else {
+            continue;
+        };
+        // Bound to the interface's address, Linux routes a multicast send
+        // through that interface (the kernel picks the device owning the
+        // source address), so no IP_MULTICAST_IF is needed.
+        let _ = socket.set_multicast_ttl_v4(2);
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let mut sent = false;
+        for _ in 0..2 {
+            sent |= socket.send_to(msg.as_bytes(), dest).is_ok();
+        }
+        if sent {
+            sockets.push(socket);
+        }
+    }
+    if sockets.is_empty() {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        for _ in 0..2 {
+            socket.send_to(msg.as_bytes(), dest)?;
+        }
+        sockets.push(socket);
+    }
+    Ok(sockets)
 }
 
 fn header(resp: &str, name: &str) -> Option<String> {

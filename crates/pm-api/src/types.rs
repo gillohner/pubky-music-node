@@ -822,9 +822,18 @@ pub struct DiscoverQuery {
     /// Trending window, `1h`..`90d`.
     pub window: Option<String>,
     pub cursor: Option<String>,
+    /// Charts and search: `tracks`, `albums` or `artists`.
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    /// Search text (`/discover/search`).
+    #[serde(default)]
+    pub q: Option<String>,
+    /// One card (`/discover/item`): its canonical or service URL.
+    #[serde(default)]
+    pub uri: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscoverItem {
     /// Canonical music URL.
     pub uri: String,
@@ -835,6 +844,54 @@ pub struct DiscoverItem {
     pub taggers: Option<u32>,
     /// The matching library track, when the user owns it.
     pub in_library: Option<Track>,
+    /// `track`, `album`, `artist` or `playlist` (from the card's type).
+    #[serde(default)]
+    pub kind: String,
+    /// The service the card is from ("TIDAL", "Bandcamp", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    /// Pinakes resource id, for `/v1/discover/item`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinakes_id: Option<String>,
+    /// How many services carry the same thing (the Pinakes group).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_size: Option<i64>,
+    /// Queue URI when the node can stream the card's own page (TIDAL, Deezer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playable: Option<String>,
+    /// "Play on…" / "Open on…": the same thing on other services, tagged first.
+    #[serde(default)]
+    pub also_on: Vec<Version>,
+}
+
+/// `GET /v1/discover/item`: one card with everything the node knows around it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoverDetail {
+    pub item: DiscoverItem,
+    /// Exact identities from Pinakes (`details.facts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbid: Option<String>,
+    #[serde(default)]
+    pub isrcs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_type: Option<String>,
+    /// Who tagged it on Pubky (labels with counts, distinct taggers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pubky: Option<OnPubky>,
+    /// The library album with the same identity, when owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_library_album: Option<i64>,
+    /// MusicBrainz / Wikipedia facts for artists, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_info: Option<ArtistInfo>,
 }
 
 // ---- streaming sources ----
