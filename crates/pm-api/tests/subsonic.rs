@@ -128,6 +128,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             slimproto_port: 0,
             session_secret_path: None,
             tidal: Default::default(),
+            spotify: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

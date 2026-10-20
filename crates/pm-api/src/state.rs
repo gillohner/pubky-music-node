@@ -61,6 +61,7 @@ pub struct NodeSettings {
     pub session_secret_path: Option<PathBuf>,
     /// TIDAL developer app credentials; empty = TIDAL not offered.
     pub tidal: crate::tidal::TidalCredentials,
+    pub spotify: crate::spotify::SpotifyCredentials,
 }
 
 pub struct NodeState {
@@ -118,6 +119,7 @@ pub struct NodeState {
     /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock);
     /// shared with the source factory so the audio thread can resolve `tidal:track:` URIs.
     pub tidal: crate::tidal::SharedEndpoints,
+    pub spotify: crate::spotify::SharedEndpoints,
     /// Deezer API origin (tests point it at a mock).
     pub deezer_base: crate::deezer::SharedBase,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -145,6 +147,11 @@ impl NodeState {
                 ..Default::default()
             }));
         let deezer_base = crate::deezer::shared_base();
+        let spotify: crate::spotify::SharedEndpoints =
+            Arc::new(std::sync::RwLock::new(crate::spotify::SpotifyEndpoints {
+                creds: settings.spotify.clone(),
+                ..Default::default()
+            }));
         let sources = Arc::new(NodeSources::new(
             library.clone(),
             settings.pipeline,
@@ -210,6 +217,7 @@ impl NodeState {
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
             deezer_base,
+            spotify,
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),

@@ -47,6 +47,15 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/search` | `?q=&limit=&sources=1` | `{tracks, albums, artists, genres, sources: [{source, items}]}`: tracks by full text (title, artist, album, genre words), albums by title, artists and genres by name; `sources` carries hits from streaming services that take part (TIDAL when configured; `sources=0` skips them), each hit flagged with `library_track_id` / `library_album_id` when the library has the same ISRC or UPC |
 | GET | `/v1/library/albums/{id}/versions`, `/v1/library/tracks/{id}/versions` | | `[{source, id, label, url, uri?}]`: the same album (by UPC) or track (by ISRC) on TIDAL, cached a week; empty when unknown |
 | GET | `/v1/sources/tidal/stream/{id}` | | the track's HLS segments as one `audio/mp4` body for browsers (`X-Tidal-Presentation: FULL\|PREVIEW`); sign-in required |
+| GET | `/v1/sources/spotify/login` | | Spotify sign-in URL (Authorization Code + PKCE); the app must list `<public_url>/spotify/callback` |
+| GET | `/v1/sources/spotify/status` | | `{configured, signed_in, user_id?, display_name?, country?, product?, redirect_uri, requested_scopes}` |
+| DELETE | `/v1/sources/spotify/session` | | sign out |
+| GET | `/v1/sources/spotify/collection` | | saved albums and tracks as hits (ISRC/UPC, library matches) |
+| POST | `/v1/sources/spotify/collection/import` | | saved tracks (by ISRC) and albums as favourites |
+| GET | `/v1/sources/spotify/playlists` | | the user's playlists |
+| POST | `/v1/sources/spotify/playlists/{id}/import` | | a private Pubky playlist by ISRC |
+| GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
+| POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |

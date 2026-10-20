@@ -192,6 +192,10 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                 client_secret: cfg.tidal.client_secret.clone(),
                 scopes: cfg.tidal.scopes.clone(),
             },
+            spotify: pm_api::spotify::SpotifyCredentials {
+                client_id: cfg.spotify.client_id.clone(),
+                client_secret: cfg.spotify.client_secret.clone(),
+            },
         },
         lib,
         registry,

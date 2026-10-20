@@ -25,6 +25,7 @@ pub mod playlists;
 pub mod radio;
 pub mod reviews;
 pub mod sources;
+pub mod spotify;
 pub mod state;
 pub mod streaming;
 pub mod subsonic;
@@ -197,6 +198,21 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
+        .route("/sources/spotify/login", get(spotify::login))
+        .route("/sources/spotify/status", get(spotify::status))
+        .route("/sources/spotify/session", delete(spotify::logout))
+        .route("/sources/spotify/collection", get(spotify::collection))
+        .route(
+            "/sources/spotify/collection/import",
+            post(spotify::import_collection),
+        )
+        .route("/sources/spotify/playlists", get(spotify::playlists))
+        .route(
+            "/sources/spotify/playlists/{id}/import",
+            post(spotify::import_playlist),
+        )
+        .route("/sources/spotify/devices", get(spotify::devices))
+        .route("/sources/spotify/play", post(spotify::play))
         .route("/sources/tidal/collection/import", post(tidal::import_collection))
         .route("/sources/tidal/playlists", get(tidal::playlists))
         .route(
@@ -229,6 +245,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .merge(
             Router::new()
                 .route("/tidal/callback", get(tidal::callback))
+                .route("/spotify/callback", get(spotify::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
@@ -994,7 +1011,7 @@ fn merge_versions(out: &mut Vec<Version>, extra: Vec<Version>) {
     for v in extra {
         let dup = out.iter().any(|o| {
             o.url.trim_end_matches('/') == v.url.trim_end_matches('/')
-                || (o.source == v.source && matches!(o.source.as_str(), "tidal" | "deezer"))
+                || (o.source == v.source && matches!(o.source.as_str(), "tidal" | "deezer" | "spotify"))
         });
         if !dup {
             out.push(v);
@@ -1017,9 +1034,10 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .map(|m| format!("mbid:{m}"))
         .or_else(|| track.isrc.as_ref().map(|i| format!("isrc:{i}")));
     let key = format!("pinakes.version.track.{id}");
-    let (t, d, p) = tokio::join!(
+    let (t, d, sp, p) = tokio::join!(
         tidal::track_versions(&s, &track),
         deezer::track_versions(&s, &track),
+        spotify::track_versions(&s, &track),
         async {
             match pinakes_key {
                 Some(k) => discover::also_on_versions(&s, &k, &key).await,
@@ -1029,6 +1047,7 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
     );
     let mut out = t.unwrap_or_default();
     out.extend(d.unwrap_or_default());
+    out.extend(sp.unwrap_or_default());
     merge_versions(&mut out, p);
     Ok(Json(out))
 }
@@ -1048,9 +1067,10 @@ async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .map(|m| format!("mbid:{m}"))
         .or_else(|| album.upc.as_ref().map(|u| format!("upc:{u}")));
     let key = format!("pinakes.version.album.{id}");
-    let (t, d, p) = tokio::join!(
+    let (t, d, sp, p) = tokio::join!(
         tidal::album_versions(&s, &album),
         deezer::album_versions(&s, &album),
+        spotify::album_versions(&s, &album),
         async {
             match pinakes_key {
                 Some(k) => discover::also_on_versions(&s, &k, &key).await,
@@ -1060,6 +1080,7 @@ async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
     );
     let mut out = t.unwrap_or_default();
     out.extend(d.unwrap_or_default());
+    out.extend(sp.unwrap_or_default());
     merge_versions(&mut out, p);
     Ok(Json(out))
 }
@@ -1887,6 +1908,7 @@ mod tests {
                 slimproto_port: 0,
                 session_secret_path: None,
                 tidal: Default::default(),
+                spotify: Default::default(),
             },
             lib,
             outputs,

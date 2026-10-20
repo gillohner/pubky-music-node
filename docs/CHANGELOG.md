@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- **Spotify** (`pm-api/src/spotify.rs`): sign-in with PKCE, catalogue in the unified search with ISRC/UPC (merges with TIDAL and Deezer rows), album and artist pages, Versions by ISRC/UPC, saved tracks/albums and playlists imported by ISRC, and "Play on Spotify" on the user's Connect devices (no audio enters the node). Config `[spotify]` / `PM_SPOTIFY_CLIENT_ID|SECRET`.
 - **MusicBrainz caching proxy** at `/mb/ws/2/…` (no token): one upstream request per second, a week of cache, the node's contact in the User-Agent; Pinakes can use it as its MusicBrainz `base_url`.
 - The upstream contact (User-Agent for MusicBrainz, Wikipedia, Pinakes) is derived from the owner's Pubky identity, `https://pubky.app/profile/<pubkey>`, as soon as the node has a session and no contact was set; a typed contact still wins.
 - **Settings follow your Pubky identity**: after every sync the node writes contact, library folders, the TIDAL session, renderers added by hand, the jukebox zone and DSP to `/priv/pubky.music/settings.json`; a fresh node restores them after its first Ring sign-in (`POST /v1/node/settings/backup|restore` for manual runs). A reinstalled container still needs `/data` on a host path to keep its Pubky session itself.

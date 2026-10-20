@@ -11,6 +11,7 @@
 #                fetch audio from it, so set it when the container is not on the host network
 #   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
 #   PM_TIDAL_SCOPES   scopes to request at sign-in (default: all the node can use; must be enabled on the app)
+#   PM_SPOTIFY_CLIENT_ID / PM_SPOTIFY_CLIENT_SECRET   Spotify developer app (developer.spotify.com); optional
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"
 CONF="${PM_CONFIG:-$DATA_DIR/node.toml}"
@@ -39,6 +40,10 @@ public_url = "${PM_PUBLIC_URL:-}"
 client_id = "${PM_TIDAL_CLIENT_ID:-}"
 client_secret = "${PM_TIDAL_CLIENT_SECRET:-}"
 scopes = "${PM_TIDAL_SCOPES:-}"
+
+[spotify]
+client_id = "${PM_SPOTIFY_CLIENT_ID:-}"
+client_secret = "${PM_SPOTIFY_CLIENT_SECRET:-}"
 TOML
 fi
 if [ -z "${PM_TOKEN:-}" ] && [ "${PM_LISTEN:-0.0.0.0:7788}" != "127.0.0.1:7788" ]; then

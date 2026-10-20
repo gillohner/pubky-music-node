@@ -18,9 +18,18 @@ pub struct NodeConfig {
     pub outputs: OutputsConfig,
     /// TIDAL developer app credentials (developer.tidal.com); empty = TIDAL off.
     pub tidal: TidalConfig,
+    /// Spotify developer app (developer.spotify.com); optional.
+    pub spotify: SpotifyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct SpotifyConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TidalConfig {
     pub client_id: String,
@@ -68,6 +77,7 @@ impl Default for NodeConfig {
             api: ApiConfig::default(),
             outputs: OutputsConfig::default(),
             tidal: TidalConfig::default(),
+            spotify: SpotifyConfig::default(),
         }
     }
 }
