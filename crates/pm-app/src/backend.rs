@@ -5,7 +5,7 @@ use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
     FavouriteRef, Favourites, GenreDetail, HomePage, Info, Lyrics, NodeSettingsView, OnPubky, PlaylistDetail,
     PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit, SourceItem, Tags,
-    TransportAction, UpdatePlaylist,
+    TransportAction, UpdatePlaylist, UploadFile,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -172,6 +172,11 @@ pub enum Cmd {
     RescanOutputs,
     PubkyLoginStart,
     PubkyLoginPoll,
+    /// Private files on the homeserver, an upload of one library track, and
+    /// a mirror of the remote files into the node.
+    PubkyFiles,
+    PubkyUpload(i64),
+    PubkyMirror,
     LoadDsp(String),
     SetDsp(String, Box<pm_audio::PipelineConfig>),
     ResetDsp(String),
@@ -235,6 +240,7 @@ pub enum Msg {
     ArtistInfo(i64, Box<ArtistInfo>, Option<(usize, usize, Vec<u8>)>),
     Lyrics(i64, Option<Box<Lyrics>>),
     AlbumFormats(Vec<pm_library::AlbumFormat>),
+    PubkyFiles(Result<Vec<pm_pubky::homeserver::RemoteFile>, String>),
     Genre(Box<GenreDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
@@ -795,6 +801,38 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                 None => None,
             };
             out.send(Msg::Cover(id, decoded));
+        }
+        Cmd::PubkyFiles => {
+            let r = c.pubky_files().await.map_err(|e| e.to_string());
+            out.send(Msg::PubkyFiles(r));
+        }
+        Cmd::PubkyUpload(track_id) => {
+            let up = c
+                .pubky_upload(&UploadFile {
+                    track_id: Some(track_id),
+                    path: None,
+                })
+                .await?;
+            out.send(Msg::Notice(format!(
+                "uploaded to your homeserver (private): {} ({:.1} MB)",
+                up.path.rsplit('/').next().unwrap_or(&up.path),
+                up.size as f64 / 1e6
+            )));
+            let r = c.pubky_files().await.map_err(|e| e.to_string());
+            out.send(Msg::PubkyFiles(r));
+        }
+        Cmd::PubkyMirror => {
+            let r = c.pubky_mirror().await?;
+            out.send(Msg::Notice(format!(
+                "mirrored {} file(s) from the homeserver, {} already here{}",
+                r.fetched,
+                r.present,
+                if r.errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} errors", r.errors.len())
+                }
+            )));
         }
         Cmd::PubkySync => {
             let r = c.pubky_sync().await?;

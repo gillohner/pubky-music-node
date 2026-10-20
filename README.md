@@ -41,7 +41,8 @@ event stream for anything else.
 `PubkyAppPost`s with a JSON envelope (ADR 0006), favourites are private v1 bookmarks (ADR 0010),
 tags are public v1 `PubkyAppTag`s written only on your action (ADR 0011); all of it syncs with the
 homeserver and comes back on a fresh node. Audio can be uploaded to the homeserver's private
-storage, never under `/pub/`. Discover reads trending music and tags through Pinakes and shows what
+storage, never under `/pub/`, from a track's menu in either UI, listed under Settings, and mirrored
+back into a fresh node. Discover reads trending music and tags through Pinakes and shows what
 Pubky knows about each album.
 
 **Migration.** `pm-node import-playlist <file>` (also in both UIs) imports M3U/M3U8, CSV and Roon's

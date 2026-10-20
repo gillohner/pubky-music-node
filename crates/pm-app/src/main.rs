@@ -145,6 +145,8 @@ struct App {
     lyrics_requested: HashSet<i64>,
     album_formats: HashMap<i64, pm_library::AlbumFormat>,
     album_focus: Option<pm_library::Focus>,
+    /// Private files on the homeserver as last listed (`Err` = not signed in / unreachable).
+    pubky_files: Option<Result<Vec<pm_pubky::homeserver::RemoteFile>, String>>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -238,6 +240,7 @@ impl App {
             lyrics_requested: HashSet::new(),
             album_formats: HashMap::new(),
             album_focus: None,
+            pubky_files: None,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -399,6 +402,7 @@ impl App {
                 }
                 Msg::Artists(a) => self.artists = a,
                 Msg::Genres(g) => self.genres = g,
+                Msg::PubkyFiles(r) => self.pubky_files = Some(r),
                 Msg::AlbumFormats(f) => {
                     self.album_formats = f.into_iter().map(|x| (x.album_id, x)).collect();
                 }
@@ -2121,6 +2125,14 @@ impl App {
                                     action = Some((i, "add"));
                                     ui.close();
                                 }
+                                if ui
+                                    .button("Upload to homeserver")
+                                    .on_hover_text("Copy this file to your Pubky homeserver's private storage (needs a session on the node)")
+                                    .clicked()
+                                {
+                                    action = Some((i, "upload"));
+                                    ui.close();
+                                }
                                 if !local
                                     && ui
                                         .button("Start radio")
@@ -2149,6 +2161,11 @@ impl App {
                 match what {
                     "play" => self.play_tracks(&tracks[i..], true, QueueAt::End),
                     "next" => self.play_tracks(&tracks[i..=i], false, QueueAt::Next),
+                    "upload" => {
+                        if let Some(id) = tracks[i].id {
+                            self.backend.send(Cmd::PubkyUpload(id.0));
+                        }
+                    }
                     "radio" => {
                         self.play_tracks(&tracks[i..=i], true, QueueAt::End);
                         self.backend.send(Cmd::SetRadio {
@@ -2881,6 +2898,52 @@ impl App {
         });
         if let Conn::Failed(e) = &self.conn {
             ui.colored_label(theme::BAD, e);
+        }
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("Homeserver files").strong().size(16.0));
+        ui.small(
+            egui::RichText::new(
+                "Audio you uploaded to your Pubky homeserver's private storage (never under /pub/). Upload from a track's ⋯ menu.",
+            )
+            .weak(),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("List files").clicked() {
+                self.backend.send(Cmd::PubkyFiles);
+            }
+            if ui
+                .button("Mirror to this node")
+                .on_hover_text("Download what this node does not have yet, then scan it")
+                .clicked()
+            {
+                self.backend.send(Cmd::PubkyMirror);
+            }
+        });
+        match &self.pubky_files {
+            None => {}
+            Some(Err(e)) => {
+                ui.weak(format!("Not available: {e}"));
+            }
+            Some(Ok(files)) if files.is_empty() => {
+                ui.weak("No private files on the homeserver yet.");
+            }
+            Some(Ok(files)) => {
+                let total: u64 = files.iter().filter_map(|f| f.size).sum();
+                ui.weak(format!("{} files · {:.1} MB", files.len(), total as f64 / 1e6));
+                egui::ScrollArea::vertical()
+                    .id_salt("pubky-files")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for f in files {
+                            ui.horizontal(|ui| {
+                                ui.label(f.name());
+                                if let Some(sz) = f.size {
+                                    ui.weak(format!("{:.1} MB", sz as f64 / 1e6));
+                                }
+                            });
+                        }
+                    });
+            }
         }
         ui.add_space(14.0);
         ui.label(egui::RichText::new("Upstream contact").strong().size(16.0));

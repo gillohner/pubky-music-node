@@ -13,6 +13,7 @@
     lyrics: new Map(),
     formats: null,
     focus: '',
+    pubkyUser: undefined,
     view: 'home',
     viewArg: null,
     albums: null,
@@ -489,6 +490,7 @@
   };
   const trackMenu = async (anchor, tracks) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
     const favItem = single && trackHasId(single) ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const radioItem = single && trackHasId(single) && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playTracks([single], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${single.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
@@ -497,6 +499,7 @@
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
       ...radioItem,
+      ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Upload to homeserver' : `Upload ${tracks.length} tracks to homeserver`, icon: 'download', run: async () => { let n = 0; for (const t of tracks) { try { await api('POST', '/pubky/files', { track_id: t.id }); n++; } catch (e) { toast(`${t.title}: ${e.message}`, 'error'); break; } } if (n) toast(n === 1 ? 'Uploaded to your homeserver (private)' : `${n} tracks uploaded to your homeserver (private)`); } }] : []),
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
       { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
@@ -558,6 +561,8 @@
     await loadFavourites();
     toast(on ? 'Added to favourites' : 'Removed from favourites');
   };
+  // Whether the node holds a Pubky session (menus offer homeserver uploads then).
+  const pubkyUser = async () => { if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   const albumsAll = async () => {
     if (!state.albums) {
       const [albums, formats] = await Promise.all([api('GET', '/library/albums?limit=1000'), api('GET', '/library/albums/formats').catch(() => [])]);
@@ -907,7 +912,7 @@
               <div class="card"><h3>Node</h3><dl class="kv"><dt>Name</dt><dd>${esc(info.name)}</dd><dt>Version</dt><dd>${esc(info.version)}</dd><dt>Library</dt><dd>${info.library.tracks} tracks · ${info.library.albums} albums · ${info.library.artists} artists</dd><dt>Files</dt><dd>${info.library.files}${info.library.missing_files ? ` · <span style="color:var(--warn)">${info.library.missing_files} missing</span>` : ''}</dd></dl>
                 <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><a class="btn" href="/v1/backup${tokenQ()}" download title="A snapshot of the library database: playlists, favourites, tags, history, settings. Restore with pm-node restore">${icon('download')} Download backup</a><button class="btn ghost" id="logout">Change token</button></div></div>
               <div class="card"><h3>Upstream contact</h3><p class="muted small">An email or URL sent in the node's User-Agent. Pinakes (Discover, On Pubky), MusicBrainz and Wikipedia ask for one.</p><div class="toolbar"><input class="input" id="contact" placeholder="you@example.org or https://your.site" value="${esc(ns.contact)}" style="width:280px"><button class="btn primary" id="contactsave">Save</button><span class="pill ${ns.discovery ? 'ok' : 'warn'}">${ns.discovery ? 'Discover on' : 'Discover off'}</span></div></div>
-              <div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p><div class="actions" style="margin-top:14px">${pk.user ? '' : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync">Sync with Pubky</button></div><div id="pkurl"></div>` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
+              <div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p><div class="actions" style="margin-top:14px">${pk.user ? '' : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync">Sync with Pubky</button>${pk.user ? `<button class="btn" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Mirror files to this node</button>` : ''}</div><div id="pkurl"></div>${pk.user ? `<div id="pkfiles" class="muted small" style="margin-top:12px">Loading homeserver files…</div>` : ''}` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
             </div>
             <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
               ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
@@ -932,6 +937,14 @@
           $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${r.removed_tracks} tracks gone`); render(); } catch (e) { toast(e.message, 'error'); } });
           $('#rescan').onclick = async () => { try { await api('POST', '/outputs/rescan'); toast('Outputs rescanned'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#logout').onclick = () => login();
+          const pkf = $('#pkfiles'); if (pkf) {
+            try {
+              const files = await api('GET', '/pubky/files');
+              const total = files.reduce((n, f) => n + (f.size || 0), 0);
+              pkf.innerHTML = files.length ? `<div class="eyebrow">Private files on the homeserver · ${files.length} · ${(total / 1e6).toFixed(1)} MB</div><div class="list compact">${files.slice(0, 50).map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.path.split('/').pop())}</div></div><span class="muted small">${f.size != null ? (f.size / 1e6).toFixed(1) + ' MB' : ''}</span></div>`).join('')}${files.length > 50 ? `<div class="muted small">… and ${files.length - 50} more</div>` : ''}</div>` : '<span>No private files on the homeserver yet. Upload tracks from their ⋯ menu; audio only ever goes under /priv/.</span>';
+            } catch (e) { pkf.textContent = 'Homeserver files: ' + e.message; }
+          }
+          const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; try { const r = await api('POST', '/pubky/files/mirror'); toast(`Mirrored ${r.fetched} file${r.fetched === 1 ? '' : 's'} (${r.present} already here${r.errors.length ? `, ${r.errors.length} errors` : ''})`); } catch (e) { toast(e.message, 'error'); } mi.disabled = false; };
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}`); render(); } catch (e) { toast(e.message, 'error'); } };
           const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
             try {
