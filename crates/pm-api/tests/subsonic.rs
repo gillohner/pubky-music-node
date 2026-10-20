@@ -134,7 +134,10 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     // One zone on a null output for the jukebox calls.
     let out = std::sync::Arc::new(pm_zones::outputs::NullOutput::new());
     s.outputs.register(out.clone());
-    s.create_zone("Test zone", out);
+    let zone = s.create_zone("Test zone", out);
+    // The null output does not pace, so a short file ends at once; repeat-one
+    // keeps the current index where the jukebox put it.
+    zone.set_repeat(pm_zones::Repeat::One);
     let app = router(s.clone());
     let salt = "abc123";
     let mut h = Md5::new();
