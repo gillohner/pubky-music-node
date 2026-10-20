@@ -106,6 +106,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs/discovery", get(discovery_report))
         .route("/outputs/upnp", post(add_upnp_output))
         .route("/outputs/upnp/{address}", delete(remove_upnp_address))
+        .route("/outputs/endpoints", post(add_endpoint))
+        .route("/outputs/endpoints/{address}", delete(remove_endpoint))
         .route("/outputs/pull", post(create_pull))
         .route("/outputs/pull/{name}/stream.wav", get(pull_stream))
         .route("/zones", get(zones).post(create_zone))
@@ -509,6 +511,7 @@ async fn discovery_report(
         upnp_enabled: s.upnp,
         cast_enabled: s.cast,
         saved_addresses: s.upnp_addresses(),
+        saved_endpoints: s.endpoint_addresses(),
         node: s.name.clone(),
     }))
 }
@@ -552,6 +555,40 @@ async fn remove_upnp_address(
         return Err(ApiError::not_found(format!("{address} is not a saved address")));
     }
     Ok(Json(s.upnp_addresses()))
+}
+
+/// `POST /v1/outputs/endpoints {address}`: add a `pm-endpoint` (the desktop
+/// app registers its player this way) at `host:port`; its outputs become
+/// zones and the address is kept for the next start.
+async fn add_endpoint(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<AddEndpoint>,
+) -> ApiResult<Vec<OutputInfo>> {
+    let st = s.clone();
+    let address = body.address.clone();
+    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| {
+            let from = local_address().unwrap_or_else(|| "this node".into());
+            ApiError::bad_request(format!(
+                "cannot reach the endpoint at {}: {e} (asked from {} at {from})",
+                body.address, s.name
+            ))
+        })?;
+    tracing::info!(address = %body.address, outputs = outs.len(), "endpoint added by address");
+    Ok(Json(outs))
+}
+
+/// `DELETE /v1/outputs/endpoints/{address}`: forget it; its zones go too.
+async fn remove_endpoint(
+    State(s): State<Arc<NodeState>>,
+    Path(address): Path<String>,
+) -> ApiResult<Vec<String>> {
+    if !s.remove_endpoint_address(&address) {
+        return Err(ApiError::not_found(format!("{address} is not a saved endpoint")));
+    }
+    Ok(Json(s.endpoint_addresses()))
 }
 
 async fn rescan_outputs(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<OutputInfo>> {
@@ -2982,6 +3019,75 @@ mod tests {
     }
 
     /// A renderer on another subnet is added by its description URL, becomes
+    /// An endpoint added by address (the desktop app's player, a Pi on
+    /// another subnet) gets a zone per output, is remembered for the next
+    /// start, and leaves nothing behind when forgotten.
+    #[tokio::test]
+    async fn an_endpoint_can_be_added_by_address() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let ep = pm_endpoint::Endpoint::new("Gil's laptop", pm_endpoint::local_outputs());
+        std::thread::spawn(move || ep.serve(listener));
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, outs) = call(
+            &app,
+            "POST",
+            "/v1/outputs/endpoints",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{outs}");
+        let outs = outs.as_array().unwrap().clone();
+        assert!(!outs.is_empty());
+        assert!(outs.iter().all(|o| o["protocol"] == "net"), "{outs:?}");
+        assert!(outs[0]["name"].as_str().unwrap().starts_with("Gil's laptop · "));
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        assert!(
+            zones
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|z| z["output"] == outs[0]["id"]),
+            "{zones}"
+        );
+        let (_, rep) = call(&app, "GET", "/v1/outputs/discovery", None).await;
+        assert_eq!(rep["saved_endpoints"][0], address);
+        // Adding again (the app restarted) changes nothing.
+        let (st, again) = call(
+            &app,
+            "POST",
+            "/v1/outputs/endpoints",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(again.as_array().unwrap().len(), outs.len());
+        let (_, zones2) = call(&app, "GET", "/v1/zones", None).await;
+        assert_eq!(zones2.as_array().unwrap().len(), zones.as_array().unwrap().len());
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/outputs/endpoints",
+            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        let enc = address.replace(':', "%3A");
+        let (st, left) = call(&app, "DELETE", &format!("/v1/outputs/endpoints/{enc}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{left}");
+        assert!(left.as_array().unwrap().is_empty());
+        let (_, zones3) = call(&app, "GET", "/v1/zones", None).await;
+        assert!(zones3
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|z| z["output"] != outs[0]["id"]));
+        let (_, outs3) = call(&app, "GET", "/v1/outputs", None).await;
+        assert!(outs3.as_array().unwrap().iter().all(|o| o["protocol"] != "net"));
+    }
+
     /// an output and a zone, is remembered for the next start, and can be
     /// forgotten again.
     #[tokio::test]

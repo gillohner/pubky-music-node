@@ -132,6 +132,8 @@ pub struct NodeState {
 
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
+/// Endpoint addresses (`pm-endpoint`, the desktop app) added by hand.
+const ENDPOINT_ADDRESSES_KEY: &str = "outputs.endpoint_addresses";
 
 /// The public page of a Pubky identity, usable as an upstream contact.
 pub fn profile_url(z32: &str) -> String {
@@ -651,6 +653,97 @@ impl NodeState {
         new
     }
 
+    /// Endpoints (`pm-endpoint`, the desktop app's player) the owner added
+    /// by address; mDNS does not cross subnets and a laptop moves around.
+    pub fn endpoint_addresses(&self) -> Vec<String> {
+        let lib = self.library.lock().expect("library poisoned");
+        lib.get_setting(ENDPOINT_ADDRESSES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_endpoint_addresses(&self, addrs: &[String]) {
+        let lib = self.library.lock().expect("library poisoned");
+        let _ = lib.set_setting(
+            ENDPOINT_ADDRESSES_KEY,
+            &serde_json::to_string(addrs).expect("serializes"),
+        );
+    }
+
+    /// Connect to the endpoint at `addr` (`host:port`), give each of its
+    /// outputs a zone, and remember the address for the next start. The
+    /// outputs it already has keep their zones. Blocking.
+    pub fn add_endpoint_address(self: &Arc<Self>, addr: &str) -> Result<Vec<pm_zones::OutputInfo>, String> {
+        let addr = addr.trim().to_string();
+        if addr.is_empty() {
+            return Err("address is required".into());
+        }
+        let outs = pm_out_net::NetOutput::connect(addr.as_str()).map_err(|e| e.to_string())?;
+        let mut saved = self.endpoint_addresses();
+        if !saved.contains(&addr) {
+            saved.push(addr.clone());
+            self.save_endpoint_addresses(&saved);
+        }
+        let mut infos = Vec::new();
+        for o in outs {
+            let out: Arc<dyn Output> = Arc::new(o);
+            let id = out.id();
+            if self.outputs.get(&id).is_none() {
+                tracing::info!(endpoint = %addr, output = %id, "endpoint output");
+                let name = out.name();
+                self.outputs.register(out.clone());
+                self.create_zone(&name, out.clone());
+            }
+            infos.push(out.info());
+        }
+        Ok(infos)
+    }
+
+    /// Forget a saved endpoint address. Its outputs and zones go away too,
+    /// so an app that moved to another address leaves nothing behind.
+    pub fn remove_endpoint_address(self: &Arc<Self>, addr: &str) -> bool {
+        let addr = addr.trim();
+        let mut saved = self.endpoint_addresses();
+        let before = saved.len();
+        saved.retain(|a| a != addr);
+        if saved.len() != before {
+            self.save_endpoint_addresses(&saved);
+        }
+        let prefix = format!("net:{addr}/");
+        let gone: Vec<OutputId> = self
+            .outputs
+            .list()
+            .into_iter()
+            .map(|o| o.id)
+            .filter(|id| id.0.starts_with(&prefix))
+            .collect();
+        for id in &gone {
+            for z in self.zones.list() {
+                if z.output == *id {
+                    self.remove_zone(&z.id);
+                }
+            }
+            self.outputs.remove(id);
+        }
+        saved.len() != before || !gone.is_empty()
+    }
+
+    /// Re-add the saved endpoint addresses at start and on rescan. Blocking.
+    pub fn restore_endpoint_addresses(self: &Arc<Self>) -> Vec<OutputId> {
+        let mut new = Vec::new();
+        for addr in self.endpoint_addresses() {
+            let before: std::collections::HashSet<OutputId> =
+                self.outputs.list().into_iter().map(|o| o.id).collect();
+            match self.add_endpoint_address(&addr) {
+                Ok(outs) => new.extend(outs.into_iter().map(|o| o.id).filter(|id| !before.contains(id))),
+                Err(e) => tracing::info!(%addr, "saved endpoint is not reachable now: {e}"),
+            }
+        }
+        new
+    }
+
     /// mDNS discovery of Cast devices; each becomes an output playing
     /// through its own pull stream. Blocking; call from `spawn_blocking`.
     pub fn discover_cast(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
@@ -691,6 +784,7 @@ impl NodeState {
     pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
         new.extend(self.restore_upnp_addresses());
+        new.extend(self.restore_endpoint_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;

@@ -498,6 +498,9 @@ pub struct DiscoveryReport {
     /// Renderer addresses added by hand (`POST /v1/outputs/upnp`).
     #[serde(default)]
     pub saved_addresses: Vec<String>,
+    /// Endpoint addresses added by hand (`POST /v1/outputs/endpoints`).
+    #[serde(default)]
+    pub saved_endpoints: Vec<String>,
     /// Which node scanned (people run more than one).
     #[serde(default)]
     pub node: String,
@@ -506,6 +509,13 @@ pub struct DiscoveryReport {
 /// `POST /v1/outputs/upnp`: a renderer by IP, `ip:port` or description URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddRenderer {
+    pub address: String,
+}
+
+/// `POST /v1/outputs/endpoints`: a `pm-endpoint` (or the desktop app's
+/// player) by `host:port`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddEndpoint {
     pub address: String,
 }
 

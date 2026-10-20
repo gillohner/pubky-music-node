@@ -26,16 +26,7 @@ struct Cli {
 }
 
 fn default_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|h| !h.is_empty())
-        })
-        .unwrap_or_else(|| "Pubky Music endpoint".into())
+    pm_endpoint::machine_name()
 }
 
 fn main() -> anyhow::Result<()> {

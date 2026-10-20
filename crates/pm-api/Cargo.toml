@@ -18,6 +18,7 @@ pm-pubky = { workspace = true }
 pm-out-upnp = { workspace = true }
 pm-out-slimproto = { workspace = true }
 pm-out-cast = { workspace = true }
+pm-out-net = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
 anyhow = { workspace = true }
@@ -43,6 +44,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+pm-endpoint = { workspace = true }
 id3 = { workspace = true }
 hound = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

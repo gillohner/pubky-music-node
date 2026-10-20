@@ -2,7 +2,12 @@
 //! same UI on every platform), with the connection made by Pubky Ring. On
 //! first start it shows a connect page; approving in Ring lets the app find
 //! the node's address and token through the owner's homeserver, store them,
-//! and open the UI. Local playback uses the UI's "This browser" zone.
+//! and open the UI.
+//!
+//! The app is also a player: it serves this machine's DACs to the node as
+//! a `pm-endpoint` (bit-perfect ALSA `hw:` on Linux, the system output
+//! elsewhere) and registers its address with the node, so "<this machine> ·
+//! <DAC>" is an ordinary zone in the UI, driven by the node like any other.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,6 +20,9 @@ use wry::WebViewBuilder;
 struct Settings {
     node_url: String,
     token: String,
+    /// The `host:port` this machine's player was last registered under.
+    #[serde(default)]
+    player_address: String,
 }
 
 fn settings_path() -> PathBuf {
@@ -52,6 +60,8 @@ enum UserEvent {
     RingUrl(String),
     /// The node was found (or given): open its UI.
     Connected(Settings),
+    /// The player's address at the node changed; remember it.
+    PlayerRegistered(Settings),
     Failed(String),
 }
 
@@ -92,14 +102,24 @@ fn main() -> anyhow::Result<()> {
         token: std::env::var("PM_TOKEN").unwrap_or_default(),
     });
     let settings = settings.or_else(load_settings);
+    let player_port = start_player();
+    if let Some(s) = settings.clone() {
+        let proxy = proxy.clone();
+        rt.spawn(async move {
+            let s = register_player(s, player_port).await;
+            let _ = proxy.send_event(UserEvent::PlayerRegistered(s));
+        });
+    }
 
     let ipc_proxy = proxy.clone();
     let rt_handle = rt.handle().clone();
     let mut builder = WebViewBuilder::new().with_ipc_handler(move |req: wry::http::Request<String>| {
-        handle_ipc(req.body(), &ipc_proxy, &rt_handle);
+        handle_ipc(req.body(), &ipc_proxy, &rt_handle, player_port);
     });
     builder = match &settings {
-        Some(s) => builder.with_initialization_script(&init_script(s)).with_url(ui_url(&s.node_url)),
+        Some(s) => builder
+            .with_initialization_script(&init_script(s))
+            .with_url(ui_url(&s.node_url)),
         None => builder.with_html(CONNECT_PAGE),
     };
     #[cfg(not(target_os = "linux"))]
@@ -108,7 +128,9 @@ fn main() -> anyhow::Result<()> {
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().ok_or_else(|| anyhow::anyhow!("no gtk box"))?;
+        let vbox = window
+            .default_vbox()
+            .ok_or_else(|| anyhow::anyhow!("no gtk box"))?;
         builder.build_gtk(vbox)?
     };
 
@@ -120,7 +142,10 @@ fn main() -> anyhow::Result<()> {
                 ..
             } => *control_flow = ControlFlow::Exit,
             Event::UserEvent(UserEvent::RingUrl(url)) => {
-                let js = format!("window.pmRingUrl && window.pmRingUrl({});", serde_json::to_string(&url).unwrap_or_default());
+                let js = format!(
+                    "window.pmRingUrl && window.pmRingUrl({});",
+                    serde_json::to_string(&url).unwrap_or_default()
+                );
                 let _ = webview.evaluate_script(&js);
             }
             Event::UserEvent(UserEvent::Connected(s)) => {
@@ -133,8 +158,16 @@ fn main() -> anyhow::Result<()> {
                 // for this session pass it in the URL, which the UI accepts.
                 let _ = webview.load_url(&format!("{}?token={}", ui_url(&s.node_url), s.token));
             }
+            Event::UserEvent(UserEvent::PlayerRegistered(s)) => {
+                if let Err(e) = save_settings(&s) {
+                    tracing::warn!("cannot save desktop settings: {e}");
+                }
+            }
             Event::UserEvent(UserEvent::Failed(e)) => {
-                let js = format!("window.pmFailed && window.pmFailed({});", serde_json::to_string(&e).unwrap_or_default());
+                let js = format!(
+                    "window.pmFailed && window.pmFailed({});",
+                    serde_json::to_string(&e).unwrap_or_default()
+                );
                 let _ = webview.evaluate_script(&js);
             }
             _ => {}
@@ -155,21 +188,38 @@ enum Ipc {
     Manual { node_url: String, token: String },
 }
 
-fn handle_ipc(body: &str, proxy: &EventLoopProxy<UserEvent>, rt: &tokio::runtime::Handle) {
+fn handle_ipc(
+    body: &str,
+    proxy: &EventLoopProxy<UserEvent>,
+    rt: &tokio::runtime::Handle,
+    player_port: Option<u16>,
+) {
     let Ok(msg) = serde_json::from_str::<Ipc>(body) else {
         tracing::warn!(%body, "unknown ipc message");
         return;
     };
     match msg {
         Ipc::Manual { node_url, token } => {
-            let _ = proxy.send_event(UserEvent::Connected(Settings { node_url, token }));
+            let s = Settings {
+                node_url,
+                token,
+                player_address: String::new(),
+            };
+            let _ = proxy.send_event(UserEvent::Connected(s.clone()));
+            let proxy = proxy.clone();
+            rt.spawn(async move {
+                let s = register_player(s, player_port).await;
+                let _ = proxy.send_event(UserEvent::PlayerRegistered(s));
+            });
         }
         Ipc::Ring => {
             let proxy = proxy.clone();
             rt.spawn(async move {
                 match ring_connect(&proxy).await {
                     Ok(s) => {
-                        let _ = proxy.send_event(UserEvent::Connected(s));
+                        let _ = proxy.send_event(UserEvent::Connected(s.clone()));
+                        let s = register_player(s, player_port).await;
+                        let _ = proxy.send_event(UserEvent::PlayerRegistered(s));
                     }
                     Err(e) => {
                         let _ = proxy.send_event(UserEvent::Failed(e.to_string()));
@@ -187,12 +237,85 @@ async fn ring_connect(proxy: &EventLoopProxy<UserEvent>) -> anyhow::Result<Setti
     let flow = hs.start_login_with("pubky-music-desktop", "/priv/pubky.music/:r")?;
     let _ = proxy.send_event(UserEvent::RingUrl(flow.url().to_string()));
     let session = flow.await_approval().await?;
-    let record = hs
-        .read_node_record(&session)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("this identity has no node yet: sign the node in once on its web page (Settings → Pubky)"))?;
+    let record = hs.read_node_record(&session).await?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "this identity has no node yet: sign the node in once on its web page (Settings → Pubky)"
+        )
+    })?;
     Ok(Settings {
         node_url: record.api_url,
         token: record.token,
+        player_address: String::new(),
     })
+}
+
+/// Serve this machine's outputs over the `pm-stream` protocol on the usual
+/// endpoint port (another when it is taken). `None` when nothing can be
+/// bound; the UI's "This browser" zone still plays then.
+fn start_player() -> Option<u16> {
+    let outputs = pm_endpoint::local_outputs();
+    let listener = std::net::TcpListener::bind(("0.0.0.0", pm_stream::DEFAULT_PORT))
+        .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))
+        .map_err(|e| tracing::warn!("no player: cannot listen: {e}"))
+        .ok()?;
+    let port = listener.local_addr().ok()?.port();
+    let name = pm_endpoint::machine_name();
+    tracing::info!(port, %name, outputs = outputs.len(), "player ready");
+    let endpoint = pm_endpoint::Endpoint::new(&name, outputs);
+    std::thread::Builder::new()
+        .name("pm-player".into())
+        .spawn(move || {
+            if let Err(e) = endpoint.serve(listener) {
+                tracing::warn!("player stopped: {e}");
+            }
+        })
+        .ok()?;
+    Some(port)
+}
+
+/// The address this machine has on the way to the node (the interface the
+/// node will connect back through).
+fn local_ip_towards(node_url: &str) -> Option<std::net::IpAddr> {
+    let u = url::Url::parse(node_url).ok()?;
+    let host = u.host_str()?;
+    let port = u.port_or_known_default().unwrap_or(80);
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // UDP connect sends nothing; it only picks the route.
+    sock.connect((host, port))
+        .or_else(|_| sock.connect("1.1.1.1:53"))
+        .ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// Tell the node where this machine's player is; it becomes a zone per
+/// DAC. An old address from a previous network is forgotten first so the
+/// zone list does not fill with ghosts. Failures are logged, never fatal.
+async fn register_player(mut s: Settings, port: Option<u16>) -> Settings {
+    let Some(port) = port else { return s };
+    let Some(ip) = local_ip_towards(&s.node_url) else {
+        tracing::warn!("player not registered: no route to the node");
+        return s;
+    };
+    let address = format!("{ip}:{port}");
+    let client = match pm_client::NodeClient::new(&s.node_url, Some(s.token.clone())) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("player not registered: {e}");
+            return s;
+        }
+    };
+    if !s.player_address.is_empty() && s.player_address != address {
+        if let Err(e) = client.remove_endpoint(&s.player_address).await {
+            tracing::debug!(old = %s.player_address, "old player address: {e}");
+        }
+    }
+    match client.add_endpoint(&address).await {
+        Ok(outs) => {
+            tracing::info!(%address, outputs = outs.len(), "player registered with the node");
+            s.player_address = address;
+        }
+        Err(e) => tracing::warn!(%address, "player not registered (the node must reach this machine): {e}"),
+    }
+    s
 }

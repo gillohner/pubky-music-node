@@ -234,8 +234,9 @@ impl Endpoint {
     }
 }
 
-/// The outputs this machine offers: the null output always, ALSA devices
-/// with the `alsa` feature.
+/// The outputs this machine offers: the null output always, ALSA `hw:`
+/// devices with the `alsa` feature, the system's shared-mode outputs with
+/// `cpal`.
 pub fn local_outputs() -> OutputRegistry {
     let registry = OutputRegistry::new();
     registry.register(Arc::new(pm_zones::outputs::NullOutput::new()));
@@ -243,5 +244,24 @@ pub fn local_outputs() -> OutputRegistry {
     for out in pm_out_local::alsa::AlsaOutput::enumerate() {
         registry.register(Arc::new(out));
     }
+    #[cfg(feature = "cpal")]
+    for out in pm_out_local::cpal_out::CpalOutput::enumerate() {
+        registry.register(Arc::new(out));
+    }
     registry
+}
+
+/// This machine's name, for the node's output list: `$HOSTNAME`, then
+/// `/etc/hostname`, else a generic name.
+pub fn machine_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|h| !h.is_empty())
+        })
+        .unwrap_or_else(|| "Pubky Music endpoint".into())
 }

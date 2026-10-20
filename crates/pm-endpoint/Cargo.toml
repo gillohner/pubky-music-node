@@ -13,6 +13,8 @@ path = "src/main.rs"
 [features]
 default = []
 alsa = ["dep:pm-out-local", "pm-out-local/alsa"]
+# The operating system's shared-mode outputs (CoreAudio, WASAPI, ALSA default).
+cpal = ["dep:pm-out-local", "pm-out-local/cpal"]
 
 [dependencies]
 pm-model = { workspace = true }

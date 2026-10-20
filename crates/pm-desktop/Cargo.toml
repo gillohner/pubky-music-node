@@ -13,6 +13,7 @@ repository = "https://github.com/gillohner/pubky-music-node"
 [dependencies]
 pm-pubky = { path = "../pm-pubky" }
 pm-client = { path = "../pm-client" }
+pm-stream = { path = "../pm-stream" }
 tao = "0.30"
 wry = "0.47"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -22,3 +23,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+
+# The built-in player: bit-perfect ALSA `hw:` devices on Linux, the system
+# output elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+pm-endpoint = { path = "../pm-endpoint", features = ["alsa", "cpal"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }

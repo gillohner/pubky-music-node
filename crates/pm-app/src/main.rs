@@ -119,6 +119,9 @@ struct App {
     review_draft: Option<(String, Option<u8>, String)>,
     folders: Vec<(String, bool)>,
     folder_input: String,
+    /// Outputs this computer offers, enumerated when Settings opens (ALSA
+    /// probing every frame would knock on the DAC that is playing).
+    local_choices: Option<Vec<(String, String)>>,
     node_settings: Option<pm_api::types::NodeSettingsView>,
     contact_input: String,
     radio_query: String,
@@ -243,6 +246,7 @@ impl App {
             review_draft: None,
             folders: Vec::new(),
             folder_input: String::new(),
+            local_choices: None,
             node_settings: None,
             contact_input: String::new(),
             radio_query: String::new(),
@@ -312,7 +316,15 @@ impl App {
         }
     }
 
+    /// Connect with the saved address and token; with a session secret
+    /// (`PM_SESSION_SECRET`, for scripts) and no token, through the homeserver.
     fn connect(&mut self) {
+        if self.settings.token.trim().is_empty() && !self.settings.session_secret.trim().is_empty() {
+            self.backend.send(Cmd::ConnectViaPubky {
+                secret: self.settings.session_secret.trim().to_string(),
+            });
+            return;
+        }
         self.backend.send(Cmd::Connect {
             base: self.settings.node_url.clone(),
             token: self.settings.token.clone(),
@@ -1433,7 +1445,7 @@ impl App {
                             if ui.small_button("▶").clicked() {
                                 to_play = Some(p.track.clone());
                             }
-                            ui.label(&p.track.title);
+                            ui.add(egui::Label::new(&p.track.title).extend());
                             ui.weak(
                                 p.track
                                     .artists
@@ -1847,7 +1859,7 @@ impl App {
                                 play_from = Some(i);
                             }
                             ui.weak(t.track_no.map(|n| n.to_string()).unwrap_or_default());
-                            ui.label(&t.title);
+                            ui.add(egui::Label::new(&t.title).extend());
                             ui.horizontal(|ui| {
                                 ui.weak(t.duration_ms.map(fmt_duration).unwrap_or_default());
                                 ui.small(egui::RichText::new(&t.format).weak());
@@ -2482,7 +2494,7 @@ impl App {
                         }
                         ui.weak(no);
                         ui.vertical(|ui| {
-                            ui.label(&t.title);
+                            ui.add(egui::Label::new(&t.title).extend());
                             let by = t
                                 .artists
                                 .iter()
@@ -3038,7 +3050,7 @@ impl App {
                         match &d.tracks[i] {
                             Some(t) => {
                                 ui.vertical(|ui| {
-                                    ui.label(&t.title);
+                                    ui.add(egui::Label::new(&t.title).extend());
                                     let by = t
                                         .artists
                                         .iter()
@@ -3541,73 +3553,85 @@ impl App {
 
     fn settings_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Node");
-        egui::Grid::new("settings")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("URL");
-                ui.add(egui::TextEdit::singleline(&mut self.settings.node_url).desired_width(360.0));
-                ui.end_row();
-                ui.label("Token");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings.token)
-                        .password(true)
-                        .desired_width(360.0),
-                );
-                ui.end_row();
-                ui.label("Pubky session");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings.session_secret)
-                        .password(true)
-                        .hint_text("exported session secret; finds your node through your homeserver")
-                        .desired_width(360.0),
-                );
-                ui.end_row();
-            });
-        ui.horizontal(|ui| {
-            if ui
-                .add(theme::primary("Sign in with Pubky Ring"))
-                .on_hover_text(
-                    "Approve in Pubky Ring; the app finds your node and its token through your homeserver",
-                )
-                .clicked()
-            {
-                self.backend.send(Cmd::RingConnect);
-            }
-            if ui.button("Connect").clicked() {
-                self.connect();
-            }
-            let has_secret = !self.settings.session_secret.trim().is_empty();
-            if ui
-                .add_enabled(has_secret, egui::Button::new("Find my node via Pubky"))
-                .on_hover_text("Reads /priv/pubky.music/node.json from your homeserver")
-                .clicked()
-            {
-                self.backend.send(Cmd::ConnectViaPubky {
-                    secret: self.settings.session_secret.trim().to_string(),
+        match &self.conn {
+            Conn::Connected(info) => {
+                let (name, url) = (info.name.clone(), self.settings.node_url.clone());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Connected to {name}")).strong());
+                    ui.weak(url);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Scan library").clicked() {
+                        self.backend.send(Cmd::Scan);
+                    }
+                    if ui.button("Refresh").clicked() {
+                        self.backend.send(Cmd::Refresh);
+                    }
+                    if ui
+                        .button("Sync with Pubky")
+                        .on_hover_text("Playlists, favourites, tags and reviews; needs the node signed in")
+                        .clicked()
+                    {
+                        self.backend.send(Cmd::PubkySync);
+                    }
+                    if ui
+                        .button("Sign the node in")
+                        .on_hover_text("Shows a QR for Pubky Ring; needed once per node")
+                        .clicked()
+                    {
+                        self.backend.send(Cmd::PubkyLoginStart);
+                    }
                 });
             }
-            if ui.button("Scan library").clicked() {
-                self.backend.send(Cmd::Scan);
+            Conn::Connecting => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Connecting to {}…", self.settings.node_url));
+                });
             }
-            if ui.button("Refresh").clicked() {
-                self.backend.send(Cmd::Refresh);
+            Conn::Failed(_) => {
+                ui.label(
+                    "Sign in with Pubky Ring: the app finds your node and its token through your homeserver.",
+                );
+                if ui.add(theme::primary("Sign in with Pubky Ring")).clicked() {
+                    self.backend.send(Cmd::RingConnect);
+                }
             }
-            if ui
-                .button("Sync with Pubky")
-                .on_hover_text("Playlists, favourites, tags and reviews; needs a session on the node")
-                .clicked()
-            {
-                self.backend.send(Cmd::PubkySync);
-            }
-            if ui
-                .button("Sign in node with Pubky Ring")
-                .on_hover_text("Starts a sign-in on the node and shows the QR to scan")
-                .clicked()
-            {
-                self.backend.send(Cmd::PubkyLoginStart);
-            }
-        });
+        }
+        egui::CollapsingHeader::new("Connect by address")
+            .default_open(matches!(self.conn, Conn::Failed(_)) && !self.settings.node_url.is_empty())
+            .show(ui, |ui| {
+                egui::Grid::new("settings")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("URL");
+                        ui.add(egui::TextEdit::singleline(&mut self.settings.node_url).desired_width(360.0));
+                        ui.end_row();
+                        ui.label("Token");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings.token)
+                                .password(true)
+                                .desired_width(360.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Connect").clicked() {
+                        self.connect();
+                    }
+                    if matches!(self.conn, Conn::Connected(_))
+                        && ui
+                            .button("Sign in with Pubky Ring instead")
+                            .on_hover_text(
+                                "Replaces the address and token with what your homeserver's node record says",
+                            )
+                            .clicked()
+                    {
+                        self.backend.send(Cmd::RingConnect);
+                    }
+                });
+            });
         if let Conn::Failed(e) = &self.conn {
             ui.colored_label(theme::BAD, e);
         }
@@ -3756,7 +3780,10 @@ impl App {
         ui.heading("Zones");
         ui.horizontal(|ui| {
             ui.label("This computer plays through:");
-            let choices = local::available_outputs();
+            if self.local_choices.is_none() {
+                self.local_choices = Some(local::available_outputs());
+            }
+            let choices = self.local_choices.clone().unwrap_or_default();
             let mut pick = self.settings.local_output.clone();
             egui::ComboBox::from_id_salt("local-output")
                 .selected_text(if pick.is_empty() {
@@ -3781,6 +3808,13 @@ impl App {
                 if self.is_local() {
                     self.refresh_queue();
                 }
+            }
+            if ui
+                .small_button("Rescan")
+                .on_hover_text("Look for devices plugged in since")
+                .clicked()
+            {
+                self.local_choices = None;
             }
         });
         ui.small(

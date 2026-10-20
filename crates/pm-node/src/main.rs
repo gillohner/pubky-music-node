@@ -209,6 +209,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
         let found = tokio::task::spawn_blocking(move || {
             let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
             found.extend(st.restore_upnp_addresses());
+            found.extend(st.restore_endpoint_addresses());
             found
         })
         .await?;

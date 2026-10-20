@@ -21,6 +21,12 @@ A. API: `curl -H 'Authorization: Bearer <token>' localhost:7788/v1/info`; `/v1/o
    `alsa:hw:N,0` (KA17) and `null`; `/v1/zones` one zone per output; a cover at
    `/v1/library/albums/<id>/cover` for an album with embedded art.
 B. Native app: `PM_NODE=http://127.0.0.1:7788 PM_TOKEN=<token> ./target/release/pm-app`.
+   Desktop app (web UI in a window + built-in player): install WebKitGTK and ALSA headers
+   (Arch: `webkit2gtk-4.1 alsa-lib`; Debian: `libwebkit2gtk-4.1-dev libasound2-dev`), then
+   `cargo build --release --manifest-path crates/pm-desktop/Cargo.toml` and run
+   `./crates/pm-desktop/target/release/pm-desktop` (or `PM_NODE=… PM_TOKEN=… pm-desktop`).
+   Click "Sign in with Pubky Ring"; the UI opens and Zones shows "<hostname> · <DAC>".
+   The node must be able to reach this machine on TCP 7790 (same LAN or routed VLANs).
    Albums grid with covers, album page, search, queue. Select the KA17 zone, play an album:
    transport bar shows position moving, the signal path badge opens the chain and matches what
    `/proc/asound/cardN/pcm0p/sub0/hw_params` says. Pause/resume/seek/next/previous. Volume slider

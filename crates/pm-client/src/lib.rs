@@ -175,6 +175,29 @@ impl NodeClient {
             .await
     }
 
+    /// Add a `pm-endpoint` at `host:port` (the desktop app registers its
+    /// own player this way); returns its outputs.
+    pub async fn add_endpoint(&self, address: &str) -> Result<Vec<OutputInfo>> {
+        self.send(
+            reqwest::Method::POST,
+            "outputs/endpoints",
+            Some(&AddEndpoint {
+                address: address.to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// Forget an endpoint address; its zones go away.
+    pub async fn remove_endpoint(&self, address: &str) -> Result<Vec<String>> {
+        let enc = address
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(':', "%3A");
+        self.send::<Vec<String>, ()>(reqwest::Method::DELETE, &format!("outputs/endpoints/{enc}"), None)
+            .await
+    }
+
     // ---- zones ----
 
     pub async fn zones(&self) -> Result<Vec<ZoneState>> {
