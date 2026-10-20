@@ -1671,45 +1671,8 @@ pub(crate) async fn stream(
             (bytes, mime)
         }
     };
-    let total = bytes.len();
-    // Byte ranges: what browsers send when seeking or resuming.
-    let range = headers
-        .get(reqwest::header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("bytes="))
-        .and_then(|v| {
-            let (a, b) = v.split_once('-')?;
-            let start: usize = a.parse().ok()?;
-            let end: usize = if b.is_empty() {
-                total.saturating_sub(1)
-            } else {
-                b.parse().ok()?
-            };
-            (start < total && start <= end).then_some((start, end.min(total - 1)))
-        });
-    let mut resp = match range {
-        Some((start, end)) => (
-            StatusCode::PARTIAL_CONTENT,
-            [
-                (reqwest::header::CONTENT_TYPE.as_str(), mime.clone()),
-                (
-                    reqwest::header::CONTENT_RANGE.as_str(),
-                    format!("bytes {start}-{end}/{total}"),
-                ),
-            ],
-            axum::body::Body::from(bytes[start..=end].to_vec()),
-        )
-            .into_response(),
-        None => (
-            StatusCode::OK,
-            [(reqwest::header::CONTENT_TYPE.as_str(), mime.clone())],
-            axum::body::Body::from(bytes.as_ref().clone()),
-        )
-            .into_response(),
-    };
-    let h = resp.headers_mut();
-    h.insert("Accept-Ranges", axum::http::HeaderValue::from_static("bytes"));
-    h.insert(
+    let mut resp = crate::ranged_response(&headers, bytes.as_ref().clone(), &mime);
+    resp.headers_mut().insert(
         "Cache-Control",
         axum::http::HeaderValue::from_static("private, max-age=600"),
     );

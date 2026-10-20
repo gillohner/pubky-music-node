@@ -1029,7 +1029,53 @@ async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
 /// The track's audio file as stored, for a controller that plays locally
 /// (`pm-app`). Served only to authenticated callers of this node; never a
 /// public URL (constraint 2).
-async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+/// A whole body or the byte range a browser asked for (seeking, resuming),
+/// with `Accept-Ranges` so the browser knows seeking is possible.
+pub(crate) fn ranged_response(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -> Response {
+    let total = bytes.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| {
+            let (a, b) = v.split_once('-')?;
+            let start: usize = a.parse().ok()?;
+            let end: usize = if b.is_empty() {
+                total.saturating_sub(1)
+            } else {
+                b.parse().ok()?
+            };
+            (start < total && start <= end).then_some((start, end.min(total - 1)))
+        });
+    let mut resp = match range {
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, mime.to_string()),
+                (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+            ],
+            axum::body::Body::from(bytes[start..=end].to_vec()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime.to_string())],
+            axum::body::Body::from(bytes),
+        )
+            .into_response(),
+    };
+    resp.headers_mut().insert(
+        header::ACCEPT_RANGES,
+        axum::http::HeaderValue::from_static("bytes"),
+    );
+    resp
+}
+
+async fn track_file(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let t = s
         .library
         .lock()
@@ -1057,17 +1103,13 @@ async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Res
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("track-{id}"));
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("inline; filename=\"{}\"", name.replace('"', "")),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
+    let mut resp = ranged_response(&headers, bytes, mime);
+    if let Ok(v) =
+        axum::http::HeaderValue::from_str(&format!("inline; filename=\"{}\"", name.replace('"', "")))
+    {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(resp)
 }
 
 async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
@@ -2783,6 +2825,54 @@ mod tests {
         let (st, left) = call(&app, "DELETE", &format!("/v1/outputs/upnp/{enc}"), None).await;
         assert_eq!(st, StatusCode::OK, "{left}");
         assert_eq!(left.as_array().unwrap().len(), 0);
+    }
+
+    /// Browsers seek by asking for byte ranges; the library file endpoint
+    /// must answer 206 with Accept-Ranges or a seek restarts the track.
+    #[tokio::test]
+    async fn library_files_serve_byte_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        let id = tracks["tracks"][0]["id"].as_i64().unwrap();
+        let full = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/library/tracks/{id}/file"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.headers()["accept-ranges"], "bytes");
+        let total = full.into_body().collect().await.unwrap().to_bytes().len();
+        let part = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/library/tracks/{id}/file"))
+                    .header("range", "bytes=100-199")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(part.headers()["content-range"], format!("bytes 100-199/{total}"));
+        assert_eq!(part.into_body().collect().await.unwrap().to_bytes().len(), 100);
     }
 
     /// Behind a reverse proxy with no public_url, the TIDAL redirect URI is
