@@ -104,6 +104,11 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         1,
         None,
     );
+    std::fs::write(
+        music.join("01.lrc"),
+        "[00:01.00]Like the legend of the phoenix\n[00:05.50]All ends with beginnings\n",
+    )
+    .unwrap();
     let db = dir.path().join("lib.sqlite");
     let s = NodeState::new(
         NodeSettings {
@@ -301,6 +306,35 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let acts: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(acts.as_array().unwrap().len(), 1);
     assert_eq!(acts[0]["track"]["title"], "Get Lucky");
+
+    // Lyrics: structured (OpenSubsonic) and legacy plain text; none for untagged songs.
+    let r = call(&app, &format!("/rest/getLyricsBySongId?id={get_lucky}&{auth}")).await;
+    let sl = &r["lyricsList"]["structuredLyrics"][0];
+    assert_eq!(sl["synced"], true, "{r}");
+    assert_eq!(sl["displayTitle"], "Get Lucky");
+    assert_eq!(sl["line"][1]["start"], 5500);
+    assert_eq!(sl["line"][1]["value"], "All ends with beginnings");
+    let r = call(
+        &app,
+        &format!("/rest/getLyricsBySongId?id={instant_crush}&{auth}"),
+    )
+    .await;
+    assert!(r["lyricsList"]["structuredLyrics"].as_array().unwrap().is_empty());
+    let r = call(
+        &app,
+        &format!("/rest/getLyrics?artist=Daft%20Punk&title=Get%20Lucky&{auth}"),
+    )
+    .await;
+    assert_eq!(
+        r["lyrics"]["value"],
+        "Like the legend of the phoenix\nAll ends with beginnings"
+    );
+    let r = call(
+        &app,
+        &format!("/rest/getLyrics?artist=Nobody&title=Nothing&{auth}"),
+    )
+    .await;
+    assert!(r["lyrics"].as_object().unwrap().is_empty());
 
     // Unknown method and unknown song.
     let r = call(&app, &format!("/rest/getVideos?{auth}")).await;

@@ -107,6 +107,7 @@ Implemented: `ping`, `getLicense`, `getOpenSubsonicExtensions`, `getMusicFolders
 alphabetical, byYear), `getSong`, `getRandomSongs`, `search2/3`, `stream`/`download` (original
 file, `Range` supported, no transcoding), `getCoverArt`, `getPlaylists`, `getPlaylist`,
 `createPlaylist`, `updatePlaylist`, `deletePlaylist` (the same playlists as `/v1`, so tracks need a
-canonical identity), `scrobble` (private activity), `startScan`, `getScanStatus`, plus empty
-answers for stars, genres, lyrics and info calls. Ids: songs are track ids, albums `al-<id>`,
+canonical identity), `scrobble` (private activity), `startScan`, `getScanStatus`,
+`getLyrics` (plain text by artist and title) and `getLyricsBySongId` (OpenSubsonic `songLyrics`, timed lines when the source was), plus empty
+answers for info calls. Ids: songs are track ids, albums `al-<id>`,
 artists `ar-<id>`, playlists `pl-<id>`.

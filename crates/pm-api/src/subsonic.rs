@@ -890,11 +890,62 @@ async fn dispatch(
             }
             m.insert("nowPlaying".into(), json!({"entry": entries}));
         }
+        // Legacy lyrics by artist + title: plain text, timestamps stripped.
         "getLyrics" => {
-            m.insert("lyrics".into(), json!({}));
+            let lib = s.library.lock().expect("library poisoned");
+            let title = p.get("title").cloned().unwrap_or_default();
+            let artist = p.get("artist").cloned().filter(|a| !a.is_empty());
+            let found = lib
+                .find_by_title_artist(&title, artist.as_deref())
+                .map_err(|e| SubErr::new(0, e.to_string()))?
+                .and_then(|t| t.id.map(|id| (id, t)));
+            let mut out = Map::new();
+            if let Some((id, t)) = found {
+                if let Some((text, _)) = lib.lyrics(id).map_err(|e| SubErr::new(0, e.to_string()))? {
+                    let (lines, _) = pm_library::lyrics::parse(&text);
+                    let plain: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+                    out.insert(
+                        "artist".into(),
+                        json!(t.artists.first().map(|a| a.name.clone()).unwrap_or_default()),
+                    );
+                    out.insert("title".into(), json!(t.title));
+                    out.insert("value".into(), json!(plain.join("\n")));
+                }
+            }
+            m.insert("lyrics".into(), Value::Object(out));
         }
+        // OpenSubsonic `songLyrics`: structured, timed when the source was.
         "getLyricsBySongId" => {
-            m.insert("lyricsList".into(), json!({"structuredLyrics": []}));
+            let id = want(p, "id")?;
+            let tid = parse_id(&id, "").ok_or_else(|| SubErr::new(70, "unknown song"))?;
+            let lib = s.library.lock().expect("library poisoned");
+            let track = lib
+                .get_track(TrackId(tid))
+                .map_err(|e| SubErr::new(0, e.to_string()))?
+                .ok_or_else(|| SubErr::new(70, "unknown song"))?;
+            let mut list = Vec::new();
+            if let Some((text, _)) = lib
+                .lyrics(TrackId(tid))
+                .map_err(|e| SubErr::new(0, e.to_string()))?
+            {
+                let (lines, synced) = pm_library::lyrics::parse(&text);
+                let line: Vec<Value> = lines
+                    .iter()
+                    .map(|l| match l.ms {
+                        Some(ms) if synced => json!({"start": ms, "value": l.text}),
+                        _ => json!({"value": l.text}),
+                    })
+                    .collect();
+                list.push(json!({
+                    "displayArtist": track.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+                    "displayTitle": track.title,
+                    "lang": "xxx",
+                    "offset": 0,
+                    "synced": synced,
+                    "line": line,
+                }));
+            }
+            m.insert("lyricsList".into(), json!({"structuredLyrics": list}));
         }
         "getPlaylists" => {
             let lib = s.library.lock().expect("library poisoned");
