@@ -56,6 +56,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w.document.querySelector('#zonebtn').click(); await sleep(100);
   console.log('zones in popover:', [...w.document.querySelectorAll('#zonepop .pop-item .name')].map((e) => e.textContent).join(', '));
   w.document.querySelector('#scrim').click();
+  // DSP editor on the first node zone: open, add a band, save, close.
+  w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(900);
+  const dspBtn = w.document.querySelector('[data-dsp]');
+  if (dspBtn) {
+    dspBtn.click(); await sleep(900);
+    const editor = w.document.querySelector('#d-save');
+    console.log('dsp editor open:', !!editor, '| eq rows:', w.document.querySelectorAll('#eq .eq-row').length);
+    if (editor) {
+      w.document.querySelector('#eq-add').click();
+      w.document.querySelector('#d-headroom').value = '-3';
+      w.document.querySelector('#d-save').click(); await sleep(700);
+      const cfg = await (await fetch(BASE + '/v1/zones/' + encodeURIComponent(dspBtn.dataset.dsp) + '/dsp', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
+      console.log('dsp saved: headroom', cfg.headroom_db, '| bands', cfg.eq.length);
+      w.document.querySelector('#d-reset').click(); await sleep(700);
+      const cfg2 = await (await fetch(BASE + '/v1/zones/' + encodeURIComponent(dspBtn.dataset.dsp) + '/dsp', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
+      console.log('dsp reset: headroom', cfg2.headroom_db, '| bands', cfg2.eq.length);
+      if (cfg.headroom_db !== -3 || cfg.eq.length !== 1 || cfg2.eq.length !== 0) errors.push('dsp editor round trip failed');
+    } else errors.push('dsp editor did not open');
+  }
   // heart on first track row (fixtures have no ids → disabled)
   const h = w.document.querySelector('.track .heart'); console.log('heart disabled (no ids):', h && h.disabled);
   console.log('errors:', errors.length ? errors : 'none');
