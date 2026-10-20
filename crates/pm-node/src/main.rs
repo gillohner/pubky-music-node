@@ -58,6 +58,9 @@ enum Cmd {
     },
     /// Scan folders into the library (configured folders when none given).
     Scan { folders: Vec<PathBuf> },
+    /// Sign in with Pubky Ring: prints a URL and QR code, waits for approval,
+    /// stores the session secret for `serve`, `upload` and sync.
+    Login,
     /// Upload audio files to the user's private homeserver storage
     /// (`pubky.session_secret_file` must be set).
     Upload {
@@ -162,6 +165,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             },
             upnp: cfg.outputs.upnp,
             slimproto_port: cfg.outputs.slimproto_port,
+            session_secret_path: Some(session_secret_path(cfg)),
         },
         lib,
         registry,
@@ -196,7 +200,9 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             cfg.library.watch_quiet_secs.max(1),
         ));
     }
-    if let Some(file) = &cfg.pubky.session_secret_file {
+    let secret_file = session_secret_path(cfg);
+    if secret_file.exists() {
+        let file = &secret_file;
         match std::fs::read_to_string(file) {
             Ok(secret) => match pm_api::sync::PubkySync::connect(cfg.pubky.network, &secret).await {
                 Ok(sync) => {
@@ -222,13 +228,61 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     pm_api::serve(state, &cfg.api.listen).await
 }
 
-async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
-    let file = cfg
-        .pubky
+fn session_secret_path(cfg: &NodeConfig) -> PathBuf {
+    cfg.pubky
         .session_secret_file
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("set `pubky.session_secret_file` in the node config"))?;
-    let secret = std::fs::read_to_string(file)?;
+        .clone()
+        .unwrap_or_else(|| cfg.data_dir.join("pubky-session.secret"))
+}
+
+async fn login(cfg: &NodeConfig) -> anyhow::Result<()> {
+    let hs = pm_pubky::homeserver::NodeHomeserver::new(cfg.pubky.network)?;
+    let flow = hs.start_login("pubky-music-node")?;
+    println!("Open Pubky Ring and scan this code, or paste the URL:\n");
+    if let Ok(code) = qrcode::QrCode::new(flow.url().as_bytes()) {
+        let text = code
+            .render::<qrcode::render::unicode::Dense1x2>()
+            .dark_color(qrcode::render::unicode::Dense1x2::Light)
+            .light_color(qrcode::render::unicode::Dense1x2::Dark)
+            .build();
+        println!("{text}\n");
+    }
+    println!("{}\n", flow.url());
+    println!("waiting for approval…");
+    let session = flow.await_approval().await?;
+    let z32 = session.public_key().to_string();
+    let secret = pm_pubky::homeserver::export_session_secret(&session)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("the session cannot be exported; sign in again"))?;
+    let path = session_secret_path(cfg);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &secret)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    println!("signed in as {z32}");
+    println!("session secret stored in {}", path.display());
+    if cfg.pubky.session_secret_file.is_none() {
+        println!(
+            "add to the config:\n  [pubky]\n  session_secret_file = \"{}\"",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
+    let file = session_secret_path(cfg);
+    let secret = std::fs::read_to_string(&file).map_err(|e| {
+        anyhow::anyhow!(
+            "no session secret at {} ({e}); run `pm-node login`",
+            file.display()
+        )
+    })?;
     let sync = pm_api::sync::PubkySync::connect(cfg.pubky.network, &secret).await?;
     println!("signed in as {}", sync.z32());
     for f in files {
@@ -291,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Scan { folders } => library::scan(&cfg, &folders)?,
         Cmd::Upload { files } => upload(&cfg, &files).await?,
+        Cmd::Login => login(&cfg).await?,
         Cmd::Stats => library::stats(&cfg)?,
         Cmd::Tracks { limit } => library::tracks(&cfg, limit)?,
         Cmd::Search { query, limit } => library::search(&cfg, &query, limit)?,

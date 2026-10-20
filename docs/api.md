@@ -48,6 +48,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |
 | GET | `/v1/pubky` | | `{user, unsynced}` |
+| POST / GET | `/v1/pubky/login` | | POST starts a Pubky Ring sign-in and returns `{url}` (`pubkyauth://…`); GET polls `{status: none\|pending\|signed_in, user?, url?}`. On approval the node stores the session secret, publishes its record and syncs |
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
 | GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |
 | POST | `/v1/pubky/files/mirror` | | download missing files into the node's mirror folder and scan it: `{fetched, present, bytes, errors}` |

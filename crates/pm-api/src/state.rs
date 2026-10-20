@@ -35,6 +35,8 @@ pub struct NodeSettings {
     pub upnp: bool,
     /// Accept Squeezebox / squeezelite players (Slimproto) on this TCP port; 0 = off.
     pub slimproto_port: u16,
+    /// Where a Pubky Ring sign-in stores the session secret (also read at start).
+    pub session_secret_path: Option<PathBuf>,
 }
 
 pub struct NodeState {
@@ -54,7 +56,11 @@ pub struct NodeState {
     pub public_url: String,
     pub upnp: bool,
     pub slimproto_port: u16,
+    pub session_secret_path: Option<PathBuf>,
+    pub pubky: pm_pubky::PmPubkyConfig,
     pub discovery: Option<Arc<pm_pubky::Discovery>>,
+    /// A sign-in in progress (POST /v1/pubky/login).
+    pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: broadcast::Sender<ApiEvent>,
@@ -101,7 +107,10 @@ impl NodeState {
             public_url: settings.public_url,
             upnp: settings.upnp,
             slimproto_port: settings.slimproto_port,
+            session_secret_path: settings.session_secret_path,
+            pubky: settings.pubky,
             discovery,
+            login: tokio::sync::Mutex::new(None),
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),

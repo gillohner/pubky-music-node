@@ -367,3 +367,19 @@ pub struct CreatePull {
     /// URL segment: `GET /v1/outputs/pull/{name}/stream.wav`.
     pub name: String,
 }
+
+// ---- Pubky Ring sign-in ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginStarted {
+    /// `pubkyauth://…` to scan or paste into Pubky Ring.
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginStatus {
+    /// `none`, `pending` or `signed_in`.
+    pub status: String,
+    pub user: Option<String>,
+    pub url: Option<String>,
+}

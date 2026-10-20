@@ -63,6 +63,7 @@ pm-node resolve https://open.spotify.com/track/<id>   # MusicBrainz URL relation
 pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001)
 pm-node discover trends                     # live Pinakes facets and music cards
 pm-node -c node.toml serve                  # API + zones; then: cargo run -p pm-app (PM_NODE, PM_TOKEN)
+pm-node -c node.toml login                  # sign in with Pubky Ring (QR), stores the session secret
 pm-node -c node.toml upload a.flac b.flac   # to the homeserver's private storage (needs a session)
 pm-endpoint --name "Kitchen Pi"            # on another machine; the node finds it over mDNS
 ```

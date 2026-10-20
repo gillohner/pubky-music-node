@@ -131,6 +131,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/friends/{viewer}", get(discover::friends))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
+        .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))
         .route("/pubky/files", get(files::list).post(files::upload))
         .route("/pubky/files/mirror", post(files::mirror))
         .route("/events", get(events_ws))
@@ -677,6 +678,93 @@ async fn pubky_status(State(s): State<Arc<NodeState>>) -> ApiResult<PubkyStatus>
     }))
 }
 
+/// Start a Pubky Ring sign-in: returns the `pubkyauth://` URL to scan or
+/// paste into Pubky Ring. Poll with GET until approved.
+async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginStarted> {
+    let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let flow = hs
+        .start_login("pubky-music-node")
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let url = flow.url().to_string();
+    *s.login.lock().await = Some(flow);
+    Ok(Json(LoginStarted { url }))
+}
+
+/// Poll the sign-in. When approved: the session is kept, its secret written
+/// to the configured file, the node record published, playlists synced.
+async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginStatus> {
+    if let Some(sync) = s.sync_handle() {
+        if s.login.lock().await.is_none() {
+            return Ok(Json(LoginStatus {
+                status: "signed_in".into(),
+                user: Some(sync.z32().to_string()),
+                url: None,
+            }));
+        }
+    }
+    let mut guard = s.login.lock().await;
+    let Some(flow) = guard.as_ref() else {
+        return Ok(Json(LoginStatus {
+            status: "none".into(),
+            user: None,
+            url: None,
+        }));
+    };
+    let url = flow.url().to_string();
+    match flow.poll().await {
+        Ok(None) => Ok(Json(LoginStatus {
+            status: "pending".into(),
+            user: None,
+            url: Some(url),
+        })),
+        Ok(Some(session)) => {
+            *guard = None;
+            drop(guard);
+            let secret = pm_pubky::homeserver::export_session_secret(&session).await;
+            if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(path, secret) {
+                    Ok(()) => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                        }
+                    }
+                    Err(e) => tracing::warn!(path = %path.display(), "cannot store the session secret: {e}"),
+                }
+            }
+            let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+                .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+            let sync = Arc::new(sync::PubkySync::from_session(hs, session));
+            let user = sync.z32().to_string();
+            s.set_sync(Some(sync.clone()));
+            if let Err(e) = sync
+                .publish_node(&s.name, &s.public_url, s.token.as_deref(), &s.version)
+                .await
+            {
+                tracing::warn!("publishing the node record failed: {e}");
+            }
+            if let Err(e) = sync.sync(&s.library).await {
+                tracing::warn!("first sync failed: {e}");
+            }
+            s.notify_library();
+            Ok(Json(LoginStatus {
+                status: "signed_in".into(),
+                user: Some(user),
+                url: None,
+            }))
+        }
+        Err(e) => {
+            *guard = None;
+            Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))
+        }
+    }
+}
+
 /// Push local changes to the private homeserver folder and pull what is missing.
 async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
     let Some(sync) = s.sync_handle() else {
@@ -795,6 +883,7 @@ mod tests {
                 public_url: "http://127.0.0.1:7788".into(),
                 upnp: false,
                 slimproto_port: 0,
+                session_secret_path: None,
             },
             lib,
             outputs,

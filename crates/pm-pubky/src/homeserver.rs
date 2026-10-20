@@ -355,3 +355,57 @@ impl RemoteFile {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 }
+
+/// Sign-in through Pubky Ring (M9): start a grant auth flow, show the URL
+/// (or a QR of it) to the user, await approval, keep the exported secret.
+pub struct LoginFlow {
+    flow: pubky::PubkyGrantAuthFlow,
+    url: String,
+}
+
+/// What the node asks for: its own private folders and pubky.app posts/tags.
+pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw";
+
+impl NodeHomeserver {
+    pub fn start_login(&self, client_id: &str) -> Result<LoginFlow, HomeserverError> {
+        let caps = LOGIN_CAPABILITIES
+            .parse::<pubky::Capabilities>()
+            .map_err(|e| HomeserverError::Transport(e.to_string()))?;
+        let client_id =
+            pubky::ClientId::new(client_id).map_err(|e| HomeserverError::Transport(e.to_string()))?;
+        let flow = self
+            .pubky
+            .start_grant_auth_flow(&caps, pubky::AuthFlowKind::signin(), client_id)?;
+        let url = flow.authorization_url().to_string();
+        Ok(LoginFlow { flow, url })
+    }
+}
+
+impl LoginFlow {
+    /// The `pubkyauth://` URL for Pubky Ring (scan or paste).
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// One poll: `Ok(None)` while the user has not approved yet.
+    pub async fn poll(&self) -> Result<Option<PubkySession>, HomeserverError> {
+        Ok(self.flow.try_poll_once().await?)
+    }
+
+    /// Block until approved.
+    pub async fn await_approval(self) -> Result<PubkySession, HomeserverError> {
+        Ok(self.flow.await_approval().await?)
+    }
+}
+
+/// The restorable secret of a session (grant or legacy cookie), for
+/// `pubky.session_secret_file`.
+#[allow(deprecated)]
+pub async fn export_session_secret(session: &PubkySession) -> Option<String> {
+    if let Some(g) = session.as_grant() {
+        if let Some(s) = g.export_local_secret().await {
+            return Some(s);
+        }
+    }
+    session.as_cookie().and_then(|c| c.export_secret())
+}
