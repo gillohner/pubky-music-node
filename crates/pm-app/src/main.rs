@@ -125,6 +125,8 @@ struct App {
     last_local_play: Option<(u64, String)>,
     /// Where to return from the Now Playing screen.
     prev_view: Option<View>,
+    /// An album whose tracks were requested in order to play it.
+    pending_play_album: Option<i64>,
     album_tracks: HashMap<i64, Vec<Track>>,
     tracks: Vec<Track>,
     search: String,
@@ -206,6 +208,7 @@ impl App {
             known_tracks: HashMap::new(),
             last_local_play: None,
             prev_view: None,
+            pending_play_album: None,
             album_tracks: HashMap::new(),
             tracks: Vec::new(),
             search: String::new(),
@@ -319,7 +322,15 @@ impl App {
                 }
                 Msg::AlbumTracks(id, t) => {
                     self.remember_tracks(t.iter());
-                    self.album_tracks.insert(id, t);
+                    self.album_tracks.insert(id, t.clone());
+                    if self.pending_play_album == Some(id) {
+                        self.pending_play_album = None;
+                        self.play_tracks(&t, true, QueueAt::End);
+                    }
+                }
+                Msg::ArtistTracks(t) => {
+                    self.remember_tracks(t.iter());
+                    self.play_tracks(&t, true, QueueAt::End);
                 }
                 Msg::Tracks(t) => {
                     self.remember_tracks(t.iter());
@@ -562,6 +573,16 @@ impl App {
 
     fn close_now_playing(&mut self) {
         self.view = self.prev_view.take().unwrap_or(View::Home);
+    }
+
+    /// Play a whole album: at once when its tracks are known, else after they load.
+    fn play_album(&mut self, id: i64) {
+        if let Some(tracks) = self.album_tracks.get(&id).cloned() {
+            self.play_tracks(&tracks, true, QueueAt::End);
+        } else {
+            self.pending_play_album = Some(id);
+            self.backend.send(Cmd::LoadAlbumTracks(id));
+        }
     }
 
     fn open_album(&mut self, id: i64) {
@@ -1167,6 +1188,7 @@ impl App {
             }
         });
         let mut clicked = None;
+        let mut play_album: Option<i64> = None;
         egui::ScrollArea::horizontal()
             .id_salt(title)
             .auto_shrink([false, true])
@@ -1174,7 +1196,10 @@ impl App {
                 ui.horizontal(|ui| {
                     for a in albums {
                         let tex = self.cover(a.id);
-                        if album_tile(ui, a, 148.0, tex.as_ref()).clicked() {
+                        let (resp, play) = album_tile(ui, a, 148.0, tex.as_ref());
+                        if play {
+                            play_album = a.id;
+                        } else if resp.clicked() {
                             clicked = a.id;
                         }
                     }
@@ -1182,6 +1207,9 @@ impl App {
             });
         if let Some(id) = clicked {
             self.open_album(id);
+        }
+        if let Some(id) = play_album {
+            self.play_album(id);
         }
     }
 
@@ -1555,11 +1583,15 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let cols = ((ui.available_width() + gap) / (tile + gap)).floor().max(1.0) as usize;
             let mut clicked = None;
+            let mut play_album: Option<i64> = None;
             for row in albums.chunks(cols) {
                 ui.horizontal(|ui| {
                     for a in row {
                         let tex = self.cover(a.id);
-                        if album_tile(ui, a, tile, tex.as_ref()).clicked() {
+                        let (resp, play) = album_tile(ui, a, tile, tex.as_ref());
+                        if play {
+                            play_album = a.id;
+                        } else if resp.clicked() {
                             clicked = a.id;
                         }
                     }
@@ -1568,6 +1600,9 @@ impl App {
             }
             if let Some(id) = clicked {
                 self.open_album(id);
+            }
+            if let Some(id) = play_album {
+                self.play_album(id);
             }
         });
     }
@@ -1857,6 +1892,9 @@ impl App {
                         d.artist.mbid.map(|mbid| pm_model::MusicUri::Artist { mbid }),
                         FavouriteRef::artist(id),
                     );
+                    if ui.add(theme::primary("▶  Play all")).clicked() {
+                        self.backend.send(Cmd::LoadArtistTracks(id));
+                    }
                 });
                 ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
                 if let Some((i, _)) = info.as_ref() {
@@ -1893,11 +1931,15 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let cols = ((ui.available_width() + gap) / (tile + gap)).floor().max(1.0) as usize;
             let mut clicked = None;
+            let mut play_album: Option<i64> = None;
             for row in d.albums.chunks(cols) {
                 ui.horizontal(|ui| {
                     for a in row {
                         let tex = self.cover(a.id);
-                        if album_tile(ui, a, tile, tex.as_ref()).clicked() {
+                        let (resp, play) = album_tile(ui, a, tile, tex.as_ref());
+                        if play {
+                            play_album = a.id;
+                        } else if resp.clicked() {
                             clicked = a.id;
                         }
                     }
@@ -3086,10 +3128,22 @@ fn signal_path_ui(ui: &mut egui::Ui, path: &SignalPath, zone: &ZoneState) {
         });
 }
 
-fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) -> egui::Response {
+/// An album tile: `(response, play_clicked)`. The play circle appears on
+/// hover in the art's corner and plays the album without opening it.
+fn album_tile(
+    ui: &mut egui::Ui,
+    a: &Album,
+    size: f32,
+    tex: Option<&egui::TextureHandle>,
+) -> (egui::Response, bool) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size + 44.0), egui::Sense::click());
     let art = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
-    let hovered = resp.hovered();
+    let play_rect = egui::Rect::from_min_size(
+        egui::pos2(art.max.x - 46.0, art.max.y - 46.0),
+        egui::vec2(38.0, 38.0),
+    );
+    let play_resp = ui.interact(play_rect, resp.id.with("play"), egui::Sense::click());
+    let hovered = resp.hovered() || play_resp.hovered();
     if hovered {
         // A soft lift: shadow under the art.
         ui.painter().rect_filled(
@@ -3130,7 +3184,33 @@ fn album_tile(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::Textur
         egui::FontId::proportional(12.0),
         theme::MUTED,
     );
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if hovered {
+        let c = play_rect.center();
+        p.circle_filled(
+            c,
+            19.0,
+            if play_resp.hovered() {
+                theme::ACCENT_STRONG
+            } else {
+                theme::ACCENT
+            },
+        );
+        let s = 7.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(c.x - s * 0.8 + 1.0, c.y - s),
+                egui::pos2(c.x + s * 1.1 + 1.0, c.y),
+                egui::pos2(c.x - s * 0.8 + 1.0, c.y + s),
+            ],
+            theme::ON_ACCENT,
+            egui::Stroke::NONE,
+        ));
+    }
+    let play = play_resp
+        .on_hover_text("Play album")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked();
+    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), play)
 }
 
 fn album_art(ui: &mut egui::Ui, a: &Album, size: f32, tex: Option<&egui::TextureHandle>) {

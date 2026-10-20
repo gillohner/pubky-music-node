@@ -120,6 +120,8 @@ pub enum Cmd {
     LoadCover(i64),
     LoadArtists,
     LoadArtist(i64),
+    /// All of an artist's tracks, to play them.
+    LoadArtistTracks(i64),
     LoadGenres,
     LoadGenre(i64),
     LoadArtistInfo(i64),
@@ -186,6 +188,7 @@ pub enum Msg {
     PubkyUser(Option<String>),
     Discovered(DiscoverKind, Box<DiscoverPage>),
     Artist(Box<ArtistDetail>),
+    ArtistTracks(Vec<Track>),
     Genres(Vec<pm_library::GenreSummary>),
     /// Info plus the decoded portrait (width, height, rgba) when there is one.
     ArtistInfo(i64, Box<ArtistInfo>, Option<(usize, usize, Vec<u8>)>),
@@ -630,6 +633,7 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadArtists => out.send(Msg::Artists(c.artists().await?)),
         Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),
+        Cmd::LoadArtistTracks(id) => out.send(Msg::ArtistTracks(c.artist_tracks(id).await?)),
         Cmd::LoadGenres => out.send(Msg::Genres(c.genres().await?)),
         Cmd::LoadArtistInfo(id) => {
             let info = c.artist_info(id).await?;
