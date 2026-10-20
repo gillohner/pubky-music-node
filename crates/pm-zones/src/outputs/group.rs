@@ -1,4 +1,4 @@
-//! A group of outputs playing the same stream (handoff §6.5, first cut).
+//! A group of outputs playing the same stream (handoff §6.5).
 //!
 //! [`GroupOutput`] presents several outputs as one: its caps are the
 //! intersection, so the pipeline negotiates a format every member takes
@@ -6,16 +6,25 @@
 //! the slowest member paces the zone through its blocking `write`, which
 //! keeps the members within one block of each other at the source side.
 //!
-//! What this does and does not do yet:
 //! * **Start alignment**: members with a smaller `fixed_latency_ms` get a
 //!   pre-roll of silence so the first sample becomes audible together.
 //! * **Drift monitoring**: each member's audible position (frames written
-//!   minus frames still queued) is compared with the leader's and reported
-//!   through [`AudioSink::members`]; the zone publishes it. Nothing is
-//!   resampled yet; drift correction (adaptive resampling shown in the
-//!   signal path) is the M8 stage this reporting feeds.
-//! * Members with no clock report (`ClockSource`) are treated as free
-//!   running; the group is honest about that in `sync`.
+//!   minus frames still queued, minus pre-roll and slips) is compared with
+//!   the leader's and reported through [`AudioSink::members`].
+//! * **Drift correction** (PCM only): a member whose clock runs ahead of
+//!   the leader's gets single frames duplicated at the end of a block, one
+//!   behind gets single frames dropped, at most one frame per
+//!   [`SLIP_DIVISOR`] frames (0.1 %) and only once the drift exceeds
+//!   [`DEADBAND_MS`]. Clock differences between consumer devices are a few
+//!   hundred ppm, so the slips stay rare; they are counted per member in
+//!   `slipped_frames` and the zone's signal path carries a `sync` stage for
+//!   grouped outputs so no bit-perfect claim is made. Adaptive resampling
+//!   would be the audibly cleaner correction; it is not built. DSD groups
+//!   are not corrected.
+//!
+//! The measurement trusts each member's `buffer_level` to reflect what its
+//! hardware has consumed; a sink that reports nothing queued (the null
+//! output) appears perfectly in time.
 
 use crate::sink::{check_block, AudioSink, BufferLevel, MemberStatus, Output, OutputId, SinkError};
 use async_trait::async_trait;
@@ -28,7 +37,15 @@ pub struct GroupOutput {
     name: String,
     members: Vec<Arc<dyn Output>>,
     caps: OutputCaps,
+    drift_correction: bool,
 }
+
+/// At most one slipped frame per this many frames written.
+pub const SLIP_DIVISOR: usize = 1000;
+/// No correction while the measured drift stays within this.
+pub const DEADBAND_MS: u64 = 2;
+/// Audio written before the first correction, so start-up buffer fills settle.
+const WARMUP_MS: u64 = 2000;
 
 impl GroupOutput {
     /// Group `members` (two or more); the first is the leader whose clock
@@ -47,7 +64,14 @@ impl GroupOutput {
             name: name.to_string(),
             members,
             caps,
+            drift_correction: true,
         })
+    }
+
+    /// Turn sample-slip drift correction off (members then only report drift).
+    pub fn with_drift_correction(mut self, on: bool) -> Self {
+        self.drift_correction = on;
+        self
     }
 
     pub fn members(&self) -> &[Arc<dyn Output>] {
@@ -169,12 +193,17 @@ impl Output for GroupOutput {
                 id,
                 sink,
                 preroll_frames: preroll,
+                inserted: 0,
+                dropped: 0,
             });
         }
         let mut g = GroupSink {
             fmt,
             members,
             written: 0,
+            correct: self.drift_correction && fmt.kind == SampleKind::Pcm,
+            warmup_frames: ms_to_frames(fmt, WARMUP_MS),
+            deadband_frames: ms_to_frames(fmt, DEADBAND_MS) as i64,
         };
         g.preroll()?;
         Ok(Box::new(g))
@@ -221,14 +250,22 @@ struct Member {
     sink: Box<dyn AudioSink>,
     /// Silence written before the first block to align start with the slowest member.
     preroll_frames: u64,
+    /// Frames duplicated / dropped by drift correction.
+    inserted: u64,
+    dropped: u64,
 }
 
 impl Member {
-    /// Audible position estimate: written minus still queued, minus pre-roll.
+    /// Audible position in stream frames: written minus still queued, minus
+    /// pre-roll and inserted frames, plus dropped ones.
     fn audible(&self) -> i64 {
         let written = self.sink.frames_written() as i64;
         let queued = self.sink.buffer_level().queued_frames as i64;
-        written - queued - self.preroll_frames as i64
+        written - queued - self.preroll_frames as i64 - self.inserted as i64 + self.dropped as i64
+    }
+
+    fn slipped(&self) -> i64 {
+        self.inserted as i64 - self.dropped as i64
     }
 }
 
@@ -236,6 +273,45 @@ pub struct GroupSink {
     fmt: AudioFormat,
     members: Vec<Member>,
     written: u64,
+    correct: bool,
+    warmup_frames: u64,
+    deadband_frames: i64,
+}
+
+/// `block` with its last frame repeated `extra` times.
+fn with_repeated_tail(block: &AudioBlock, extra: usize) -> AudioBlock {
+    let ch = block.format.channels as usize;
+    match &block.samples {
+        Samples::PcmI32(v) => {
+            let mut out = Vec::with_capacity(v.len() + extra * ch);
+            out.extend_from_slice(v);
+            let tail = &v[v.len() - ch..];
+            for _ in 0..extra {
+                out.extend_from_slice(tail);
+            }
+            AudioBlock::pcm_i32(block.format, out)
+        }
+        Samples::PcmF64(v) => {
+            let mut out = Vec::with_capacity(v.len() + extra * ch);
+            out.extend_from_slice(v);
+            let tail = &v[v.len() - ch..];
+            for _ in 0..extra {
+                out.extend_from_slice(tail);
+            }
+            AudioBlock::pcm_f64(block.format, out)
+        }
+        Samples::Dsd(v) => AudioBlock::dsd(block.format, v.clone()),
+    }
+}
+
+/// `block` without its last `cut` frames.
+fn without_tail(block: &AudioBlock, cut: usize) -> AudioBlock {
+    let ch = block.format.channels as usize;
+    match &block.samples {
+        Samples::PcmI32(v) => AudioBlock::pcm_i32(block.format, v[..v.len() - cut * ch].to_vec()),
+        Samples::PcmF64(v) => AudioBlock::pcm_f64(block.format, v[..v.len() - cut * ch].to_vec()),
+        Samples::Dsd(v) => AudioBlock::dsd(block.format, v.clone()),
+    }
 }
 
 impl GroupSink {
@@ -269,10 +345,33 @@ impl AudioSink for GroupSink {
         if let Samples::PcmF64(_) = block.samples {
             return Err(SinkError::FloatNotAccepted);
         }
-        for m in self.members.iter_mut() {
-            m.sink.write(block)?;
+        let frames = block.frames();
+        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+        let correcting = self.correct && self.written >= self.warmup_frames && frames > 0;
+        for (i, m) in self.members.iter_mut().enumerate() {
+            if i == 0 || !correcting {
+                m.sink.write(block)?;
+                continue;
+            }
+            let drift = m.audible() - leader;
+            if drift.abs() <= self.deadband_frames {
+                m.sink.write(block)?;
+                continue;
+            }
+            let slip = frames
+                .div_ceil(SLIP_DIVISOR)
+                .min(drift.unsigned_abs() as usize)
+                .min(frames - 1);
+            if drift > 0 {
+                // Ahead: its clock consumed more, so it gets more to play.
+                m.sink.write(&with_repeated_tail(block, slip))?;
+                m.inserted += slip as u64;
+            } else {
+                m.sink.write(&without_tail(block, slip))?;
+                m.dropped += slip as u64;
+            }
         }
-        self.written += block.frames() as u64;
+        self.written += frames as u64;
         Ok(())
     }
 
@@ -319,6 +418,7 @@ impl AudioSink for GroupSink {
                 output: m.id.clone(),
                 drift_ms: frames_to_ms(self.fmt, m.audible() - leader),
                 level: m.sink.buffer_level(),
+                slipped_frames: m.slipped(),
             })
             .collect()
     }
@@ -371,6 +471,147 @@ mod tests {
             g.set_volume(Volume::Db(-3.0)).await,
             Err(SinkError::NoVolume(_))
         ));
+    }
+
+    /// An output whose sink consumes frames from a shared virtual clock at
+    /// `ratio` times the leader's rate; nothing blocks.
+    struct ClockOutput {
+        id: &'static str,
+        ratio: f64,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+        caps: OutputCaps,
+    }
+
+    impl ClockOutput {
+        fn new(id: &'static str, ratio: f64, clock: &Arc<std::sync::atomic::AtomicU64>) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                ratio,
+                clock: clock.clone(),
+                written: Arc::default(),
+                caps: OutputCaps::unlimited(),
+            })
+        }
+    }
+
+    struct ClockSink {
+        fmt: AudioFormat,
+        ratio: f64,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait]
+    impl Output for ClockOutput {
+        fn id(&self) -> OutputId {
+            OutputId::new("clock", self.id)
+        }
+        fn name(&self) -> String {
+            self.id.to_string()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.caps
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Ok(Box::new(ClockSink {
+                fmt,
+                ratio: self.ratio,
+                clock: self.clock.clone(),
+                written: self.written.clone(),
+            }))
+        }
+    }
+
+    impl AudioSink for ClockSink {
+        fn format(&self) -> AudioFormat {
+            self.fmt
+        }
+        fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+            self.written
+                .fetch_add(block.frames() as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
+            let consumed = (self.clock.load(std::sync::atomic::Ordering::Relaxed) as f64 * self.ratio) as u64;
+            BufferLevel {
+                queued_frames: written.saturating_sub(consumed),
+                capacity_frames: 1 << 20,
+            }
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn frames_written(&self) -> u64 {
+            self.written.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// Thirty seconds at 48 kHz with members whose clocks run 500 ppm fast
+    /// and slow: with correction they stay within the deadband, without it
+    /// they drift 15 ms apart.
+    async fn run_clocks(correct: bool) -> (Vec<MemberStatus>, u64, u64, u64) {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let lead = ClockOutput::new("lead", 1.0, &clock);
+        let fast = ClockOutput::new("fast", 1.0005, &clock);
+        let slow = ClockOutput::new("slow", 0.9995, &clock);
+        let g = GroupOutput::new("sync", vec![lead.clone(), fast.clone(), slow.clone()])
+            .unwrap()
+            .with_drift_correction(correct);
+        let fmt = AudioFormat::pcm(48_000, 24, 2);
+        let mut sink = g.open(fmt).await.unwrap();
+        let block = AudioBlock::pcm_i32(fmt, (0..960).map(|i| i * 1000).collect());
+        // The zone keeps the leader about 100 ms ahead of its clock, as a
+        // real blocking write would; the others consume at their own rate.
+        for n in 1..=3000u64 {
+            sink.write(&block).unwrap();
+            clock.store(
+                (n * 480).saturating_sub(4800),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let load = |o: &Arc<ClockOutput>| o.written.load(std::sync::atomic::Ordering::Relaxed);
+        (sink.members(), load(&lead), load(&fast), load(&slow))
+    }
+
+    #[tokio::test]
+    async fn drift_is_corrected_by_sample_slip() {
+        let (m, lead, fast, slow) = run_clocks(true).await;
+        assert_eq!(lead, 3000 * 480);
+        assert_eq!(m[0].slipped_frames, 0, "the leader is never touched");
+        for s in &m[1..] {
+            assert!(s.drift_ms.abs() <= DEADBAND_MS as i64, "{s:?}");
+        }
+        // 500 ppm over 30 s is 720 frames; the deadband leaves up to 96 uncorrected.
+        assert!((600..=720).contains(&m[1].slipped_frames), "{:?}", m[1]);
+        assert!((-720..=-600).contains(&m[2].slipped_frames), "{:?}", m[2]);
+        assert_eq!(fast as i64, lead as i64 + m[1].slipped_frames);
+        assert_eq!(slow as i64, lead as i64 + m[2].slipped_frames);
+    }
+
+    #[tokio::test]
+    async fn without_correction_drift_is_only_reported() {
+        let (m, lead, fast, slow) = run_clocks(false).await;
+        assert_eq!(fast, lead);
+        assert_eq!(slow, lead);
+        assert!(m.iter().all(|s| s.slipped_frames == 0));
+        assert!(m[1].drift_ms >= 14, "{:?}", m[1]);
+        assert!(m[2].drift_ms <= -14, "{:?}", m[2]);
+    }
+
+    #[test]
+    fn tail_helpers() {
+        let fmt = AudioFormat::pcm(48_000, 24, 2);
+        let b = AudioBlock::pcm_i32(fmt, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            with_repeated_tail(&b, 2).samples,
+            Samples::PcmI32(vec![1, 2, 3, 4, 5, 6, 5, 6, 5, 6])
+        );
+        assert_eq!(without_tail(&b, 1).samples, Samples::PcmI32(vec![1, 2, 3, 4]));
     }
 
     #[test]

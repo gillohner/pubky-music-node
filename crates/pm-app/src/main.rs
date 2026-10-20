@@ -1794,7 +1794,11 @@ impl App {
                 }
                 if let Some(n) = np.as_ref().map(|n| &n.members).filter(|m| m.len() > 1) {
                     let worst = n.iter().map(|m| m.drift_ms.abs()).max().unwrap_or(0);
-                    ui.weak(format!("group · {} outputs · drift ≤ {worst} ms", n.len()));
+                    let slips: i64 = n.iter().map(|m| m.slipped_frames.abs()).sum();
+                    ui.weak(format!(
+                        "group · {} outputs · drift ≤ {worst} ms · {slips} frames slipped",
+                        n.len()
+                    ));
                 }
                 ui.add_space(8.0);
                 let mut db = self.volume_db;

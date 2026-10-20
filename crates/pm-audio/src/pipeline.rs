@@ -510,6 +510,17 @@ impl Plan {
         }
     }
 
+    /// Grouped outputs keep their members in time by slipping single
+    /// samples when clocks drift: a `sync` stage before `output` says so.
+    pub fn add_sync_stage(&mut self, note: impl Into<String>) {
+        let out = self.output;
+        let at = self.path.stages.len().saturating_sub(1);
+        self.path.stages.insert(
+            at,
+            pm_model::PathStage::new("sync", out, out, pm_model::Quality::Enhanced).with_note(note),
+        );
+    }
+
     pub fn source_format(&self) -> AudioFormat {
         self.source
     }

@@ -162,12 +162,15 @@ impl SourceFactory for RemoteTracks {
     ) -> Result<Box<dyn Processor>, SourceError> {
         let source = src.format();
         let cfg = self.cfg.read().expect("cfg lock").clone();
-        let plan = pm_audio::Plan::negotiate_for(source, caps, &cfg, src.replay_gain()).map_err(|e| {
+        let mut plan = pm_audio::Plan::negotiate_for(source, caps, &cfg, src.replay_gain()).map_err(|e| {
             SourceError::Negotiate {
                 format: source,
                 reason: e.to_string(),
             }
         })?;
+        if src.lossy_source() {
+            plan.mark_lossy_source();
+        }
         Ok(Box::new(plan))
     }
 }

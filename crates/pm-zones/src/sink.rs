@@ -97,6 +97,10 @@ pub struct MemberStatus {
     /// Audible position relative to the group's leader; positive = ahead.
     pub drift_ms: i64,
     pub level: BufferLevel,
+    /// Net frames inserted (positive) or dropped (negative) to keep this
+    /// member in time with the leader; 0 when nothing was corrected.
+    #[serde(default)]
+    pub slipped_frames: i64,
 }
 
 /// An open output. Methods block; call them from the zone's audio thread.

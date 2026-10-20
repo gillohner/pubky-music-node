@@ -15,7 +15,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/outputs/pull` | `{name}` | (UPnP/OpenHome renderers found by SSDP and Cast devices found by mDNS get one of these automatically (`upnp-<udn>`, `cast-<id>`) and appear as outputs `upnp:<udn>` / `cast:<id>` with zones; `[outputs] upnp`, `[outputs] cast`, `[api] public_url`) |
 | POST | `/v1/outputs/pull` | `{name}` | a pull output and its zone `Stream <name>`; renderers, browsers or scripts fetch `GET /v1/outputs/pull/{name}/stream.wav` (live WAV of the zone's post-DSP output; the listener paces the zone; 408 when nothing plays) |
 | GET | `/v1/zones` | | `ZoneState[]` |
-| POST | `/v1/zones` | `{name, output}` or `{name, outputs: [leader, …]}` for a group | the new `ZoneState`; `now_playing.members` carries per-output drift for groups |
+| POST | `/v1/zones` | `{name, output}` or `{name, outputs: [leader, …]}` for a group | the new `ZoneState`; `now_playing.members` carries per-output drift and `slipped_frames` (net frames duplicated/dropped to stay in time) for groups |
 | GET / DELETE | `/v1/zones/{id}` | | `ZoneState` / 204 |
 | GET | `/v1/zones/{id}/queue` | | `QueueItem[]` |
 | POST | `/v1/zones/{id}/queue` | `{track_ids?, items?, at: end\|next, replace?, play?}` | `{ids}` |
