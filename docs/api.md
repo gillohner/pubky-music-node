@@ -10,7 +10,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | Method | Path | Body / query | Returns |
 | :-- | :-- | :-- | :-- |
 | GET / PUT | `/v1/node/settings` | PUT: `{contact}` | `{contact, discovery}`; the contact (email or URL, never a code-host link) is saved in the library and turns Pinakes/Nexus discovery on without a restart; 400 when invalid |
-| GET | `/v1/info` | | name, version, library stats, zone/output counts |
+| GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning` |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
 | POST | `/v1/outputs/rescan` | | discover again (local devices, endpoints); new outputs get zones; returns the list |
 | POST | `/v1/outputs/pull` | `{name}` | (UPnP/OpenHome renderers found by SSDP and Cast devices found by mDNS get one of these automatically (`upnp-<udn>`, `cast-<id>`) and appear as outputs `upnp:<udn>` / `cast:<id>` with zones; `[outputs] upnp`, `[outputs] cast`, `[api] public_url`) |

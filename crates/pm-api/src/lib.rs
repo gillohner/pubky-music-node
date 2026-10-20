@@ -263,6 +263,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         library,
         zones: s.zones.list().len(),
         outputs: s.outputs.len(),
+        scanning: s.is_scanning(),
     }))
 }
 

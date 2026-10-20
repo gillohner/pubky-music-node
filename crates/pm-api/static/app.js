@@ -760,7 +760,7 @@
               <div class="card" style="margin-top:12px"><h3>Group outputs</h3><p class="muted small">Pick two or more outputs to play as one zone; the first checked is the leader. Members are kept in time by single-sample slips (shown as a <code>sync</code> stage).</p><div class="chips" id="groupouts">${outs.filter((o) => o.caps.groupable !== false).map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" style="width:240px"><button class="btn primary" id="groupmake">${icon('plus')} Create group</button></div></div>
             </section>
             <p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>`;
-          $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); } catch (e) { toast(e.message, 'error'); } };
+          $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) state.zone = BROWSER; render(); } catch (e) { toast(e.message, 'error'); } });
           $('#groupmake').onclick = async () => { const ids = $$('#groupouts input:checked').map((i) => i.value); const name = $('#groupname').value.trim() || 'Group'; if (ids.length < 2) { toast('Pick at least two outputs', 'error'); return; } try { const z = await api('POST', '/zones', { name, outputs: ids }); state.zones[z.id] = z; toast(`Group “${name}” created`); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-dsp]', main).forEach((b) => b.onclick = () => { state.dspOpen = state.dspOpen === b.dataset.dsp ? null : b.dataset.dsp; render(); });
@@ -769,7 +769,7 @@
           }
           const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
-          const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); render(); } catch (e) { toast(e.message, 'error'); } };
+          const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
           $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${r.removed_tracks} tracks gone`); render(); } catch (e) { toast(e.message, 'error'); } });
           $('#rescan').onclick = async () => { try { await api('POST', '/outputs/rescan'); toast('Outputs rescanned'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -799,10 +799,19 @@
 
   // ---- connection + events -------------------------------------------------
   const setConn = (ok, text) => { const c = $('#conn'); c.className = 'node-status ' + (ok ? 'ok' : 'bad'); $('.node-text', c).textContent = text; c.title = text; };
+  // Scan indicator: while the node says it is scanning, poll /info until it is done.
+  let scanTimer = null;
+  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
+  const watchScan = (info) => {
+    showScanning(!!(info && info.scanning));
+    clearTimeout(scanTimer);
+    if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${i.library.tracks} tracks`); watchScan(i); } catch { showScanning(false); } }, 4000);
+  };
   const connect = async () => {
     try {
       state.info = await api('GET', '/info');
       setConn(true, `${state.info.name} · ${state.info.library.tracks} tracks`);
+      watchScan(state.info);
       loadFavourites().catch(() => {});
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
@@ -826,7 +835,7 @@
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
       }
       else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
-      else if (ev.type === 'library_changed') { state.albums = null; if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render(); if (state.info) api('GET', '/info').then((i) => { state.info = i; setConn(true, `${i.name} · ${i.library.tracks} tracks`); }).catch(() => {}); }
+      else if (ev.type === 'library_changed') { state.albums = null; api('GET', '/info').then((i) => { state.info = i; watchScan(i); }).catch(() => {}); if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render(); if (state.info) api('GET', '/info').then((i) => { state.info = i; setConn(true, `${i.name} · ${i.library.tracks} tracks`); }).catch(() => {}); }
       renderBar();
     };
     ws.onclose = () => { setConn(false, 'Reconnecting…'); setTimeout(events, 3000); };

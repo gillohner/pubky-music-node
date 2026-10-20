@@ -4,7 +4,8 @@
 #   PM_TOKEN     bearer token clients must send (required when listening beyond localhost)
 #   PM_DATA_DIR  where the SQLite library lives (default /data)
 #   PM_FOLDERS   colon-separated music folders to scan (default /music)
-#   PM_CONTACT   email or URL for outbound User-Agent strings (MusicBrainz requires one)
+#   PM_CONTACT   email or URL for outbound User-Agent strings (optional here; it can also be
+#                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"

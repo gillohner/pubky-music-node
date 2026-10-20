@@ -17,6 +17,9 @@ pub struct Info {
     pub library: pm_library::LibraryStats,
     pub zones: usize,
     pub outputs: usize,
+    /// A library scan is running right now.
+    #[serde(default)]
+    pub scanning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
