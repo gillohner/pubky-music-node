@@ -30,7 +30,29 @@ pub const Q_LOSSY: Color32 = WARN;
 pub const RADIUS: u8 = 8;
 
 /// Install the theme on the context (dark only; the app has one look).
+/// egui's bundled fonts miss the transport and symbol glyphs the app uses
+/// (▶ ◀ ♥ ♡ ★ ☆ ♪ ≡ ✕ render as boxes on some systems); DejaVu Sans is
+/// added as the last fallback for both families, so every glyph resolves.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "DejaVuSans".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../fonts/DejaVuSans.ttf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("DejaVuSans".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply(ctx: &egui::Context) {
+    install_fonts(ctx);
     ctx.set_theme(egui::Theme::Dark);
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.text_styles = [
