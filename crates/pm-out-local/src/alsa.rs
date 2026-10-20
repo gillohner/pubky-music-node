@@ -324,7 +324,8 @@ impl AlsaSink {
                 return Err(unsupported());
             }
             // ~0.5 s of buffer: generous, the endpoint owns the clock (§6.1).
-            hwp.set_buffer_size_near((rate / 2) as i64).map_err(alsa_err)?;
+            hwp.set_buffer_size_near((rate / 2) as alsa::pcm::Frames)
+                .map_err(alsa_err)?;
             pcm.hw_params(&hwp).map_err(alsa_err)?;
             (
                 hwp.get_buffer_size().map_err(alsa_err)? as u64,
