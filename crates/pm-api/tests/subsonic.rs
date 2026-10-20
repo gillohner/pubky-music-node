@@ -307,6 +307,22 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     assert_eq!(acts.as_array().unwrap().len(), 1);
     assert_eq!(acts[0]["track"]["title"], "Get Lucky");
 
+    // byYear honours the range (both fixtures are from 2013).
+    let r = call(
+        &app,
+        &format!("/rest/getAlbumList2?type=byYear&fromYear=2000&toYear=2030&{auth}"),
+    )
+    .await;
+    assert_eq!(r["albumList2"]["album"].as_array().unwrap().len(), 2, "{r}");
+    let r = call(
+        &app,
+        &format!("/rest/getAlbumList2?type=byYear&fromYear=1990&toYear=2000&{auth}"),
+    )
+    .await;
+    assert!(r["albumList2"]["album"].as_array().unwrap().is_empty(), "{r}");
+    let r = call(&app, &format!("/rest/getAlbumList2?type=byYear&{auth}")).await;
+    assert_eq!(r["albumList2"]["album"].as_array().unwrap().len(), 2);
+
     // Lyrics: structured (OpenSubsonic) and legacy plain text; none for untagged songs.
     let r = call(&app, &format!("/rest/getLyricsBySongId?id={get_lucky}&{auth}")).await;
     let sl = &r["lyricsList"]["structuredLyrics"][0];

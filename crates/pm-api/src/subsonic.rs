@@ -735,7 +735,19 @@ async fn dispatch(
                                 a.title.to_lowercase(),
                             )
                         }),
-                        "byYear" => all.sort_by_key(|a| (a.year.unwrap_or(0), a.title.to_lowercase())),
+                        // fromYear > toYear asks for the range in descending order.
+                        "byYear" => {
+                            let from = num(p, "fromYear", 0) as i32;
+                            let to = num(p, "toYear", 9999) as i32;
+                            let (lo, hi) = (from.min(to), from.max(to));
+                            if p.contains_key("fromYear") || p.contains_key("toYear") {
+                                all.retain(|a| a.year.is_some_and(|y| (lo..=hi).contains(&y)));
+                            }
+                            all.sort_by_key(|a| (a.year.unwrap_or(0), a.title.to_lowercase()));
+                            if from > to {
+                                all.reverse();
+                            }
+                        }
                         _ => all.sort_by_key(|a| a.title.to_lowercase()),
                     }
                     all.into_iter()
