@@ -2053,34 +2053,41 @@ impl App {
         }
         let tile = 168.0;
         let gap = 14.0;
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            let cols = ((ui.available_width() + gap) / (tile + gap)).floor().max(1.0) as usize;
-            let mut clicked = None;
-            let mut play_album: Option<i64> = None;
-            for row in albums.chunks(cols) {
-                ui.horizontal(|ui| {
-                    for a in row {
-                        let tex = self.cover(a.id);
-                        let badge =
-                            a.id.and_then(|id| self.album_formats.get(&id))
-                                .map(|f| f.label.clone());
-                        let (resp, play) = album_tile_badged(ui, a, tile, tex.as_ref(), badge.as_deref());
-                        if play {
-                            play_album = a.id;
-                        } else if resp.clicked() {
-                            clicked = a.id;
+        // Only visible rows are laid out (and only their covers requested), so
+        // a library of thousands of albums scrolls without fetching everything.
+        let cols = ((ui.available_width() + gap) / (tile + gap)).floor().max(1.0) as usize;
+        let row_count = albums.len().div_ceil(cols);
+        let row_height = tile + 44.0 + (gap - 6.0);
+        let mut clicked = None;
+        let mut play_album: Option<i64> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show_rows(ui, row_height, row_count, |ui, range| {
+                for r in range {
+                    let row = &albums[r * cols..((r + 1) * cols).min(albums.len())];
+                    ui.horizontal(|ui| {
+                        for a in row {
+                            let tex = self.cover(a.id);
+                            let badge =
+                                a.id.and_then(|id| self.album_formats.get(&id))
+                                    .map(|f| f.label.clone());
+                            let (resp, play) = album_tile_badged(ui, a, tile, tex.as_ref(), badge.as_deref());
+                            if play {
+                                play_album = a.id;
+                            } else if resp.clicked() {
+                                clicked = a.id;
+                            }
                         }
-                    }
-                });
-                ui.add_space(gap - 6.0);
-            }
-            if let Some(id) = clicked {
-                self.open_album(id);
-            }
-            if let Some(id) = play_album {
-                self.play_album(id);
-            }
-        });
+                    });
+                    ui.add_space(gap - 6.0);
+                }
+            });
+        if let Some(id) = clicked {
+            self.open_album(id);
+        }
+        if let Some(id) = play_album {
+            self.play_album(id);
+        }
     }
 
     fn album_view(&mut self, ui: &mut egui::Ui, id: i64) {
