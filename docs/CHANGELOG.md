@@ -24,4 +24,5 @@ Newest first. Dates are when the change landed on `main`.
 - Libraries beyond 1000 albums or tracks show everything: both UIs page through the API's
   `after` cursor.
 - Filter boxes on the Albums, Artists and Tracks pages of both UIs.
+- The native app's Albums grid is virtualised (only visible covers are fetched).
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
