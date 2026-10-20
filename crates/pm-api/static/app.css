@@ -480,3 +480,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .chips .chip .count { margin-left: 4px; color: var(--muted); font-size: 12px; }
 .list.compact { margin-top: 8px; }
 .list.compact .list-row { padding: 6px 10px; min-height: 0; }
+.page-head .count[data-filtered]:not([data-filtered=''])::after { content: ' · ' attr(data-filtered); color: var(--accent-strong); }

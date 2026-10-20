@@ -603,6 +603,13 @@
     }
     return out;
   };
+  // A client-side filter box for long lists: hides rows/tiles whose text does not contain the query.
+  const filterBox = (placeholder) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}" style="width:200px">`;
+  const bindFilter = (selector) => {
+    const f = $('#filter'); if (!f) return;
+    f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${n} shown` : ''; };
+    f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
+  };
   const albumsAll = async () => {
     if (!state.albums) {
       const [albums, formats] = await Promise.all([pageAll('/library/albums', (a) => a.id), api('GET', '/library/albums/formats').catch(() => [])]);
@@ -667,8 +674,9 @@
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
           const shown = albums.filter((a) => inFocus(a, state.focus));
-          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length) + (albums.length ? focusChips(albums) : '') + (shown.length ? albumGrid(shown) : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) : '') + (shown.length ? albumGrid(shown) : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
+          bindFilter('.grid .tile');
           break;
         }
         case 'album': {
@@ -707,7 +715,8 @@
           loading();
           state.artists = await api('GET', '/library/artists');
           if (state.view !== 'artists') return;
-          main.innerHTML = pageHead('Artists', state.artists.length) + (state.artists.length ? `<div class="list">${state.artists.map((a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
+          main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? `<div class="list">${state.artists.map((a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
+          bindFilter('.list .list-row');
           break;
         }
         case 'artist': {
@@ -747,8 +756,9 @@
           loading();
           const tracks = await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks);
           if (state.view !== 'tracks') return;
-          main.innerHTML = pageHead('Tracks', tracks.length, tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '') + (tracks.length ? trackRows(tracks, { key: 'all' }) : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Tracks', tracks.length, (tracks.length > 12 ? filterBox('Filter tracks') : '') + (tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (tracks.length ? trackRows(tracks, { key: 'all' }) : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
           lists.all = tracks;
+          bindFilter('.track');
           const sh = $('#shuffle'); if (sh) sh.onclick = () => playTracks(tracks, true);
           break;
         }
