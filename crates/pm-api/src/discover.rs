@@ -48,6 +48,43 @@ fn upstream(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, e.to_string())
 }
 
+/// `GET /v1/discover/uri?uri=|track_id=|album_id=|artist_id=`: the Pubky
+/// view of one object (tags and taggers from Nexus). 412 without a contact.
+pub(crate) async fn on_pubky(
+    State(s): State<Arc<NodeState>>,
+    Query(r): Query<FavouriteRef>,
+) -> ApiResult<OnPubky> {
+    let d = discovery(&s)?;
+    let uri = {
+        let lib = s.library.lock().expect("library poisoned");
+        crate::favourites::canonical_for(&lib, &r)?
+    };
+    let url = uri.to_url();
+    match d.nexus().resource_by_uri(&url).await {
+        Ok(view) => {
+            let mut tags: Vec<(String, u64)> = view
+                .tags
+                .iter()
+                .map(|t| (t.label.clone(), t.taggers_count.max(t.taggers.len() as u64)))
+                .collect();
+            tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            Ok(Json(OnPubky {
+                uri: url,
+                indexed: true,
+                taggers: view.distinct_taggers() as u64,
+                tags,
+            }))
+        }
+        Err(pm_pubky::nexus::NexusError::NotFound) => Ok(Json(OnPubky {
+            uri: url,
+            indexed: false,
+            tags: Vec::new(),
+            taggers: 0,
+        })),
+        Err(e) => Err(upstream(e)),
+    }
+}
+
 /// Trending music in a window (`1h`..`90d`); falls back to all-time
 /// activity with tag facets when the upstream does not support windows yet.
 pub(crate) async fn trends(

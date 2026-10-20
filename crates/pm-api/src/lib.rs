@@ -154,6 +154,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/playlists/{id}/play", post(playlists::play))
         .route("/discover/trends", get(discover::trends))
+        .route("/discover/uri", get(discover::on_pubky))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
         .route("/radio/search", get(radio::search))
@@ -1243,6 +1244,10 @@ mod tests {
             home["recently_added"].as_array().unwrap().len(),
             home["stats"]["albums"]
         );
+
+        // Without a contact, the Pubky view of an object is a clear 412.
+        let (st, e) = call(&app, "GET", &format!("/v1/discover/uri?track_id={id}"), None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
 
         // Unknown track and unknown zone are 404s.
         let (st, _) = call(

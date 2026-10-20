@@ -487,6 +487,7 @@
           const a = albums.find((x) => x.id === id) || (tr.tracks[0] && tr.tracks[0].album) || { id, title: 'Album' };
           const myTags = a.release_mbid ? (await api('GET', `/tags?album_id=${id}`).catch(() => ({ tags: [] }))).tags : [];
           const myReview = a.release_mbid ? ((await api('GET', `/reviews?album_id=${id}`).catch(() => ({ reviews: [] }))).reviews[0] || null) : null;
+          const onPubky = a.release_mbid && !state.discoveryOff ? await api('GET', `/discover/uri?album_id=${id}`).catch((e) => { if (String(e.message).includes('discovery is off')) state.discoveryOff = true; return null; }) : null;
           const tracks = tr.tracks;
           const total = tracks.reduce((s, t) => s + (t.duration_ms || 0), 0);
           const relUrl = a.release_mbid ? 'https://musicbrainz.org/release/' + a.release_mbid : null;
@@ -499,6 +500,7 @@
               <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
               ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
               ${relUrl ? reviewRow(myReview) : ''}
+              ${onPubky ? `<div class="tagrow"><span class="eyebrow">On Pubky</span>${onPubky.indexed ? (onPubky.taggers ? `<span class="muted small">${onPubky.taggers} ${onPubky.taggers === 1 ? 'person' : 'people'}</span>` : '') + (onPubky.tags.length ? onPubky.tags.slice(0, 12).map(([l, n]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('') : '<span class="muted small">no tags yet</span>') : '<span class="muted small">not indexed yet</span>'}</div>` : ''}
             </div></div>` + trackRows(tracks, { showAlbum: false, numbers: 'track', key: 'album' });
           bindTagRow({ album_id: id });
           bindReviewRow({ album_id: id }, myReview);

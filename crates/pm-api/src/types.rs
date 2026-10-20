@@ -612,6 +612,18 @@ pub struct DiscoverItem {
     pub in_library: Option<Track>,
 }
 
+/// What Pubky (via Nexus) knows about one canonical URL: who tagged it and how.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnPubky {
+    pub uri: String,
+    /// The indexer knows this URL.
+    pub indexed: bool,
+    /// Labels with how many people used them, most used first.
+    pub tags: Vec<(String, u64)>,
+    /// Distinct people across all labels (from the paged tagger lists).
+    pub taggers: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscoverPage {
     /// Tag facets `(label, count)` when the upstream returned them.

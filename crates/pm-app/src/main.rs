@@ -105,6 +105,9 @@ struct App {
     tag_input: String,
     /// My review per canonical URL, and the draft being edited (url, rating, text).
     reviews: HashMap<String, Option<pm_api::types::ReviewEntry>>,
+    /// Pubky's view per canonical URL; `None` once the node said discovery is off.
+    on_pubky: HashMap<String, pm_api::types::OnPubky>,
+    discovery_off: bool,
     review_draft: Option<(String, Option<u8>, String)>,
     folders: Vec<(String, bool)>,
     folder_input: String,
@@ -186,6 +189,8 @@ impl App {
             tags: HashMap::new(),
             tag_input: String::new(),
             reviews: HashMap::new(),
+            on_pubky: HashMap::new(),
+            discovery_off: false,
             review_draft: None,
             folders: Vec::new(),
             folder_input: String::new(),
@@ -277,6 +282,10 @@ impl App {
                 }
                 Msg::Stations(st) => self.stations = st,
                 Msg::Folders(f) => self.folders = f,
+                Msg::OnPubky(None) => self.discovery_off = true,
+                Msg::OnPubky(Some(v)) => {
+                    self.on_pubky.insert(v.uri.clone(), *v);
+                }
                 Msg::Review(r) => {
                     if let Some(uri) = r.uri.clone() {
                         self.reviews.insert(uri, r.reviews.into_iter().next());
@@ -543,8 +552,46 @@ impl App {
         {
             self.backend.send(Cmd::LoadTags(FavouriteRef::album(id)));
             self.backend.send(Cmd::LoadReview(FavouriteRef::album(id)));
+            if !self.discovery_off {
+                self.backend.send(Cmd::LoadOnPubky(FavouriteRef::album(id)));
+            }
         }
         self.view = View::Album(id);
+    }
+
+    /// What Pubky knows about the object: tag labels with counts, people.
+    fn on_pubky_row(&mut self, ui: &mut egui::Ui, uri: Option<pm_model::MusicUri>) {
+        let Some(uri) = uri else {
+            return;
+        };
+        let Some(v) = self.on_pubky.get(&uri.to_url()).cloned() else {
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new("On Pubky")
+                    .size(12.0)
+                    .strong()
+                    .color(theme::MUTED),
+            );
+            if !v.indexed {
+                ui.weak("not indexed yet");
+                return;
+            }
+            if v.taggers > 0 {
+                ui.weak(format!(
+                    "{} {}",
+                    v.taggers,
+                    if v.taggers == 1 { "person" } else { "people" }
+                ));
+            }
+            for (label, n) in v.tags.iter().take(12) {
+                theme::pill(ui, Some(theme::ACCENT), &format!("#{label} · {n}"));
+            }
+            if v.tags.is_empty() {
+                ui.weak("no tags yet");
+            }
+        });
     }
 
     /// Rating stars and notes for an object; private v1 review posts.
@@ -1578,6 +1625,12 @@ impl App {
                         .release_mbid
                         .map(|mbid| pm_model::MusicUri::Release { mbid }),
                     FavouriteRef::album(id),
+                );
+                self.on_pubky_row(
+                    ui,
+                    album
+                        .release_mbid
+                        .map(|mbid| pm_model::MusicUri::Release { mbid }),
                 );
             });
         });

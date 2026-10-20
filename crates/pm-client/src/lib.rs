@@ -751,6 +751,24 @@ impl NodeClient {
         .await
     }
 
+    /// The Pubky view (tags, taggers) of a library object or canonical URL.
+    pub async fn on_pubky(&self, r: &FavouriteRef) -> Result<OnPubky> {
+        let mut q: Vec<(&str, String)> = Vec::new();
+        if let Some(u) = &r.uri {
+            q.push(("uri", u.clone()));
+        }
+        if let Some(i) = r.track_id {
+            q.push(("track_id", i.to_string()));
+        }
+        if let Some(i) = r.album_id {
+            q.push(("album_id", i.to_string()));
+        }
+        if let Some(i) = r.artist_id {
+            q.push(("artist_id", i.to_string()));
+        }
+        self.get("discover/uri", &q).await
+    }
+
     pub async fn discover_trends(&self, window: &str, limit: usize) -> Result<DiscoverPage> {
         self.get(
             "discover/trends",

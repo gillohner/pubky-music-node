@@ -3,8 +3,8 @@
 
 use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
-    FavouriteRef, Favourites, GenreDetail, HomePage, Info, PlaylistDetail, PlaylistSummary, QueueAt, Reviews,
-    SearchResults, Tags, TransportAction,
+    FavouriteRef, Favourites, GenreDetail, HomePage, Info, OnPubky, PlaylistDetail, PlaylistSummary, QueueAt,
+    Reviews, SearchResults, Tags, TransportAction,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -41,6 +41,7 @@ pub enum Cmd {
     },
     LoadTags(FavouriteRef),
     LoadReview(FavouriteRef),
+    LoadOnPubky(FavouriteRef),
     SetReview {
         what: FavouriteRef,
         rating: Option<u8>,
@@ -153,6 +154,8 @@ pub enum Msg {
     Favourites(Box<Favourites>),
     Tags(Box<Tags>),
     Review(Box<Reviews>),
+    /// `None` when discovery is off on the node (no contact configured).
+    OnPubky(Option<Box<OnPubky>>),
     RadioResults(String, Vec<RadioStation>),
     Stations(Vec<RadioStation>),
     AlbumTracks(i64, Vec<Track>),
@@ -362,6 +365,11 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         }
         Cmd::LoadTags(what) => out.send(Msg::Tags(Box::new(c.tags(Some(&what)).await?))),
         Cmd::LoadReview(what) => out.send(Msg::Review(Box::new(c.reviews(Some(&what)).await?))),
+        Cmd::LoadOnPubky(what) => match c.on_pubky(&what).await {
+            Ok(v) => out.send(Msg::OnPubky(Some(Box::new(v)))),
+            Err(pm_client::ClientError::Api { status: 412, .. }) => out.send(Msg::OnPubky(None)),
+            Err(e) => return Err(e),
+        },
         Cmd::SetReview { what, rating, text } => {
             c.set_review(&what, rating, &text).await?;
             out.send(Msg::Notice("Review saved".into()));
