@@ -112,3 +112,15 @@ Folders can be added from the web UI or the app (Settings → Library folders) a
 `[library] folders` of the config. Folders added from the UI are stored in the library database,
 watched for changes and scanned straight away; removing one there forgets the tracks that lived
 only in it.
+
+## Backups
+
+Everything the node knows that is not in your music files lives in one SQLite file,
+`<data_dir>/library.db`: playlists, reviews and listening activity (also on your homeserver once
+synced), favourites, tags, play history, saved radio stations, settings, the art and lyrics index.
+`pm-node -c node.toml backup <file>` writes a consistent snapshot while the node runs (SQLite
+`VACUUM INTO`), the web UI's Settings page offers the same file as *Download backup*, and
+`GET /v1/backup` serves it for a cron job. To go back: stop the node, `pm-node -c node.toml
+restore <file>` (the previous database is kept as `library.db.bak`), start the node and let it
+rescan. Covers extracted from files are in `<data_dir>/art` and come back on a scan; the Pubky
+session secret is a separate file named by `session_secret_file`.

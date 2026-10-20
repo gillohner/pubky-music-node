@@ -115,6 +115,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/backup", get(backup))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
         .route("/library/artists", get(artists))
@@ -697,6 +698,44 @@ async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
     Ok(Json(t))
+}
+
+/// A consistent snapshot of the library database as a download
+/// (`pm-node restore <file>` brings it back).
+async fn backup(State(s): State<Arc<NodeState>>) -> Result<axum::response::Response, ApiError> {
+    let tmp = std::env::temp_dir().join(format!(
+        "pubky-music-backup-{}-{}.db",
+        std::process::id(),
+        pm_library::db::now_unix()
+    ));
+    let bytes = {
+        let lib = s.library.lock().expect("library poisoned");
+        lib.backup_to(&tmp)?;
+        let bytes = std::fs::read(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        bytes.map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading the backup snapshot: {e}"),
+            )
+        })?
+    };
+    let date = time::OffsetDateTime::now_utc().date();
+    let name = format!("pubky-music-{date}.db");
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.sqlite3".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
@@ -1823,6 +1862,34 @@ mod tests {
 
     /// Library radio: with the flag on, a zone that runs out of queue gets
     /// similar tracks appended and keeps playing.
+    #[tokio::test]
+    async fn backup_downloads_a_sqlite_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/backup")
+            .header("authorization", "Bearer t")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let disposition = resp
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(disposition.contains("pubky-music-"), "{disposition}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"SQLite format 3\0"));
+        let copy = dir.path().join("copy.db");
+        std::fs::write(&copy, &body).unwrap();
+        assert!(pm_library::Library::open(&copy).is_ok());
+    }
+
     #[tokio::test]
     async fn lyrics_come_from_a_sidecar_lrc() {
         let dir = tempfile::tempdir().unwrap();

@@ -97,6 +97,8 @@ pm-node play 01.flac 02.flac --to alsa:hw:1,0  # one zone, gapless join when for
 pm-node play some.flac --to null --volume-db=-6   # shows the float path and dither stages
 pm-node -c node.toml scan /music            # SQLite library with FTS5 search
 pm-node -c node.toml search "daft punk"
+pm-node -c node.toml backup ~/pm-$(date +%F).db   # library snapshot, safe while serving
+pm-node -c node.toml restore ~/pm-2026-10-20.db   # with the node stopped
 pm-node -c node.toml import-playlist roon-export.xlsx
 pm-node resolve https://open.spotify.com/track/<id>   # MusicBrainz URL relations
 pm-node uri https://tidal.com/browse/track/251380836  # canonical form (ADR 0001)

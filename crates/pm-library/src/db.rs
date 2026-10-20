@@ -605,6 +605,24 @@ impl Library {
         Ok(out)
     }
 
+    // ----- backup -----------------------------------------------------------
+
+    /// Write a consistent snapshot of the whole database to `path` (SQLite
+    /// `VACUUM INTO`): safe while the node runs, and the copy is a plain
+    /// database file that `restore` or `Library::open` can use. The target
+    /// must not exist.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            return Err(LibraryError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"),
+            });
+        }
+        let conn = self.lock();
+        conn.execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
+    }
+
     // ----- lyrics -----------------------------------------------------------
 
     /// Store (or clear, with `None`) the lyrics of a track; `source` is
@@ -1590,6 +1608,23 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    #[test]
+    fn backup_is_a_usable_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("library.db")).unwrap();
+        let id = lib
+            .upsert_track(&sample_track("/music/a.flac", "Get Lucky"))
+            .unwrap();
+        lib.set_lyrics(id, Some(("la la", "tag"))).unwrap();
+        let copy = dir.path().join("backup.db");
+        lib.backup_to(&copy).unwrap();
+        assert!(lib.backup_to(&copy).is_err(), "never overwrites");
+        let restored = Library::open(&copy).unwrap();
+        assert_eq!(restored.stats().unwrap().tracks, 1);
+        assert_eq!(restored.get_track(id).unwrap().unwrap().title, "Get Lucky");
+        assert_eq!(restored.lyrics(id).unwrap().unwrap().0, "la la");
+    }
 
     #[test]
     fn migrate_and_roundtrip() {

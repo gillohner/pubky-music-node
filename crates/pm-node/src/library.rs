@@ -12,6 +12,60 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     Library::open(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
+/// Snapshot the library database to `file` (works while the node runs).
+pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> {
+    if force && file.exists() {
+        std::fs::remove_file(file)?;
+    }
+    let lib = open(cfg)?;
+    lib.backup_to(file)
+        .with_context(|| format!("writing backup {}", file.display()))?;
+    let s = lib.stats()?;
+    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "backup written: {} ({} tracks, {} albums, {:.1} MB)",
+        file.display(),
+        s.tracks,
+        s.albums,
+        size as f64 / 1e6
+    );
+    Ok(())
+}
+
+/// Replace the library database with a backup. Stop the node first: the
+/// previous database is kept as `library.db.bak`, and stale WAL files are
+/// removed so SQLite cannot replay them into the restored copy.
+pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let db = cfg.db_path();
+    // Validate (and migrate) a scratch copy first so a broken file never
+    // replaces a working library.
+    let staged = db.with_extension("db.restoring");
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(file, &staged).with_context(|| format!("reading {}", file.display()))?;
+    let stats = {
+        let lib =
+            Library::open(&staged).with_context(|| format!("{} is not a library backup", file.display()))?;
+        lib.stats()?
+    };
+    for suffix in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(suffix));
+    }
+    if db.exists() {
+        std::fs::rename(&db, db.with_extension("db.bak"))?;
+    }
+    std::fs::rename(&staged, &db)?;
+    println!(
+        "restored {} into {} ({} tracks, {} albums); the previous database is {}",
+        file.display(),
+        db.display(),
+        stats.tracks,
+        stats.albums,
+        db.with_extension("db.bak").display()
+    );
+    Ok(())
+}
+
 /// Scan the given folders, or the configured ones when none are given.
 pub fn scan(cfg: &NodeConfig, folders: &[std::path::PathBuf]) -> anyhow::Result<()> {
     let lib = open(cfg)?;

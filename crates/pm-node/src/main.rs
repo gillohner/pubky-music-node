@@ -78,6 +78,17 @@ enum Cmd {
     },
     /// Library counts.
     Stats,
+    /// Write a snapshot of the library database (playlists, favourites,
+    /// tags, history, settings, lyrics, art index) to a file; safe while
+    /// the node runs.
+    Backup {
+        file: PathBuf,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Replace the library database with a backup; stop the node first.
+    Restore { file: PathBuf },
     /// List tracks.
     Tracks {
         #[arg(long, default_value_t = 50)]
@@ -357,6 +368,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Upload { files } => upload(&cfg, &files).await?,
         Cmd::Login => login(&cfg).await?,
         Cmd::Stats => library::stats(&cfg)?,
+        Cmd::Backup { file, force } => library::backup(&cfg, &file, force)?,
+        Cmd::Restore { file } => library::restore(&cfg, &file)?,
         Cmd::ImportPlaylist { file, name } => library::import_playlist(&cfg, &file, name.as_deref())?,
         Cmd::Tracks { limit } => library::tracks(&cfg, limit)?,
         Cmd::Search { query, limit } => library::search(&cfg, &query, limit)?,
