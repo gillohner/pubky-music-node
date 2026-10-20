@@ -98,6 +98,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks/{id}", get(track))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
+        .route("/library/artists", get(artists))
+        .route("/library/artists/{id}", get(artist))
+        .route("/library/artists/{id}/tracks", get(artist_tracks))
         .route("/library/albums", get(albums))
         .route("/library/albums/{id}/tracks", get(album_tracks))
         .route("/library/albums/{id}/cover", get(album_cover))
@@ -415,6 +418,24 @@ async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -
         .lock()
         .expect("library poisoned")
         .search_tracks(&q.q, limit)?;
+    Ok(Json(Tracks { tracks }))
+}
+
+async fn artists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::ArtistSummary>> {
+    Ok(Json(s.library.lock().expect("library poisoned").list_artists()?))
+}
+
+async fn artist(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<ArtistDetail> {
+    let lib = s.library.lock().expect("library poisoned");
+    let artist = lib
+        .get_artist(id)?
+        .ok_or_else(|| ApiError::not_found(format!("no artist {id}")))?;
+    let albums = lib.artist_albums(id)?;
+    Ok(Json(ArtistDetail { artist, albums }))
+}
+
+async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
+    let tracks = s.library.lock().expect("library poisoned").artist_tracks(id)?;
     Ok(Json(Tracks { tracks }))
 }
 

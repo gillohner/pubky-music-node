@@ -1,7 +1,8 @@
 //! Request and response bodies of `/v1`. Plain serde types so a client crate
 //! can reuse them without pulling in the server.
 
-use pm_model::{Track, Volume};
+use pm_library::ArtistSummary;
+use pm_model::{Album, Track, Volume};
 use pm_pubky::{ActivitySource, Playlist};
 use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
@@ -315,4 +316,12 @@ pub struct MirrorReport {
     pub bytes: u64,
     #[serde(default)]
     pub errors: Vec<String>,
+}
+
+// ---- artists ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistDetail {
+    pub artist: ArtistSummary,
+    pub albums: Vec<Album>,
 }

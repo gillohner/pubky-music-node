@@ -2,8 +2,8 @@
 //! commands in, messages out, a reconnecting `/v1/events` stream.
 
 use pm_api::types::{
-    AddPlaylistItems, ApiEvent, CreatePlaylist, Enqueue, Info, PlaylistDetail, PlaylistSummary, QueueAt,
-    TransportAction,
+    AddPlaylistItems, ApiEvent, ArtistDetail, CreatePlaylist, Enqueue, Info, PlaylistDetail, PlaylistSummary,
+    QueueAt, TransportAction,
 };
 use pm_client::NodeClient;
 use pm_model::{Album, Track, Volume};
@@ -70,6 +70,8 @@ pub enum Cmd {
     },
     PubkySync,
     LoadCover(i64),
+    LoadArtists,
+    LoadArtist(i64),
 }
 
 #[derive(Debug)]
@@ -93,6 +95,8 @@ pub enum Msg {
     Playlist(Box<PlaylistDetail>),
     PlaylistDeleted(String),
     Notice(String),
+    Artists(Vec<pm_library::ArtistSummary>),
+    Artist(Box<ArtistDetail>),
     /// Decoded RGBA cover, or `None` when the album has none.
     Cover(i64, Option<(usize, usize, Vec<u8>)>),
     Error(String),
@@ -333,6 +337,8 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
                 )));
             }
         }
+        Cmd::LoadArtists => out.send(Msg::Artists(c.artists().await?)),
+        Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),
         Cmd::LoadCover(id) => {
             let decoded = match c.album_cover(id).await? {
                 Some((_, bytes)) => tokio::task::spawn_blocking(move || {

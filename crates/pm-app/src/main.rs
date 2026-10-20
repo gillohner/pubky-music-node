@@ -14,7 +14,7 @@ mod local;
 use backend::{Backend, Cmd, Msg};
 use local::{LocalPlayer, LOCAL_ZONE_ID};
 use pm_api::sources::NodeSources;
-use pm_api::types::{Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction};
+use pm_api::types::{ArtistDetail, Info, PlaylistDetail, PlaylistSummary, QueueAt, TransportAction};
 use pm_model::{Album, Quality, SignalPath, Track, Volume};
 use pm_zones::{Insert, QueueItem, Transport, ZoneState};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,8 @@ impl Default for Settings {
 enum View {
     Albums,
     Album(i64),
+    Artists,
+    Artist(i64),
     Playlists,
     Playlist(String),
     Tracks,
@@ -89,6 +91,8 @@ struct App {
     queues: HashMap<String, Vec<QueueItem>>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
+    artists: Vec<pm_library::ArtistSummary>,
+    artist_details: HashMap<i64, ArtistDetail>,
     new_playlist_name: String,
     /// Album id → texture (`None` once the node said there is no cover).
     covers: HashMap<i64, Option<egui::TextureHandle>>,
@@ -133,6 +137,8 @@ impl App {
             queues: HashMap::new(),
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
+            artists: Vec::new(),
+            artist_details: HashMap::new(),
             new_playlist_name: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
@@ -192,6 +198,10 @@ impl App {
                 Msg::ScanStarted => {
                     self.scanning = true;
                     self.toast("scan started");
+                }
+                Msg::Artists(a) => self.artists = a,
+                Msg::Artist(d) => {
+                    self.artist_details.insert(d.artist.id, *d);
                 }
                 Msg::Playlists(p) => self.playlists = p,
                 Msg::Playlist(d) => {
@@ -436,6 +446,8 @@ impl App {
         match self.view.clone() {
             View::Albums => self.albums_view(ui),
             View::Album(id) => self.album_view(ui, id),
+            View::Artists => self.artists_view(ui),
+            View::Artist(id) => self.artist_view(ui, id),
             View::Playlists => self.playlists_view(ui),
             View::Playlist(id) => self.playlist_view(ui, &id),
             View::Tracks => {
@@ -629,6 +641,82 @@ impl App {
                         track_ids: vec![tid.0],
                     });
                 }
+            }
+        });
+    }
+
+    fn artists_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Artists");
+            ui.weak(format!("{}", self.artists.len()));
+        });
+        if self.artists.is_empty() {
+            ui.weak("No artists yet.");
+            return;
+        }
+        let artists = self.artists.clone();
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("artists")
+                .num_columns(3)
+                .striped(true)
+                .show(ui, |ui| {
+                    for a in &artists {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new(&a.name).strong()).frame(false))
+                            .clicked()
+                        {
+                            if !self.artist_details.contains_key(&a.id) {
+                                self.backend.send(Cmd::LoadArtist(a.id));
+                            }
+                            self.view = View::Artist(a.id);
+                        }
+                        ui.weak(format!("{} albums", a.albums));
+                        ui.weak(format!("{} tracks", a.tracks));
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn artist_view(&mut self, ui: &mut egui::Ui, id: i64) {
+        ui.horizontal(|ui| {
+            if ui.button("‹ Artists").clicked() {
+                self.view = View::Artists;
+            }
+        });
+        let Some(d) = self.artist_details.get(&id).cloned() else {
+            ui.spinner();
+            return;
+        };
+        ui.add_space(6.0);
+        ui.heading(egui::RichText::new(&d.artist.name).size(26.0).strong());
+        ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
+        ui.add_space(8.0);
+        let tile = 168.0;
+        let gap = 14.0;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let cols = ((ui.available_width() + gap) / (tile + gap)).floor().max(1.0) as usize;
+            let mut clicked = None;
+            for row in d.albums.chunks(cols) {
+                ui.horizontal(|ui| {
+                    for a in row {
+                        let tex = self.cover(a.id);
+                        if album_tile(ui, a, tile, tex.as_ref()).clicked() {
+                            clicked = a.id;
+                        }
+                    }
+                });
+                ui.add_space(gap - 6.0);
+            }
+            if let Some(aid) = clicked {
+                if !self.albums.iter().any(|a| a.id == Some(aid)) {
+                    self.albums
+                        .extend(d.albums.iter().filter(|a| a.id == Some(aid)).cloned());
+                }
+                if !self.album_tracks.contains_key(&aid) {
+                    self.backend.send(Cmd::LoadAlbumTracks(aid));
+                }
+                self.view = View::Album(aid);
             }
         });
     }

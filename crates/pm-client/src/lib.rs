@@ -265,6 +265,21 @@ impl NodeClient {
             .tracks)
     }
 
+    pub async fn artists(&self) -> Result<Vec<pm_library::ArtistSummary>> {
+        self.get("library/artists", &[]).await
+    }
+
+    pub async fn artist(&self, id: i64) -> Result<ArtistDetail> {
+        self.get(&format!("library/artists/{id}"), &[]).await
+    }
+
+    pub async fn artist_tracks(&self, id: i64) -> Result<Vec<Track>> {
+        Ok(self
+            .get::<Tracks>(&format!("library/artists/{id}/tracks"), &[])
+            .await?
+            .tracks)
+    }
+
     pub async fn albums(&self, after: Option<i64>, limit: u32) -> Result<Vec<Album>> {
         let mut q = vec![("limit", limit.to_string())];
         if let Some(a) = after {
