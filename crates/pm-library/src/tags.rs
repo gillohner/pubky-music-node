@@ -85,8 +85,9 @@ pub struct FileProbe {
 }
 
 /// Extensions the scanner accepts, lowercase.
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["flac", "m4a", "alac", "wav", "wave", "aif", "aiff", "dsf", "dff"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "flac", "m4a", "alac", "wav", "wave", "aif", "aiff", "dsf", "dff", "mp3", "ogg", "oga",
+];
 
 pub fn is_supported(path: &Path) -> bool {
     extension(path)
@@ -181,6 +182,9 @@ fn probe_symphonia(path: &Path, ext: &str) -> Result<(FileProbe, TagSet)> {
     let container = match params.codec {
         codec::CODEC_ID_FLAC => "flac",
         codec::CODEC_ID_ALAC => "alac",
+        codec::CODEC_ID_MP3 => "mp3",
+        codec::CODEC_ID_AAC => "aac",
+        codec::CODEC_ID_VORBIS => "vorbis",
         _ => match format.format_info().short_name {
             "wav" | "wave" | "riff" => "wav",
             "aiff" | "aif" => "aiff",
@@ -233,8 +237,15 @@ fn default_bits(id: symphonia::core::codecs::audio::AudioCodecId) -> Option<u32>
         codec::CODEC_ID_PCM_S24LE | codec::CODEC_ID_PCM_S24BE => 24,
         codec::CODEC_ID_PCM_S32LE | codec::CODEC_ID_PCM_S32BE => 32,
         codec::CODEC_ID_PCM_S8 => 8,
+        // Lossy decoders produce float; we carry it as 24-bit PCM.
+        codec::CODEC_ID_MP3 | codec::CODEC_ID_AAC | codec::CODEC_ID_VORBIS => 24,
         _ => return None,
     })
+}
+
+/// Containers whose audio went through a lossy codec.
+pub fn is_lossy_container(container: &str) -> bool {
+    matches!(container, "mp3" | "aac" | "vorbis" | "opus")
 }
 
 impl TagSet {

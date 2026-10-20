@@ -32,6 +32,10 @@ impl FrameSource for Source {
     fn finalize(&mut self) -> Option<bool> {
         Source::finalize(self)
     }
+
+    fn lossy_source(&self) -> bool {
+        Source::is_lossy(self)
+    }
 }
 
 impl Processor for Plan {

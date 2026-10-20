@@ -56,6 +56,9 @@ impl FrameSource for WithReplayGain {
     fn replay_gain(&self) -> Option<ReplayGain> {
         Some(self.gain)
     }
+    fn lossy_source(&self) -> bool {
+        self.inner.lossy_source()
+    }
 }
 
 /// One decoded track. Methods block (file I/O); the zone calls them from its
@@ -76,6 +79,10 @@ pub trait FrameSource: Send {
     /// ReplayGain from the track's tags, when known.
     fn replay_gain(&self) -> Option<ReplayGain> {
         None
+    }
+    /// The audio went through a lossy codec; the signal path says so.
+    fn lossy_source(&self) -> bool {
+        false
     }
 }
 

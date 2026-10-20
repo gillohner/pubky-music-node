@@ -501,6 +501,15 @@ impl Plan {
         })
     }
 
+    /// Record that the source itself is lossy (MP3, AAC, Vorbis): the decode
+    /// stage becomes `Lossy`, so the headline never claims bit-perfect.
+    pub fn mark_lossy_source(&mut self) {
+        if let Some(stage) = self.path.stages.first_mut() {
+            stage.quality = Quality::Lossy;
+            stage.note = Some("lossy source codec".into());
+        }
+    }
+
     pub fn source_format(&self) -> AudioFormat {
         self.source
     }

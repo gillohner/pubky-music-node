@@ -22,7 +22,9 @@ use pm_model::{AudioBlock, AudioFormat};
 use std::fs::File;
 use std::path::Path;
 use symphonia::core::audio::sample::SampleFormat;
-use symphonia::core::codecs::audio::well_known::{CODEC_ID_ALAC, CODEC_ID_FLAC};
+use symphonia::core::codecs::audio::well_known::{
+    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3, CODEC_ID_VORBIS,
+};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymError;
@@ -93,6 +95,12 @@ impl Decoder {
             "flac"
         } else if params.codec == CODEC_ID_ALAC {
             "alac"
+        } else if params.codec == CODEC_ID_MP3 {
+            "mp3"
+        } else if params.codec == CODEC_ID_AAC {
+            "aac"
+        } else if params.codec == CODEC_ID_VORBIS {
+            "vorbis"
         } else {
             match format.format_info().short_name {
                 "wav" | "wave" => "wav",
@@ -142,6 +150,11 @@ impl Decoder {
 
     pub fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
+    }
+
+    /// The audio went through a lossy codec: no bit-perfect claim applies.
+    pub fn is_lossy(&self) -> bool {
+        matches!(self.container, "mp3" | "aac" | "vorbis")
     }
 
     pub fn container(&self) -> &str {
@@ -251,6 +264,11 @@ impl Decoder {
 
 /// The source's real bit depth.
 fn resolve_bits(params: &symphonia::core::codecs::audio::AudioCodecParameters) -> Option<u8> {
+    // Lossy decoders hand out float; carry it as 24-bit PCM (the decoder's
+    // own precision is well below that).
+    if matches!(params.codec, CODEC_ID_MP3 | CODEC_ID_AAC | CODEC_ID_VORBIS) {
+        return Some(24);
+    }
     if params.codec == CODEC_ID_ALAC {
         // The container does not set bits_per_sample for ALAC; it is byte 5 of
         // the magic cookie (optionally wrapped in frma/alac atoms).

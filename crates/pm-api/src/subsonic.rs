@@ -396,6 +396,9 @@ fn mime_for(container: &str) -> (&'static str, &'static str) {
         "alac" | "isomp4" | "mp4" | "m4a" => ("audio/mp4", "m4a"),
         "dsf" => ("audio/x-dsf", "dsf"),
         "dff" => ("audio/x-dff", "dff"),
+        "mp3" => ("audio/mpeg", "mp3"),
+        "aac" => ("audio/aac", "m4a"),
+        "vorbis" => ("audio/ogg", "ogg"),
         _ => ("application/octet-stream", "bin"),
     }
 }

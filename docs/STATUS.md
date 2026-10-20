@@ -28,7 +28,8 @@ implemented with automated tests but not yet exercised outside this repository's
 4. Canonical IDs: playlists, activity and imports accept only canonical music URLs; library tracks
    without a MusicBrainz id or ISRC are refused from social data with an explanatory error.
 5. Bit-perfect by default: every conversion is a named stage with a quality level; defaults add
-   none; tests cover bypass, pad, dither, resample and EQ paths.
+   none; tests cover bypass, pad, dither, resample and EQ paths. Lossy sources (MP3, AAC, Vorbis)
+   decode to 24-bit float output and mark the decode stage `Lossy`, so no bit-perfect claim is made.
 6. Reverse engineering: none.
 
 ## Deployment shapes

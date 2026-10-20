@@ -550,6 +550,9 @@ async fn track_file(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Res
         "isomp4" | "mp4" | "m4a" => "audio/mp4",
         "dsf" => "audio/x-dsf",
         "dff" => "audio/x-dff",
+        "mp3" => "audio/mpeg",
+        "aac" => "audio/aac",
+        "vorbis" => "audio/ogg",
         _ => "application/octet-stream",
     };
     let name = t

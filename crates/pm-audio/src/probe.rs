@@ -17,7 +17,7 @@ pub struct FileInfo {
 
 /// Extensions the node scans for.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "m4a", "mp4", "alac", "wav", "wave", "aif", "aiff", "dsf", "dff",
+    "flac", "m4a", "mp4", "alac", "wav", "wave", "aif", "aiff", "dsf", "dff", "mp3", "ogg", "oga",
 ];
 
 pub fn is_supported_extension(path: &Path) -> bool {

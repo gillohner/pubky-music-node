@@ -45,6 +45,14 @@ impl Source {
         }
     }
 
+    /// Lossy codec behind this source (MP3, AAC, Vorbis).
+    pub fn is_lossy(&self) -> bool {
+        match self {
+            Source::Pcm(d) => d.is_lossy(),
+            Source::Dsd(_) => false,
+        }
+    }
+
     pub fn next_block(&mut self) -> Result<Option<AudioBlock>, AudioError> {
         match self {
             Source::Pcm(d) => d.next_block(),
