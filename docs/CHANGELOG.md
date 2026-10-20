@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- TIDAL through the official API: catalogue search, albums and tracks in the Sources view, sign-in
+  with OAuth 2 + PKCE from either UI, playback of `tidal:track:` URIs through stream manifests and
+  HLS segments (FLAC when the subscription allows; DRM refused; previews logged). Config `[tidal]`
+  or `PM_TIDAL_*`.
+- Zones that could play nothing now say the last open error.
 - Queue tools in both UIs: shuffle what comes next, save the queue as a playlist, transfer playback
   to another zone, Start radio from a track, an album or an artist page, sleep timer per zone.
 - Lyrics from tags or a sidecar `.lrc` (synced lines follow the position); Subsonic `getLyrics` and
