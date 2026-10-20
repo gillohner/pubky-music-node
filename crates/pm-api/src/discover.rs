@@ -300,6 +300,28 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
     }
 }
 
+/// A MusicBrainz card without links (Pinakes is making MusicBrainz links
+/// their own hubs; until their cards carry `also_on`): ask by `key=mbid:` and
+/// resolve again.
+async fn fill_from_key(s: &NodeState, it: &mut DiscoverItem, album_id: Option<i64>) {
+    if !it.also_on.is_empty() || it.in_library.is_some() {
+        return;
+    }
+    let Some(mbid) = it
+        .page
+        .as_deref()
+        .and_then(|p| p.strip_prefix("https://musicbrainz.org/recording/"))
+        .map(|m| m.trim_end_matches('/').to_string())
+    else {
+        return;
+    };
+    let key = format!("mbid:{mbid}");
+    it.also_on = also_on_versions(s, &key, &format!("pinakes.version.{key}")).await;
+    let r = resolve(&service_access(s), it, album_id);
+    it.plays_from = r.plays_from;
+    it.connect = r.connect;
+}
+
 /// `GET /v1/discover/play?uri=…`: what to queue for an item, resolved through
 /// the node's connected services; albums expand to their tracks on the
 /// chosen service.
@@ -321,7 +343,8 @@ pub(crate) async fn play_plan(
     // Pinakes knows it: every link of the group. Otherwise the provider's own page.
     let (it, album_id, album_name, duration) = match &r {
         Some(r) => {
-            let (it, a) = detail_item(&s, r);
+            let (mut it, a) = detail_item(&s, r);
+            fill_from_key(&s, &mut it, a).await;
             let f = r.facts();
             (it, a, f.album.clone(), f.duration_secs())
         }
@@ -656,7 +679,8 @@ pub(crate) async fn item_detail(
         return Err(ApiError::not_found("Pinakes has not seen this link"));
     };
     let facts = r.facts();
-    let (item, in_library_album) = detail_item(&s, &r);
+    let (mut item, in_library_album) = detail_item(&s, &r);
+    fill_from_key(&s, &mut item, in_library_album).await;
     let on_pubky = match d.nexus().resource_by_uri(&r.card.uri).await {
         Ok(view) => {
             let mut tags: Vec<(String, u64)> = view

@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- Pinakes fixtures re-recorded from the live #21 build (8092), OpenAPI candidate included. MusicBrainz recording cards that Pinakes now puts in charts without links are filled by `key=mbid:` before resolving, so they play.
 - **UX wireframes, phase 1b** (`docs/ux/06…11`): search with the Everywhere / My library scope, artist, album and song pages with Wikipedia and MusicBrainz facts and source labels, the Everywhere / This version tag switch, the review composer, and Copy to my homeserver.
 - **Favourites, playlist items and history from other services are real rows** (owner finding): `POST /v1/discover/describe {uris}` names any music URL outside the library with title, artist, cover and where it plays from, through one Pinakes batch lookup, then the provider's own API for that id (TIDAL, Deezer, Spotify); cached a day. A URL is never a name ("Untitled on TIDAL" when nothing is known). `GET /v1/discover/play` now also plays links Pinakes has not seen through the provider (a favourited TIDAL album plays its tracks from TIDAL). Web: Favourites › "From other services" and playlist rows get title, cover, Play, the menu and the Plays-from chip.
 - Global search shows library results at once, then streaming services and Pubky as they answer.
