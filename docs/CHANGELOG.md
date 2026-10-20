@@ -21,4 +21,6 @@ Newest first. Dates are when the change landed on `main`.
 - Subsonic `jukeboxControl` drives a node zone from any Subsonic client; `byYear` album lists
   honour `fromYear`/`toYear`.
 - The browser zone's queue survives a reload.
+- Libraries beyond 1000 albums or tracks show everything: both UIs page through the API's
+  `after` cursor.
 - Queue, repeat, radio, shuffle and transport replies wait for the engine to apply the command.
