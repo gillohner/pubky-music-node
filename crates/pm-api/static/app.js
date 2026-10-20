@@ -332,7 +332,7 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); return; }
+    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); return; }
     if (typing) return;
     if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
@@ -370,6 +370,7 @@
           <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" ${can ? '' : 'disabled'} title="${can ? (fav ? 'Remove from favourites' : 'Add to favourites') : 'No MusicBrainz id or ISRC yet'}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue">${icon('plus')}</button>
+          <button class="icon-btn" data-act="more" title="More">${icon('more')}</button>
         </div>
       </div>`;
     }).join('')}</div>`;
@@ -386,6 +387,7 @@
       if (act === 'play') playTracks(tracks.slice(i), true);
       else if (act === 'next') playTracks([tracks[i]], false, 'next');
       else if (act === 'add') playTracks([tracks[i]], false, 'end');
+      else if (act === 'more') trackMenu(btn, [tracks[i]]);
       else if (act === 'fav') {
         const on = btn.classList.contains('on');
         try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
@@ -409,6 +411,34 @@
     $('#notesbtn').onclick = () => { $('#notesedit').hidden = false; $('#notesbtn').hidden = true; if ($('#notes')) $('#notes').hidden = true; $('#notestext').focus(); };
     $('#notescancel').onclick = () => { $('#notesedit').hidden = true; $('#notesbtn').hidden = false; if ($('#notes')) $('#notes').hidden = false; };
     $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
+  };
+  // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
+  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
+  const closeMenu = () => { menuEl.hidden = true; };
+  const showMenu = (anchor, items) => {
+    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item" data-mi="${i}" ${it.disabled ? 'disabled' : ''}>${it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}</span></button>`).join('');
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { closeMenu(); items[Number(b.dataset.mi)].run(); });
+    menuEl.hidden = false;
+    const r = anchor.getBoundingClientRect(); const mw = 280;
+    menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
+    menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
+    menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
+    setTimeout(() => document.addEventListener('click', (e) => { if (!menuEl.contains(e.target)) closeMenu(); }, { once: true }), 0);
+  };
+  const addToPlaylist = async (playlistId, tracks) => {
+    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, { track_ids: tracks.map((t) => t.id) }); toast(tracks.length === 1 ? 'Added to playlist' : `${tracks.length} tracks added to playlist`); }
+    catch (e) { toast(e.message, 'error'); }
+  };
+  const trackMenu = async (anchor, tracks) => {
+    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    const items = [
+      { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
+      { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
+      { title: 'Add to playlist' },
+      ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
+      { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
+    ];
+    showMenu(anchor, items);
   };
   const BAND_KINDS = ['peaking', 'low_shelf', 'high_shelf', 'low_pass', 'high_pass'];
   const dspEditor = (zone, cfg) => `<div class="card dsp" style="margin-top:12px"><div class="section-head"><h3>DSP · ${esc(zone.name)}</h3><span class="muted small">Every stage shows in the signal path; defaults keep the path bit-perfect.</span></div>
@@ -531,7 +561,7 @@
               <div class="eyebrow">Album</div><h1>${esc(a.title)}</h1>
               <div class="sub">${esc(a.album_artist || artists(tracks[0] || {}))}</div>
               <div class="facts">${[a.year, `${tracks.length} tracks`, fmtLong(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div>
-              <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
+              <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn" id="albummore" title="More">${icon('more')}</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
               ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
               ${relUrl ? reviewRow(myReview) : ''}
               ${onPubky ? `<div class="tagrow"><span class="eyebrow">On Pubky</span>${onPubky.indexed ? (onPubky.taggers ? `<span class="muted small">${onPubky.taggers} ${onPubky.taggers === 1 ? 'person' : 'people'}</span>` : '') + (onPubky.tags.length ? onPubky.tags.slice(0, 12).map(([l, n]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('') : '<span class="muted small">no tags yet</span>') : '<span class="muted small">not indexed yet</span>'}</div>` : ''}
@@ -542,6 +572,7 @@
           $('#playall').onclick = () => playTracks(tracks, true);
           $('#nextall').onclick = () => playTracks(tracks, false, 'next');
           $('#addall').onclick = () => playTracks(tracks, false, 'end');
+          $('#albummore').onclick = (e) => { e.stopPropagation(); trackMenu($('#albummore'), tracks); };
           $('#heart').onclick = async () => { try { await setFavourite({ album_id: id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
           break;
         }

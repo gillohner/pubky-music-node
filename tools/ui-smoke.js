@@ -75,6 +75,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       if (cfg.headroom_db !== -3 || cfg.eq.length !== 1 || cfg2.eq.length !== 0) errors.push('dsp editor round trip failed');
     } else errors.push('dsp editor did not open');
   }
+  // Track ⋯ menu opens with playlist entries.
+  w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
+  const more = w.document.querySelector('.track [data-act="more"]');
+  if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('New playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
   // heart on first track row (fixtures have no ids → disabled)
   const h = w.document.querySelector('.track .heart'); console.log('heart disabled (no ids):', h && h.disabled);
   console.log('errors:', errors.length ? errors : 'none');
