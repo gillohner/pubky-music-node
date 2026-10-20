@@ -39,7 +39,7 @@ fn site_slug(site: &str) -> String {
 }
 
 /// `also_on` entries as Versions rows (tagged first, playable when the node streams the service).
-fn also_on_rows(links: &[pm_pubky::pinakes::AlsoOn]) -> Vec<Version> {
+pub(crate) fn also_on_rows(links: &[pm_pubky::pinakes::AlsoOn]) -> Vec<Version> {
     let mut v: Vec<&pm_pubky::pinakes::AlsoOn> = links.iter().collect();
     v.sort_by_key(|a| !a.is_tagged());
     v.into_iter()
@@ -892,6 +892,18 @@ pub(crate) fn playable_uri(url: &str) -> Option<String> {
 /// with a queue URI when the node can stream it (TIDAL, Deezer). Pinakes
 /// has no card for a MusicBrainz URL itself, so keys are the join. Empty
 /// without a contact or when nobody on Pubky tagged the recording. Cached
+/// The service links of a MusicBrainz URL's own card (Pinakes treats
+/// recording, release, artist and ISRC URLs as hubs since pubky/pinakes#24):
+/// an identified file's canonical URL gets its versions directly. Unknown
+/// hubs are read on demand (paced); empty while Pinakes reads or when the
+/// card has no links yet.
+pub(crate) async fn hub_versions(s: &Arc<NodeState>, hub: &str) -> Vec<Version> {
+    match crate::pinakes_reader::card(s, hub).await {
+        crate::pinakes_reader::Card::Found(r) => also_on_rows(r.also_on()),
+        _ => Vec::new(),
+    }
+}
+
 /// a day.
 pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) -> Vec<Version> {
     let Some(d) = s.discovery() else {

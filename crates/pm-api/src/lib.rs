@@ -1134,21 +1134,41 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let pinakes_key = track
-        .recording_mbid
+    // The canonical identity first (tags, fingerprint or the owner's
+    // confirmation), then the raw tag ids.
+    let canonical = track.canonical.as_ref().map(|(u, _)| u.clone());
+    let hub = canonical
         .as_ref()
-        .map(|m| format!("mbid:{m}"))
-        .or_else(|| track.isrc.as_ref().map(|i| format!("isrc:{i}")));
+        .filter(|u| {
+            matches!(
+                u,
+                pm_model::MusicUri::Recording { .. } | pm_model::MusicUri::Isrc { .. }
+            )
+        })
+        .map(|u| u.to_url());
+    let pinakes_key = match &canonical {
+        Some(pm_model::MusicUri::Recording { mbid }) => Some(format!("mbid:{mbid}")),
+        Some(pm_model::MusicUri::Isrc { isrc }) => Some(format!("isrc:{isrc}")),
+        _ => None,
+    }
+    .or_else(|| track.recording_mbid.as_ref().map(|m| format!("mbid:{m}")))
+    .or_else(|| track.isrc.as_ref().map(|i| format!("isrc:{i}")));
     let key = format!("pinakes.version.track.{id}");
     let (t, d, sp, p) = tokio::join!(
         tidal::track_versions(&s, &track),
         deezer::track_versions(&s, &track),
         spotify::track_versions(&s, &track),
         async {
-            match pinakes_key {
-                Some(k) => discover::also_on_versions(&s, &k, &key).await,
+            // The MusicBrainz URL's own card (a hub), then everything tagged with the key.
+            let mut v = match &hub {
+                Some(h) => discover::hub_versions(&s, h).await,
                 None => Vec::new(),
+            };
+            if let Some(k) = pinakes_key {
+                let by_key = discover::also_on_versions(&s, &k, &key).await;
+                merge_versions(&mut v, by_key);
             }
+            v
         }
     );
     let mut out = t.unwrap_or_default();
@@ -3690,6 +3710,120 @@ mod tests {
                 "{path} is not the UI"
             );
         }
+    }
+
+    /// An identified local file (fingerprint, no IDs in its tags) gets its
+    /// versions from its MusicBrainz URL's own card: Pinakes treats MusicBrainz
+    /// links as hubs (pubky/pinakes#24).
+    #[tokio::test]
+    async fn identified_files_get_versions_from_their_musicbrainz_hub() {
+        let mut card: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        // The hub card: the MusicBrainz URL with the group's service links.
+        let all = card["details"]["also_on"].as_array().unwrap().clone();
+        let mut links = vec![
+            serde_json::json!({"uri": "https://tidal.com/track/534050211", "site": "TIDAL", "id": "a14a55b508a614dd965baefb8c4587cc"}),
+        ];
+        links.extend(all);
+        card["uri"] = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into();
+        card["site"] = "MusicBrainz".into();
+        card["also_on"] = serde_json::json!(links.clone());
+        card["details"]["also_on"] = serde_json::json!(links);
+        let card = card.to_string();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/resources/by-uri",
+                get(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let card = card.clone();
+                        let seen = s2.clone();
+                        async move {
+                            seen.lock()
+                                .unwrap()
+                                .push(q.get("uri").cloned().unwrap_or_default());
+                            ([(header::CONTENT_TYPE, "application/json")], card)
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/search",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        r#"{"items":[],"cursor":null,"reach_truncated":false}"#,
+                    )
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let id = lib
+                .upsert_track(&untagged_track(
+                    dir.path().join("11.flac"),
+                    "Bohemian Rhapsody",
+                    "Queen",
+                ))
+                .unwrap();
+            let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+            lib.set_identity(
+                id.0,
+                &pm_model::MusicUri::Recording { mbid },
+                pm_model::Confidence::Fingerprint { score: 0.97 },
+                Some("9ff43b6a-4f16-427c-93c2-92307ca505e0"),
+            )
+            .unwrap();
+            id
+        };
+        let app = router(s.clone());
+        let (st, v) = call(
+            &app,
+            "GET",
+            &format!("/v1/library/tracks/{}/versions", tid.0),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            seen.lock().unwrap().first().map(String::as_str),
+            Some("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"),
+            "asks for the hub card by the canonical URL"
+        );
+        let sources: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["source"].as_str().unwrap())
+            .collect();
+        for want in ["tidal", "spotify", "deezer", "youtube"] {
+            assert!(sources.contains(&want), "{want} missing: {v}");
+        }
+        let tidal = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["source"] == "tidal")
+            .unwrap();
+        assert_eq!(tidal["uri"], "tidal:track:534050211", "TIDAL plays: {tidal}");
     }
 
     #[test]
