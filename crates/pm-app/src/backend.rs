@@ -27,6 +27,11 @@ pub enum Cmd {
     Refresh,
     LoadHome,
     LoadNewReleases,
+    /// Play a random track by the artist on `zone` and turn library radio on.
+    ArtistRadio {
+        artist: i64,
+        zone: String,
+    },
     LoadFavourites,
     RadioSearch(String),
     SourceSearch {
@@ -782,6 +787,34 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::LoadArtists => out.send(Msg::Artists(c.artists().await?)),
         Cmd::LoadArtist(id) => out.send(Msg::Artist(Box::new(c.artist(id).await?))),
         Cmd::LoadArtistTracks(id) => out.send(Msg::ArtistTracks(c.artist_tracks(id).await?)),
+        Cmd::ArtistRadio { artist, zone } => {
+            let tracks = c.artist_tracks(artist).await?;
+            let ids: Vec<i64> = tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
+            if ids.is_empty() {
+                out.send(Msg::Notice("no playable tracks by this artist".into()));
+            } else {
+                let pick = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as usize)
+                    .unwrap_or(0)
+                    % ids.len();
+                c.enqueue(
+                    &zone,
+                    &Enqueue {
+                        track_ids: vec![ids[pick]],
+                        items: Vec::new(),
+                        at: QueueAt::End,
+                        replace: true,
+                        play: true,
+                    },
+                )
+                .await?;
+                c.set_radio(&zone, true).await?;
+                out.send(Msg::Notice("radio on: similar music follows".into()));
+                let q = c.queue(&zone).await?;
+                out.send(Msg::Queue(zone, q));
+            }
+        }
         Cmd::LoadGenres => out.send(Msg::Genres(c.genres().await?)),
         Cmd::LoadLyrics(id) => {
             let l = c.lyrics(id).await?;

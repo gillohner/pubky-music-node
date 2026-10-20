@@ -2346,6 +2346,19 @@ impl App {
                     if ui.add(theme::primary("▶  Play all")).clicked() {
                         self.backend.send(Cmd::LoadArtistTracks(id));
                     }
+                    if !self.is_local()
+                        && ui
+                            .add(theme::secondary("Start radio"))
+                            .on_hover_text(
+                                "A random track by this artist, then similar music from the library",
+                            )
+                            .clicked()
+                    {
+                        self.backend.send(Cmd::ArtistRadio {
+                            artist: id,
+                            zone: self.settings.zone.clone(),
+                        });
+                    }
                 });
                 ui.weak(format!("{} albums · {} tracks", d.artist.albums, d.artist.tracks));
                 if let Some((i, _)) = info.as_ref() {
