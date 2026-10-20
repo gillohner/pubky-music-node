@@ -159,6 +159,8 @@ struct App {
     /// Opened in the system browser on the next frame (TIDAL sign-in).
     pending_open_url: Option<String>,
     tidal_poll_at: Option<Instant>,
+    /// The signed-in user's TIDAL collection and playlists, once loaded.
+    tidal_mine: Option<(pm_api::tidal::TidalCollection, Vec<pm_api::tidal::TidalPlaylist>)>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -260,6 +262,7 @@ impl App {
             tidal_status: None,
             pending_open_url: None,
             tidal_poll_at: None,
+            tidal_mine: None,
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -427,9 +430,15 @@ impl App {
                         self.tidal_poll_at = None;
                         self.sources.clear();
                         self.backend.send(Cmd::LoadSources);
+                        if self.tidal_mine.is_none() {
+                            self.backend.send(Cmd::TidalMine);
+                        }
+                    } else {
+                        self.tidal_mine = None;
                     }
                     self.tidal_status = Some(st);
                 }
+                Msg::TidalMine(col, pls) => self.tidal_mine = Some((col, pls)),
                 Msg::OpenUrl(u) => {
                     self.pending_open_url = Some(u);
                     // Poll the node until the sign-in lands (the browser finishes it).
@@ -1808,6 +1817,10 @@ impl App {
             }
         });
         let Some((q, hits)) = self.archive_results.clone() else {
+            if self.source_id == "tidal" && self.tidal_status.as_ref().is_some_and(|s| s.signed_in) {
+                self.tidal_mine_view(ui);
+                return;
+            }
             ui.add_space(20.0);
             ui.weak("Search above.");
             return;
@@ -3055,6 +3068,78 @@ impl App {
         }
         if let Some(id) = delete {
             self.backend.send(Cmd::DeleteZone(id));
+        }
+    }
+
+    /// The signed-in user's TIDAL collection and playlists, with imports.
+    fn tidal_mine_view(&mut self, ui: &mut egui::Ui) {
+        let Some((col, pls)) = self.tidal_mine.clone() else {
+            ui.add_space(12.0);
+            ui.spinner();
+            ui.weak("Loading your TIDAL collection…");
+            return;
+        };
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Your collection").strong().size(16.0));
+            ui.weak(format!(
+                "{} tracks · {} albums",
+                col.tracks.len(),
+                col.albums.len()
+            ));
+            if ui
+                .small_button("Import as favourites")
+                .on_hover_text("By ISRC where TIDAL has one, else by the TIDAL link")
+                .clicked()
+            {
+                self.backend.send(Cmd::TidalImportCollection);
+            }
+        });
+        let mut open: Option<String> = None;
+        let mut import: Option<String> = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for h in col.albums.iter().chain(col.tracks.iter()) {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(&h.title).strong()).frame(false))
+                        .clicked()
+                    {
+                        open = Some(h.id.clone());
+                    }
+                    let mut facts = vec![h.kind.clone()];
+                    facts.extend(h.creator.clone());
+                    facts.extend(h.year.map(|y| y.to_string()));
+                    ui.weak(facts.join(" · "));
+                });
+            }
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("Your playlists").strong().size(16.0));
+            if pls.is_empty() {
+                ui.weak("No playlists of your own on TIDAL.");
+            }
+            for p in &pls {
+                ui.horizontal(|ui| {
+                    ui.label(&p.name);
+                    ui.weak(format!("{} tracks", p.items));
+                    if ui
+                        .small_button("Import")
+                        .on_hover_text("As a private Pubky playlist of canonical URIs")
+                        .clicked()
+                    {
+                        import = Some(p.id.clone());
+                    }
+                });
+            }
+        });
+        if let Some(id) = open {
+            self.archive_loading = Some(id.clone());
+            self.backend.send(Cmd::LoadSourceItem {
+                source: "tidal".into(),
+                id,
+            });
+        }
+        if let Some(id) = import {
+            self.backend.send(Cmd::TidalImportPlaylist(id));
         }
     }
 

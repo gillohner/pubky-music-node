@@ -474,6 +474,32 @@ impl NodeClient {
         Ok(l.url)
     }
 
+    pub async fn tidal_collection(&self) -> Result<pm_api::tidal::TidalCollection> {
+        self.get("sources/tidal/collection", &[]).await
+    }
+
+    pub async fn tidal_playlists(&self) -> Result<Vec<pm_api::tidal::TidalPlaylist>> {
+        self.get("sources/tidal/playlists", &[]).await
+    }
+
+    pub async fn tidal_import_collection(&self) -> Result<pm_api::tidal::ImportReport> {
+        self.send::<pm_api::tidal::ImportReport, ()>(
+            reqwest::Method::POST,
+            "sources/tidal/collection/import",
+            None,
+        )
+        .await
+    }
+
+    pub async fn tidal_import_playlist(&self, id: &str) -> Result<pm_api::tidal::ImportReport> {
+        self.send::<pm_api::tidal::ImportReport, ()>(
+            reqwest::Method::POST,
+            &format!("sources/tidal/playlists/{id}/import"),
+            None,
+        )
+        .await
+    }
+
     pub async fn tidal_logout(&self) -> Result<pm_api::tidal::TidalStatus> {
         self.send::<pm_api::tidal::TidalStatus, ()>(reqwest::Method::DELETE, "sources/tidal/session", None)
             .await

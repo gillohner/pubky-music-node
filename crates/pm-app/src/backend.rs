@@ -189,6 +189,9 @@ pub enum Cmd {
     TidalStatus,
     TidalLogin,
     TidalLogout,
+    TidalMine,
+    TidalImportCollection,
+    TidalImportPlaylist(String),
     PubkyUpload(i64),
     PubkyMirror,
     LoadDsp(String),
@@ -257,6 +260,7 @@ pub enum Msg {
     NewReleases(Box<NewReleasesPage>),
     PubkyFiles(Result<Vec<pm_pubky::homeserver::RemoteFile>, String>),
     TidalStatus(pm_api::tidal::TidalStatus),
+    TidalMine(pm_api::tidal::TidalCollection, Vec<pm_api::tidal::TidalPlaylist>),
     /// A URL the app should open in the system browser (TIDAL sign-in).
     OpenUrl(String),
     Genre(Box<GenreDetail>),
@@ -593,6 +597,41 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::TidalLogin => {
             let url = c.tidal_login_url().await?;
             out.send(Msg::OpenUrl(url));
+        }
+        Cmd::TidalMine => {
+            let col = c.tidal_collection().await?;
+            let pls = c.tidal_playlists().await?;
+            out.send(Msg::TidalMine(col, pls));
+        }
+        Cmd::TidalImportCollection => {
+            let r = c.tidal_import_collection().await?;
+            out.send(Msg::Notice(format!(
+                "{} TIDAL favourites imported{}",
+                r.imported,
+                if r.skipped > 0 {
+                    format!(", {} skipped", r.skipped)
+                } else {
+                    String::new()
+                }
+            )));
+            out.send(Msg::Favourites(Box::new(c.favourites().await?)));
+        }
+        Cmd::TidalImportPlaylist(id) => {
+            let r = c.tidal_import_playlist(&id).await?;
+            out.send(Msg::Notice(format!(
+                "imported “{}”: {} tracks{}",
+                r.playlist
+                    .as_ref()
+                    .map(|p| p.summary.name.as_str())
+                    .unwrap_or("playlist"),
+                r.imported,
+                if r.skipped > 0 {
+                    format!(", {} skipped", r.skipped)
+                } else {
+                    String::new()
+                }
+            )));
+            out.send(Msg::Playlists(c.playlists().await?));
         }
         Cmd::TidalLogout => {
             out.send(Msg::TidalStatus(c.tidal_logout().await?));
