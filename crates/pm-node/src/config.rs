@@ -82,6 +82,8 @@ pub struct OutputsConfig {
     pub upnp: bool,
     /// Slimproto port for Squeezebox / squeezelite players; 0 disables.
     pub slimproto_port: u16,
+    /// Discover Chromecast / Google Cast devices (mDNS) and offer them as outputs.
+    pub cast: bool,
 }
 
 impl Default for OutputsConfig {
@@ -92,6 +94,7 @@ impl Default for OutputsConfig {
             discover_ms: 1500,
             upnp: true,
             slimproto_port: 3483,
+            cast: true,
         }
     }
 }

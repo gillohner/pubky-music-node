@@ -29,6 +29,7 @@ fn state(dir: &std::path::Path) -> Arc<NodeState> {
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
             upnp: false,
+            cast: false,
             slimproto_port: 0,
             session_secret_path: None,
         },

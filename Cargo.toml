@@ -16,6 +16,7 @@ members = [
     "crates/pm-out-net",
     "crates/pm-out-upnp",
     "crates/pm-out-slimproto",
+    "crates/pm-out-cast",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ pm-endpoint = { path = "crates/pm-endpoint" }
 pm-out-net = { path = "crates/pm-out-net" }
 pm-out-upnp = { path = "crates/pm-out-upnp" }
 pm-out-slimproto = { path = "crates/pm-out-slimproto" }
+pm-out-cast = { path = "crates/pm-out-cast" }
 
 anyhow = "1.0"
 async-trait = "0.1"

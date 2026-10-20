@@ -3644,6 +3644,7 @@ dependencies = [
  "pm-audio",
  "pm-library",
  "pm-model",
+ "pm-out-cast",
  "pm-out-slimproto",
  "pm-out-upnp",
  "pm-pubky",
@@ -3797,6 +3798,22 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pm-out-cast"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mdns-sd",
+ "pm-model",
+ "pm-zones",
+ "rustls",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
 ]
 
 [[package]]

@@ -33,6 +33,8 @@ pub struct NodeSettings {
     pub public_url: String,
     /// Discover UPnP/OpenHome renderers and offer them as outputs.
     pub upnp: bool,
+    /// Discover Chromecast / Google Cast devices and offer them as outputs.
+    pub cast: bool,
     /// Accept Squeezebox / squeezelite players (Slimproto) on this TCP port; 0 = off.
     pub slimproto_port: u16,
     /// Where a Pubky Ring sign-in stores the session secret (also read at start).
@@ -55,6 +57,7 @@ pub struct NodeState {
     pub subsonic_user: String,
     pub public_url: String,
     pub upnp: bool,
+    pub cast: bool,
     pub slimproto_port: u16,
     pub session_secret_path: Option<PathBuf>,
     pub pubky: pm_pubky::PmPubkyConfig,
@@ -106,6 +109,7 @@ impl NodeState {
             subsonic_user: settings.subsonic_user,
             public_url: settings.public_url,
             upnp: settings.upnp,
+            cast: settings.cast,
             slimproto_port: settings.slimproto_port,
             session_secret_path: settings.session_secret_path,
             pubky: settings.pubky,
@@ -331,11 +335,46 @@ impl NodeState {
         new
     }
 
+    /// mDNS discovery of Cast devices; each becomes an output playing
+    /// through its own pull stream. Blocking; call from `spawn_blocking`.
+    pub fn discover_cast(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
+        if !self.cast {
+            return Vec::new();
+        }
+        let mut new = Vec::new();
+        for d in pm_out_cast::discover(timeout) {
+            let name = format!(
+                "cast-{}",
+                d.id.chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(32)
+                    .collect::<String>()
+            );
+            let pull = self.pull_output(&name);
+            let out = Arc::new(pm_out_cast::CastOutput::new(
+                d.clone(),
+                pull,
+                self.pull_url(&name),
+            ));
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            tracing::info!(device = %d.friendly_name, output = %id, "Cast device");
+            let zone_name = out.name();
+            self.outputs.register(out.clone());
+            self.create_zone(&zone_name, out);
+            new.push(id);
+        }
+        new
+    }
+
     /// Run discovery again: register outputs not seen before and give each
     /// a zone. Returns the ids that are new. Blocking (mDNS browse, TCP
     /// connects, SSDP); call from `spawn_blocking`.
     pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
+        new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;
         };

@@ -164,6 +164,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                 cfg.api.public_url.clone()
             },
             upnp: cfg.outputs.upnp,
+            cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
             session_secret_path: Some(session_secret_path(cfg)),
         },
