@@ -7,7 +7,8 @@ Newest first. Dates are when the change landed on `main`.
 - Streaming is integrated where the music is (Roon-style): the main search answers with TIDAL
   albums and tracks next to the library (flagged when already owned), album pages show Versions
   on TIDAL by UPC, track menus offer Stream from TIDAL by ISRC, and the browser zone plays TIDAL
-  through a node proxy. The Sources screen is for connecting accounts.
+  through a node proxy; Home shows a strip from the TIDAL collection and TIDAL album pages link
+  to the owned album. The Sources screen is for connecting accounts.
 - TIDAL through the official API: catalogue search, albums and tracks in the Sources view, sign-in
   with OAuth 2 + PKCE from either UI, playback of `tidal:track:` URIs through stream manifests and
   HLS segments (FLAC; verified live: the THIRD_PARTY developer tier gets 30 s previews until TIDAL
