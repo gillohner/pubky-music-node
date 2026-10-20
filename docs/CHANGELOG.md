@@ -6,8 +6,9 @@ Newest first. Dates are when the change landed on `main`.
 
 - TIDAL through the official API: catalogue search, albums and tracks in the Sources view, sign-in
   with OAuth 2 + PKCE from either UI, playback of `tidal:track:` URIs through stream manifests and
-  HLS segments (FLAC when the subscription allows; DRM refused; previews logged). Config `[tidal]`
-  or `PM_TIDAL_*`.
+  HLS segments (FLAC when the subscription allows; DRM refused; previews logged); the signed-in
+  user's collection and playlists listed on the Sources page and importable as favourites and
+  private Pubky playlists (ISRC where TIDAL has one). Config `[tidal]` or `PM_TIDAL_*`.
 - Zones that could play nothing now say the last open error.
 - Queue tools in both UIs: shuffle what comes next, save the queue as a playlist, transfer playback
   to another zone, Start radio from a track, an album or an artist page, sleep timer per zone.
