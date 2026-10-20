@@ -189,6 +189,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/search", get(discover::search))
         .route("/discover/item", get(discover::item_detail))
         .route("/discover/play", get(discover::play_plan))
+        .route("/discover/describe", post(discover::describe))
         .route(
             "/library/identify",
             get(identify::get_status).post(identify::start),
@@ -3495,6 +3496,54 @@ mod tests {
         let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
         assert_eq!(st["counts"]["identified"], 3, "{st}");
         assert_eq!(st["counts"]["suggested"], 0);
+    }
+
+    /// Favourites and playlist items from other services render as rows:
+    /// Pinakes's card gives title, artist and cover in one batch; a link
+    /// nobody knows keeps an empty title (never the URL) and its service.
+    #[tokio::test]
+    async fn describe_names_links_outside_the_library() {
+        let card = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/card-tidal-track-bohemian.json"
+        ))
+        .unwrap();
+        let card: serde_json::Value = serde_json::from_str(&card).unwrap();
+        let card = serde_json::json!([card.get("card").cloned().unwrap_or(card.clone())]).to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/v1/resources/lookup",
+            post(move || {
+                let card = card.clone();
+                async move { ([(header::CONTENT_TYPE, "application/json")], card) }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let body = serde_json::json!({"uris": ["https://tidal.com/track/534050211", "https://tidal.com/album/338204560"]});
+        let (st, v) = call(&app, "POST", "/v1/discover/describe", Some(body.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let v = v.as_array().unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0]["title"], "Bohemian Rhapsody");
+        assert!(v[0]["image"].as_str().unwrap().starts_with("https://"));
+        assert!(v[1]["title"].is_null(), "never the URL as a name: {}", v[1]);
+        assert_eq!(v[1]["site"], "TIDAL");
+        assert_eq!(v[1]["page"], "https://tidal.com/album/338204560");
+        // Cached: the same answer without Pinakes.
+        let (st, again) = call(&app, "POST", "/v1/discover/describe", Some(body)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(again[0]["title"], "Bohemian Rhapsody");
     }
 
     #[test]

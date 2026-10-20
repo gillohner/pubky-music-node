@@ -4,3 +4,6 @@ incremental = false
 
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

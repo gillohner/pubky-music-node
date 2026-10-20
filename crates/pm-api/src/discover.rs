@@ -307,14 +307,33 @@ pub(crate) async fn play_plan(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<DiscoverQuery>,
 ) -> ApiResult<PlayPlan> {
-    let d = discovery(&s)?;
     let Some(uri) = q.uri.clone().filter(|u| !u.trim().is_empty()) else {
         return Err(ApiError::bad_request("uri is required"));
     };
-    let Some(r) = d.resource_for(uri.trim()).await.map_err(upstream)? else {
-        return Err(ApiError::not_found("Pinakes has not seen this link"));
+    let uri = uri.trim().to_string();
+    let r = match s.discovery() {
+        Some(d) => d.resource_for(&uri).await.unwrap_or_else(|e| {
+            tracing::debug!("play: pinakes: {e}");
+            None
+        }),
+        None => None,
     };
-    let (it, album_id) = detail_item(&s, &r);
+    // Pinakes knows it: every link of the group. Otherwise the provider's own page.
+    let (it, album_id, album_name, duration) = match &r {
+        Some(r) => {
+            let (it, a) = detail_item(&s, r);
+            let f = r.facts();
+            (it, a, f.album.clone(), f.duration_secs())
+        }
+        None => match describe_from_provider(&s, &uri).await {
+            Some(it) => (it, None, None, None),
+            None => {
+                return Err(ApiError::not_found(
+                    "neither Pinakes nor a connected service knows this link",
+                ))
+            }
+        },
+    };
     let res = resolve(&service_access(&s), &it, album_id);
     let mut plan = PlayPlan {
         uri: it.uri.clone(),
@@ -343,11 +362,177 @@ pub(crate) async fn play_plan(
             plan.spotify_uris = vec![format!("spotify:{}:{}", l.kind, l.id)];
         }
         (Some(_), Some(l)) => {
-            plan.items = expand_link(&s, l, &it, &r).await?;
+            plan.items = expand_link(&s, l, &it, album_name, duration).await?;
         }
         _ => {}
     }
     Ok(Json(plan))
+}
+
+/// `POST /v1/discover/describe {uris}`: a proper row for each music URL
+/// that is not in the library (favourites, playlist items, history): title,
+/// artist, cover and where it plays from. Pinakes answers in one batch; links
+/// it has not seen ask the provider's own API for that id (TIDAL, Deezer,
+/// Spotify). A URL is never used as a name: unknown titles stay empty.
+/// Cached a day per URL.
+pub(crate) async fn describe(
+    State(s): State<Arc<NodeState>>,
+    Json(req): Json<DescribeRequest>,
+) -> ApiResult<Vec<DiscoverItem>> {
+    let uris: Vec<String> = req
+        .uris
+        .iter()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .take(500)
+        .collect();
+    let now = pm_library::db::now_unix();
+    let cache_key = |u: &str| format!("describe.{u}");
+    let mut found: std::collections::HashMap<String, DiscoverItem> = Default::default();
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        for u in &uris {
+            if let Some((at, it)) = lib
+                .get_setting(&cache_key(u))
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str::<(i64, DiscoverItem)>(&j).ok())
+            {
+                if now - at < 86_400 {
+                    found.insert(u.clone(), it);
+                }
+            }
+        }
+    }
+    let missing: Vec<String> = uris.iter().filter(|u| !found.contains_key(*u)).cloned().collect();
+    let mut fresh: Vec<(String, DiscoverItem)> = Vec::new();
+    if !missing.is_empty() {
+        if let Some(d) = s.discovery() {
+            match d.pinakes().lookup(&missing).await {
+                Ok(cards) => {
+                    let acc = service_access(&s);
+                    let lib = s.library.lock().expect("library poisoned");
+                    let norm = |u: &str| u.trim_end_matches('/').replace("://www.", "://").to_lowercase();
+                    for u in &missing {
+                        let Some(card) = cards.iter().find(|c| norm(&c.uri) == norm(u)) else {
+                            continue;
+                        };
+                        let Ok(uri) = MusicUri::parse(u).or_else(|_| MusicUri::parse(&card.uri)) else {
+                            continue;
+                        };
+                        let di = DiscoveredItem {
+                            uri,
+                            card: card.clone(),
+                            taggers: None,
+                        };
+                        fresh.push((u.clone(), item(&acc, &lib, &di)));
+                    }
+                }
+                Err(e) => tracing::debug!("describe: pinakes lookup: {e}"),
+            }
+        }
+    }
+    for u in &missing {
+        if fresh.iter().any(|(x, _)| x == u) {
+            continue;
+        }
+        if let Some(it) = describe_from_provider(&s, u).await {
+            fresh.push((u.clone(), it));
+        }
+    }
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        for (u, it) in &fresh {
+            if let Ok(j) = serde_json::to_string(&(now, it)) {
+                let _ = lib.set_setting(&cache_key(u), &j);
+            }
+        }
+    }
+    found.extend(fresh);
+    Ok(Json(
+        uris.iter()
+            .map(|u| {
+                found.remove(u).unwrap_or_else(|| DiscoverItem {
+                    uri: u.clone(),
+                    title: None,
+                    artist: None,
+                    description: None,
+                    image: None,
+                    taggers: None,
+                    in_library: None,
+                    kind: "other".into(),
+                    site: site_of(u),
+                    pinakes_id: None,
+                    group_size: None,
+                    playable: None,
+                    also_on: Vec::new(),
+                    page: Some(u.clone()),
+                    plays_from: None,
+                    connect: Vec::new(),
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// The service a URL belongs to, as people say it.
+fn site_of(u: &str) -> Option<String> {
+    let host = url::Url::parse(u)
+        .ok()?
+        .host_str()?
+        .trim_start_matches("www.")
+        .to_string();
+    Some(
+        match host.as_str() {
+            "tidal.com" | "listen.tidal.com" => "TIDAL",
+            "open.spotify.com" => "Spotify",
+            "deezer.com" => "Deezer",
+            "music.apple.com" => "Apple Music",
+            "musicbrainz.org" => "MusicBrainz",
+            "youtube.com" | "music.youtube.com" => "YouTube",
+            "bandcamp.com" => "Bandcamp",
+            "music.amazon.com" => "Amazon Music",
+            h if h.ends_with(".bandcamp.com") => "Bandcamp",
+            other => return Some(other.to_string()),
+        }
+        .to_string(),
+    )
+}
+
+/// One URL through its own provider's API (no Pinakes card yet).
+async fn describe_from_provider(s: &NodeState, u: &str) -> Option<DiscoverItem> {
+    use crate::streaming::StreamingService;
+    let l = service_link(u, true)?;
+    let acc = service_access(s);
+    let svc: Box<dyn StreamingService> = match (l.service, access(&acc, l.service)) {
+        ("tidal", Access::Full) => Box::new(crate::tidal::Tidal),
+        ("deezer", _) => Box::new(crate::deezer::Deezer),
+        ("spotify", Access::External) => Box::new(crate::spotify::Spotify),
+        _ => return None,
+    };
+    let src = svc.item(s, &format!("{}:{}", l.kind, l.id)).await.ok()?;
+    let mut it = DiscoverItem {
+        uri: u.to_string(),
+        title: Some(src.title.clone()).filter(|t| !t.trim().is_empty()),
+        artist: src.creator.clone(),
+        description: None,
+        image: src.image.clone(),
+        taggers: None,
+        in_library: None,
+        kind: l.kind.to_string(),
+        site: site_of(u),
+        pinakes_id: None,
+        group_size: None,
+        playable: playable_uri(u),
+        also_on: Vec::new(),
+        page: Some(u.to_string()),
+        plays_from: None,
+        connect: Vec::new(),
+    };
+    let r = resolve(&acc, &it, None);
+    it.plays_from = r.plays_from;
+    it.connect = r.connect;
+    Some(it)
 }
 
 /// Queue items for a service link: a track straight from the card, an
@@ -356,7 +541,8 @@ async fn expand_link(
     s: &NodeState,
     l: &ServiceLink,
     it: &DiscoverItem,
-    r: &pm_pubky::pinakes::ResourceDetail,
+    album: Option<String>,
+    duration_secs: Option<u64>,
 ) -> Result<Vec<pm_zones::QueueItem>, ApiError> {
     use crate::streaming::StreamingService;
     let svc: Box<dyn StreamingService> = match l.service {
@@ -369,14 +555,13 @@ async fn expand_link(
             "tidal" => crate::tidal::track_uri(&l.id),
             _ => crate::deezer::track_uri(&l.id),
         };
-        let facts = r.facts();
         return Ok(vec![pm_zones::QueueItem {
             id: 0,
             uri,
             title: it.title.clone(),
             artist: it.artist.clone(),
-            album: facts.album.clone(),
-            duration_ms: facts.duration_secs().map(|d| d * 1000),
+            album,
+            duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
         }]);
     }

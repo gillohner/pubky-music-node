@@ -885,6 +885,12 @@ pub struct DiscoverItem {
     pub connect: Vec<String>,
 }
 
+/// `POST /v1/discover/describe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescribeRequest {
+    pub uris: Vec<String>,
+}
+
 /// Where an item plays from (the "Plays from" chip).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaysFrom {
