@@ -64,7 +64,7 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
-            features: --features alsa
+            features: --features alsa,pm-app/cpal
             ext: ""
           - os: windows-latest
             name: windows-x86_64

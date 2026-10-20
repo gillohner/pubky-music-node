@@ -22,13 +22,16 @@ pub struct LocalPlayer {
 }
 
 impl LocalPlayer {
+    /// `preferred` is an output id from [`available_outputs`] (saved in the
+    /// app's settings); empty picks the best one automatically.
     pub fn new(
         client: Arc<RwLock<Option<NodeClient>>>,
         handle: tokio::runtime::Handle,
         cache: PathBuf,
+        preferred: &str,
     ) -> Self {
         let _ = std::fs::create_dir_all(&cache);
-        let output = local_output();
+        let output = pick_output(preferred);
         let output_name = output.name();
         let factory = Arc::new(RemoteTracks {
             client,
@@ -58,6 +61,70 @@ impl LocalPlayer {
     pub fn set_dsp(&self, cfg: PipelineConfig) {
         *self.factory.cfg.write().expect("cfg lock") = cfg;
     }
+
+    /// Switch this computer's output: the old zone stops, a new one starts on
+    /// the chosen device with the same sources and DSP settings.
+    pub fn select_output(&mut self, id: &str) {
+        let output = pick_output(id);
+        self.zone.stop();
+        self.zone.clear();
+        self.output_name = output.name();
+        self.zone = Arc::new(Zone::new(
+            ZoneId::new(LOCAL_ZONE_ID),
+            "This computer",
+            output,
+            self.factory.clone(),
+        ));
+    }
+}
+
+/// Outputs this machine offers, as (id, name): ALSA `hw:` devices (bit-perfect),
+/// then the system's shared-mode outputs, then silence.
+#[allow(clippy::vec_init_then_push)] // the pushes depend on cargo features
+pub fn available_outputs() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    #[cfg(feature = "alsa")]
+    {
+        for o in pm_out_local::alsa::AlsaOutput::enumerate() {
+            out.push((o.id().0, o.name()));
+        }
+    }
+    #[cfg(feature = "cpal")]
+    {
+        for o in pm_out_local::cpal_out::CpalOutput::enumerate() {
+            out.push((o.id().0, o.name()));
+        }
+    }
+    out.push((NullOutput::new().id().0, "No local output".into()));
+    out
+}
+
+/// The output with this id, else the automatic choice.
+fn pick_output(id: &str) -> Arc<dyn Output> {
+    if !id.is_empty() {
+        #[cfg(feature = "alsa")]
+        {
+            if let Some(o) = pm_out_local::alsa::AlsaOutput::enumerate()
+                .into_iter()
+                .find(|o| o.id().0 == id)
+            {
+                return Arc::new(o);
+            }
+        }
+        #[cfg(feature = "cpal")]
+        {
+            if let Some(o) = pm_out_local::cpal_out::CpalOutput::enumerate()
+                .into_iter()
+                .find(|o| o.id().0 == id)
+            {
+                return Arc::new(o);
+            }
+        }
+        if id == NullOutput::new().id().0 {
+            return Arc::new(NullOutput::new());
+        }
+    }
+    local_output()
 }
 
 /// Pick this machine's output: the first ALSA `hw:` device (bit-perfect),

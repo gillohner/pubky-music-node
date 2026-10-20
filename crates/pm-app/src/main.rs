@@ -43,6 +43,9 @@ fn main() -> eframe::Result {
 struct Settings {
     node_url: String,
     token: String,
+    /// Output id for this computer's playback (empty = automatic).
+    #[serde(default)]
+    local_output: String,
     /// Exported Pubky session secret; lets the app find the node via the homeserver (ADR 0008).
     #[serde(default)]
     session_secret: String,
@@ -55,6 +58,7 @@ impl Default for Settings {
         Self {
             node_url: std::env::var("PM_NODE").unwrap_or_else(|_| "http://127.0.0.1:7788".into()),
             token: std::env::var("PM_TOKEN").unwrap_or_default(),
+            local_output: String::new(),
             session_secret: std::env::var("PM_SESSION_SECRET").unwrap_or_default(),
             zone: LOCAL_ZONE_ID.into(),
         }
@@ -206,7 +210,12 @@ impl App {
             .unwrap_or_default();
         let ctx = cc.egui_ctx.clone();
         let backend = Backend::start(move || ctx.request_repaint());
-        let local = LocalPlayer::new(backend.client.clone(), backend.handle.clone(), cache_dir());
+        let local = LocalPlayer::new(
+            backend.client.clone(),
+            backend.handle.clone(),
+            cache_dir(),
+            &settings.local_output,
+        );
         backend.send(Cmd::Connect {
             base: settings.node_url.clone(),
             token: settings.token.clone(),
@@ -3704,7 +3713,41 @@ impl App {
         });
         ui.add_space(12.0);
         ui.heading("Zones");
-        ui.label(format!("This computer plays through: {}", self.local.output_name));
+        ui.horizontal(|ui| {
+            ui.label("This computer plays through:");
+            let choices = local::available_outputs();
+            let mut pick = self.settings.local_output.clone();
+            egui::ComboBox::from_id_salt("local-output")
+                .selected_text(if pick.is_empty() {
+                    format!("Automatic ({})", self.local.output_name)
+                } else {
+                    choices
+                        .iter()
+                        .find(|(id, _)| *id == pick)
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_else(|| self.local.output_name.clone())
+                })
+                .width(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut pick, String::new(), "Automatic");
+                    for (id, name) in &choices {
+                        ui.selectable_value(&mut pick, id.clone(), name);
+                    }
+                });
+            if pick != self.settings.local_output {
+                self.settings.local_output = pick.clone();
+                self.local.select_output(&pick);
+                if self.is_local() {
+                    self.refresh_queue();
+                }
+            }
+        });
+        ui.small(
+            egui::RichText::new(
+                "ALSA hw: devices are bit-perfect; the shared-mode entries go through the desktop's sound server.",
+            )
+            .weak(),
+        );
         let mut delete = None;
         egui::Grid::new("zones-table")
             .num_columns(3)
