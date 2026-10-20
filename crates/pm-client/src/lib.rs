@@ -457,6 +457,36 @@ impl NodeClient {
         .await
     }
 
+    /// Import described tracks as a new private playlist.
+    pub async fn import_playlist(&self, req: &ImportPlaylist) -> Result<ImportedPlaylist> {
+        self.send(reqwest::Method::POST, "playlists/import", Some(req))
+            .await
+    }
+
+    /// Import a playlist file (M3U/M3U8, CSV, Roon Excel export) by its bytes.
+    pub async fn import_playlist_file(
+        &self,
+        file_name: &str,
+        name: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<ImportedPlaylist> {
+        let mut url = self.url("playlists/import/file");
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("file", file_name);
+            if let Some(n) = name {
+                q.append_pair("name", n);
+            }
+        }
+        let resp = self
+            .authed(self.http.post(url))
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await?;
+        Self::finish(resp).await
+    }
+
     pub async fn delete_playlist(&self, id: &str) -> Result<()> {
         self.send::<(), ()>(reqwest::Method::DELETE, &format!("playlists/{id}"), None)
             .await

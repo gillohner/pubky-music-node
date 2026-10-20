@@ -278,6 +278,35 @@ pub struct DescribedTrack {
     pub album: Option<String>,
     #[serde(default)]
     pub uri: Option<String>,
+    /// A file path as another player knew it; matched exactly, then by file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl From<pm_library::ImportedTrack> for DescribedTrack {
+    fn from(t: pm_library::ImportedTrack) -> Self {
+        Self {
+            title: t.title,
+            artist: t.artist,
+            album: t.album,
+            uri: None,
+            path: t.path,
+        }
+    }
+}
+
+/// Query for `POST /v1/playlists/import/file`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImportFileQuery {
+    /// Playlist name; defaults to the file's own name or its stem.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The uploaded file's name, used to pick the format and the default name.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// `m3u`, `csv` or `xlsx` when the name does not say.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +349,9 @@ pub struct ImportPlaylist {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportedPlaylist {
     pub id: String,
+    pub name: String,
+    /// Entries found in the file (or sent).
+    pub parsed: usize,
     pub imported: usize,
     pub unresolved: Vec<DescribedTrack>,
 }

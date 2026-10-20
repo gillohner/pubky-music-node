@@ -124,6 +124,7 @@ struct App {
     /// Last queue version seen per remote zone, to refetch the queue on change.
     queue_versions: HashMap<String, u64>,
     new_playlist_name: String,
+    import_path: String,
     /// Album id → texture (`None` once the node said there is no cover).
     covers: HashMap<i64, Option<egui::TextureHandle>>,
     cover_requests: std::collections::HashSet<i64>,
@@ -185,6 +186,7 @@ impl App {
             dsp_edit: None,
             queue_versions: HashMap::new(),
             new_playlist_name: String::new(),
+            import_path: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
             view: View::Home,
@@ -1232,9 +1234,22 @@ impl App {
                 self.new_playlist_name.clear();
             }
         });
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.import_path)
+                    .hint_text("Import: path to an .m3u/.m3u8, .csv or Roon .xlsx export")
+                    .desired_width(420.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Import").clicked() || enter) && !self.import_path.trim().is_empty() {
+                let path = PathBuf::from(shellexpand_home(self.import_path.trim()));
+                self.backend.send(Cmd::ImportPlaylistFile(path));
+                self.import_path.clear();
+            }
+        });
         ui.add_space(6.0);
         if self.playlists.is_empty() {
-            ui.weak("No playlists yet. Create one above, then use ⋯ on any track to add it.");
+            ui.weak("No playlists yet. Create one above, import a file, or use ⋯ on any track to add it.");
             return;
         }
         let lists = self.playlists.clone();
@@ -2340,6 +2355,16 @@ fn fmt_ago(unix: i64) -> String {
         format!("{} h ago", s / 3600)
     } else {
         format!("{} d ago", s / 86_400)
+    }
+}
+
+/// `~/x` → the home directory.
+fn shellexpand_home(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME")
+            .map(|h| format!("{h}/{rest}"))
+            .unwrap_or_else(|_| p.to_string()),
+        None => p.to_string(),
     }
 }
 

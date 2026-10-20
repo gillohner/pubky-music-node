@@ -120,3 +120,69 @@ pub async fn resolve(cfg: &NodeConfig, input: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// `pm-node import-playlist`: parse the file, resolve against the library and
+/// store a private v1 playlist post (the same object the API and sync use).
+pub fn import_playlist(cfg: &NodeConfig, file: &Path, name: Option<&str>) -> anyhow::Result<()> {
+    use pm_library::import::{detect_format, name_from_file, parse};
+    use pm_pubky::{MusicContent, MusicPost, Playlist, PlaylistItem};
+
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let format = detect_format(file.to_str(), &bytes).context("cannot tell the playlist format")?;
+    let list = parse(&bytes, format, file.parent())?;
+    let lib = open(cfg)?;
+    let mut items = Vec::new();
+    let mut unresolved = Vec::new();
+    for t in &list.tracks {
+        match lib.resolve_import(t)? {
+            Some(track) => match track.publishable_uri() {
+                Some(u) => items.push(PlaylistItem::new(u)),
+                None => unresolved.push(format!("{} (in library, no canonical id)", t.title)),
+            },
+            None => unresolved.push(match (&t.artist, &t.path) {
+                (Some(a), _) => format!("{} — {a}", t.title),
+                (None, Some(p)) => format!("{} ({p})", t.title),
+                _ => t.title.clone(),
+            }),
+        }
+    }
+    let name = name
+        .map(str::to_string)
+        .or(list.name.clone())
+        .unwrap_or_else(|| name_from_file(file));
+    println!(
+        "{}: {} entries, {} matched, {} unmatched",
+        name,
+        list.tracks.len(),
+        items.len(),
+        unresolved.len()
+    );
+    for u in &unresolved {
+        println!("  unmatched: {u}");
+    }
+    anyhow::ensure!(
+        !items.is_empty(),
+        "nothing matched the library; scan the folders first"
+    );
+    let playlist = Playlist::new(name, None, None, items);
+    let post = MusicPost::new(MusicContent::Playlist(playlist));
+    let id = post.create_id();
+    post.validate(Some(&id))?;
+    let json = serde_json::to_string(&post.post)?;
+    let (created_at, updated_at) = match &post.content {
+        MusicContent::Playlist(p) => (p.created_at, p.updated_at),
+        other => (other.created_micros(), other.created_micros()),
+    };
+    lib.upsert_music_post(&pm_library::MusicPostRow {
+        id: id.clone(),
+        kind: post.content.type_name().to_string(),
+        visibility: "private".into(),
+        json,
+        created_at,
+        updated_at,
+        synced_at: None,
+        deleted: false,
+    })?;
+    println!("stored playlist {id} (private; `pm-node serve` syncs it to the homeserver when signed in)");
+    Ok(())
+}

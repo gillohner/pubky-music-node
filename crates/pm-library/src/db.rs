@@ -5,6 +5,7 @@
 //! Full-text search uses FTS5 (compiled into rusqlite's bundled SQLite).
 
 use crate::error::{LibraryError, Result};
+use crate::import::ImportedTrack;
 use pm_model::AudioFormat;
 use pm_model::{Album, Artist, AudioFile, Confidence, Isrc, Mbid, MusicUri, SampleKind, Track, TrackId, Upc};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -434,6 +435,73 @@ impl Library {
             .query_map(params![limit as i64, offset as i64], row_to_album)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         v.into_iter().collect()
+    }
+
+    /// Tracks whose file name (last path segment) is `name`.
+    pub fn tracks_by_file_name(&self, name: &str) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE fi.path LIKE ?1 ESCAPE '\\' AND fi.missing = 0 LIMIT 20"
+        ))?;
+        let escaped = name.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![format!("%/{escaped}")], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    /// The library track for a title and (optional) artist: the first search
+    /// hit whose title matches exactly, preferring one by that artist.
+    pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(None);
+        }
+        let artist = artist.unwrap_or("").trim();
+        let q = if artist.is_empty() {
+            title.to_string()
+        } else {
+            format!("{title} {artist}")
+        };
+        let mut hits = self.search_tracks(&q, 20)?;
+        if hits.is_empty() && !artist.is_empty() {
+            hits = self.search_tracks(title, 20)?;
+        }
+        let norm = |s: &str| s.trim().to_lowercase();
+        let first_artist = artist.split([',', ';', '&']).next().unwrap_or("").trim();
+        Ok(hits
+            .iter()
+            .find(|t| {
+                norm(&t.title) == norm(title)
+                    && (artist.is_empty()
+                        || t.artists
+                            .iter()
+                            .any(|a| norm(&a.name) == norm(artist) || norm(&a.name) == norm(first_artist)))
+            })
+            .or_else(|| hits.iter().find(|t| norm(&t.title) == norm(title)))
+            .cloned())
+    }
+
+    /// Match an imported playlist entry: exact path, then file name, then
+    /// title and artist.
+    pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
+        if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
+            if let Some(row) = self.file_by_path(&p)? {
+                if let Some(track) = self.get_track(row.track_id)? {
+                    return Ok(Some(track));
+                }
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                let hits = self.tracks_by_file_name(name)?;
+                if hits.len() == 1 {
+                    return Ok(hits.into_iter().next());
+                }
+                if let Some(h) = hits.into_iter().find(|h| h.title.eq_ignore_ascii_case(&t.title)) {
+                    return Ok(Some(h));
+                }
+            }
+        }
+        self.find_by_title_artist(&t.title, t.artist.as_deref())
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.

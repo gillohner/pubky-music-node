@@ -115,6 +115,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/import", post(activity::import_playlist))
+        .route("/playlists/import/file", post(activity::import_playlist_file))
         .route("/activity", get(activity::list).post(activity::record))
         .route(
             "/playlists/{id}",

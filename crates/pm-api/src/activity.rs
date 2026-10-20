@@ -26,27 +26,13 @@ pub(crate) fn resolve_described(lib: &Library, d: &DescribedTrack) -> Result<Opt
             return Ok(Some(t));
         }
     }
-    let title = d.title.trim();
-    if title.is_empty() {
-        return Ok(None);
-    }
-    let artist = d.artist.as_deref().unwrap_or("").trim();
-    let q = if artist.is_empty() {
-        title.to_string()
-    } else {
-        format!("{title} {artist}")
-    };
-    let hits = lib.search_tracks(&q, 20)?;
-    let norm = |s: &str| s.trim().to_lowercase();
-    let best = hits
-        .iter()
-        .find(|t| {
-            norm(&t.title) == norm(title)
-                && (artist.is_empty() || t.artists.iter().any(|a| norm(&a.name) == norm(artist)))
-        })
-        .or_else(|| hits.iter().find(|t| norm(&t.title) == norm(title)))
-        .cloned();
-    Ok(best)
+    Ok(lib.resolve_import(&pm_library::ImportedTrack {
+        title: d.title.clone(),
+        artist: d.artist.clone(),
+        album: d.album.clone(),
+        path: d.path.clone(),
+        duration_ms: None,
+    })?)
 }
 
 fn source_of(s: &str) -> ActivitySource {
@@ -136,10 +122,52 @@ pub(crate) async fn import_playlist(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<ImportPlaylist>,
 ) -> ApiResult<ImportedPlaylist> {
+    import_described(&s, body.name, body.description, body.tracks).map(Json)
+}
+
+/// Import a playlist file (M3U/M3U8, CSV, Roon's Excel export) sent as the
+/// raw body. Entries resolve by path, file name, then title and artist.
+pub(crate) async fn import_playlist_file(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<ImportFileQuery>,
+    body: axum::body::Bytes,
+) -> ApiResult<ImportedPlaylist> {
+    let format = match q.format.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("m3u") | Some("m3u8") => Some(pm_library::ImportFormat::M3u),
+        Some("csv") | Some("tsv") => Some(pm_library::ImportFormat::Csv),
+        Some("xlsx") => Some(pm_library::ImportFormat::Xlsx),
+        Some(other) => return Err(ApiError::bad_request(format!("unknown format {other}"))),
+        None => pm_library::import::detect_format(q.file.as_deref(), &body),
+    };
+    let format = format
+        .ok_or_else(|| ApiError::bad_request(pm_library::import::ImportError::UnknownFormat.to_string()))?;
+    let list = pm_library::import::parse(&body, format, None)
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let name = q
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .or(list.name)
+        .or_else(|| {
+            q.file
+                .as_deref()
+                .map(|f| pm_library::import::name_from_file(std::path::Path::new(f)))
+        })
+        .unwrap_or_else(|| "Imported playlist".into());
+    let tracks: Vec<DescribedTrack> = list.tracks.into_iter().map(Into::into).collect();
+    import_described(&s, name, None, tracks).map(Json)
+}
+
+fn import_described(
+    s: &Arc<NodeState>,
+    name: String,
+    description: Option<String>,
+    tracks: Vec<DescribedTrack>,
+) -> Result<ImportedPlaylist, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
+    let parsed = tracks.len();
     let mut items = Vec::new();
     let mut unresolved = Vec::new();
-    for d in &body.tracks {
+    for d in &tracks {
         let uri = match resolve_described(&lib, d)? {
             Some(t) => t.publishable_uri().cloned(),
             None => d
@@ -159,7 +187,7 @@ pub(crate) async fn import_playlist(
             "none of the tracks resolved to a canonical identity",
         ));
     }
-    let playlist = Playlist::new(body.name, body.description, None, items);
+    let playlist = Playlist::new(name.clone(), description, None, items);
     let post = MusicPost::new(MusicContent::Playlist(playlist));
     let id = post.create_id();
     post.validate(Some(&id))
@@ -168,9 +196,11 @@ pub(crate) async fn import_playlist(
     let imported = post.as_playlist().map(|p| p.items.len()).unwrap_or(0);
     drop(lib);
     s.notify_library();
-    Ok(Json(ImportedPlaylist {
+    Ok(ImportedPlaylist {
         id,
+        name,
+        parsed,
         imported,
         unresolved,
-    }))
+    })
 }

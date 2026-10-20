@@ -67,6 +67,15 @@ enum Cmd {
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
+    /// Import a playlist file (M3U/M3U8, CSV, Roon's Excel export) into the
+    /// library as a private playlist; entries match by path, file name, then
+    /// title and artist. Unmatched entries are listed.
+    ImportPlaylist {
+        file: PathBuf,
+        /// Playlist name (default: from the file).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Library counts.
     Stats,
     /// List tracks.
@@ -348,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Upload { files } => upload(&cfg, &files).await?,
         Cmd::Login => login(&cfg).await?,
         Cmd::Stats => library::stats(&cfg)?,
+        Cmd::ImportPlaylist { file, name } => library::import_playlist(&cfg, &file, name.as_deref())?,
         Cmd::Tracks { limit } => library::tracks(&cfg, limit)?,
         Cmd::Search { query, limit } => library::search(&cfg, &query, limit)?,
         Cmd::Resolve { input } => library::resolve(&cfg, &input).await?,

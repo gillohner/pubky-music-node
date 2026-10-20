@@ -177,4 +177,64 @@ async fn record_and_import_resolve_through_the_library() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A playlist file: the exact path, the same file under another mount
+    // (matched by file name), a title-only entry, and a miss.
+    let a = music.join("a.wav");
+    let m3u = format!(
+        "#EXTM3U\n#PLAYLIST:From elsewhere\n{}\n/mnt/old-nas/Daft Punk/a.wav\n#EXTINF:369,Daft Punk - Get Lucky\n/nowhere/x.flac\n#EXTINF:1,Nobody - Missing\n/nowhere/missing.flac\n",
+        a.display()
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?file=mix.m3u8")
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(m3u))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let st = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    assert_eq!(imp["name"], "From elsewhere");
+    assert_eq!(imp["parsed"], 4);
+    assert_eq!(imp["imported"], 3, "{imp}");
+    assert_eq!(imp["unresolved"][0]["title"], "Missing");
+    assert_eq!(imp["unresolved"][0]["path"], "/nowhere/missing.flac");
+    // Explicit name wins; an unknown format is a 400; garbage CSV is a 422.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?name=Named&format=csv")
+        .body(Body::from("Title,Artist\nGet Lucky,Daft Punk\n"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(imp["name"], "Named");
+    assert_eq!(imp["imported"], 1);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?format=doc")
+        .body(Body::from("x"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?file=x.csv")
+        .body(Body::from("a,b\n1,2\n"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, lists) = call(&app, "GET", "/v1/playlists", None).await;
+    assert!(lists
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "From elsewhere" && p["items"] == 3));
 }

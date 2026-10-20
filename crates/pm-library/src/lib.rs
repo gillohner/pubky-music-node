@@ -17,6 +17,7 @@ pub mod canonical;
 pub mod db;
 pub mod dsd;
 pub mod error;
+pub mod import;
 #[cfg(feature = "musicbrainz")]
 pub mod musicbrainz;
 pub mod posts;
@@ -27,6 +28,7 @@ pub use canonical::{assign, Resolver};
 pub use db::{AlbumArt, ArtistSummary, PlayEntry, PlayedTrack};
 pub use db::{Library, LibraryStats};
 pub use error::{LibraryError, Result};
+pub use import::{ImportFormat, ImportedList, ImportedTrack};
 pub use posts::MusicPostRow;
 pub use scan::{ScanReport, Scanner};
 pub use tags::{probe_and_read, FileProbe, Picture, TagSet};

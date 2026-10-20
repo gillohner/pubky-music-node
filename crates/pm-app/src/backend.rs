@@ -71,6 +71,8 @@ pub enum Cmd {
         index: usize,
     },
     DeletePlaylist(String),
+    /// Read a playlist file on this computer and import it on the node.
+    ImportPlaylistFile(std::path::PathBuf),
     PlayPlaylist {
         id: String,
         zone: String,
@@ -375,6 +377,37 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::RemovePlaylistItem { id, index } => {
             let d = c.remove_playlist_item(&id, index).await?;
             out.send(Msg::Playlist(Box::new(d)));
+            out.send(Msg::Playlists(c.playlists().await?));
+        }
+        Cmd::ImportPlaylistFile(path) => {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| pm_client::ClientError::Decode(format!("{}: {e}", path.display())))?;
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("playlist")
+                .to_string();
+            let r = c.import_playlist_file(&file_name, None, bytes).await?;
+            out.send(Msg::Notice(format!(
+                "Imported “{}”: {} of {} entries matched{}",
+                r.name,
+                r.imported,
+                r.parsed,
+                if r.unresolved.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; unmatched: {}",
+                        r.unresolved
+                            .iter()
+                            .take(5)
+                            .map(|d| d.title.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            )));
             out.send(Msg::Playlists(c.playlists().await?));
         }
         Cmd::DeletePlaylist(id) => {
