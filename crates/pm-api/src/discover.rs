@@ -63,12 +63,12 @@ fn also_on_rows(links: &[pm_pubky::pinakes::AlsoOn]) -> Vec<Version> {
         .collect()
 }
 
-fn item(lib: &Library, d: &DiscoveredItem) -> DiscoverItem {
+fn item(acc: &ServiceAccess, lib: &Library, d: &DiscoveredItem) -> DiscoverItem {
     let in_library = lib
         .tracks_by_canonical(&d.uri)
         .ok()
         .and_then(|v| v.into_iter().next());
-    DiscoverItem {
+    let mut it = DiscoverItem {
         uri: d.uri.to_url(),
         title: d.card.name.clone(),
         artist: d.card.artist_hint(),
@@ -82,7 +82,318 @@ fn item(lib: &Library, d: &DiscoveredItem) -> DiscoverItem {
         group_size: d.card.group.as_ref().map(|g| g.size),
         playable: playable_uri(&d.card.uri),
         also_on: also_on_rows(&d.card.also_on),
+        page: Some(d.card.uri.clone()),
+        plays_from: None,
+        connect: Vec::new(),
+    };
+    let r = resolve(acc, &it, None);
+    it.plays_from = r.plays_from;
+    it.connect = r.connect;
+    it
+}
+
+// ---- playback resolution (steward UX brief §3) ----
+
+/// A service page the node understands: `tidal.com/track/1`, `tidal.com/album/2`,
+/// `deezer.com/album/3`, `open.spotify.com/track/4`, ….
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceLink {
+    pub service: &'static str,
+    pub kind: &'static str,
+    pub id: String,
+    pub url: String,
+    pub tagged: bool,
+}
+
+pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("listen.")
+        .trim_start_matches("open.");
+    let segs: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let service = match host {
+        "tidal.com" => "tidal",
+        "deezer.com" => "deezer",
+        "spotify.com" => "spotify",
+        _ => return None,
+    };
+    // Deezer pages carry a language segment (`/en/track/1`); TIDAL a `/browse/`.
+    let i = segs.iter().position(|s| *s == "track" || *s == "album")?;
+    let kind = if segs[i] == "track" { "track" } else { "album" };
+    let id = segs.get(i + 1)?.to_string();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
     }
+    Some(ServiceLink {
+        service,
+        kind,
+        id,
+        url: url.to_string(),
+        tagged,
+    })
+}
+
+/// How this node can use a service right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Streams full tracks into the zone.
+    Full,
+    /// Plays on the service's own device (Spotify Connect).
+    External,
+    /// 30 s excerpts only.
+    Preview,
+    /// Not connected: an account or credentials are needed.
+    No,
+}
+
+/// What each service can do for this node right now. Computed once, before
+/// any library lock: the session loaders take that lock themselves.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ServiceAccess {
+    tidal: Access,
+    spotify: Access,
+}
+
+pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
+    ServiceAccess {
+        tidal: if crate::tidal::connected(s) {
+            Access::Full
+        } else {
+            Access::No
+        },
+        spotify: if crate::spotify::load_user(s).is_some() {
+            Access::External
+        } else {
+            Access::No
+        },
+    }
+}
+
+fn access(acc: &ServiceAccess, service: &str) -> Access {
+    match service {
+        "tidal" => acc.tidal,
+        "deezer" => Access::Preview,
+        "spotify" => acc.spotify,
+        _ => Access::No,
+    }
+}
+
+fn service_name(id: &str) -> &'static str {
+    match id {
+        "tidal" => "TIDAL",
+        "deezer" => "Deezer",
+        "spotify" => "Spotify",
+        _ => "service",
+    }
+}
+
+fn plays_from_link(l: &ServiceLink, a: Access) -> PlaysFrom {
+    let name = service_name(l.service);
+    PlaysFrom {
+        service: l.service.to_string(),
+        kind: l.kind.to_string(),
+        id: format!("{}:{}", l.kind, l.id),
+        label: match a {
+            Access::Preview => format!("{name} · 30 s preview"),
+            Access::External => format!("{name} · plays on a Connect device"),
+            _ if l.tagged => format!("{name} · tagged on Pubky"),
+            _ => name.to_string(),
+        },
+        url: Some(l.url.clone()),
+        mode: match a {
+            Access::Preview => "preview",
+            Access::External => "connect",
+            _ => "full",
+        }
+        .into(),
+    }
+}
+
+pub(crate) struct Resolution {
+    pub plays_from: Option<PlaysFrom>,
+    pub link: Option<ServiceLink>,
+    pub connect: Vec<String>,
+    pub preview: Option<(PlaysFrom, ServiceLink)>,
+}
+
+/// Where an item plays from: the library when the recording (or album) is
+/// owned, else the best service link the node can stream (tagged links
+/// first, TIDAL before Spotify Connect), else nothing, with the services
+/// that have it. Previews are offered separately, never as the answer.
+/// No network: the links come with the card.
+pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i64>) -> Resolution {
+    if let Some(t) = &it.in_library {
+        let fmt = t.file.format.to_string();
+        return Resolution {
+            plays_from: Some(PlaysFrom {
+                service: "library".into(),
+                kind: "track".into(),
+                id: t.id.map(|i| i.0.to_string()).unwrap_or_default(),
+                label: format!("Your library · {fmt}"),
+                url: None,
+                mode: "full".into(),
+            }),
+            link: None,
+            connect: Vec::new(),
+            preview: None,
+        };
+    }
+    if let Some(a) = album_id {
+        return Resolution {
+            plays_from: Some(PlaysFrom {
+                service: "library".into(),
+                kind: "album".into(),
+                id: a.to_string(),
+                label: "Your library".into(),
+                url: None,
+                mode: "full".into(),
+            }),
+            link: None,
+            connect: Vec::new(),
+            preview: None,
+        };
+    }
+    let mut links: Vec<ServiceLink> = Vec::new();
+    if let Some(l) = it.page.as_deref().and_then(|p| service_link(p, true)) {
+        links.push(l);
+    }
+    // `also_on` rows are tagged-first already; a row's url is the service page.
+    for v in &it.also_on {
+        if let Some(l) = service_link(&v.url, v.label.contains("tagged")) {
+            if !links
+                .iter()
+                .any(|x| x.service == l.service && x.kind == l.kind && x.id == l.id)
+            {
+                links.push(l);
+            }
+        }
+    }
+    let rank = |l: &ServiceLink| match (access(acc, l.service), l.service) {
+        (Access::Full, _) => 0,
+        (Access::External, _) => 2,
+        _ => 9,
+    } * 2
+        + usize::from(!l.tagged);
+    let mut sorted = links.clone();
+    sorted.sort_by_key(rank);
+    let best = sorted
+        .iter()
+        .find(|l| matches!(access(acc, l.service), Access::Full | Access::External))
+        .cloned();
+    let preview = links
+        .iter()
+        .find(|l| access(acc, l.service) == Access::Preview && l.kind == "track")
+        .map(|l| (plays_from_link(l, Access::Preview), l.clone()));
+    let mut connect: Vec<String> = links
+        .iter()
+        .filter(|l| access(acc, l.service) == Access::No)
+        .map(|l| l.service.to_string())
+        .collect();
+    connect.dedup();
+    Resolution {
+        plays_from: best.as_ref().map(|l| plays_from_link(l, access(acc, l.service))),
+        link: best,
+        connect,
+        preview,
+    }
+}
+
+/// `GET /v1/discover/play?uri=…`: what to queue for an item, resolved through
+/// the node's connected services; albums expand to their tracks on the
+/// chosen service.
+pub(crate) async fn play_plan(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<DiscoverQuery>,
+) -> ApiResult<PlayPlan> {
+    let d = discovery(&s)?;
+    let Some(uri) = q.uri.clone().filter(|u| !u.trim().is_empty()) else {
+        return Err(ApiError::bad_request("uri is required"));
+    };
+    let Some(r) = d.resource_for(uri.trim()).await.map_err(upstream)? else {
+        return Err(ApiError::not_found("Pinakes has not seen this link"));
+    };
+    let (it, album_id) = detail_item(&s, &r);
+    let res = resolve(&service_access(&s), &it, album_id);
+    let mut plan = PlayPlan {
+        uri: it.uri.clone(),
+        plays_from: res.plays_from.clone(),
+        track_ids: Vec::new(),
+        items: Vec::new(),
+        spotify_uris: Vec::new(),
+        connect: res.connect.clone(),
+        preview: res.preview.as_ref().map(|(p, _)| p.clone()),
+    };
+    match (&res.plays_from, &res.link) {
+        (Some(p), _) if p.service == "library" => {
+            if p.kind == "album" {
+                let lib = s.library.lock().expect("library poisoned");
+                plan.track_ids = lib
+                    .album_tracks(p.id.parse().unwrap_or(0))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|t| t.id.map(|i| i.0))
+                    .collect();
+            } else if let Some(id) = it.in_library.as_ref().and_then(|t| t.id) {
+                plan.track_ids = vec![id.0];
+            }
+        }
+        (Some(p), Some(l)) if p.mode == "connect" => {
+            plan.spotify_uris = vec![format!("spotify:{}:{}", l.kind, l.id)];
+        }
+        (Some(_), Some(l)) => {
+            plan.items = expand_link(&s, l, &it, &r).await?;
+        }
+        _ => {}
+    }
+    Ok(Json(plan))
+}
+
+/// Queue items for a service link: a track straight from the card, an
+/// album through the service's item (its tracks in order).
+async fn expand_link(
+    s: &NodeState,
+    l: &ServiceLink,
+    it: &DiscoverItem,
+    r: &pm_pubky::pinakes::ResourceDetail,
+) -> Result<Vec<pm_zones::QueueItem>, ApiError> {
+    use crate::streaming::StreamingService;
+    let svc: Box<dyn StreamingService> = match l.service {
+        "tidal" => Box::new(crate::tidal::Tidal),
+        "deezer" => Box::new(crate::deezer::Deezer),
+        _ => return Ok(Vec::new()),
+    };
+    if l.kind == "track" {
+        let uri = match l.service {
+            "tidal" => crate::tidal::track_uri(&l.id),
+            _ => crate::deezer::track_uri(&l.id),
+        };
+        let facts = r.facts();
+        return Ok(vec![pm_zones::QueueItem {
+            id: 0,
+            uri,
+            title: it.title.clone(),
+            artist: it.artist.clone(),
+            album: facts.album.clone(),
+            duration_ms: facts.duration_secs().map(|d| d * 1000),
+            image: it.image.clone(),
+        }]);
+    }
+    let album = svc.item(s, &format!("album:{}", l.id)).await?;
+    Ok(album
+        .tracks
+        .iter()
+        .map(|t| pm_zones::QueueItem {
+            id: 0,
+            uri: t.url.clone(),
+            title: Some(t.title.clone()),
+            artist: t.artist.clone().or_else(|| album.creator.clone()),
+            album: Some(album.title.clone()),
+            duration_ms: t.duration_ms,
+            image: album.image.clone().or_else(|| it.image.clone()),
+        })
+        .collect())
 }
 
 fn chart_type(t: Option<&str>) -> &'static str {
@@ -106,8 +417,9 @@ pub(crate) async fn charts(
         .trending_of(chart_type(q.type_.as_deref()), &window, limit)
         .await
         .map_err(upstream)?;
+    let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
-    Ok(Json(page(&lib, Vec::new(), &p.items)))
+    Ok(Json(page(&acc, &lib, Vec::new(), &p.items)))
 }
 
 /// `GET /v1/discover/search?q=&type=`: Pinakes's text search over music
@@ -140,8 +452,9 @@ pub(crate) async fn search(
         .map_err(upstream)?;
     let cards: Vec<pm_pubky::pinakes::Card> = resp.items.into_iter().filter(|c| c.is_music()).collect();
     let items = pm_pubky::discovery::items_from_cards(cards);
+    let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
-    Ok(Json(page(&lib, Vec::new(), &items)))
+    Ok(Json(page(&acc, &lib, Vec::new(), &items)))
 }
 
 /// `GET /v1/discover/item?uri=`: one card with facts, every link, who tagged
@@ -158,49 +471,7 @@ pub(crate) async fn item_detail(
         return Err(ApiError::not_found("Pinakes has not seen this link"));
     };
     let facts = r.facts();
-    let (item, in_library_album) = {
-        let lib = s.library.lock().expect("library poisoned");
-        let music = MusicUri::parse(&r.card.uri).ok();
-        let in_library = music
-            .as_ref()
-            .and_then(|m| lib.tracks_by_canonical(m).ok())
-            .and_then(|v| v.into_iter().next());
-        let by_isrc = facts.isrcs().iter().find_map(|i| {
-            let isrc = pm_model::Isrc::parse(i).ok()?;
-            lib.tracks_by_canonical(&MusicUri::Isrc { isrc })
-                .ok()?
-                .into_iter()
-                .next()
-        });
-        let in_library = in_library.or(by_isrc);
-        let album = facts
-            .upc
-            .as_deref()
-            .and_then(|u| pm_model::Upc::parse(u).ok())
-            .and_then(|u| lib.album_by_upc(&u).ok().flatten())
-            .and_then(|a| a.id)
-            .or_else(|| {
-                in_library
-                    .as_ref()
-                    .and_then(|t| t.album.as_ref().and_then(|a| a.id))
-            });
-        let item = DiscoverItem {
-            uri: music.map(|m| m.to_url()).unwrap_or_else(|| r.card.uri.clone()),
-            title: r.card.name.clone(),
-            artist: facts.artist.clone().or_else(|| r.card.artist_hint()),
-            description: r.card.description.clone(),
-            image: r.card.image.clone(),
-            taggers: None,
-            in_library,
-            kind: kind_of(&r.card),
-            site: r.card.site.clone(),
-            pinakes_id: Some(r.card.id.clone()),
-            group_size: r.card.group.as_ref().map(|g| g.size),
-            playable: playable_uri(&r.card.uri),
-            also_on: also_on_rows(r.also_on()),
-        };
-        (item, album)
-    };
+    let (item, in_library_album) = detail_item(&s, &r);
     let on_pubky = match d.nexus().resource_by_uri(&r.card.uri).await {
         Ok(view) => {
             let mut tags: Vec<(String, u64)> = view
@@ -233,11 +504,78 @@ pub(crate) async fn item_detail(
     }))
 }
 
-fn page(lib: &Library, facets: Vec<pm_pubky::pinakes::TagFacet>, items: &[DiscoveredItem]) -> DiscoverPage {
+fn page(
+    acc: &ServiceAccess,
+    lib: &Library,
+    facets: Vec<pm_pubky::pinakes::TagFacet>,
+    items: &[DiscoveredItem],
+) -> DiscoverPage {
     DiscoverPage {
         facets: facets.into_iter().map(|f| (f.label, f.count)).collect(),
-        items: items.iter().map(|d| item(lib, d)).collect(),
+        items: items.iter().map(|d| item(acc, lib, d)).collect(),
     }
+}
+
+/// The item of a full card: library matches by MBID, ISRC and UPC, every
+/// link of the group, and where it plays from.
+fn detail_item(s: &NodeState, r: &pm_pubky::pinakes::ResourceDetail) -> (DiscoverItem, Option<i64>) {
+    let facts = r.facts();
+    let acc = service_access(s);
+    let lib = s.library.lock().expect("library poisoned");
+    let music = MusicUri::parse(&r.card.uri).ok();
+    let in_library = music
+        .as_ref()
+        .and_then(|m| lib.tracks_by_canonical(m).ok())
+        .and_then(|v| v.into_iter().next());
+    let by_isrc = facts.isrcs().iter().find_map(|i| {
+        let isrc = pm_model::Isrc::parse(i).ok()?;
+        lib.tracks_by_canonical(&MusicUri::Isrc { isrc })
+            .ok()?
+            .into_iter()
+            .next()
+    });
+    let by_mbid = facts
+        .mbid
+        .as_deref()
+        .and_then(|m| pm_model::Mbid::parse(m).ok())
+        .and_then(|mbid| lib.tracks_by_canonical(&MusicUri::Recording { mbid }).ok())
+        .and_then(|v| v.into_iter().next());
+    let in_library = in_library.or(by_mbid).or(by_isrc);
+    let album = facts
+        .upc
+        .as_deref()
+        .and_then(|u| pm_model::Upc::parse(u).ok())
+        .and_then(|u| lib.album_by_upc(&u).ok().flatten())
+        .and_then(|a| a.id)
+        .or_else(|| {
+            in_library
+                .as_ref()
+                .and_then(|t| t.album.as_ref().and_then(|a| a.id))
+        });
+    let kind = kind_of(&r.card);
+    let mut item = DiscoverItem {
+        uri: music.map(|m| m.to_url()).unwrap_or_else(|| r.card.uri.clone()),
+        title: r.card.name.clone(),
+        artist: facts.artist.clone().or_else(|| r.card.artist_hint()),
+        description: r.card.description.clone(),
+        image: r.card.image.clone(),
+        taggers: None,
+        in_library,
+        kind: kind.clone(),
+        site: r.card.site.clone(),
+        pinakes_id: Some(r.card.id.clone()),
+        group_size: r.card.group.as_ref().map(|g| g.size),
+        playable: playable_uri(&r.card.uri),
+        also_on: also_on_rows(r.also_on()),
+        page: Some(r.card.uri.clone()),
+        plays_from: None,
+        connect: Vec::new(),
+    };
+    drop(lib);
+    let res = resolve(&acc, &item, album.filter(|_| kind == "album"));
+    item.plays_from = res.plays_from;
+    item.connect = res.connect;
+    (item, album)
 }
 
 fn upstream(e: impl std::fmt::Display) -> ApiError {
@@ -386,8 +724,9 @@ pub(crate) async fn trends(
         Ok(p) => (Vec::new(), p.items),
         Err(_) => d.trends(limit).await.map_err(upstream)?,
     };
+    let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
-    Ok(Json(page(&lib, facets, &items)))
+    Ok(Json(page(&acc, &lib, facets, &items)))
 }
 
 pub(crate) async fn by_tag(
@@ -400,8 +739,9 @@ pub(crate) async fn by_tag(
         .by_tag(&label, q.limit.unwrap_or(30).min(200), q.cursor.clone())
         .await
         .map_err(upstream)?;
+    let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
-    Ok(Json(page(&lib, Vec::new(), &p.items)))
+    Ok(Json(page(&acc, &lib, Vec::new(), &p.items)))
 }
 
 pub(crate) async fn friends(
@@ -414,6 +754,7 @@ pub(crate) async fn friends(
         .friends_activity(&viewer, q.limit.unwrap_or(30).min(200), q.cursor.clone())
         .await
         .map_err(upstream)?;
+    let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
-    Ok(Json(page(&lib, Vec::new(), &p.items)))
+    Ok(Json(page(&acc, &lib, Vec::new(), &p.items)))
 }

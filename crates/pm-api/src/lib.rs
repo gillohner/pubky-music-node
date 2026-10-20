@@ -187,6 +187,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/charts", get(discover::charts))
         .route("/discover/search", get(discover::search))
         .route("/discover/item", get(discover::item_detail))
+        .route("/discover/play", get(discover::play_plan))
         .route("/discover/uri", get(discover::on_pubky))
         .route("/discover/tag/{label}", get(discover::by_tag))
         .route("/discover/friends/{viewer}", get(discover::friends))
@@ -3196,6 +3197,134 @@ mod tests {
         let (st, left) = call(&app, "DELETE", &format!("/v1/outputs/upnp/{enc}"), None).await;
         assert_eq!(st, StatusCode::OK, "{left}");
         assert_eq!(left.as_array().unwrap().len(), 0);
+    }
+
+    /// `GET /v1/discover/play` resolves through the node's connected
+    /// services: with nothing connected it names the services that have the
+    /// song (and offers a preview); once the library owns the recording it
+    /// plays from there.
+    #[tokio::test]
+    async fn play_plan_resolves_through_connected_services() {
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/v1/resources/by-uri",
+            get(move || {
+                let fixture = fixture.clone();
+                async move { ([(header::CONTENT_TYPE, "application/json")], fixture) }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let q = "/v1/discover/play?uri=https%3A%2F%2Ftidal.com%2Ftrack%2F534050211";
+        let (st, plan) = call(&app, "GET", q, None).await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert!(plan["plays_from"].is_null(), "nothing is connected: {plan}");
+        let connect: Vec<&str> = plan["connect"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            connect.contains(&"tidal") && connect.contains(&"spotify"),
+            "{plan}"
+        );
+        assert_eq!(plan["preview"]["service"], "deezer");
+        assert_eq!(plan["preview"]["mode"], "preview");
+        assert!(plan["items"].is_null() || plan["items"].as_array().unwrap().is_empty());
+        // The item page says the same, without expanding anything.
+        let (st, d) = call(
+            &app,
+            "GET",
+            "/v1/discover/item?uri=https%3A%2F%2Ftidal.com%2Ftrack%2F534050211",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{d}");
+        assert!(d["item"]["plays_from"].is_null());
+        assert_eq!(d["item"]["connect"][0], "tidal");
+        assert_eq!(d["item"]["page"], "https://tidal.com/track/534050211");
+        // Own the recording: the library wins.
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+            let t = pm_model::Track {
+                id: None,
+                title: "Bohemian Rhapsody".into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: "Queen".into(),
+                    mbid: None,
+                }],
+                album: None,
+                track_no: Some(11),
+                disc_no: None,
+                duration_ms: Some(355_000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join("bo.flac"),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(355_000),
+                },
+                recording_mbid: Some(mbid),
+                isrc: None,
+                acoustid: None,
+                canonical: Some((
+                    pm_model::MusicUri::Recording { mbid },
+                    pm_model::Confidence::TaggedMbid,
+                )),
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            lib.upsert_track(&t).unwrap().0
+        };
+        let (st, plan) = call(&app, "GET", q, None).await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(plan["plays_from"]["service"], "library");
+        assert_eq!(plan["plays_from"]["mode"], "full");
+        assert_eq!(plan["track_ids"][0], tid);
+        assert!(plan["connect"].is_null());
+    }
+
+    #[test]
+    fn service_links_are_recognised() {
+        use discover::service_link;
+        let l = service_link("https://tidal.com/album/495402659", true).unwrap();
+        assert_eq!(
+            (l.service, l.kind, l.id.as_str()),
+            ("tidal", "album", "495402659")
+        );
+        let l = service_link("https://www.deezer.com/en/track/4329888262", false).unwrap();
+        assert_eq!((l.service, l.kind), ("deezer", "track"));
+        let l = service_link("https://open.spotify.com/track/2OBofMJx94NryV2SK8p8Zf", false).unwrap();
+        assert_eq!(
+            (l.service, l.kind, l.id.as_str()),
+            ("spotify", "track", "2OBofMJx94NryV2SK8p8Zf")
+        );
+        assert!(service_link("https://music.apple.com/us/album/dracula/1830000000", true).is_none());
+        assert!(service_link(
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            true
+        )
+        .is_none());
     }
 
     /// Pinakes's `also_on` joins the Versions list: every service that has

@@ -100,6 +100,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/charts` | `?type=tracks|albums|artists&window=24h|7d|30d&limit=` | Pinakes chart, one song across services one row; items carry `kind`, `site`, `group_size`, `playable`, `also_on` |
 | GET | `/v1/discover/search` | `?q=&type=&limit=` | Pinakes text search over music tagged on Pubky, joined to the library |
 | GET | `/v1/discover/item` | `?uri=` | one card: facts (`mbid`, `isrcs`, `upc`, `duration_secs`, albums), every `also_on` link, `on_pubky` tags/taggers, `in_library_album` |
+| GET | `/v1/discover/play` | `?uri=` | where the item plays from, resolved through the node's connected services: the library (`track_ids`), else the best service link, tagged first, TIDAL before Spotify Connect (`items` to queue, or `spotify_uris` for `POST /v1/sources/spotify/play`); albums expand to their tracks on that service. With nothing connected: `plays_from` absent, `connect` names the services that have it, `preview` a 30 s Deezer excerpt. Rows and `/discover/item` carry the same `plays_from`/`connect` without expanding |
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |

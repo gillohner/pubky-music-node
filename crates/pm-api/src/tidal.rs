@@ -139,6 +139,11 @@ fn endpoints(s: &NodeState) -> TidalEndpoints {
     s.tidal.read().expect("tidal endpoints").clone()
 }
 
+/// Whether the node can stream TIDAL now: credentials and a user session.
+pub(crate) fn connected(s: &NodeState) -> bool {
+    creds(s).configured() && load_user(s).is_some()
+}
+
 fn creds(s: &NodeState) -> TidalCredentials {
     endpoints(s).creds
 }

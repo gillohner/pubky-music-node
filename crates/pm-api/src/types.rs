@@ -872,6 +872,58 @@ pub struct DiscoverItem {
     /// "Play on…" / "Open on…": the same thing on other services, tagged first.
     #[serde(default)]
     pub also_on: Vec<Version>,
+    /// The card's own page (a service URL), when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    /// Where Play will take this from, resolved through the node's connected
+    /// services: the library, else the best service link. `None` with
+    /// `connect` naming the services that have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_from: Option<PlaysFrom>,
+    /// Services that have this item but are not connected to this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<String>,
+}
+
+/// Where an item plays from (the "Plays from" chip).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaysFrom {
+    /// `library`, `tidal`, `deezer`, `spotify`.
+    pub service: String,
+    /// `track` or `album`.
+    pub kind: String,
+    /// Source item id (`track:<id>` / `album:<id>`); the library track or album id.
+    pub id: String,
+    /// Short text for the chip ("TIDAL · tagged on Pubky", "Your library · FLAC").
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `preview` when the service only gives excerpts, `connect` when the
+    /// service plays on its own device (Spotify Connect), else `full`.
+    pub mode: String,
+}
+
+/// `GET /v1/discover/play`: what to queue for an item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayPlan {
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_from: Option<PlaysFrom>,
+    /// Library track ids to queue (when `plays_from.service == "library"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_ids: Vec<i64>,
+    /// Queue items to send to a zone (streamed by the node).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<pm_zones::QueueItem>,
+    /// Spotify URIs for `POST /v1/sources/spotify/play` (mode `connect`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spotify_uris: Vec<String>,
+    /// Services that have it but are not connected ("Connect TIDAL").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<String>,
+    /// A 30 s preview the node can play when nothing full is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PlaysFrom>,
 }
 
 /// `GET /v1/discover/item`: one card with everything the node knows around it.
