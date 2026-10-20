@@ -2821,8 +2821,24 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("audio/mp4"));
+        assert_eq!(resp.headers().get("accept-ranges").unwrap(), "bytes");
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert_eq!(body.len(), flac.len(), "proxy body is the whole file");
+        assert_eq!(&body[..], &flac[..]);
+        // Seeking: a byte range comes back as 206 with the right slice.
+        let req = Request::builder()
+            .uri("/v1/sources/tidal/stream/20115564")
+            .header("range", "bytes=100-199")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            resp.headers().get("content-range").unwrap(),
+            &format!("bytes 100-199/{}", flac.len())
+        );
+        let part = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&part[..], &flac[100..200]);
         // Without a session the resolver refuses with a clear reason.
         s.library.lock().unwrap().delete_setting("tidal.user").unwrap();
         let (_, _) = call(

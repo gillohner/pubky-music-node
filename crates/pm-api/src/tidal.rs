@@ -1522,91 +1522,153 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
     Ok(out)
 }
 
-/// `GET /v1/sources/tidal/stream/{id}`: the track's HLS segments as one
-/// `audio/mp4` body, so browsers (the web UI's own zone) can play TIDAL
-/// without an HLS player. Same rules as node playback (sign-in, previews).
+/// Whole tracks fetched for browsers, kept a short while so seeking and
+/// replaying do not hit TIDAL again. Previews are tiny; full tracks are tens
+/// of megabytes, so only a few are kept.
+/// (track id, fetched at, bytes, media type).
+type CachedStream = (String, std::time::Instant, Arc<Vec<u8>>, String);
+
+fn stream_cache() -> &'static Mutex<Vec<CachedStream>> {
+    static C: std::sync::OnceLock<Mutex<Vec<CachedStream>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(Vec::new()))
+}
+const STREAM_CACHE_ENTRIES: usize = 6;
+const STREAM_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+const STREAM_MAX_BYTES: usize = 300 * 1024 * 1024;
+
+/// `GET /v1/sources/tidal/stream/{id}`: the track as one `audio/mp4` body
+/// with a known length and byte ranges, so browsers (the web UI's own zone)
+/// can play, pause and seek it like a file. Same rules as node playback
+/// (sign-in, previews, DRM refused).
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(ApiError::bad_request("bad TIDAL track id"));
     }
-    let token = user_token(&s).await?.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::PRECONDITION_FAILED,
-            "sign in to TIDAL on the Sources page first",
-        )
-    })?;
-    let api = api_base(&s);
-    let v: Value = s
-        .http_client()
-        .get(format!("{api}/trackManifests/{id}"))
-        .bearer_auth(&token)
-        .header(reqwest::header::ACCEPT, ACCEPT)
-        .query(&[
-            ("adaptive", "false"),
-            ("formats", "FLAC_HIRES,FLAC,AACLC"),
-            ("manifestType", "HLS"),
-            ("uriScheme", "HTTPS"),
-            ("usage", "PLAYBACK"),
-        ])
-        .send()
-        .await
-        .map_err(upstream)?
-        .json()
-        .await
-        .map_err(upstream)?;
-    let m = parse_manifest(&v).map_err(upstream)?;
-    if m.drm {
-        return Err(upstream("this track is DRM-protected"));
-    }
-    let mime = if m.formats.iter().any(|f| f.starts_with("FLAC")) {
-        "audio/mp4; codecs=\"flac\""
-    } else {
-        "audio/mp4; codecs=\"mp4a.40.2\""
+    let cached = {
+        let mut c = stream_cache().lock().expect("stream cache");
+        c.retain(|(_, at, _, _)| at.elapsed() < STREAM_CACHE_TTL);
+        c.iter()
+            .find(|(k, _, _, _)| *k == id)
+            .map(|(_, _, b, mime)| (b.clone(), mime.clone()))
     };
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
-    let uri = m.uri.clone();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let client = crate::sources::http_client();
-        let mut reader = match crate::hls::HlsReader::open(client, &uri) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(std::io::Error::other(e)));
-                return;
+    let (bytes, mime) = match cached {
+        Some(c) => c,
+        None => {
+            let token = user_token(&s).await?.ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::PRECONDITION_FAILED,
+                    "sign in to TIDAL on the Sources page first",
+                )
+            })?;
+            let api = api_base(&s);
+            let v: Value = s
+                .http_client()
+                .get(format!("{api}/trackManifests/{id}"))
+                .bearer_auth(&token)
+                .header(reqwest::header::ACCEPT, ACCEPT)
+                .query(&[
+                    ("adaptive", "false"),
+                    ("formats", "FLAC_HIRES,FLAC,AACLC"),
+                    ("manifestType", "HLS"),
+                    ("uriScheme", "HTTPS"),
+                    ("usage", "PLAYBACK"),
+                ])
+                .send()
+                .await
+                .map_err(upstream)?
+                .json()
+                .await
+                .map_err(upstream)?;
+            let m = parse_manifest(&v).map_err(upstream)?;
+            if m.drm {
+                return Err(upstream("this track is DRM-protected"));
             }
-        };
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx
-                        .blocking_send(Ok(bytes::Bytes::copy_from_slice(&buf[..n])))
-                        .is_err()
-                    {
+            let mime = if m.formats.iter().any(|f| f.starts_with("FLAC")) {
+                "audio/mp4; codecs=\"flac\""
+            } else {
+                "audio/mp4; codecs=\"mp4a.40.2\""
+            }
+            .to_string();
+            let uri = m.uri.clone();
+            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                use std::io::Read;
+                let client = crate::sources::http_client();
+                let mut reader = crate::hls::HlsReader::open(client, &uri)?;
+                let mut out = Vec::new();
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
                         break;
                     }
+                    out.extend_from_slice(&buf[..n]);
+                    if out.len() > STREAM_MAX_BYTES {
+                        return Err("track larger than the proxy allows".into());
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
-                    break;
-                }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| upstream(e.to_string()))?
+            .map_err(upstream)?;
+            let bytes = Arc::new(bytes);
+            let mut c = stream_cache().lock().expect("stream cache");
+            c.retain(|(k, _, _, _)| *k != id);
+            if c.len() >= STREAM_CACHE_ENTRIES {
+                c.remove(0);
             }
+            c.push((id.clone(), std::time::Instant::now(), bytes.clone(), mime.clone()));
+            tracing::info!(track = %id, bytes = bytes.len(), presentation = %m.presentation, "TIDAL stream fetched for a browser");
+            (bytes, mime)
         }
-    });
-    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-    Ok((
-        [
-            (reqwest::header::CONTENT_TYPE.as_str(), mime.to_string()),
-            ("Cache-Control", "no-store".to_string()),
-            ("X-Tidal-Presentation", m.presentation.clone()),
-        ],
-        body,
-    )
-        .into_response())
+    };
+    let total = bytes.len();
+    // Byte ranges: what browsers send when seeking or resuming.
+    let range = headers
+        .get(reqwest::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| {
+            let (a, b) = v.split_once('-')?;
+            let start: usize = a.parse().ok()?;
+            let end: usize = if b.is_empty() {
+                total.saturating_sub(1)
+            } else {
+                b.parse().ok()?
+            };
+            (start < total && start <= end).then_some((start, end.min(total - 1)))
+        });
+    let mut resp = match range {
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (reqwest::header::CONTENT_TYPE.as_str(), mime.clone()),
+                (
+                    reqwest::header::CONTENT_RANGE.as_str(),
+                    format!("bytes {start}-{end}/{total}"),
+                ),
+            ],
+            axum::body::Body::from(bytes[start..=end].to_vec()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::OK,
+            [(reqwest::header::CONTENT_TYPE.as_str(), mime.clone())],
+            axum::body::Body::from(bytes.as_ref().clone()),
+        )
+            .into_response(),
+    };
+    let h = resp.headers_mut();
+    h.insert("Accept-Ranges", axum::http::HeaderValue::from_static("bytes"));
+    h.insert(
+        "Cache-Control",
+        axum::http::HeaderValue::from_static("private, max-age=600"),
+    );
+    Ok(resp)
 }
 
 // ---- playback (audio thread, blocking) ----

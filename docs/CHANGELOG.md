@@ -4,6 +4,9 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-20
 
+- TrueNAS SCALE: a ready compose file (`deploy/truenas/`) and deployment notes.
+- The TIDAL browser proxy serves whole tracks with a known length and byte ranges, so the
+  browser zone shows the real length and seeks, pauses and resumes like a file.
 - Streaming is integrated where the music is (Roon-style): the main search answers with TIDAL
   albums and tracks next to the library (flagged when already owned), album pages show Versions
   on TIDAL by UPC, track menus offer Stream from TIDAL by ISRC, and the browser zone plays TIDAL

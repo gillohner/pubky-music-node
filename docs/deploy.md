@@ -28,6 +28,17 @@ docker run -d --name pm -p 7788:7788 --device /dev/snd \
 curl -H 'Authorization: Bearer change-me' http://localhost:7788/v1/info
 ```
 
+## TrueNAS SCALE
+
+`deploy/truenas/docker-compose.yaml` is a ready custom app: Apps → Discover Apps → ⋮ → *Install
+via YAML*, paste it, set the token, contact and the two dataset paths. The web UI is the node
+itself on port 7788 (`http://<nas>:7788/`, it asks for the token once); the same address and token
+go into the native app and into Subsonic clients. The image is published on GHCR; the package
+must be public (or the NAS needs registry credentials) for the pull to succeed. The container runs
+as uid 1000, so the data dataset must be writable by that user; the music dataset is read-only.
+Using the form instead: Repository `ghcr.io/gillohner/pubky-music-node`, Tag `edge` (no tag in
+the repository field), the `PM_*` variables, port 7788 → 7788, and the two storage mounts.
+
 ## Umbrel
 
 `deploy/umbrel/pubky-music-node/` holds the app manifest and compose file for an Umbrel community

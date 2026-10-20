@@ -1,0 +1,29 @@
+# Pubky Music Node on TrueNAS SCALE: Apps → Discover Apps → ⋮ → Install via YAML.
+# Edit the three paths and the token before installing. The image runs as uid 1000,
+# so the data dataset must be writable by that user (chown -R 1000:1000 or set
+# `user:` below to the dataset's owner). The music dataset is mounted read-only.
+services:
+  node:
+    image: ghcr.io/gillohner/pubky-music-node:edge
+    container_name: pubky-music
+    restart: unless-stopped
+    ports:
+      - "7788:7788"
+    environment:
+      PM_LISTEN: "0.0.0.0:7788"
+      PM_TOKEN: "change-me-to-a-long-random-secret"
+      PM_CONTACT: "you@example.org"
+      PM_NAME: "TrueNAS"
+      PM_FOLDERS: "/music"
+      # TIDAL developer app (optional); register http://<nas>:7788/tidal/callback on it.
+      PM_TIDAL_CLIENT_ID: ""
+      PM_TIDAL_CLIENT_SECRET: ""
+      RUST_LOG: "info"
+    volumes:
+      - /mnt/tank/music:/music:ro
+      - /mnt/tank/apps/pubky-music:/data
+    # A USB DAC on the NAS itself: uncomment and keep the audio group.
+    # devices:
+    #   - /dev/snd:/dev/snd
+    # group_add:
+    #   - audio
