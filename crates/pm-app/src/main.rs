@@ -106,6 +106,9 @@ struct App {
     friends_viewer: String,
     new_zone_name: String,
     new_zone_outputs: Vec<String>,
+    show_queue: bool,
+    /// Last queue version seen per remote zone, to refetch the queue on change.
+    queue_versions: HashMap<String, u64>,
     new_playlist_name: String,
     /// Album id → texture (`None` once the node said there is no cover).
     covers: HashMap<i64, Option<egui::TextureHandle>>,
@@ -158,6 +161,8 @@ impl App {
             friends_viewer: String::new(),
             new_zone_name: String::new(),
             new_zone_outputs: Vec::new(),
+            show_queue: true,
+            queue_versions: HashMap::new(),
             new_playlist_name: String::new(),
             covers: HashMap::new(),
             cover_requests: std::collections::HashSet::new(),
@@ -195,7 +200,13 @@ impl App {
                     self.zones = zs.into_iter().map(|z| (z.id.0.clone(), z)).collect();
                 }
                 Msg::Zone(z) => {
-                    self.zones.insert(z.id.0.clone(), *z);
+                    let id = z.id.0.clone();
+                    let changed =
+                        self.queue_versions.insert(id.clone(), z.queue_version) != Some(z.queue_version);
+                    self.zones.insert(id.clone(), *z);
+                    if changed && id == self.settings.zone {
+                        self.backend.send(Cmd::Queue(id));
+                    }
                 }
                 Msg::ZoneRemoved(id) => {
                     self.zones.remove(&id.0);
@@ -475,6 +486,13 @@ impl App {
                 self.view = View::Search;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(self.show_queue, "☰ Queue")
+                    .on_hover_text("Toggle the queue panel (Q)")
+                    .clicked()
+                {
+                    self.show_queue = !self.show_queue;
+                }
                 if let Some((msg, at)) = &self.status {
                     if at.elapsed() < Duration::from_secs(6) {
                         ui.label(egui::RichText::new(msg).weak());
@@ -1105,6 +1123,63 @@ impl App {
         }
     }
 
+    /// Compact queue for the selected zone: current item highlighted, click to
+    /// jump, ✕ to remove.
+    fn queue_panel(&mut self, ui: &mut egui::Ui) {
+        let zone = self.current_zone();
+        let items = self.queue_items();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Queue").strong());
+            ui.weak(self.zone_name(&self.settings.zone));
+        });
+        ui.separator();
+        if items.is_empty() {
+            ui.weak("Empty. Play an album or add tracks with ⋯.");
+            return;
+        }
+        let mut play_index = None;
+        let mut remove = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for (i, it) in items.iter().enumerate() {
+                let current = zone.queue_index == Some(i);
+                let title = it.title.clone().unwrap_or_else(|| it.uri.clone());
+                ui.horizontal(|ui| {
+                    let label = if current {
+                        egui::RichText::new(format!("▶ {title}")).strong()
+                    } else {
+                        egui::RichText::new(format!("{}. {title}", i + 1))
+                    };
+                    if ui
+                        .add(egui::Button::new(label).frame(false).truncate())
+                        .on_hover_text(it.artist.clone().unwrap_or_default())
+                        .clicked()
+                    {
+                        play_index = Some(i);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").clicked() {
+                            remove = Some(it.id);
+                        }
+                        ui.weak(it.duration_ms.map(fmt_duration).unwrap_or_default());
+                    });
+                });
+            }
+        });
+        if let Some(i) = play_index {
+            self.transport(TransportAction::Play { index: Some(i) });
+        }
+        if let Some(id) = remove {
+            if self.is_local() {
+                self.local.zone.remove(id);
+            } else {
+                self.backend.send(Cmd::RemoveItem {
+                    zone: self.settings.zone.clone(),
+                    item: id,
+                });
+            }
+        }
+    }
+
     fn settings_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Node");
         egui::Grid::new("settings")
@@ -1422,6 +1497,29 @@ impl eframe::App for App {
         if zone.transport == Transport::Playing {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
+        // Keyboard: space play/pause, ← → previous/next, Q toggles the queue panel.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (space, right, left, q) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::Q),
+                )
+            });
+            if space {
+                self.transport(TransportAction::Toggle);
+            }
+            if right {
+                self.transport(TransportAction::Next);
+            }
+            if left {
+                self.transport(TransportAction::Previous);
+            }
+            if q {
+                self.show_queue = !self.show_queue;
+            }
+        }
         egui::Panel::left("nav")
             .default_size(200.0)
             .resizable(false)
@@ -1445,6 +1543,17 @@ impl eframe::App for App {
             .resizable(false)
             .frame(egui::Frame::NONE.inner_margin(8))
             .show(ui, |ui| self.top_bar(ui));
+        if self.show_queue {
+            egui::Panel::right("queue")
+                .default_size(300.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(26, 26, 31))
+                        .inner_margin(10),
+                )
+                .show(ui, |ui| self.queue_panel(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.inner_margin(16))
             .show(ui, |ui| self.content(ui));
