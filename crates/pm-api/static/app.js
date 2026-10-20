@@ -691,14 +691,23 @@
         case 'discover': {
           loading();
           const tag = state.viewArg && state.viewArg.tag;
+          const mode = tag ? 'tag' : (state.viewArg && state.viewArg.mode) || 'trending';
+          const tabs = `<div class="chips tabs">${[['trending', 'Trending'], ['friends', 'Friends']].map(([m, l]) => `<button class="chip ${mode === m ? 'on' : ''}" data-dmode="${m}">${l}</button>`).join('')}</div>`;
+          const bindTabs = () => $$('[data-dmode]', main).forEach((b) => b.onclick = () => setView('discover', { mode: b.dataset.dmode }));
+          let pk = null;
+          if (mode === 'friends') {
+            try { pk = await api('GET', '/pubky'); } catch { pk = null; }
+            if (!pk || !pk.user) { main.innerHTML = pageHead('Discover', 'via Pinakes') + tabs + emptyState('artist', 'Friends need a Pubky session', 'Sign in with Pubky Ring in Settings; then this tab shows what the people you follow are tagging.', { view: 'settings', label: 'Open settings' }); bindTabs(); break; }
+          }
           let page;
-          try { page = await api('GET', tag ? `/discover/tag/${encodeURIComponent(tag)}?limit=40` : '/discover/trends?window=7d&limit=40'); }
-          catch (e) { main.innerHTML = pageHead('Discover') + `<div class="notice warn">${esc(e.message)}</div><p class="muted">Discover reads trending music from Pinakes. Set <code>contact</code> in the node's config so the request carries a contact address.</p>`; break; }
+          try { page = await api('GET', tag ? `/discover/tag/${encodeURIComponent(tag)}?limit=40` : mode === 'friends' ? `/discover/friends/${encodeURIComponent(pk.user)}?limit=40` : '/discover/trends?window=7d&limit=40'); }
+          catch (e) { main.innerHTML = pageHead('Discover', 'via Pinakes') + tabs + `<div class="notice warn">${esc(e.message)}</div><p class="muted">Discover reads music tagged on Pubky through Pinakes. Set the upstream contact in Settings so the requests carry a contact address.</p>`; bindTabs(); break; }
           if (state.view !== 'discover') return;
-          main.innerHTML = (tag ? backBtn('discover', 'Trending') : '') + pageHead(tag ? `#${tag}` : 'Discover', tag ? 'tagged on Pubky, via Pinakes' : 'trending this week via Pinakes')
+          main.innerHTML = (tag ? backBtn('discover', 'Trending') : '') + pageHead(tag ? `#${tag}` : 'Discover', tag ? 'tagged on Pubky, via Pinakes' : mode === 'friends' ? 'what the people you follow are tagging' : 'trending this week via Pinakes') + (tag ? '' : tabs)
             + (page.facets.length ? `<div class="chips">${page.facets.slice(0, 30).map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : '')
             + (page.items.length ? `<div class="list">${page.items.map((it, i) => `<div class="list-row"><div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div><div class="grow"><div class="name">${esc(it.title || (it.in_library && it.in_library.title) || it.uri)}</div><div class="sub">${esc(it.artist || '')}${it.taggers != null ? ` · ${it.taggers} taggers` : ''}</div></div>${it.in_library ? `<button class="btn sm" data-dplay="${i}">${icon('play')} In library</button>` : '<span class="pill">not in library</span>'}<a class="icon-btn" href="${esc(it.uri)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></div>`).join('')}</div>` : emptyState('compass', 'Nothing trending yet', 'Pinakes has not indexed music tags for this window.'));
           $$('[data-dplay]', main).forEach((b) => b.onclick = () => playTracks([page.items[Number(b.dataset.dplay)].in_library], true));
+          bindTabs();
           break;
         }
         case 'queue': {
