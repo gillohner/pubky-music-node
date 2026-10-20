@@ -26,7 +26,7 @@
     ws: null,
     favUris: new Set(),
     trackCache: new Map(),
-    browserQueue: [],
+    browserQueue: (() => { try { const q = JSON.parse(localStorage.getItem('pm.browserQueue') || '[]'); return Array.isArray(q) ? q.filter((it) => it && it.uri && !it.stream) : []; } catch { return []; } })(),
     browserIndex: -1,
     history: [],
   };
@@ -110,6 +110,9 @@
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
   const zoneList = () => [browserState(), ...Object.values(state.zones)];
+  // The browser's queue survives a reload (library tracks only; radio streams are not kept).
+  let lastSavedQueue = '';
+  setInterval(() => { try { const j = JSON.stringify(state.browserQueue.filter((it) => !it.stream)); if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); } } catch { /* storage unavailable */ } }, 2000);
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); $('#zonename').textContent = z ? z.name : 'Zone'; };
   const browserPlay = (i) => {
