@@ -34,7 +34,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
 | GET | `/v1/library/albums` | `?after=&limit=` | `Album[]` |
 | GET | `/v1/library/albums/{id}/tracks` | | `{tracks}` |
-| GET | `/v1/library/albums/{id}/cover` | | image bytes (embedded picture extracted at scan, or `cover.jpg` next to the files); 404 when none |
+| GET | `/v1/library/albums/{id}/cover` | | image bytes: the embedded picture extracted at scan, `cover.jpg` next to the files, or (for albums with a MusicBrainz release/release-group id) the Cover Art Archive front image fetched once and cached in the art dir; misses are remembered for a week; 404 when none |
 | GET | `/v1/library/history` | `?limit=` | `{plays: [{id, track, zone, played_at}]}`, newest first; node zones record a play when a library track starts |
 | POST | `/v1/library/history` | `{track_id, zone?}` | records a play made by the client itself (the app's local zone, the browser); 404 for an unknown track |
 | GET | `/v1/library/home` | `?limit=` | `{recently_added, recently_played, most_played_albums, most_played: [{track, plays, last_played_at}], history, stats}` |

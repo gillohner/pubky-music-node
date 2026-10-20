@@ -76,6 +76,8 @@ pub struct NodeState {
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
+    /// Cover Art Archive origin; tests point it at a local server.
+    pub caa_base: std::sync::RwLock<String>,
     scanning: Mutex<bool>,
 }
 
@@ -120,6 +122,7 @@ impl NodeState {
             watcher: Mutex::new(None),
             discover: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
+            caa_base: std::sync::RwLock::new("https://coverartarchive.org".into()),
             scanning: Mutex::new(false),
         })
     }

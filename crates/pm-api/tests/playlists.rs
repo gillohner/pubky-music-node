@@ -39,6 +39,10 @@ fn write_wav(path: &std::path::Path, title: &str, mbid: Option<&str>) {
             description: "MusicBrainz Track Id".into(),
             value: m.into(),
         });
+        t.add_frame(id3::frame::ExtendedText {
+            description: "MusicBrainz Album Id".into(),
+            value: MB2.into(),
+        });
         t.add_frame(id3::frame::Picture {
             mime_type: "image/png".into(),
             picture_type: id3::frame::PictureType::CoverFront,
@@ -126,9 +130,16 @@ async fn playlist_lifecycle() {
         .as_i64()
         .unwrap();
 
-    // The album got its cover from the tagged file's embedded picture.
+    // The album got its cover from the tagged file's embedded picture. (The
+    // untagged file has no release id, so it forms a second "Lists" album.)
     let (_, albums) = call(&app, "GET", "/v1/library/albums", None).await;
-    let album_id = albums[0]["id"].as_i64().unwrap();
+    let albums = albums.as_array().unwrap().clone();
+    let album_id = albums.iter().find(|a| a["release_mbid"] == MB2).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let bare_album_id = albums.iter().find(|a| a["release_mbid"].is_null()).unwrap()["id"]
+        .as_i64()
+        .unwrap();
     let req = Request::builder()
         .uri(format!("/v1/library/albums/{album_id}/cover"))
         .body(Body::empty())
@@ -290,19 +301,27 @@ async fn playlist_lifecycle() {
         .await;
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
     }
-    let album_id = tagged["album"]["id"].as_i64().unwrap();
     let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"album_id": bare_album_id})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an album without a release id cannot be hearted"
+    );
+    let (st, f) = call(
         &app,
         "PUT",
         "/v1/favourites",
         Some(serde_json::json!({"album_id": album_id})),
     )
     .await;
-    assert_eq!(
-        st,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "the test album has no release id"
-    );
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["uri"], format!("https://musicbrainz.org/release/{MB2}"));
     let (st, _) = call(
         &app,
         "PUT",
@@ -337,7 +356,8 @@ async fn playlist_lifecycle() {
     assert_eq!(favs["tracks"].as_array().unwrap().len(), 1, "{favs}");
     assert_eq!(favs["tracks"][0]["id"], tagged_id);
     assert_eq!(favs["other"].as_array().unwrap().len(), 1);
-    assert_eq!(favs["uris"].as_array().unwrap().len(), 2);
+    assert_eq!(favs["albums"].as_array().unwrap().len(), 1);
+    assert_eq!(favs["uris"].as_array().unwrap().len(), 3);
     let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(home["favourite_albums"].is_array());
@@ -480,4 +500,131 @@ async fn playlist_lifecycle() {
 
 fn urlencoding(s: &str) -> String {
     s.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// Albums without embedded art get their cover from the Cover Art Archive
+/// (pointed at a local server here), once; the file is then served from disk.
+#[tokio::test]
+async fn covers_fall_back_to_the_cover_art_archive() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = hits.clone();
+    let caa = axum::Router::new().route(
+        "/release/{mbid}/front-500",
+        axum::routing::get(move |axum::extract::Path(mbid): axum::extract::Path<String>| {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                if mbid == MB2 {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "image/png")],
+                        b"\x89PNG-fake".to_vec(),
+                    )
+                } else {
+                    (
+                        StatusCode::NOT_FOUND,
+                        [("content-type", "text/plain")],
+                        Vec::new(),
+                    )
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, caa).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    // Tagged with a release id but no picture frame: the archive is asked.
+    let path = music.join("bare.wav");
+    {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..2205 {
+            w.write_sample((i % 50) as i16).unwrap();
+            w.write_sample(-((i % 50) as i16)).unwrap();
+        }
+        w.finalize().unwrap();
+        let mut t = id3::Tag::new();
+        t.set_title("Bare");
+        t.set_artist("Tester");
+        t.set_album("No Art");
+        t.add_frame(id3::frame::ExtendedText {
+            description: "MusicBrainz Album Id".into(),
+            value: MB2.into(),
+        });
+        t.write_to_path(&path, id3::Version::Id3v24).unwrap();
+    }
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    *s.caa_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+    let app = router(s.clone());
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, albums) = call(&app, "GET", "/v1/library/albums", None).await;
+    let album = albums
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == "No Art")
+        .unwrap();
+    assert_eq!(album["release_mbid"], MB2);
+    let id = album["id"].as_i64().unwrap();
+    for round in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/library/albums/{id}/cover"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "round {round}");
+        assert_eq!(resp.headers()["content-type"], "image/png");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"\x89PNG-fake");
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "fetched once, then served from the art dir"
+    );
+    let art = s.library.lock().unwrap().album_art(id).unwrap().unwrap();
+    assert_eq!(art.source, "coverartarchive");
+    assert!(art.file.starts_with(dir.path().join("art")));
 }

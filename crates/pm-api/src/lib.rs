@@ -10,6 +10,7 @@
 //! by pubkey (M5) wraps this API rather than replacing it.
 
 pub mod activity;
+pub mod art;
 pub mod discover;
 pub mod favourites;
 pub mod files;
@@ -725,12 +726,13 @@ async fn scan(State(s): State<Arc<NodeState>>, Json(body): Json<ScanRequest>) ->
 
 /// The album's cover image (extracted at scan time or found in the folder).
 async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let art = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .album_art(id)?
-        .ok_or_else(|| ApiError::not_found(format!("no cover for album {id}")))?;
+    let known = s.library.lock().expect("library poisoned").album_art(id)?;
+    let art = match known {
+        Some(a) => a,
+        None => art::fetch_missing_cover(&s, id)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("no cover for album {id}")))?,
+    };
     let bytes = tokio::fs::read(&art.file)
         .await
         .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
