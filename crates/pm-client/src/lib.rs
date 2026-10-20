@@ -474,6 +474,16 @@ impl NodeClient {
         Ok(l.url)
     }
 
+    /// Where else a library album streams from (TIDAL by UPC).
+    pub async fn album_versions(&self, album: i64) -> Result<Vec<Version>> {
+        self.get(&format!("library/albums/{album}/versions"), &[]).await
+    }
+
+    /// Where else a library track streams from (TIDAL by ISRC).
+    pub async fn track_versions(&self, track: i64) -> Result<Vec<Version>> {
+        self.get(&format!("library/tracks/{track}/versions"), &[]).await
+    }
+
     pub async fn tidal_collection(&self) -> Result<pm_api::tidal::TidalCollection> {
         self.get("sources/tidal/collection", &[]).await
     }

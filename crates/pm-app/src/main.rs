@@ -161,6 +161,9 @@ struct App {
     tidal_poll_at: Option<Instant>,
     /// The signed-in user's TIDAL collection and playlists, once loaded.
     tidal_mine: Option<(pm_api::tidal::TidalCollection, Vec<pm_api::tidal::TidalPlaylist>)>,
+    /// Streaming versions of library albums (TIDAL by UPC), once looked up.
+    album_versions: HashMap<i64, Vec<pm_api::types::Version>>,
+    album_versions_requested: HashSet<i64>,
     playlists: Vec<PlaylistSummary>,
     playlist_details: HashMap<String, PlaylistDetail>,
     artists: Vec<pm_library::ArtistSummary>,
@@ -263,6 +266,8 @@ impl App {
             pending_open_url: None,
             tidal_poll_at: None,
             tidal_mine: None,
+            album_versions: HashMap::new(),
+            album_versions_requested: HashSet::new(),
             playlists: Vec::new(),
             playlist_details: HashMap::new(),
             artists: Vec::new(),
@@ -439,6 +444,10 @@ impl App {
                     self.tidal_status = Some(st);
                 }
                 Msg::TidalMine(col, pls) => self.tidal_mine = Some((col, pls)),
+                Msg::AlbumVersions(id, v) => {
+                    self.album_versions.insert(id, v);
+                }
+                Msg::LocalItems(items) => self.play_source_items(items, true),
                 Msg::OpenUrl(u) => {
                     self.pending_open_url = Some(u);
                     // Poll the node until the sign-in lands (the browser finishes it).
@@ -1222,6 +1231,69 @@ impl App {
                         ui.label(egui::RichText::new("Tracks").strong().size(16.0));
                         self.track_table(ui, &r.tracks, true);
                     }
+                    // Streaming services answer in the same search (TIDAL when configured).
+                    for src in &r.sources {
+                        if src.items.is_empty() {
+                            continue;
+                        }
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("On {}", src.source.to_uppercase()))
+                                    .strong()
+                                    .size(16.0),
+                            );
+                            ui.weak("streams from your account");
+                        });
+                        let mut open: Option<String> = None;
+                        let mut play: Option<(pm_api::types::SourceHit, bool)> = None;
+                        for h in &src.items {
+                            ui.horizontal(|ui| {
+                                if h.kind == "album" {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(egui::RichText::new(&h.title).strong())
+                                                .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        open = Some(h.id.clone());
+                                    }
+                                } else {
+                                    if theme::icon_button(ui, 24.0, "▶", "Play").clicked() {
+                                        play = Some((h.clone(), true));
+                                    }
+                                    if ui.small_button("+").on_hover_text("Add to queue").clicked() {
+                                        play = Some((h.clone(), false));
+                                    }
+                                    ui.label(&h.title);
+                                }
+                                let mut facts = vec![h.kind.clone()];
+                                facts.extend(h.creator.clone());
+                                facts.extend(h.year.map(|y| y.to_string()));
+                                if h.library_album_id.is_some() || h.library_track_id.is_some() {
+                                    facts.push("in library".into());
+                                }
+                                ui.weak(facts.join(" · "));
+                            });
+                        }
+                        if let Some(id) = open {
+                            self.archive_loading = Some(id.clone());
+                            self.source_id = src.source.clone();
+                            self.backend.send(Cmd::LoadSourceItem {
+                                source: src.source.clone(),
+                                id,
+                            });
+                            self.view = View::Sources;
+                        }
+                        if let Some((h, replace)) = play {
+                            let mut item =
+                                QueueItem::new(format!("tidal:track:{}", h.id.trim_start_matches("track:")));
+                            item.title = Some(h.title.clone());
+                            item.artist = h.creator.clone();
+                            self.play_source_items(vec![item], replace);
+                        }
+                    }
                 });
             }
             View::Queue => self.queue_view(ui),
@@ -1611,9 +1683,33 @@ impl App {
             .skip(from)
             .map(|t| t.queue_item(item))
             .collect();
+        self.play_source_items(items, replace);
+    }
+
+    /// Queue items from a streaming source on the current zone. The local
+    /// player cannot resolve `tidal:track:` itself, so it streams those
+    /// through the node's proxy.
+    fn play_source_items(&mut self, items: Vec<QueueItem>, replace: bool) {
         if items.is_empty() {
             return;
         }
+        let items: Vec<QueueItem> = if self.is_local() {
+            items
+                .into_iter()
+                .map(|mut it| {
+                    if let Some(id) = it.uri.strip_prefix("tidal:track:") {
+                        it.uri = format!(
+                            "{}/v1/sources/tidal/stream/{id}?token={}",
+                            self.settings.node_url.trim_end_matches('/'),
+                            self.settings.token
+                        );
+                    }
+                    it
+                })
+                .collect()
+        } else {
+            items
+        };
         if self.is_local() {
             if replace {
                 self.local.zone.stop();
@@ -2245,6 +2341,24 @@ impl App {
                     if ui.add(theme::secondary("Add to queue")).clicked() {
                         self.play_tracks(&tracks, false, QueueAt::End);
                     }
+                    if self.album_versions_requested.insert(id) {
+                        self.backend.send(Cmd::LoadAlbumVersions(id));
+                    }
+                    for v in self.album_versions.get(&id).cloned().unwrap_or_default() {
+                        if ui
+                            .add(theme::secondary(&format!("▶ {}", v.label)))
+                            .on_hover_text("Play this version from the streaming service")
+                            .clicked()
+                        {
+                            self.archive_loading = Some(v.id.clone());
+                            self.source_id = v.source.clone();
+                            self.backend.send(Cmd::LoadSourceItem {
+                                source: v.source.clone(),
+                                id: v.id.clone(),
+                            });
+                            self.view = View::Sources;
+                        }
+                    }
                     if !self.is_local()
                         && !tracks.is_empty()
                         && ui
@@ -2308,6 +2422,10 @@ impl App {
     fn track_table(&mut self, ui: &mut egui::Ui, tracks: &[Track], show_album: bool) {
         let playlists = self.playlists.clone();
         let local = self.is_local();
+        let tidal_on = self
+            .sources
+            .iter()
+            .any(|s| s.id == "tidal" && !s.status.starts_with("not configured"));
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let mut action: Option<(usize, &str)> = None;
             let mut playlist_add: Option<(usize, usize)> = None;
@@ -2383,6 +2501,16 @@ impl App {
                                     action = Some((i, "upload"));
                                     ui.close();
                                 }
+                                if tracks[i].isrc.is_some()
+                                    && tidal_on
+                                    && ui
+                                        .button("Stream from TIDAL")
+                                        .on_hover_text("The same recording (by ISRC) from your TIDAL account")
+                                        .clicked()
+                                {
+                                    action = Some((i, "version"));
+                                    ui.close();
+                                }
                                 if !local
                                     && ui
                                         .button("Start radio")
@@ -2414,6 +2542,14 @@ impl App {
                     "upload" => {
                         if let Some(id) = tracks[i].id {
                             self.backend.send(Cmd::PubkyUpload(id.0));
+                        }
+                    }
+                    "version" => {
+                        if let Some(id) = tracks[i].id {
+                            self.backend.send(Cmd::PlayTrackVersion {
+                                track_id: id.0,
+                                zone: (!local).then(|| self.settings.zone.clone()),
+                            });
                         }
                     }
                     "radio" => {

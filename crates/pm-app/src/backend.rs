@@ -5,7 +5,7 @@ use pm_api::types::{
     AddPlaylistItems, ApiEvent, ArtistDetail, ArtistInfo, CreatePlaylist, DiscoverPage, Enqueue,
     FavouriteRef, Favourites, GenreDetail, HomePage, Info, Lyrics, NewReleasesPage, NodeSettingsView,
     OnPubky, PlaylistDetail, PlaylistFromQueue, PlaylistSummary, QueueAt, Reviews, SearchResults, SourceHit,
-    SourceItem, Tags, TransportAction, UpdatePlaylist, UploadFile,
+    SourceItem, Tags, TransportAction, UpdatePlaylist, UploadFile, Version,
 };
 use pm_client::{NodeClient, RadioStation};
 use pm_model::{Album, Track, Volume};
@@ -190,6 +190,14 @@ pub enum Cmd {
     TidalLogin,
     TidalLogout,
     TidalMine,
+    /// Versions of a library album elsewhere (TIDAL by UPC).
+    LoadAlbumVersions(i64),
+    /// Play a library track's streaming version: on `zone`, or (None) hand the
+    /// queue items back for the local player.
+    PlayTrackVersion {
+        track_id: i64,
+        zone: Option<String>,
+    },
     TidalImportCollection,
     TidalImportPlaylist(String),
     PubkyUpload(i64),
@@ -261,6 +269,9 @@ pub enum Msg {
     PubkyFiles(Result<Vec<pm_pubky::homeserver::RemoteFile>, String>),
     TidalStatus(pm_api::tidal::TidalStatus),
     TidalMine(pm_api::tidal::TidalCollection, Vec<pm_api::tidal::TidalPlaylist>),
+    AlbumVersions(i64, Vec<Version>),
+    /// Queue items for the local player (streaming versions).
+    LocalItems(Vec<QueueItem>),
     /// A URL the app should open in the system browser (TIDAL sign-in).
     OpenUrl(String),
     Genre(Box<GenreDetail>),
@@ -597,6 +608,42 @@ async fn handle(c: NodeClient, cmd: Cmd, out: &Emitter) -> pm_client::Result<()>
         Cmd::TidalLogin => {
             let url = c.tidal_login_url().await?;
             out.send(Msg::OpenUrl(url));
+        }
+        Cmd::LoadAlbumVersions(id) => {
+            let v = c.album_versions(id).await.unwrap_or_default();
+            out.send(Msg::AlbumVersions(id, v));
+        }
+        Cmd::PlayTrackVersion { track_id, zone } => {
+            let versions = c.track_versions(track_id).await?;
+            let Some(v) = versions.iter().find(|v| v.uri.is_some()) else {
+                out.send(Msg::Notice("no streaming version of this track".into()));
+                return Ok(());
+            };
+            let track = c.track(track_id).await?;
+            let mut item = QueueItem::new(v.uri.clone().unwrap_or_default());
+            item.title = Some(track.title.clone());
+            item.artist = track.artists.first().map(|a| a.name.clone());
+            item.album = track.album.as_ref().map(|a| a.title.clone());
+            item.duration_ms = track.duration_ms;
+            match zone {
+                Some(z) => {
+                    c.enqueue(
+                        &z,
+                        &Enqueue {
+                            track_ids: vec![],
+                            items: vec![item],
+                            at: QueueAt::End,
+                            replace: true,
+                            play: true,
+                        },
+                    )
+                    .await?;
+                    out.send(Msg::Notice(format!("streaming from {}", v.source.to_uppercase())));
+                    let q = c.queue(&z).await?;
+                    out.send(Msg::Queue(z, q));
+                }
+                None => out.send(Msg::LocalItems(vec![item])),
+            }
         }
         Cmd::TidalMine => {
             let col = c.tidal_collection().await?;
