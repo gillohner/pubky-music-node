@@ -52,6 +52,15 @@ C4. TIDAL (needs `[tidal]` credentials in node.toml and the app's redirect URI r
    Sources page pick TIDAL, search, open an album, Connect TIDAL and finish the sign-in in the
    browser. Then play a track to the KA17 zone: report the signal path (FLAC expected; say if it
    is a preview or refused as DRM), and try Import as favourites and one playlist import.
+C5. Deezer (no credentials): search any well-known artist in the main search of both UIs. The
+   results must show Deezer artists/albums/tracks after your library and TIDAL, with a DEEZER
+   badge; an album the library owns (same UPC) must NOT be duplicated. Play a Deezer track to the
+   KA17 zone and in the browser zone: a 30-second MP3 preview, the signal path says MP3. Open a
+   library album → Versions: a Deezer chip appears when the album has a UPC; the track ⋯ menu
+   offers "Stream from Deezer · …" when the track has an ISRC.
+C6. Network scan: Settings → Outputs → "Scan the network". Report the list (every UPnP device,
+   whether it is a renderer, Cast devices) and any notes. If a renderer you own is missing, say
+   what the notes said.
 D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
    127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96
