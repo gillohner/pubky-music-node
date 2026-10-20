@@ -356,6 +356,19 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
 .card h3 { margin-bottom: 10px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.zone-card { display: flex; flex-direction: column; gap: 12px; }
+.zone-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+.zone-card .zc-head { display: flex; align-items: center; gap: 10px; }
+.zone-card .zc-head h3 { margin: 0; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zone-card .zc-now { display: flex; gap: 12px; align-items: center; min-height: 56px; }
+.zone-card .zc-now .art, .zone-card .zc-now .np-art { width: 56px; height: 56px; flex: none; }
+.zone-card .zc-text { min-width: 0; flex: 1; }
+.zone-card .zc-text .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zone-card .zc-text .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zone-card .zc-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.zone-card .icon-btn.big { width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; }
+.zone-card .icon-btn.big:hover { background: var(--accent-strong); }
+.zone-card .zc-controls input[type=range] { flex: 1; min-width: 100px; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .toolbar .input { width: 260px; }
 .file-btn input { display: none; }
