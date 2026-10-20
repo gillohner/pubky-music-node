@@ -119,6 +119,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
             upnp: false,
+            slimproto_port: 0,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

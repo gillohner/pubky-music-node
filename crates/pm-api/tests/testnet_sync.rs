@@ -39,6 +39,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
             upnp: false,
+            slimproto_port: 0,
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

@@ -3644,6 +3644,7 @@ dependencies = [
  "pm-audio",
  "pm-library",
  "pm-model",
+ "pm-out-slimproto",
  "pm-out-upnp",
  "pm-pubky",
  "pm-zones",
@@ -3821,6 +3822,18 @@ dependencies = [
  "pm-stream",
  "pm-zones",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "pm-out-slimproto"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pm-model",
+ "pm-zones",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]

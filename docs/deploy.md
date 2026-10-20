@@ -67,3 +67,11 @@ The node lists the endpoint's outputs next to its own (`[outputs] discover = tru
 `endpoints = ["192.168.1.20:7790"]` where multicast does not cross). The endpoint receives the
 negotiated format and packs it for its DAC exactly as the node would locally; its DAC buffer paces
 the stream (ADR 0007). The traffic is plain TCP on the LAN; never expose the port to the internet.
+
+## Squeezebox players and squeezelite
+
+The node speaks Slimproto on TCP 3483 (`[outputs] slimproto_port`). Point a player at the node's
+address (`squeezelite -s <node-ip> -o hw:0,0`); it appears as an output and zone named after its
+model and MAC, plays the zone's post-DSP PCM as a WAV stream it fetches from `[api] public_url`, and
+takes volume through its own digital gain. Players on the same subnet also find the node through
+the discovery responder.

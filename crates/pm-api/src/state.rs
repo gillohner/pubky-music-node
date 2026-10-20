@@ -33,6 +33,8 @@ pub struct NodeSettings {
     pub public_url: String,
     /// Discover UPnP/OpenHome renderers and offer them as outputs.
     pub upnp: bool,
+    /// Accept Squeezebox / squeezelite players (Slimproto) on this TCP port; 0 = off.
+    pub slimproto_port: u16,
 }
 
 pub struct NodeState {
@@ -51,6 +53,7 @@ pub struct NodeState {
     pub subsonic_user: String,
     pub public_url: String,
     pub upnp: bool,
+    pub slimproto_port: u16,
     pub discovery: Option<Arc<pm_pubky::Discovery>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
@@ -97,6 +100,7 @@ impl NodeState {
             subsonic_user: settings.subsonic_user,
             public_url: settings.public_url,
             upnp: settings.upnp,
+            slimproto_port: settings.slimproto_port,
             discovery,
             events,
             sync: Mutex::new(None),
@@ -220,6 +224,60 @@ impl NodeState {
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::new(name)))
             .clone()
+    }
+
+    /// Start the Slimproto server (players connect to us) and the UDP
+    /// discovery responder. Each connecting player becomes an output with a
+    /// zone; its pull stream is registered for the HTTP route.
+    pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
+        if self.slimproto_port == 0 {
+            return Ok(());
+        }
+        let listener = std::net::TcpListener::bind(("0.0.0.0", self.slimproto_port))?;
+        let web_port = url::Url::parse(&self.public_url)
+            .ok()
+            .and_then(|u| u.port_or_known_default())
+            .unwrap_or(7788);
+        let token = self.token.clone();
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |name| match &token {
+            Some(t) => format!("/v1/outputs/pull/{name}/stream.wav?token={t}"),
+            None => format!("/v1/outputs/pull/{name}/stream.wav"),
+        });
+        let state = self.clone();
+        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
+            let name = out.pull().stream_name().to_string();
+            state
+                .pulls
+                .lock()
+                .expect("pulls lock")
+                .insert(name, out.pull().clone());
+            let id = out.id();
+            if state.outputs.get(&id).is_some() {
+                // Reconnecting player: replace the output behind the same zone.
+                state.outputs.register(out.clone());
+                return;
+            }
+            let zone_name = out.name();
+            state.outputs.register(out.clone());
+            state.create_zone(&zone_name, out);
+        });
+        let name = self.name.clone();
+        std::thread::Builder::new()
+            .name("slimproto".into())
+            .spawn(move || {
+                if let Err(e) = pm_out_slimproto::serve(listener, web_port, stream_path, on_player) {
+                    tracing::warn!("slimproto server stopped: {e}");
+                }
+            })?;
+        std::thread::Builder::new()
+            .name("slimproto-discovery".into())
+            .spawn(move || {
+                if let Err(e) = pm_out_slimproto::discovery_responder(&name, web_port) {
+                    tracing::info!("slimproto discovery responder unavailable: {e}");
+                }
+            })?;
+        tracing::info!(port = self.slimproto_port, "Slimproto server listening");
+        Ok(())
     }
 
     /// SSDP discovery of UPnP/OpenHome renderers; each becomes an output

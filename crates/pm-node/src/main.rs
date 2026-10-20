@@ -161,11 +161,15 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                 cfg.api.public_url.clone()
             },
             upnp: cfg.outputs.upnp,
+            slimproto_port: cfg.outputs.slimproto_port,
         },
         lib,
         registry,
     );
     state.zones_for_all_outputs();
+    if let Err(e) = state.start_slimproto() {
+        tracing::warn!("slimproto: {e}");
+    }
     {
         let st = state.clone();
         let found =

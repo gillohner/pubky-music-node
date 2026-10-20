@@ -80,6 +80,8 @@ pub struct OutputsConfig {
     pub discover_ms: u64,
     /// Discover UPnP/OpenHome renderers (SSDP) and offer them as outputs.
     pub upnp: bool,
+    /// Slimproto port for Squeezebox / squeezelite players; 0 disables.
+    pub slimproto_port: u16,
 }
 
 impl Default for OutputsConfig {
@@ -89,6 +91,7 @@ impl Default for OutputsConfig {
             discover: true,
             discover_ms: 1500,
             upnp: true,
+            slimproto_port: 3483,
         }
     }
 }
