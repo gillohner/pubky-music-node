@@ -20,7 +20,8 @@ silently cannot connect.
 7. Room for the system bars: Tauri's MainActivity draws edge to edge, and the
    WebView (before Chromium 136) reports no safe-area insets to the page, so
    the status bar covered the node's menu and search. The content view is
-   padded by the bars' (and the keyboard's) insets, on the UI's background.
+   padded by the bars' (and the keyboard's) insets, on the UI's background
+   (dark or light with the system, like the web UI's theme-color).
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -154,21 +155,16 @@ if "pubky_music_network" not in mtext:
     )
     manifest.write_text(mtext)
 
-# 7. pad the content view by the system bars, keyboard and cutout
+# 7. pad the content view by the system bars, keyboard and cutout, on the UI's background
 activity = activities[0]
 atext = activity.read_text()
 if "pubky-music: insets" not in atext:
     call = "super.onCreate(savedInstanceState)"
-    if atext.count(call) != 1:
+    if atext.count(call) != 1 or atext.count("\n}") < 1:
         die(f"expected one `{call}` in {activity}")
     atext = atext.replace(call, call + """
     // pubky-music: insets (tools/release/android-patch.py)
     val root = findViewById<android.view.View>(android.R.id.content)
-    root.setBackgroundColor(0xFF0F1014.toInt()) // the web UI's --bg
-    androidx.core.view.WindowCompat.getInsetsController(window, root).apply {
-      isAppearanceLightStatusBars = false
-      isAppearanceLightNavigationBars = false
-    }
     androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
       val t = androidx.core.view.WindowInsetsCompat.Type.systemBars() or
         androidx.core.view.WindowInsetsCompat.Type.displayCutout() or
@@ -176,7 +172,29 @@ if "pubky-music: insets" not in atext:
       val bars = insets.getInsets(t)
       v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
       androidx.core.view.WindowInsetsCompat.CONSUMED
-    }""")
+    }
+    pubkyMusicBars()""")
+    # The bars follow the system theme, as the web UI does unless Settings picks one
+    # (theme-color in crates/pm-api/static/index.html). uiMode changes do not recreate the activity.
+    tail = atext.rstrip().rfind("}")
+    atext = atext[:tail] + """
+  override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+    super.onConfigurationChanged(newConfig)
+    pubkyMusicBars()
+  }
+
+  private fun pubkyMusicBars() {
+    val root = findViewById<android.view.View>(android.R.id.content)
+    val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+      android.content.res.Configuration.UI_MODE_NIGHT_YES
+    root.setBackgroundColor(if (night) 0xFF0F1014.toInt() else 0xFFF5F5F8.toInt())
+    androidx.core.view.WindowCompat.getInsetsController(window, root).apply {
+      isAppearanceLightStatusBars = !night
+      isAppearanceLightNavigationBars = !night
+    }
+  }
+}
+"""
     activity.write_text(atext)
 
 print(

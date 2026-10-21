@@ -207,6 +207,11 @@ def run(node):
         until("the node's page in the app", node_page, timeout=90, every=3)
         log("the node's page is showing in the app")
         check_status_bar()
+        shot("2a-light")
+        adb("shell", "cmd", "uimode", "night", "yes")  # the bars and the page follow to dark
+        time.sleep(3)
+        shot("2b-dark")
+        adb("shell", "cmd", "uimode", "night", "no")
         until("the player service", lambda: "player service started" in logcat(), timeout=90)
         m = until("the player's port", lambda: re.search(r"player ready port=(\d+)", logcat()), timeout=10)
         port = m.group(1)

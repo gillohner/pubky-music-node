@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Fix: on Android the status bar covered the top of the node's page** (the menu and search). The app draws edge to edge, and older Android WebViews tell the page nothing about the bars. The app now keeps the page clear of the status bar, navigation bar, camera cutout and keyboard, with bars that follow the system's light or dark mode, as the UI does (a theme picked in Settings › Appearance against the system's still gets the system's bar colour). The emulator test checks that the menu sits below the status bar.
 - **Fix: on Android the status bar covered the top of the node's page** (the menu and search). The app draws edge to edge, and older Android WebViews tell the page nothing about the bars. The app now keeps the page clear of the status bar, navigation bar, camera cutout and keyboard, with dark bars to match the UI. The emulator test checks that the menu sits below the status bar.
 - **Your server, checked against a real Navidrome (0.64.2).** Connect, search, album pages and zone playback all work. A server that can't transcode (Navidrome without ffmpeg) answered the browser's MP3 request with an error, so the browser stream now falls back to the original file (FLAC plays in browsers). Empty MusicBrainz and ISRC fields are read as "not known".
 - **Your own music server as a source** (step 5.1, OpenSubsonic client): Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node.
