@@ -126,7 +126,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
 | GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |
 | POST | `/v1/pubky/files/mirror` | | download missing files into the node's mirror folder and scan it: `{fetched, present, bytes, errors}` |
-| GET | `/v1/events` | WebSocket | first `{"type":"snapshot","zones":[...]}`, then `zone` (full state), `zone_event` (track started/ended, skipped, paused, resumed, seeked, stopped, queue, `stream_title` for radio, error), `zone_removed`, `library_changed` |
+| GET | `/v1/events` | WebSocket | first `{"type":"snapshot","seq","boot","library_rev","zones":[...]}`, then numbered (`seq`) `zone` (full state; also sent when a zone is created), `zone_event` (track started/ended, skipped, paused, resumed, seeked, stopped, queue, `stream_title` for radio, error), `zone_removed`, `library_changed`. Send `{"type":"ping","id":n}` for `{"type":"pong","id":n}`, `{"type":"resync"}` for a fresh snapshot. See `docs/CONNECTION.md` |
 
 Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private
 homeserver folder when `pubky.session_secret_file` is set. Items are canonical music URLs only.

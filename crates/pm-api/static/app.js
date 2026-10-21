@@ -81,11 +81,16 @@
   const setFill = (el) => { const min = +el.min || 0; const max = +el.max || 1; el.style.setProperty('--fill', `${((el.value - min) / (max - min)) * 100}%`); };
 
   const api = async (method, path, body) => {
-    const r = await fetch('/v1' + path, {
-      method,
-      headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
+    if (method !== 'GET') await whenConnected();
+    let r;
+    try {
+      r = await fetch('/v1' + path, {
+        method,
+        headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch { linkHint(); throw new Error("Can't reach the node."); }
     if (r.status === 401) { login(); throw new Error('The node wants an API token.'); }
     const text = await r.text();
     let json = null;
@@ -1494,7 +1499,97 @@
   };
 
   // ---- connection + events -------------------------------------------------
-  const setConn = (ok, text) => { const c = $('#conn'); c.className = 'node-status ' + (ok ? 'ok' : 'bad'); $('.node-text', c).textContent = text; c.title = text; };
+  // The connection to the node (docs/CONNECTION.md): one WebSocket on /v1/events that reconnects with
+  // backoff and jitter, resyncs from the snapshot (seq, boot, library_rev) without a reload, pings for the
+  // round-trip time, and holds changes made while it is down for a few seconds.
+  const link = { ws: null, up: false, ever: false, attempt: 0, retry: null, retryAt: 0, tick: null, ping: null, pingId: 0, pingSent: 0, awaiting: false, missed: 0, rtt: null, pongs: false, loaded: false, seq: null, boot: null, libRev: null, downSince: 0, waiters: [] };
+  const HOLD_MS = 8000;
+  const nodeLabel = () => (state.info ? `${state.info.name} · ${state.info.library.tracks} tracks` : 'Connected');
+  // kind: 'ok' (connected) | 'wait' (reconnecting) | 'bad' (offline); true/false for ok/bad.
+  const setConn = (kind, text) => {
+    if (kind === true) kind = 'ok'; else if (kind === false) kind = 'bad';
+    const c = $('#conn');
+    c.className = 'node-status ' + kind;
+    c.dataset.state = kind === 'ok' ? 'connected' : kind === 'wait' ? 'reconnecting' : 'offline';
+    const ms = kind === 'ok' && link.rtt != null ? ` · ${link.rtt} ms` : '';
+    $('.node-text', c).textContent = text + ms;
+    c.title = kind === 'ok' ? (link.rtt != null ? `${text}. Round trip ${link.rtt} ms.` : text) : `${text}. Click to retry now.`;
+    const bar = $('#connbar');
+    if (bar) { bar.hidden = kind === 'ok'; bar.className = 'connbar ' + kind; $('.connbar-text', bar).textContent = text; }
+  };
+  const whenConnected = () => {
+    if (!link.ever || link.up) return Promise.resolve();
+    linkHint();
+    return new Promise((resolve, reject) => {
+      const w = { resolve, timer: setTimeout(() => { link.waiters = link.waiters.filter((x) => x !== w); reject(new Error('Not connected to the node, so nothing was changed. Try again when it is back.')); }, HOLD_MS) };
+      link.waiters.push(w);
+    });
+  };
+  const flushWaiters = () => { const ws = link.waiters; link.waiters = []; ws.forEach((w) => { clearTimeout(w.timer); w.resolve(); }); };
+  // Someone is waiting on the node: retry now rather than at the end of a long backoff.
+  const linkHint = () => { if (link.ever && !link.up && link.retry && link.retryAt - Date.now() > 1000) retryNow(); };
+  const showDown = () => {
+    clearInterval(link.tick);
+    const paint = () => {
+      if (link.up) { clearInterval(link.tick); return; }
+      const secs = Math.max(0, Math.ceil((link.retryAt - Date.now()) / 1000));
+      if (!navigator.onLine) setConn('bad', 'Offline: no network');
+      else if (link.ever && Date.now() - link.downSince < 20000) setConn('wait', 'Reconnecting…');
+      else setConn('bad', secs ? `Node offline · retrying in ${secs} s` : 'Node offline · retrying…');
+    };
+    paint(); link.tick = setInterval(paint, 1000);
+  };
+  const scheduleRetry = () => {
+    clearTimeout(link.retry);
+    const d = Math.min(30000, 500 * 2 ** Math.min(link.attempt, 10));
+    const wait = Math.round(d / 2 + Math.random() * d / 2);
+    link.attempt++; link.retryAt = Date.now() + wait;
+    link.retry = setTimeout(() => { link.retry = null; reconnect(); }, wait);
+  };
+  const goneDown = () => {
+    link.up = false; clearInterval(link.ping); link.awaiting = false;
+    if (!link.downSince) link.downSince = Date.now();
+    scheduleRetry(); showDown();
+  };
+  // Drop the socket without waiting for its close handshake (a dead peer may never answer).
+  const dropSocket = () => { const ws = link.ws; link.ws = null; if (ws) { ws.onclose = ws.onmessage = ws.onerror = null; try { ws.close(); } catch {} } };
+  const retryNow = () => { clearTimeout(link.retry); link.retry = null; link.attempt = 0; reconnect(); };
+  const reconnect = async () => {
+    if (!link.loaded) return connect();
+    try { state.info = await api('GET', '/info'); } catch { goneDown(); return; }
+    openEvents();
+  };
+  const sendPing = () => {
+    const ws = link.ws; if (!ws || ws.readyState !== 1) return;
+    if (link.awaiting && link.pongs && ++link.missed >= 2) { dropSocket(); goneDown(); return; }
+    link.pingId++; link.pingSent = performance.now(); link.awaiting = true;
+    ws.send(JSON.stringify({ type: 'ping', id: link.pingId }));
+  };
+  const onLibraryChanged = () => {
+    state.albums = null;
+    api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); }).catch(() => {});
+    if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
+  };
+  const applySnapshot = (ev) => {
+    const first = link.boot == null;
+    const restarted = !first && ev.boot != null && ev.boot !== link.boot;
+    const libChanged = !first && (restarted || (ev.library_rev != null && ev.library_rev !== link.libRev));
+    const downFor = link.downSince ? Date.now() - link.downSince : 0;
+    link.seq = ev.seq ?? null; link.boot = ev.boot ?? null; link.libRev = ev.library_rev ?? null;
+    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
+    const wasUp = link.up;
+    link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
+    setConn('ok', nodeLabel());
+    if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
+    flushWaiters();
+    if (!first) {
+      refreshQueue(false);
+      if (!overlay.hidden) renderNowPlaying();
+      if (state.view === 'zones') render();
+      if (libChanged) onLibraryChanged();
+      if (downFor > 5000) toast(restarted ? 'Reconnected: the node restarted' : 'Reconnected');
+    }
+  };
   // Scan indicator: while the node says it is scanning, poll /info until it is done.
   let scanTimer = null;
   const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
@@ -1530,18 +1625,34 @@
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);
       { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
-      events();
-    } catch (e) { setConn(false, e.message); main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)}</div>`; }
+      link.loaded = true;
+      openEvents();
+    } catch (e) {
+      main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)} It retries by itself.</div>`;
+      if (!link.downSince) link.downSince = Date.now();
+      scheduleRetry(); showDown();
+    }
   };
-  const events = () => {
-    if (state.ws) { state.ws.onclose = null; state.ws.close(); }
+  const openEvents = () => {
+    clearTimeout(link.retry); link.retry = null;
+    dropSocket();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/v1/events${tokenQ()}`);
-    state.ws = ws;
+    link.ws = ws;
+    ws.onclose = () => { if (link.ws === ws) { link.ws = null; goneDown(); } };
     ws.onmessage = (m) => {
-      const ev = JSON.parse(m.data);
-      if (ev.type === 'snapshot') { state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName(); }
-      else if (ev.type === 'zone') {
+      let ev; try { ev = JSON.parse(m.data); } catch { return; }
+      if (ev.type === 'pong') {
+        if (ev.id === link.pingId) { link.rtt = Math.max(1, Math.round(performance.now() - link.pingSent)); link.awaiting = false; link.missed = 0; link.pongs = true; setConn('ok', nodeLabel()); }
+        return;
+      }
+      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); return; }
+      // Numbered events: a gap means something was missed, so ask for a fresh snapshot.
+      if (typeof ev.seq === 'number' && link.seq != null) {
+        if (ev.seq > link.seq + 1) ws.send(JSON.stringify({ type: 'resync' }));
+        if (ev.seq > link.seq) link.seq = ev.seq;
+      }
+      if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
@@ -1549,11 +1660,15 @@
         if (state.view === 'zones' && (!old || old.transport !== ev.state.transport || (old.now_playing && old.now_playing.item.id) !== (ev.state.now_playing && ev.state.now_playing.item.id))) render();
       }
       else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
-      else if (ev.type === 'library_changed') { state.albums = null; api('GET', '/info').then((i) => { state.info = i; watchScan(i); }).catch(() => {}); if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render(); if (state.info) api('GET', '/info').then((i) => { state.info = i; setConn(true, `${i.name} · ${i.library.tracks} tracks`); }).catch(() => {}); }
+      else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };
-    ws.onclose = () => { setConn(false, 'Reconnecting…'); setTimeout(events, 3000); };
-    ws.onopen = () => { if (state.info) setConn(true, `${state.info.name} · ${state.info.library.tracks} tracks`); };
   };
+  $('#conn').addEventListener('click', () => { if (!link.up) retryNow(); });
+  $('#connretry').addEventListener('click', () => retryNow());
+  window.addEventListener('online', () => { if (!link.up) retryNow(); });
+  window.addEventListener('offline', () => { if (link.up) sendPing(); else showDown(); });
+  // Phones and laptops suspend sockets in the background: check at once when the page is back.
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') return; if (link.up) { link.awaiting = false; sendPing(); } else if (link.ever || link.retry) retryNow(); });
   connect();
 })();

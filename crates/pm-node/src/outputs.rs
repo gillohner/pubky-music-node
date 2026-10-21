@@ -9,7 +9,7 @@ use std::time::Duration;
 /// built with the `alsa` feature.
 pub fn discover() -> OutputRegistry {
     let registry = OutputRegistry::new();
-    registry.register(Arc::new(NullOutput::new()));
+    registry.register(Arc::new(NullOutput::from_env()));
     #[cfg(feature = "alsa")]
     for out in pm_out_local::alsa::AlsaOutput::enumerate() {
         registry.register(Arc::new(out));

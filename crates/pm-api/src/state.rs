@@ -101,7 +101,7 @@ pub struct NodeState {
     >,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
-    pub events: broadcast::Sender<ApiEvent>,
+    pub events: crate::events::EventBus,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
     /// Folder watcher, kept alive here.
@@ -171,7 +171,7 @@ impl NodeState {
             tidal.clone(),
             deezer_base.clone(),
         ));
-        let (events, _) = broadcast::channel(1024);
+        let events = crate::events::EventBus::new(1024);
         // A contact saved through the API wins over an unset config value.
         let mut pubky = settings.pubky;
         if pubky.validate_contact().is_err() {
@@ -254,6 +254,9 @@ impl NodeState {
         let library = self.library.clone();
         let key = queue_key(zone.id());
         let mut state_rx = zone.watch();
+        // Every controller learns about the new zone at once, not on its first change.
+        let initial = state_rx.borrow_and_update().clone();
+        let _ = self.events.send(ApiEvent::Zone { state: initial });
         tokio::spawn(async move {
             let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {

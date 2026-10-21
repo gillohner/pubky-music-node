@@ -239,7 +239,7 @@ impl Endpoint {
 /// `cpal`.
 pub fn local_outputs() -> OutputRegistry {
     let registry = OutputRegistry::new();
-    registry.register(Arc::new(pm_zones::outputs::NullOutput::new()));
+    registry.register(Arc::new(pm_zones::outputs::NullOutput::from_env()));
     #[cfg(feature = "alsa")]
     for out in pm_out_local::alsa::AlsaOutput::enumerate() {
         registry.register(Arc::new(out));

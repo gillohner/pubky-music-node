@@ -2,6 +2,17 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-21
+
+- **The connection survives outages** (infra brief §2, `docs/CONNECTION.md`).
+  - The node numbers every `/v1/events` message (`seq`). The snapshot carries `boot` (new on every start) and `library_rev`.
+  - The node answers `ping` and `resync`, pings sockets itself, and drops silent controllers after 45 s. A new zone is announced at once.
+  - The web UI reconnects with backoff and jitter. It resyncs from the snapshot without a reload, and reloads the library views when the node restarted or the library changed.
+  - The UI shows the round-trip time, and connected, reconnecting or offline with a "Retry now" banner.
+  - A change made while disconnected waits up to 8 s and then goes out, or is refused with a message. It never fires later.
+  - `PM_NULL_OUTPUT=realtime` makes the null output play in real time.
+  - `tools/ui-reconnect.js` kills and restores the node under two browser controllers. Resync takes 0.3–1.7 s after the node is back.
+
 ## 2026-10-20
 
 - **Identification verified against the real AcoustID service:** a recorded answer (Bohemian Rhapsody, 133 release groups) is now a fixture and lands on a real 12-track release for a 12-file folder; `tests/live_acoustid.rs` (ignored; key and files from the environment) fingerprints real files and looks them up. On four Creative Commons tracks from Jamendo: one identified by fingerprint, two known to AcoustID without a MusicBrainz recording (left to suggestions), one unknown.

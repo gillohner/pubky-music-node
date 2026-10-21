@@ -92,6 +92,24 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .node-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .node-status.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(79, 207, 127, 0.18); }
 .node-status.bad .dot { background: var(--bad); }
+.node-status.wait .dot { background: var(--warn); animation: conn-pulse 1.2s ease-in-out infinite; }
+.node-status.wait, .node-status.bad { cursor: pointer; }
+@keyframes conn-pulse { 50% { opacity: 0.35; } }
+/* Shown while the node is not connected; appears after 2 s so a short blip does not flash it. */
+.connbar {
+  position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 60; width: max-content; max-width: calc(100vw - 32px);
+  display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; border-radius: 18px;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25); animation: connbar-in 0.2s ease 2s both;
+}
+.connbar[hidden] { display: none; }
+.connbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+.connbar.wait .dot { animation: conn-pulse 1.2s ease-in-out infinite; }
+.connbar.bad .dot { background: var(--bad); }
+.connbar-text { min-width: 0; }
+.connbar-retry { flex: none; font: inherit; font-size: 12px; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+.connbar-retry:hover { border-color: var(--fg-2); }
+@keyframes connbar-in { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .node-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .content { grid-area: content; display: flex; flex-direction: column; min-width: 0; min-height: 0; }

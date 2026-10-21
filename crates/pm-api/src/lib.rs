@@ -16,6 +16,7 @@ pub mod artist_info;
 pub mod audius;
 pub mod deezer;
 pub mod discover;
+pub mod events;
 pub mod favourites;
 pub mod files;
 pub mod hls;
@@ -37,19 +38,17 @@ pub mod tidal;
 pub mod types;
 pub mod watch;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{middleware, Json, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use pm_model::TrackId;
 use pm_zones::{Insert, Output, OutputId, OutputInfo, QueueItem, Zone, ZoneId, ZoneState};
 use sources::NodeSources;
 pub use state::{NodeSettings, NodeState};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use types::*;
 
 // ---- errors ----
@@ -241,7 +240,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))
         .route("/pubky/files", get(files::list).post(files::upload))
         .route("/pubky/files/mirror", post(files::mirror))
-        .route("/events", get(events_ws))
+        .route("/events", get(events::events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state.clone());
     // The web UI's paths (navigation brief): a deep link or reload lands on
@@ -1921,59 +1920,6 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
         s.notify_library();
     }
     Ok(Json(report))
-}
-
-// ---- events ----
-
-async fn events_ws(State(s): State<Arc<NodeState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| event_stream(socket, s))
-}
-
-async fn event_stream(socket: WebSocket, s: Arc<NodeState>) {
-    let (mut tx, mut rx) = socket.split();
-    let mut events = s.events.subscribe();
-    let snapshot = ApiEvent::Snapshot {
-        zones: s.zones.list(),
-    };
-    if send_json(&mut tx, &snapshot).await.is_err() {
-        return;
-    }
-    loop {
-        tokio::select! {
-            ev = events.recv() => match ev {
-                Ok(ev) => {
-                    if send_json(&mut tx, &ev).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!(n, "event stream lagged; resending snapshot");
-                    let snap = ApiEvent::Snapshot { zones: s.zones.list() };
-                    if send_json(&mut tx, &snap).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
-            msg = rx.next() => match msg {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(Message::Ping(p))) => {
-                    if tx.send(Message::Pong(p)).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(_)) => {}
-            },
-        }
-    }
-}
-
-async fn send_json<T: serde::Serialize>(
-    tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    v: &T,
-) -> Result<(), axum::Error> {
-    let text = serde_json::to_string(v).expect("event serializes");
-    tx.send(Message::Text(text.into())).await
 }
 
 #[cfg(test)]
@@ -5074,7 +5020,7 @@ mod tests {
         assert_eq!(st, StatusCode::NO_CONTENT);
         let mut removed = false;
         while let Ok(ev) = events.try_recv() {
-            if matches!(ev, ApiEvent::ZoneRemoved { ref zone } if zone.0 == "kitchen") {
+            if matches!(ev.event, ApiEvent::ZoneRemoved { ref zone } if zone.0 == "kitchen") {
                 removed = true;
             }
         }
