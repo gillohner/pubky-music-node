@@ -116,19 +116,20 @@ impl MusicSpecsBuilder {
         self.finish(MusicContent::Activity(Activity::new(uri, source, duration_ms)))
     }
 
-    /// A pubky.app tag on a canonical music URL, byte-identical to what
-    /// pubky.app would write: `/pub/pubky.app/tags/<Blake3 of "{uri}:{label}">`.
+    /// A tag on a canonical music URL: a `PubkyAppTag` byte-identical to what
+    /// pubky.app would write, under the node's own namespace so Nexus indexes
+    /// it as a universal tag: `/pub/pubky.music/tags/<Blake3 of "{uri}:{label}">`.
     /// Tags are always public: a tag on a private playlist makes no sense.
     pub fn create_music_tag(
         &self,
         target: &MusicUri,
         label: &str,
     ) -> Result<(pubky_app_specs::PubkyAppTag, Meta), SchemaError> {
-        use pubky_app_specs::traits::{HasIdPath, HashId, Validatable as _};
+        use pubky_app_specs::traits::{HashId, Validatable as _};
         let tag = pubky_app_specs::PubkyAppTag::new(target.to_url(), label.to_string());
         let id = tag.create_id();
         tag.validate(Some(&id)).map_err(SchemaError::Validation)?;
-        let path = pubky_app_specs::PubkyAppTag::create_path(&id);
+        let path = super::music_tag_path(&id);
         let url = format!("{PROTOCOL}{}{path}", self.z32);
         Ok((
             tag,
@@ -185,6 +186,9 @@ mod tests {
         let (tag, meta) = b.create_music_tag(&rec(), "ambient").unwrap();
         assert_eq!(tag.uri, rec().to_url());
         assert_eq!(meta.visibility, Visibility::Public);
-        assert!(meta.path.starts_with("/pub/pubky.app/tags/"));
+        assert!(
+            meta.path.starts_with("/pub/pubky.music/tags/"),
+            "Nexus indexes external-link tags only in an app's own namespace"
+        );
     }
 }

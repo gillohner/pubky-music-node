@@ -9,9 +9,11 @@
 //! * **App namespace**: `pubky.music`, as the single constant
 //!   [`schemas::APP_NAMESPACE`]. The final name is open (handoff §11); change it
 //!   in one place.
-//! * **Tags reuse pubky.app**: a music tag is a `PubkyAppTag` under
-//!   `/pub/pubky.app/tags/<id>` whose `uri` is the canonical URL, so pubky.app,
-//!   Nexus and Pinakes all see it without a music-specific plugin.
+//! * **Tags reuse the pubky.app object**: a music tag is a `PubkyAppTag` under
+//!   the node's own namespace, `/pub/pubky.music/tags/<id>`, whose `uri` is the
+//!   canonical URL. Nexus indexes tags on external links only as universal tags
+//!   in an app's own namespace (under `pubky.app/tags/` they must target
+//!   `pubky://` objects and are dropped), so Nexus and Pinakes see them.
 //! * **IDs follow pubky-app-specs**: timestamp IDs (microseconds → 8 big-endian
 //!   bytes → Crockford base32, 13 chars) and hash IDs (Blake3, first 16 bytes →
 //!   Crockford base32, 26 chars). Every `created_at` is microseconds.

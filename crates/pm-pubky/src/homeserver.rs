@@ -212,14 +212,23 @@ impl NodeHomeserver {
     }
 
     /// A user's public tags on music URLs: `(path, tag)`; other tags skipped.
+    /// Reads the node's namespace and the legacy `pubky.app/tags/` (until
+    /// the sync has moved those).
     pub async fn read_music_tags(
         &self,
         user_z32: &str,
     ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        let dir = format!("{}pubky.app/tags/", Visibility::Public.prefix());
         let mut out = Vec::new();
-        for path in self.list_dir(&user, &dir, Visibility::Public, None).await? {
+        let mut paths = self
+            .list_dir(&user, crate::schemas::TAG_DIR, Visibility::Public, None)
+            .await
+            .unwrap_or_default();
+        paths.extend(
+            self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
+                .await?,
+        );
+        for path in paths {
             let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
             match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
                 Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.push((path, t)),
@@ -228,6 +237,46 @@ impl NodeHomeserver {
             }
         }
         Ok(out)
+    }
+
+    /// The public paths under `dir` of a user (`/pub/...`), e.g. to check
+    /// where tags live.
+    pub async fn public_paths(&self, user_z32: &str, dir: &str) -> Result<Vec<String>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        self.list_dir(&user, dir, Visibility::Public, None).await
+    }
+
+    /// Move the user's tags on external links from the legacy
+    /// `/pub/pubky.app/tags/` to `/pub/pubky.music/tags/` (same id, same
+    /// body), so Nexus indexes them. Tags on `pubky://` objects stay. Safe to
+    /// run again: a tag already at the new path is only deleted at the old.
+    /// Returns (moved, kept).
+    pub async fn migrate_music_tags(
+        &self,
+        session: &PubkySession,
+    ) -> Result<(usize, usize), HomeserverError> {
+        let user = session.public_key();
+        let legacy = self
+            .list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
+            .await?;
+        let (mut moved, mut kept) = (0, 0);
+        for path in legacy {
+            let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
+            let Ok(tag) = serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) else {
+                kept += 1;
+                continue;
+            };
+            if tag.uri.starts_with("pubky://") {
+                kept += 1;
+                continue;
+            }
+            let id = path.rsplit('/').next().unwrap_or("").to_string();
+            self.write_object(session, &crate::schemas::music_tag_path(&id), &tag)
+                .await?;
+            self.delete(session, &path).await?;
+            moved += 1;
+        }
+        Ok((moved, kept))
     }
 
     /// Another user's public playlists.
@@ -470,8 +519,11 @@ pub struct LoginFlow {
     url: String,
 }
 
-/// What the node asks for: its own private folders and pubky.app posts/tags.
-pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw";
+/// What the node asks for: its own private folders, pubky.app objects, and
+/// its public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
+/// external links).
+pub const LOGIN_CAPABILITIES: &str =
+    "/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw";
 
 /// What a controller asks for: read access to the user's public pubky.app
 /// data only, enough to prove who is signing in. The node never keeps this

@@ -199,3 +199,91 @@ async fn playlists_round_trip_through_the_private_folder() {
         .map(|v| v.is_empty())
         .unwrap_or(true));
 }
+
+/// Tags on external links move from `/pub/pubky.app/tags/` (Nexus never
+/// indexes those) to `/pub/pubky.music/tags/` with the same id and body;
+/// tags on `pubky://` objects stay; new tags go straight to the new path;
+/// the move is idempotent (steward fix, 2026-10-21).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tags_move_to_the_node_namespace() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pubky_app_specs::traits::HashId;
+    let pubky = Pubky::testnet().unwrap();
+    let keypair = Keypair::random();
+    let signer = pubky.signer(keypair.clone());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-tags").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    // What an older node wrote: a tag on a TIDAL link and one on a pubky:// post.
+    let external =
+        pubky_app_specs::PubkyAppTag::new("https://tidal.com/album/199574241".into(), "lol".into());
+    let internal = pubky_app_specs::PubkyAppTag::new(
+        format!("pubky://{z32}/pub/pubky.app/posts/0034A0X7NJ52G"),
+        "nice".into(),
+    );
+    let (ext_id, int_id) = (external.create_id(), internal.create_id());
+    homeserver
+        .write_object(&session, &format!("/pub/pubky.app/tags/{ext_id}"), &external)
+        .await
+        .unwrap();
+    homeserver
+        .write_object(&session, &format!("/pub/pubky.app/tags/{int_id}"), &internal)
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "tags");
+    let app = router(n.clone());
+    let (st, t) = call(
+        &app,
+        "PUT",
+        "/v1/tags",
+        Some(serde_json::json!({"uri": "https://tidal.com/album/199574241", "label": "music"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    n.set_sync(Some(sync.clone()));
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let new: Vec<String> = homeserver
+        .public_paths(&z32, "/pub/pubky.music/tags/")
+        .await
+        .unwrap();
+    let old: Vec<String> = homeserver
+        .public_paths(&z32, "/pub/pubky.app/tags/")
+        .await
+        .unwrap();
+    assert!(
+        new.contains(&format!("/pub/pubky.music/tags/{ext_id}")),
+        "moved with its id: {new:?}"
+    );
+    assert_eq!(new.len(), 2, "the moved tag and the new one: {new:?}");
+    assert_eq!(
+        old,
+        vec![format!("/pub/pubky.app/tags/{int_id}")],
+        "a tag on a pubky:// post stays"
+    );
+    // Read back: both tags on the TIDAL link, from the new path.
+    let tags = homeserver.read_music_tags(&z32).await.unwrap();
+    assert_eq!(tags.len(), 2, "{tags:?}");
+    assert!(tags.iter().all(|(p, _)| p.starts_with("/pub/pubky.music/tags/")));
+    // Idempotent.
+    let r2 = sync.sync(&n.library).await.unwrap();
+    assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+    assert_eq!(
+        homeserver
+            .public_paths(&z32, "/pub/pubky.music/tags/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}

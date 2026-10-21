@@ -13,7 +13,6 @@ use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_PLAYLIST, TYPE_REVIEW};
 use pm_pubky::{Favourite, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
-use pubky_app_specs::traits::HasIdPath;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
@@ -208,11 +207,35 @@ impl PubkySync {
             }
         }
 
-        // Tags: public PubkyAppTags, pushed and pulled the same way.
+        // Tags: public PubkyAppTags under the node's namespace (Nexus indexes
+        // tags on external links only there), pushed and pulled the same way.
+        // Tags written under pubky.app/tags/ before are moved first.
+        match self.homeserver.migrate_music_tags(&self.session).await {
+            Ok((moved, kept)) if moved > 0 => {
+                tracing::info!(
+                    moved,
+                    kept,
+                    "tags moved to /pub/pubky.music/tags/ so Nexus indexes them"
+                );
+                report.pushed += moved;
+            }
+            Ok(_) => {}
+            Err(e) => report.errors.push(tag_write_hint(format!(
+                "moving tags to /pub/pubky.music/tags/: {e}"
+            ))),
+        }
         let pending = library.lock().expect("library poisoned").unsynced_tags()?;
         for row in pending {
-            let path = pubky_app_specs::PubkyAppTag::create_path(&row.id);
+            let path = pm_pubky::schemas::music_tag_path(&row.id);
             if row.deleted {
+                // Also the legacy path, for a tag written there and never moved.
+                let _ = self
+                    .homeserver
+                    .delete(
+                        &self.session,
+                        &format!("{}{}", pm_pubky::schemas::LEGACY_TAG_DIR, row.id),
+                    )
+                    .await;
                 match self.homeserver.delete(&self.session, &path).await {
                     Ok(()) => report.deleted += 1,
                     Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => report.deleted += 1,
@@ -228,7 +251,7 @@ impl PubkySync {
                     created_at: row.created_at,
                 };
                 if let Err(e) = self.homeserver.write_object(&self.session, &path, &tag).await {
-                    report.errors.push(format!("write {path}: {e}"));
+                    report.errors.push(tag_write_hint(format!("write {path}: {e}")));
                     continue;
                 }
                 report.pushed += 1;
@@ -436,4 +459,17 @@ pub struct SettingsRestored {
     pub folders: Vec<String>,
     pub folders_missing: Vec<String>,
     pub settings: u32,
+}
+
+/// A session approved before the tag namespace moved cannot write
+/// `/pub/pubky.music/`: say what to do about it.
+fn tag_write_hint(msg: String) -> String {
+    if msg.contains("403")
+        || msg.to_lowercase().contains("forbidden")
+        || msg.to_lowercase().contains("capabilit")
+    {
+        format!("{msg} (sign the node in with Pubky Ring again: tags now go to /pub/pubky.music/, which this session may not write)")
+    } else {
+        msg
+    }
 }

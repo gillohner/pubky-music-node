@@ -6,7 +6,7 @@
 //! | [`Playlist`] | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` |
 //! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` |
 //! | [`Activity`] | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` |
-//! | music tag | `PubkyAppTag` (reused as-is) | `/pub/pubky.app/tags/<id>` |
+//! | music tag | `PubkyAppTag` (reused as-is) | `/pub/pubky.music/tags/<id>` ([`TAG_DIR`]) |
 //! | favourite | `PubkyAppBookmark` (reused as-is) | `/priv/pubky.app/bookmarks/<hash id>` |
 //!
 //! Ids are Timestamp IDs like every post. Objects follow the pubky-app-specs
@@ -131,4 +131,23 @@ pub(crate) fn validate_image_url(url: &str, max: usize) -> Result<(), SchemaErro
             "image URL scheme must be http, https or pubky, got {s}"
         ))),
     }
+}
+
+/// The app namespace the node writes public tags under.
+///
+/// Nexus indexes a tag on an *external* link (a TIDAL, Spotify or
+/// MusicBrainz URL) only as a universal tag written in an app's own
+/// namespace; under `pubky.app/tags/` it is parsed as a pubky.app tag, which
+/// must target `pubky://` objects, and is dropped. pubky-social-specs v1
+/// names no music namespace, so the node uses its own.
+pub const TAG_NAMESPACE: &str = "pubky.music";
+/// `/pub/pubky.music/tags/`: where the node writes tags.
+pub const TAG_DIR: &str = "/pub/pubky.music/tags/";
+/// Where the node wrote tags before 2026-10-21 (Nexus never indexed these;
+/// they are moved to [`TAG_DIR`] by the sync).
+pub const LEGACY_TAG_DIR: &str = "/pub/pubky.app/tags/";
+
+/// The path of a music tag with this id (the `PubkyAppTag` id rule).
+pub fn music_tag_path(id: &str) -> String {
+    format!("{TAG_DIR}{id}")
 }

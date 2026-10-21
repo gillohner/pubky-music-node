@@ -23,3 +23,15 @@ validated with the spec's rules before storage.
   Discover by tag; the node shows the user's own tags immediately from the local table.
 * Objects without a MusicBrainz identity cannot be tagged (constraint 4), with a 422 that says so.
 * Removing a tag deletes the public object; until the delete is pushed the tag is hidden locally.
+
+## Amendment (2026-10-21): the tag path
+
+The node first wrote tags under `/pub/pubky.app/tags/<id>`. Nexus (upstream `nexus-watcher`,
+`ExtendedParsedUri::UniversalTag`) indexes a tag on an **external** URL only when it is written in
+another app's namespace; under `pubky.app/tags/` it is parsed as a pubky.app tag, which must target
+`pubky://` objects, so none of the node's tags reached Nexus or Pinakes. Tags now go to
+`/pub/pubky.music/tags/<id>` with the same `PubkyAppTag` body and the same id rule
+(`pm_pubky::schemas::TAG_DIR`); pubky-social-specs v1 names no music namespace. The sync moves tags on
+external links from the old path (idempotent; tags on `pubky://` objects stay) and reads both until
+then. The node's sign-in asks for `/pub/pubky.music/:rw`; a session approved before this needs one
+new Pubky Ring sign-in. Bookmarks, posts and settings are private (`/priv/`) and not affected.
