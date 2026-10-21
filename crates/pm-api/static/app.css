@@ -310,7 +310,7 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .field { display: block; }
 .field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .field input, .input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); padding: 9px 12px; border-radius: 8px; font: inherit; }
-.field input:focus, .input:focus { border-color: var(--accent); outline: none; }
+.field input:focus, .input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 
 /* ---- buttons ---- */
 .btn {

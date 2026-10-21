@@ -120,7 +120,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);
   const hsecs = [...w.document.querySelectorAll('#main .section h3')].map((h) => h.textContent);
   console.log('home sections:', hsecs.join(' | '), '| rows', w.document.querySelectorAll('#main .srow').length);
-  if (!hsecs.includes('Trending songs') || !hsecs.includes('Tags people use for music')) errors.push('home sections incomplete');
+  // Without a contact the Pubky sections wait and Get started asks for it (steward next-3, item 2)
+  const asksContact = !!w.document.querySelector('#h-setup #setupcontact');
+  if (!asksContact && (!hsecs.includes('Trending songs') || !hsecs.includes('Tags people use for music'))) errors.push('home sections incomplete');
   if (w.document.querySelector('.nav-item[data-view="discover"]')) errors.push('the Discover sidebar entry is still there');
   // Identify library: a card in Settings; an unidentified row's mark opens the review view.
   w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(1500);
