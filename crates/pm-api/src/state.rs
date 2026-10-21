@@ -76,6 +76,9 @@ pub struct NodeState {
     pub remote: tokio::sync::Mutex<crate::remote::Remote>,
     /// The tunnel's key once it runs, for `/v1/info`.
     pub remote_id: std::sync::RwLock<Option<String>>,
+    /// Keys the pull-stream URLs handed to renderers (`stream_key`), so a TV gets a URL for its
+    /// own stream and never the API token. Kept in the library: URLs survive restarts.
+    stream_secret: [u8; 32],
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -161,6 +164,7 @@ pub fn profile_url(z32: &str) -> String {
 impl NodeState {
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
         let node_id = node_id(&library);
+        let stream_secret = stream_secret(&library);
         let library = Arc::new(Mutex::new(library));
         let tidal: crate::tidal::SharedEndpoints =
             Arc::new(std::sync::RwLock::new(crate::tidal::TidalEndpoints {
@@ -208,6 +212,7 @@ impl NodeState {
             node_id,
             remote: Default::default(),
             remote_id: Default::default(),
+            stream_secret,
             name: settings.name,
             version: settings.version,
             library,
@@ -500,12 +505,25 @@ impl NodeState {
         *self.discover.lock().expect("discover lock") = Some(f);
     }
 
-    /// The pull-stream URL renderers fetch for `name`.
+    /// The pull-stream URL renderers fetch for `name`, with that stream's key (renderers cannot
+    /// send a bearer token, and must not get the API token).
     pub fn pull_url(&self, name: &str) -> String {
         format!(
-            "{}/v1/outputs/pull/{name}/stream.wav",
-            self.public_url.trim_end_matches('/')
+            "{}{}",
+            self.public_url.trim_end_matches('/'),
+            self.pull_path(name)
         )
+    }
+
+    /// `/v1/outputs/pull/{name}/stream.wav?k=<key>`.
+    pub fn pull_path(&self, name: &str) -> String {
+        format!("/v1/outputs/pull/{name}/stream.wav?k={}", self.stream_key(name))
+    }
+
+    /// The key that opens one pull stream (and nothing else).
+    pub fn stream_key(&self, name: &str) -> String {
+        let h = blake3::keyed_hash(&self.stream_secret, name.as_bytes());
+        h.to_hex()[..32].to_string()
     }
 
     /// Create (or reuse) a pull output under `name`, registered for the HTTP route.
@@ -529,11 +547,9 @@ impl NodeState {
             .ok()
             .and_then(|u| u.port_or_known_default())
             .unwrap_or(7788);
-        let token = self.token.clone();
-        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |name| match &token {
-            Some(t) => format!("/v1/outputs/pull/{name}/stream.wav?token={t}"),
-            None => format!("/v1/outputs/pull/{name}/stream.wav"),
-        });
+        let keys = self.clone();
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> =
+            Arc::new(move |name| keys.pull_path(name));
         let state = self.clone();
         let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
             let name = out.pull().stream_name().to_string();
@@ -1013,4 +1029,20 @@ impl NodeState {
             token_required: self.token.is_some(),
         }
     }
+}
+
+const STREAM_SECRET_KEY: &str = "stream.secret";
+
+/// The secret behind the pull-stream keys: read from the library, or made and saved.
+fn stream_secret(lib: &Library) -> [u8; 32] {
+    if let Ok(Some(hex)) = lib.get_setting(STREAM_SECRET_KEY) {
+        if let Ok(h) = blake3::Hash::from_hex(hex.trim()) {
+            return *h.as_bytes();
+        }
+    }
+    let secret: [u8; 32] = rand::random();
+    if let Err(e) = lib.set_setting(STREAM_SECRET_KEY, &blake3::Hash::from_bytes(secret).to_hex()) {
+        tracing::warn!(error = %e, "saving the stream secret");
+    }
+    secret
 }

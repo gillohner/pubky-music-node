@@ -112,7 +112,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs/endpoints", post(add_endpoint))
         .route("/outputs/endpoints/{address}", delete(remove_endpoint))
         .route("/outputs/pull", post(create_pull))
-        .route("/outputs/pull/{name}/stream.wav", get(pull_stream))
+        .route("/outputs/pull/{name}/url", get(pull_url))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
         .route("/zones/{id}/queue", get(queue).post(enqueue).delete(clear_queue))
@@ -284,6 +284,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
                 // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
+                // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
+                .route("/v1/outputs/pull/{name}/stream.wav", get(pull_stream))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
                 .route("/mb/ws/2/{*path}", get(mbproxy::forward))
                 .with_state(state.clone()),
@@ -311,19 +313,27 @@ async fn auth(
     req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
-    if let Some(token) = &state.token {
-        let bearer = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::to_string)
-            // Browsers cannot set headers on WebSocket upgrades: allow `?token=`.
-            .or_else(|| query.get("token").cloned());
-        if bearer.as_deref() != Some(token.as_str()) {
-            return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
-        }
+    if !token_ok(&state, &headers, &query) {
+        return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     }
     next.run(req).await
+}
+
+/// The request carries the API token (or the node has none).
+fn token_ok(
+    state: &NodeState,
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+) -> bool {
+    let Some(token) = &state.token else { return true };
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+        // Browsers cannot set headers on WebSocket upgrades: allow `?token=`.
+        .or_else(|| query.get("token").cloned());
+    bearer.as_deref() == Some(token.as_str())
 }
 
 // ---- web UI ----
@@ -488,10 +498,27 @@ async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePul
 
 /// The live WAV stream of a pull output. Waits up to 15 s for a zone to
 /// start playing into it; a second listener replaces the first.
+/// `GET /v1/outputs/pull/{name}/url`: the keyed URL to give a renderer or player by hand.
+async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
+    if !s.pulls.lock().expect("pulls lock").contains_key(&name) {
+        return Err(ApiError::not_found(format!("no pull output {name}")));
+    }
+    Ok(Json(serde_json::json!({ "url": s.pull_url(&name) })))
+}
+
 async fn pull_stream(
     State(s): State<Arc<NodeState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
+    let keyed = q.get("k").is_some_and(|k| *k == s.stream_key(&name));
+    if !keyed && !token_ok(&s, &headers, &q) {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "missing or wrong stream key",
+        ));
+    }
     let out = s
         .pulls
         .lock()

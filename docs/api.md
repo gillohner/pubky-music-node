@@ -26,6 +26,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/outputs/rescan` | | discover again (local devices, endpoints); new outputs get zones; returns the list |
 | POST | `/v1/outputs/pull` | `{name}` | (UPnP/OpenHome renderers found by SSDP and Cast devices found by mDNS get one of these automatically (`upnp-<udn>`, `cast-<id>`) and appear as outputs `upnp:<udn>` / `cast:<id>` with zones; `[outputs] upnp`, `[outputs] cast`, `[api] public_url`) |
 | POST | `/v1/outputs/pull` | `{name}` | a pull output and its zone `Stream <name>`; renderers, browsers or scripts fetch `GET /v1/outputs/pull/{name}/stream.wav` (live WAV of the zone's post-DSP output; the listener paces the zone; 408 when nothing plays) |
+| GET | `/v1/outputs/pull/{name}/url` | | `{url}`: the stream URL to give a renderer or player by hand. It carries that stream's key (`?k=`), which opens this one stream and nothing else; the API token also works. Renderers the node finds itself (UPnP, Cast, Slimproto) get keyed URLs; they never get the API token |
 | GET | `/v1/zones` | | `ZoneState[]` |
 | POST | `/v1/zones` | `{name, output}` or `{name, outputs: [leader, …]}` for a group | the new `ZoneState`; `now_playing.members` carries per-output drift and `slipped_frames` (net frames duplicated/dropped to stay in time) for groups |
 | GET / DELETE | `/v1/zones/{id}` | | `ZoneState` / 204 |

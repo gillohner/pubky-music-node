@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- Fixed: **Cast devices and UPnP/DLNA renderers could not play from a node with an API token.** They were handed the stream URL without credentials, and the node answered 401. Each pull stream now has its own key in its URL (`?k=`, derived from a secret kept in the library, so URLs survive restarts). The key opens that stream only. Slimproto players also get keys instead of the API token, and `GET /v1/outputs/pull/{name}/url` gives the URL for manual use. Checked with gmediarender, a real DLNA renderer, on a token-protected node: it fetches and plays the zone.
 - **Remote access over iroh** (ADR 0013, `crates/pm-remote`, `docs/CONNECTION.md`).
   - With a Pubky session, the node runs an iroh endpoint with its own key and pipes the `pubky-music/http/1` ALPN to its API. It publishes the key in the private node record. `[remote] enabled` (default on) and `[remote] relay` (empty = n0's public relays, a URL, or `none`) control it.
   - The app reaches the node away from home: when neither the saved address nor the LAN answers, it opens a local tunnel by key, with relay fallback, and shows the node through it. Every request still needs the token.
