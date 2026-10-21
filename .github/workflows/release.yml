@@ -121,7 +121,15 @@ jobs:
         working-directory: crates/pm-desktop
         run: |
           npm ci --no-audit --no-fund
-          npx tauri build --ci ${{ matrix.args }} --config release.conf.json
+          build() { npx tauri build --ci ${{ matrix.args }} --config release.conf.json; }
+          if [ "$RUNNER_OS" = macOS ]; then
+            # hdiutil now and then finds the new disk image busy and bundle_dmg.sh fails; the app is
+            # compiled by then, so another try only bundles again.
+            build || { echo "::warning::DMG bundling failed; trying again"; sleep 15; build; } \
+              || { echo "::warning::DMG bundling failed twice; last try"; sleep 30; build; }
+          else
+            build
+          fi
       - name: collect
         shell: bash
         run: tools/release/collect-app.sh ${{ matrix.platform }}
