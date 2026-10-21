@@ -235,7 +235,8 @@ pub enum Decision {
     },
     /// Several candidates (or only weak ones): the owner decides.
     Suggest(Vec<Candidate>),
-    /// AcoustID knows nothing about this audio.
+    /// AcoustID knows nothing about this audio, or knows it without a
+    /// MusicBrainz recording (the caller then tries a search by tags).
     Unknown,
 }
 
@@ -612,6 +613,48 @@ mod tests {
         assert_eq!(best_folder_release(&files, 12).as_deref(), Some(OPERA_1975));
         match decide(&r, &facts[0], 12, Some(OPERA_1975)) {
             Decision::Identified { release, .. } => assert_eq!(release.unwrap().to_string(), OPERA_1975),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A real AcoustID answer (recorded with the node's key): it parses, and
+    /// a file at track 11 of a 12-file folder lands on a real 12-track
+    /// release of A Night at the Opera.
+    #[test]
+    fn a_recorded_answer_parses_and_finds_the_release() {
+        let r = fixture("recorded-bohemian-trackid.json");
+        assert_eq!(r.len(), 1);
+        let rec = &r[0].recordings[0];
+        assert_eq!(rec.id, BOHEMIAN);
+        assert!(rec.releasegroups.len() > 100);
+        let file = FileFacts {
+            track_no: Some(11),
+            disc_no: Some(1),
+            duration_secs: Some(355.0),
+        };
+        match decide(&r, &file, 12, None) {
+            Decision::Identified {
+                recording,
+                release,
+                confidence,
+                acoustid,
+            } => {
+                assert_eq!(recording.to_string(), BOHEMIAN);
+                assert!(matches!(confidence, Confidence::FingerprintRelease { .. }));
+                assert_eq!(acoustid, "84eed5cd-5b1f-4f5c-8c92-2686d2877862");
+                let rel = release.unwrap().to_string();
+                let on_opera = rec
+                    .releasegroups
+                    .iter()
+                    .filter(|g| g.title.as_deref() == Some("A Night at the Opera"))
+                    .flat_map(|g| g.releases.iter())
+                    .any(|x| x.id == rel);
+                let any_12 = rec
+                    .all_releases()
+                    .any(|x| x.id == rel && x.total_tracks() == Some(12));
+                assert!(any_12, "the release fits the 12-file folder");
+                let _ = on_opera;
+            }
             other => panic!("{other:?}"),
         }
     }
