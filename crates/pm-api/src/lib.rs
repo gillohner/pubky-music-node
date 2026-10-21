@@ -26,6 +26,7 @@ pub mod item;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod pinakes_reader;
+pub mod play_from;
 pub mod playlists;
 pub mod radio;
 pub mod remote;
@@ -188,6 +189,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::delete(playlists::remove_item),
         )
         .route("/playlists/{id}/play", post(playlists::play))
+        .route("/playlists/{id}/play-from", get(play_from::playlist_play_from))
+        .route("/playlists/{id}/order", put(playlists::set_order))
+        .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
+        .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))
         .route("/discover/charts", get(discover::charts))
         .route("/discover/search", get(discover::search))

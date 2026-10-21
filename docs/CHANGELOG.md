@@ -4,6 +4,19 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Where playlist songs play from** (step 4, STEWARD-UX-BRIEF §3, ADR 0015).
+  - Each song row has a source chip (Library, TIDAL, Spotify, …), or "Unavailable" with the reason.
+  - A click on the chip lists every source the song has on this node, plus "Auto (follow the playlist)". Picking one pins the song, shown by a pin mark on the chip.
+  - A summary bar ("41 songs · 41 TIDAL") filters by source.
+  - "Play from" orders the services, per playlist or for the node (Settings). Drag, the arrow buttons or Alt+↑/↓ reorder it.
+  - Play queues every song from its resolved source.
+  - Songs saved only as an ISRC or MusicBrainz id resolve through Pinakes (`key=isrc:`/`key=mbid:`) and TIDAL's and Spotify's own ISRC lookup. The owner's 41-song Spotify import went from 6 to 41 songs that play, named from the matched track.
+  - The page shows songs at once and fills the chips when the lookups finish (about 30 s the first time for 41 songs, 0.5 s after that).
+  - Pins and the order sync as the collection's `ext.music` hints.
+  - Fixed along the way:
+    - A TIDAL or Spotify track link was named after its album ("Deutschrap Party 2024 by STOKED"); now it is named after its song. The describe cache was bumped.
+    - Playlist rows' move-up arrow pointed down, and their buttons stacked on phones (styles existed only for the queue).
+  - Tests: resolution and order unit tests, `tests/playlists.rs::items_resolve_their_source_with_pins_and_orders`, the v1 round trip of pins and order, and `tools/ui-playlist-sources.js`. Shots: `docs/ux/shots/playlist-sources/`.
 - **Fix: controls that did not match the design** (owner report, STEWARD-FIX-design-lint.md). The item page's Everywhere / This version switch was grey browser-default buttons with an emoji globe, because `.scope` had no style and its buttons had no class.
   - The switch is now the app's chip control (the same as the search scope chips), with icons from the icon set, `aria-pressed`, one tab stop and arrow keys.
   - New `tools/design-lint.js` runs in CI (web-ui job). It fails on a `<button>` without a component class, an emoji or symbol used as an icon, or a class with no rule in `app.css`.

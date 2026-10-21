@@ -184,7 +184,7 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
 
 /// How this node can use a service right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Access {
+pub(crate) enum Access {
     /// Streams full tracks into the zone.
     Full,
     /// Plays on the service's own device (Spotify Connect).
@@ -218,7 +218,7 @@ pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
     }
 }
 
-fn access(acc: &ServiceAccess, service: &str) -> Access {
+pub(crate) fn access(acc: &ServiceAccess, service: &str) -> Access {
     match service {
         "tidal" => acc.tidal,
         "deezer" => Access::Preview,
@@ -239,7 +239,7 @@ pub(crate) fn service_title(id: &str) -> String {
     }
 }
 
-fn service_name(id: &str) -> &'static str {
+pub(crate) fn service_name(id: &str) -> &'static str {
     match id {
         "tidal" => "TIDAL",
         "deezer" => "Deezer",
@@ -248,7 +248,7 @@ fn service_name(id: &str) -> &'static str {
     }
 }
 
-fn plays_from_link(l: &ServiceLink, a: Access) -> PlaysFrom {
+pub(crate) fn plays_from_link(l: &ServiceLink, a: Access) -> PlaysFrom {
     let name = service_name(l.service);
     PlaysFrom {
         service: l.service.to_string(),
@@ -369,19 +369,19 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
 /// A MusicBrainz card without links (Pinakes is making MusicBrainz links
 /// their own hubs; until their cards carry `also_on`): ask by `key=mbid:` and
 /// resolve again.
-async fn fill_from_key(s: &NodeState, it: &mut DiscoverItem, album_id: Option<i64>) {
+pub(crate) async fn fill_from_key(s: &NodeState, it: &mut DiscoverItem, album_id: Option<i64>) {
     if !it.also_on.is_empty() || it.in_library.is_some() {
         return;
     }
-    let Some(mbid) = it
-        .page
-        .as_deref()
-        .and_then(|p| p.strip_prefix("https://musicbrainz.org/recording/"))
-        .map(|m| m.trim_end_matches('/').to_string())
-    else {
+    // A MusicBrainz recording asks by `mbid:`, an ISRC link by `isrc:`
+    let page = it.page.clone().unwrap_or_else(|| it.uri.clone());
+    let key = if let Some(m) = page.strip_prefix("https://musicbrainz.org/recording/") {
+        format!("mbid:{}", m.trim_end_matches('/'))
+    } else if let Some(i) = page.strip_prefix("https://musicbrainz.org/isrc/") {
+        format!("isrc:{}", i.trim_end_matches('/').to_ascii_uppercase())
+    } else {
         return;
     };
-    let key = format!("mbid:{mbid}");
     it.also_on = also_on_versions(s, &key, &format!("pinakes.version.{key}")).await;
     let r = resolve(&service_access(s), it, album_id);
     it.plays_from = r.plays_from;
@@ -465,15 +465,20 @@ pub(crate) async fn describe(
     State(s): State<Arc<NodeState>>,
     Json(req): Json<DescribeRequest>,
 ) -> ApiResult<Vec<DiscoverItem>> {
-    let uris: Vec<String> = req
-        .uris
+    Ok(Json(describe_uris(&s, &req.uris).await))
+}
+
+/// The rows behind [`describe`], one per URL in order (at most 500).
+pub(crate) async fn describe_uris(s: &Arc<NodeState>, uris: &[String]) -> Vec<DiscoverItem> {
+    let uris: Vec<String> = uris
         .iter()
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
         .take(500)
         .collect();
     let now = pm_library::db::now_unix();
-    let cache_key = |u: &str| format!("describe.{u}");
+    // v2: track links are named by their song, not their album
+    let cache_key = |u: &str| format!("describe2.{u}");
     let mut found: std::collections::HashMap<String, DiscoverItem> = Default::default();
     {
         let lib = s.library.lock().expect("library poisoned");
@@ -498,7 +503,7 @@ pub(crate) async fn describe(
         if let Some(d) = s.discovery() {
             match d.pinakes().lookup(&missing).await {
                 Ok(cards) => {
-                    let acc = service_access(&s);
+                    let acc = service_access(s);
                     let lib = s.library.lock().expect("library poisoned");
                     let norm = |u: &str| u.trim_end_matches('/').replace("://www.", "://").to_lowercase();
                     for u in &missing {
@@ -526,12 +531,12 @@ pub(crate) async fn describe(
             continue;
         }
         unknown_to_pinakes.push(u.clone());
-        if let Some(it) = describe_from_provider(&s, u).await {
+        if let Some(it) = describe_from_provider(s, u).await {
             fresh.push((u.clone(), it));
         }
     }
     // Ask Pinakes to read them (paced), so their groups and tags come next time.
-    crate::pinakes_reader::resolve_later(&s, unknown_to_pinakes);
+    crate::pinakes_reader::resolve_later(s, unknown_to_pinakes);
     {
         let lib = s.library.lock().expect("library poisoned");
         for (u, it) in &fresh {
@@ -541,30 +546,28 @@ pub(crate) async fn describe(
         }
     }
     found.extend(fresh);
-    Ok(Json(
-        uris.iter()
-            .map(|u| {
-                found.remove(u).unwrap_or_else(|| DiscoverItem {
-                    uri: u.clone(),
-                    title: None,
-                    artist: None,
-                    description: None,
-                    image: None,
-                    taggers: None,
-                    in_library: None,
-                    kind: "other".into(),
-                    site: site_of(u),
-                    pinakes_id: None,
-                    group_size: None,
-                    playable: None,
-                    also_on: Vec::new(),
-                    page: Some(u.clone()),
-                    plays_from: None,
-                    connect: Vec::new(),
-                })
+    uris.iter()
+        .map(|u| {
+            found.remove(u).unwrap_or_else(|| DiscoverItem {
+                uri: u.clone(),
+                title: None,
+                artist: None,
+                description: None,
+                image: None,
+                taggers: None,
+                in_library: None,
+                kind: "other".into(),
+                site: site_of(u),
+                pinakes_id: None,
+                group_size: None,
+                playable: None,
+                also_on: Vec::new(),
+                page: Some(u.clone()),
+                plays_from: None,
+                connect: Vec::new(),
             })
-            .collect(),
-    ))
+        })
+        .collect()
 }
 
 /// The service a URL belongs to, as people say it.
@@ -592,7 +595,7 @@ fn site_of(u: &str) -> Option<String> {
 }
 
 /// One URL through its own provider's API (no Pinakes card yet).
-async fn describe_from_provider(s: &NodeState, u: &str) -> Option<DiscoverItem> {
+pub(crate) async fn describe_from_provider(s: &NodeState, u: &str) -> Option<DiscoverItem> {
     use crate::streaming::StreamingService;
     let l = service_link(u, true)?;
     let acc = service_access(s);
@@ -603,10 +606,17 @@ async fn describe_from_provider(s: &NodeState, u: &str) -> Option<DiscoverItem> 
         _ => return None,
     };
     let src = svc.item(s, &format!("{}:{}", l.kind, l.id)).await.ok()?;
+    // A track link's item is its album; the song is its one track
+    let song = (l.kind == "track" && src.tracks.len() == 1).then(|| &src.tracks[0]);
     let mut it = DiscoverItem {
         uri: u.to_string(),
-        title: Some(src.title.clone()).filter(|t| !t.trim().is_empty()),
-        artist: src.creator.clone(),
+        title: song
+            .map(|t| t.title.clone())
+            .or_else(|| Some(src.title.clone()))
+            .filter(|t| !t.trim().is_empty()),
+        artist: song
+            .and_then(|t| t.artist.clone())
+            .or_else(|| src.creator.clone()),
         description: None,
         image: src.image.clone(),
         taggers: None,

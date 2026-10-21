@@ -1029,3 +1029,179 @@ async fn artist_info_comes_from_open_sources_and_is_cached() {
     let (st, _) = call(&app, "GET", "/v1/library/artists/999/info", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+/// Where each item plays from (play_from.rs): the library first by default, a direct file link,
+/// a service that is not connected with its reason, pins that survive reordering, and the
+/// playlist's own order next to the node's global one.
+#[tokio::test]
+async fn items_resolve_their_source_with_pins_and_orders() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("tagged.wav"), "Tagged", Some(MB));
+    let db = dir.path().join("lib.sqlite");
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+        },
+        Library::open(&db).unwrap(),
+        outputs,
+    );
+    s.zones_for_all_outputs();
+    let app = router(s.clone());
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let song = format!("https://musicbrainz.org/recording/{MB}");
+    let file = "https://archive.org/download/cornellgem/1.%20Minglewood%20Blues.mp3";
+    let tidal = "https://tidal.com/track/50850120";
+    let (st, pl) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({"name": "Mixed", "uris": [song, file, tidal]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+
+    let (st, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+    assert_eq!(st, StatusCode::OK, "{pf}");
+    assert_eq!(pf["own_order"], false);
+    assert_eq!(
+        pf["order"]["order"],
+        serde_json::json!(["library", "tidal", "spotify"])
+    );
+    let items = pf["items"].as_array().unwrap();
+    assert_eq!(items[0]["plays_from"]["service"], "library");
+    assert!(items[0]["track_id"].is_i64());
+    assert_eq!(items[0]["title"], "Tagged");
+    assert_eq!(items[1]["plays_from"]["service"], "archive");
+    assert!(items[2]["plays_from"].is_null(), "{}", items[2]);
+    assert_eq!(items[2]["reason"], "Not on your connected services");
+    assert_eq!(items[2]["connect"], serde_json::json!(["tidal"]));
+    assert_eq!(items[2]["sources"][0]["mode"], "none");
+
+    // Pin item 0 to TIDAL: not connected here, so the order still decides, and the chip says so
+    let (st, _) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/items/0/source"),
+        Some(serde_json::json!({"service": "tidal", "uri": tidal})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+    assert_eq!(pf["items"][0]["pin"]["service"], "tidal");
+    assert_eq!(pf["items"][0]["pin_unavailable"], true);
+    assert_eq!(pf["items"][0]["plays_from"]["service"], "library");
+    assert!(pf["items"][0]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["service"] == "tidal"));
+
+    // Reordering keeps the pin with its item
+    let (_, d) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}"),
+        Some(serde_json::json!({"uris": [tidal, file, song]})),
+    )
+    .await;
+    assert_eq!(d["playlist"]["items"][2]["source"]["service"], "tidal", "{d}");
+    assert!(d["playlist"]["items"][0].get("source").is_none());
+    // Auto clears it
+    let (_, d) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/items/2/source"),
+        Some(serde_json::json!({"service": null})),
+    )
+    .await;
+    assert!(d["playlist"]["items"][2].get("source").is_none(), "{d}");
+
+    // The playlist's own order, then back to the node's
+    let (st, _) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/order"),
+        Some(serde_json::json!({"order": ["qobuz"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (_, d) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/order"),
+        Some(serde_json::json!({"order": ["spotify", "tidal"]})),
+    )
+    .await;
+    assert_eq!(
+        d["playlist"]["source_order"],
+        serde_json::json!(["spotify", "tidal", "library"])
+    );
+    let (_, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+    assert_eq!(pf["own_order"], true);
+    assert_eq!(
+        pf["items"][2]["plays_from"]["service"], "library",
+        "the only usable source"
+    );
+    let (_, d) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/order"),
+        Some(serde_json::json!({"order": null})),
+    )
+    .await;
+    assert!(d["playlist"].get("source_order").is_none());
+
+    // The node's global order
+    let (_, o) = call(
+        &app,
+        "PUT",
+        "/v1/play-order",
+        Some(serde_json::json!({"order": ["tidal"]})),
+    )
+    .await;
+    assert_eq!(o["order"], serde_json::json!(["tidal", "library", "spotify"]));
+    assert_eq!(o["services"][0]["connected"], false);
+    let (_, o) = call(&app, "GET", "/v1/play-order", None).await;
+    assert_eq!(o["order"][0], "tidal");
+
+    // Playing queues what plays here and reports the rest
+    let zone = s.zones.list()[0].id.to_string();
+    let (st, r) = call(
+        &app,
+        "POST",
+        &format!("/v1/playlists/{id}/play"),
+        Some(serde_json::json!({"zone": zone})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["queued"], 2);
+    assert_eq!(r["missing"], serde_json::json!([tidal]));
+}

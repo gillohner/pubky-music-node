@@ -56,10 +56,10 @@ fn tidy(extra: &mut Map<String, Value>) {
     }
 }
 
-/// The item's `ext.music.source`, when it is well formed: a service name and an http(s) or pubky
-/// URI (required here) that passes
-/// the reference gate (returned canonical). `owner` is the playlist's author, for
-/// private references.
+/// The item's `ext.music.source`, when it is well formed: a service name and, when present, an
+/// http(s) or pubky URI that passes the reference gate (returned canonical). A source without a
+/// URI names a service only (`library`: "play my own file"). `owner` is the playlist's author,
+/// for private references.
 pub fn item_source(
     item: &PubkySocialCollectionItem,
     ctx: &ValidationCtx,
@@ -68,16 +68,18 @@ pub fn item_source(
     let value = music(&item.extra)?.get("source")?.clone();
     let mut source: MusicSource = serde_json::from_value(value).ok()?;
     check_source(&source).ok()?;
-    source.uri = Some(
-        validate_reference(
-            source.uri.as_deref()?,
-            AllowedSchemes::PubkyHttpHttps,
-            VALIDATION_LIMITS.reference_uri_max_length,
-            ctx,
-            owner,
-        )
-        .ok()?,
-    );
+    if let Some(uri) = source.uri.as_deref() {
+        source.uri = Some(
+            validate_reference(
+                uri,
+                AllowedSchemes::PubkyHttpHttps,
+                VALIDATION_LIMITS.reference_uri_max_length,
+                ctx,
+                owner,
+            )
+            .ok()?,
+        );
+    }
     Some(source)
 }
 

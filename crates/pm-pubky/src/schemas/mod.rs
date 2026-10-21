@@ -25,7 +25,7 @@ mod review;
 pub use activity::{Activity, ActivitySource};
 pub use bookmark::Favourite;
 pub use builder::{Meta, MusicSpecsBuilder};
-pub use playlist::{Playlist, PlaylistItem};
+pub use playlist::{ItemSource, Playlist, PlaylistItem};
 pub use post::{MusicContent, MusicPost, Visibility};
 pub use review::Review;
 

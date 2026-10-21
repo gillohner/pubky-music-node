@@ -940,7 +940,15 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
     let Some(isrc) = track.isrc.as_ref() else {
         return Ok(Vec::new());
     };
-    let key = format!("spotify.version.track.{}", track.id.map(|i| i.0).unwrap_or(0));
+    isrc_versions(s, &isrc.to_string()).await
+}
+
+/// Spotify tracks with this ISRC (cached per ISRC).
+pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Version>, ApiError> {
+    if !creds(s).configured() {
+        return Ok(Vec::new());
+    }
+    let key = format!("spotify.version.isrc.{isrc}");
     if let Some(v) = crate::tidal::cache_get(s, &key) {
         return Ok(v);
     }

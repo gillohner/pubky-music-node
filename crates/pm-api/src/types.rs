@@ -1296,3 +1296,94 @@ pub struct LoginStatus {
     pub user: Option<String>,
     pub url: Option<String>,
 }
+
+// ---- where playlist items play from (play_from.rs) ----
+
+/// One source an item has on this node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaySource {
+    /// `library`, `tidal`, `spotify`, `deezer`, `archive`.
+    pub service: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub label: String,
+    /// `full`, `connect` (plays on a Spotify device), `preview` or `none` (not connected).
+    pub mode: String,
+    pub available: bool,
+    /// The source the item plays from now.
+    pub chosen: bool,
+}
+
+/// A playlist item, resolved: the chip, the pin and every source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistItemPlay {
+    pub index: usize,
+    pub uri: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub image: Option<String>,
+    pub page: Option<String>,
+    pub site: Option<String>,
+    pub duration_ms: Option<u64>,
+    /// The library track, when the library is the chosen source.
+    pub track_id: Option<i64>,
+    /// The queue URI, when a streamed service is the chosen source.
+    pub stream_uri: Option<String>,
+    pub plays_from: Option<PlaysFrom>,
+    /// The owner's pin, if any.
+    pub pin: Option<pm_pubky::ItemSource>,
+    /// Pinned, but that source is not usable here (the order decided instead).
+    pub pin_unavailable: bool,
+    pub sources: Vec<PlaySource>,
+    /// Why nothing plays ("Not on your connected services").
+    pub reason: Option<String>,
+    /// Services that have it but are not connected.
+    pub connect: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistPlayFrom {
+    /// The order in use (the playlist's, else the node's).
+    pub order: PlayOrder,
+    /// Whether the playlist has its own order.
+    pub own_order: bool,
+    pub items: Vec<PlaylistItemPlay>,
+}
+
+/// A play order and what each service can do on this node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayOrder {
+    pub order: Vec<String>,
+    pub services: Vec<PlayService>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayService {
+    pub id: String,
+    pub name: String,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetPlayOrder {
+    pub order: Vec<String>,
+}
+
+/// `PUT /v1/playlists/{id}/order`: `null` follows the node's order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetPlaylistOrder {
+    #[serde(default)]
+    pub order: Option<Vec<String>>,
+}
+
+/// `PUT /v1/playlists/{id}/items/{index}/source`: no `service` means Auto (follow the playlist).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PinItemSource {
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub uri: Option<String>,
+}

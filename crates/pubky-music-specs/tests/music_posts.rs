@@ -209,7 +209,6 @@ fn hostile_item_sources_are_dropped() {
         json!({"ext": {"music": {"source": "tidal"}}}),
         json!({"ext": {"music": {"source": {"service": "Tidal", "uri": "https://tidal.com/track/1"}}}}),
         json!({"ext": {"music": {"source": {"service": "tidal", "uri": "javascript:alert(1)"}}}}),
-        json!({"ext": {"music": {"source": {"service": "tidal"}}}}),
         json!({"ext": {"music": {"source": {"service": "tidal", "uri": "https://t/1", "service ": 1, "n": 9_007_199_254_740_993_u64}}}}),
     ] {
         let it = item(SONG, ext.clone());
@@ -222,6 +221,18 @@ fn hostile_item_sources_are_dropped() {
         Some(&MusicSource::new("tidal", "https://tidal.com/track/1")),
     );
     assert!(item_source(&it, &PUB, None).is_some());
+}
+
+#[test]
+fn a_source_may_name_only_a_service() {
+    let it = item(
+        SONG,
+        json!({"ext": {"music": {"source": {"service": "library"}}}}),
+    );
+    assert_eq!(
+        item_source(&it, &PUB, None),
+        Some(MusicSource::service("library"))
+    );
 }
 
 #[test]

@@ -642,3 +642,38 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .chiplink { display: inline-flex; align-items: center; background: none; border: 0; padding: 2px; border-radius: 999px; color: var(--fg-2); cursor: pointer; font: inherit; }
 .chiplink:hover { color: var(--accent-strong); background: var(--surface-3); }
 .chiplink:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Where playlist songs play from: source chips, the summary bar, the order list */
+.srcchip { flex: none; max-width: 150px; padding: 3px 8px 3px 4px; }
+.srcchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srcchip .src-badge { width: 18px; height: 18px; }
+.srcchip.pinned { border-color: var(--accent); }
+.srcchip.pinned .ic { width: 12px; height: 12px; color: var(--accent-strong); }
+.srcchip.none { color: var(--muted); border-style: dashed; padding-left: 8px; }
+.list-row.unavail .grow, .list-row.unavail .thumb, .list-row.unavail [data-splay] { opacity: 0.45; }
+.list-row.filtered { display: none; }
+.plsummary { margin-bottom: 12px; }
+.chip.warnchip { border-color: rgba(232, 178, 74, 0.4); }
+.porder { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
+.porder-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); transition: transform 0.15s var(--ease); }
+.porder-row.off .grow { color: var(--muted); }
+.porder-row.dragging { z-index: 2; background: var(--surface-3); box-shadow: var(--shadow); transition: none; }
+.porder-grip { cursor: grab; touch-action: none; color: var(--muted); display: inline-flex; padding: 4px; border-radius: 6px; }
+.porder-grip:hover, .porder-grip:focus-visible { color: var(--fg); background: var(--surface-3); outline: none; }
+.porder-grip .ic { width: 16px; height: 16px; }
+.pop-item.on { color: var(--accent-strong); }
+.pop-item .pop-check { margin-left: auto; width: 16px; height: 16px; }
+.pop-note { display: block; font-size: 11px; color: var(--muted); }
+.pop-item:disabled { opacity: 0.55; cursor: default; }
+@media (max-width: 600px) { .srcchip span { display: none; } .srcchip { padding: 3px; } }
+.srcchip.wait { padding: 5px 9px; }
+.srcchip .spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .srcchip .spin { animation: none; } }
+/* Row reorder buttons outside the queue (playlist songs), and the up chevron everywhere */
+.ic.up { transform: rotate(180deg); }
+.q-actions { display: inline-flex; gap: 2px; flex: none; }
+.q-actions .icon-btn { width: 30px; height: 30px; }
+.q-actions .icon-btn .ic { width: 16px; height: 16px; }
+@media (hover: hover) { .srow .q-actions { opacity: 0; transition: opacity 0.12s; } .srow:hover .q-actions, .srow:focus-within .q-actions { opacity: 1; } }
+@media (max-width: 600px) { #plsongs .srow .thumb { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions .icon-btn { width: 28px; } }
+.porder-row .grow { flex: 1; min-width: 0; }

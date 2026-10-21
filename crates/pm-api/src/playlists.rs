@@ -3,7 +3,6 @@
 //! canonical music URLs; playing a playlist resolves each item to a library
 //! track by that URL.
 
-use crate::sources::NodeSources;
 use crate::state::NodeState;
 use crate::types::*;
 use crate::{ApiError, ApiResult};
@@ -75,6 +74,12 @@ fn load(lib: &Library, id: &str) -> Result<(MusicPostRow, Playlist), ApiError> {
         .cloned()
         .ok_or_else(|| ApiError::not_found(format!("no playlist {id}")))?;
     Ok((row, playlist))
+}
+
+/// A stored playlist by id.
+pub(crate) fn load_playlist(s: &NodeState, id: &str) -> Result<Playlist, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    Ok(load(&lib, id)?.1)
 }
 
 fn summary(row: &MusicPostRow, p: &Playlist) -> PlaylistSummary {
@@ -302,13 +307,15 @@ pub(crate) async fn update(
         p.image = Some(i).filter(|i| !i.trim().is_empty());
     }
     if let Some(uris) = body.uris {
-        // Keep `added_at` for items that stay.
-        let old = p.items.clone();
+        // Keep `added_at` and the pin for items that stay (each copy keeps its own).
+        let mut old = p.items.clone();
         p.items = parse_uris(&uris)?
             .into_iter()
             .map(|mut it| {
-                if let Some(prev) = old.iter().find(|o| o.uri == it.uri) {
+                if let Some(k) = old.iter().position(|o| o.uri == it.uri) {
+                    let prev = old.remove(k);
                     it.added_at = prev.added_at;
+                    it.source = prev.source;
                 }
                 it
             })
@@ -358,6 +365,51 @@ pub(crate) async fn remove_item(
     Ok(Json(d))
 }
 
+/// `PUT /v1/playlists/{id}/items/{index}/source`: pin where this item plays from, or Auto.
+pub(crate) async fn pin_source(
+    State(s): State<Arc<NodeState>>,
+    Path((id, index)): Path<(String, usize)>,
+    Json(body): Json<PinItemSource>,
+) -> ApiResult<PlaylistDetail> {
+    let lib = s.library.lock().expect("library poisoned");
+    let (row, mut p) = load(&lib, &id)?;
+    let item = p
+        .items
+        .get_mut(index)
+        .ok_or_else(|| ApiError::not_found(format!("no item {index}")))?;
+    item.source = body
+        .service
+        .filter(|sv| !sv.trim().is_empty() && sv != "auto")
+        .map(|service| pm_pubky::ItemSource {
+            service,
+            uri: body.uri.filter(|u| !u.trim().is_empty()),
+        });
+    let d = save_edit(&lib, &id, p, &row)?;
+    drop(lib);
+    s.notify_library();
+    Ok(Json(d))
+}
+
+/// `PUT /v1/playlists/{id}/order {order}`: the playlist's own play order, or `null` to follow
+/// the node's.
+pub(crate) async fn set_order(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetPlaylistOrder>,
+) -> ApiResult<PlaylistDetail> {
+    let order = match body.order {
+        Some(o) => Some(crate::play_from::checked_order(&o)?),
+        None => None,
+    };
+    let lib = s.library.lock().expect("library poisoned");
+    let (row, mut p) = load(&lib, &id)?;
+    p.source_order = order;
+    let d = save_edit(&lib, &id, p, &row)?;
+    drop(lib);
+    s.notify_library();
+    Ok(Json(d))
+}
+
 pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -370,7 +422,9 @@ pub(crate) async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Queue the playlist's resolvable tracks into a zone.
+/// Queue the playlist into a zone, each item from where it plays (its pin, else the
+/// playlist's order, else the node's; see [`crate::play_from`]). Items that play only on a
+/// Spotify device, or nowhere here, are reported in `missing`.
 pub(crate) async fn play(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -380,27 +434,20 @@ pub(crate) async fn play(
         .zones
         .get(&ZoneId::new(&body.zone))
         .ok_or_else(|| ApiError::not_found(format!("no zone {}", body.zone)))?;
-    let (items, missing) = {
-        let lib = s.library.lock().expect("library poisoned");
-        let (_, p) = load(&lib, &id)?;
-        let mut items = Vec::new();
-        let mut missing = Vec::new();
-        for it in &p.items {
-            match resolve(&lib, it).and_then(|t| NodeSources::item_for(&t)) {
-                Some(q) => items.push(q),
-                // Streamable service links play directly (Internet Archive files).
-                None => match stream_item(&it.uri) {
-                    Some(q) => items.push(q),
-                    None => missing.push(it.uri.clone()),
-                },
-            }
+    let p = load_playlist(&s, &id)?;
+    let (_, _, resolved) = crate::play_from::resolve_playlist(&s, &p).await;
+    let mut items = Vec::new();
+    let mut missing = Vec::new();
+    for r in resolved {
+        match r.queue {
+            Some(q) => items.push(q),
+            None => missing.push(r.view.uri),
         }
-        (items, missing)
-    };
+    }
     if items.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "none of the playlist's items is in the library",
+            "none of the playlist's items plays on this node's connected services",
         ));
     }
     let replace = body.replace.unwrap_or(true);

@@ -8,6 +8,19 @@ pub struct PlaylistItem {
     pub uri: String,
     /// Microseconds.
     pub added_at: i64,
+    /// Where the owner wants this item to play from (a pin). A suggestion:
+    /// each listener's node still resolves with its own services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ItemSource>,
+}
+
+/// A pinned source: a service id (`library`, `tidal`, `spotify`, …) and,
+/// for a service, the exact page to play.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemSource {
+    pub service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 impl PlaylistItem {
@@ -15,6 +28,7 @@ impl PlaylistItem {
         Self {
             uri: uri.to_url(),
             added_at: ids::now_micros(),
+            source: None,
         }
     }
 }
@@ -35,6 +49,10 @@ pub struct Playlist {
     pub created_at: i64,
     /// Microseconds; bumped on every edit.
     pub updated_at: i64,
+    /// The services to play from, in order (`library`, `tidal`, …); `None`
+    /// follows the node's global order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_order: Option<Vec<String>>,
 }
 
 impl Playlist {
@@ -52,6 +70,7 @@ impl Playlist {
             items,
             created_at: now,
             updated_at: now,
+            source_order: None,
         }
         .sanitize()
     }
@@ -65,6 +84,17 @@ impl Playlist {
     pub fn touch(&mut self) {
         self.updated_at = ids::now_micros();
     }
+}
+
+/// At most this many services in a playlist's order.
+pub const SOURCE_ORDER_MAX: usize = 16;
+
+/// A service id: 1–32 bytes of `[a-z0-9-]` (same rule as pubky-music-specs).
+pub fn is_service_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 impl Validatable for Playlist {
@@ -82,10 +112,24 @@ impl Validatable for Playlist {
                 .map(|i| PlaylistItem {
                     uri: sanitize_uri(&i.uri),
                     added_at: i.added_at,
+                    source: i.source.map(|s| ItemSource {
+                        service: s.service.trim().to_ascii_lowercase(),
+                        uri: s.uri.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()),
+                    }),
                 })
                 .collect(),
             created_at: self.created_at,
             updated_at: self.updated_at,
+            source_order: self.source_order.map(|o| {
+                let mut out: Vec<String> = Vec::new();
+                for s in o {
+                    let s = s.trim().to_ascii_lowercase();
+                    if !s.is_empty() && !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+                out
+            }),
         }
     }
 
@@ -124,6 +168,26 @@ impl Validatable for Playlist {
                 return Err(SchemaError::validation(
                     "item added_at must be positive microseconds",
                 ));
+            }
+            if let Some(src) = &item.source {
+                if !is_service_id(&src.service) {
+                    return Err(SchemaError::validation(format!(
+                        "item source {:?} is not a service id",
+                        src.service
+                    )));
+                }
+                if let Some(u) = &src.uri {
+                    validate_image_url(u, limits::PLAYLIST_IMAGE_URL_MAX).map_err(|_| {
+                        SchemaError::validation("item source uri must be an http(s) or pubky link")
+                    })?;
+                }
+            }
+        }
+        if let Some(order) = &self.source_order {
+            if order.len() > SOURCE_ORDER_MAX || !order.iter().all(|s| is_service_id(s)) {
+                return Err(SchemaError::validation(format!(
+                    "source_order must list at most {SOURCE_ORDER_MAX} service ids"
+                )));
             }
         }
         if self.created_at <= 0 || self.updated_at < self.created_at {
@@ -170,11 +234,44 @@ mod tests {
     }
 
     #[test]
+    fn pins_and_order_are_tidied_and_checked() {
+        let mut it = PlaylistItem::new(&rec());
+        it.source = Some(ItemSource {
+            service: " TIDAL ".into(),
+            uri: Some(" https://tidal.com/track/1 ".into()),
+        });
+        let mut p = Playlist::new("x", None, None, vec![it]);
+        p.source_order = Some(vec!["Tidal".into(), "library".into(), "tidal".into()]);
+        let p = p.sanitize();
+        assert_eq!(p.items[0].source.as_ref().unwrap().service, "tidal");
+        assert_eq!(
+            p.items[0].source.as_ref().unwrap().uri.as_deref(),
+            Some("https://tidal.com/track/1")
+        );
+        assert_eq!(
+            p.source_order.as_deref(),
+            Some(&["tidal".to_string(), "library".to_string()][..])
+        );
+        p.validate(None).unwrap();
+
+        let mut bad = p.clone();
+        bad.items[0].source.as_mut().unwrap().uri = Some("javascript:alert(1)".into());
+        assert!(bad.validate(None).is_err());
+        let mut bad = p.clone();
+        bad.items[0].source.as_mut().unwrap().service = "TIDAL!".into();
+        assert!(bad.validate(None).is_err());
+        let mut bad = p;
+        bad.source_order = Some((0..17).map(|i| format!("s{i}")).collect());
+        assert!(bad.validate(None).is_err());
+    }
+
+    #[test]
     fn rejects_bad_items_and_names() {
         let mut p = Playlist::new("x", None, None, vec![]);
         p.items.push(PlaylistItem {
             uri: "music:recording:mbid:abc".into(),
             added_at: 1,
+            source: None,
         });
         assert!(matches!(p.validate(None), Err(SchemaError::Uri { .. })));
         let p = Playlist::new("", None, None, vec![]);
@@ -199,6 +296,7 @@ mod tests {
             vec![PlaylistItem {
                 uri: " https://open.spotify.com/intl-de/track/4cOdK2wGLETKBW3PvgPWqT?si=1 ".into(),
                 added_at: 5,
+                source: None,
             }],
         );
         assert_eq!(

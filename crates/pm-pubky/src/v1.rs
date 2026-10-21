@@ -16,7 +16,7 @@
 //! the newest one on the homeserver, and readers take the newest.
 
 use crate::ids;
-use crate::schemas::{Activity, ActivitySource, MusicContent, Playlist, PlaylistItem, Review};
+use crate::schemas::{Activity, ActivitySource, ItemSource, MusicContent, Playlist, PlaylistItem, Review};
 use pm_model::MusicUri;
 use pubky_music_specs::ext;
 use pubky_music_specs::{MusicPost, MusicPostKind, MusicSource, MUSIC_NAMESPACE};
@@ -193,16 +193,30 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
         .map(|it| {
             let mut item = PubkySocialCollectionItem::new(it.uri.clone(), None);
             ext::set_item_added_at(&mut item, it.added_at / 1000);
+            if let Some(src) = &it.source {
+                let source = MusicSource {
+                    service: src.service.clone(),
+                    uri: src.uri.clone(),
+                    extra: Default::default(),
+                };
+                ext::set_item_source(&mut item, Some(&source));
+            }
             item
         })
         .collect();
-    let post = PubkySocialPost::new_collection(
+    let mut post = PubkySocialPost::new_collection(
         p.name.clone(),
         p.description.clone(),
         items,
         p.image.clone(),
         Some(PubkySocialCollectionLayout::List),
     );
+    if let Some(order) = p.source_order.as_ref().filter(|o| !o.is_empty()) {
+        let mut content: PubkySocialCollectionContent =
+            serde_json::from_str(&post.content).expect("the collection was just written");
+        ext::set_source_order(&mut content, order);
+        post.content = serde_json::to_string(&content).expect("a collection serializes");
+    }
     // The content cap binds before the item cap for long URLs
     if post.content.chars().count() > VALIDATION_LIMITS.collection_content_max_length {
         return Err(NotV1::TooLong(p.items.len()));
@@ -273,9 +287,20 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
                 .filter_map(|it| {
                     let uri = MusicUri::parse(&it.uri).ok()?.to_url();
                     let added_at = ext::item_added_at(it).map_or(created_at, |ms| ms * 1000);
-                    Some(PlaylistItem { uri, added_at })
+                    let source =
+                        ext::item_source(it, &pubky_social_specs::ValidationCtx { root: Root::Priv }, None)
+                            .map(|s| ItemSource {
+                                service: s.service,
+                                uri: s.uri,
+                            });
+                    Some(PlaylistItem {
+                        uri,
+                        added_at,
+                        source,
+                    })
                 })
                 .collect();
+            let order = ext::source_order(&content);
             Some(MusicContent::Playlist(Playlist {
                 name: content.name,
                 description: content.description,
@@ -283,6 +308,7 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
                 items,
                 created_at,
                 updated_at: micros_of(edit_id)?.max(created_at),
+                source_order: Some(order).filter(|o| !o.is_empty()),
             }))
         }
         PubkySocialPostKind::Note => {
@@ -399,11 +425,43 @@ mod tests {
                 .map(|i| PlaylistItem {
                     uri: if i % 2 == 0 { SONG.into() } else { SONG2.into() },
                     added_at: created + i as i64 * 1000,
+                    source: None,
                 })
                 .collect(),
             created_at: created,
             updated_at: created + 10_000_000,
+            source_order: None,
         }
+    }
+
+    #[test]
+    fn pins_and_the_play_order_ride_in_ext_music() {
+        let mut pl = playlist(2);
+        pl.items[0].source = Some(ItemSource {
+            service: "tidal".into(),
+            uri: Some("https://tidal.com/track/50850120".into()),
+        });
+        pl.items[1].source = Some(ItemSource {
+            service: "library".into(),
+            uri: None,
+        });
+        pl.source_order = Some(vec!["tidal".into(), "library".into()]);
+        let id = id_of(pl.created_at);
+        let V1Post::Social(post) = to_v1(&MusicContent::Playlist(pl.clone())).unwrap() else {
+            panic!("a playlist is a social collection")
+        };
+        let content: serde_json::Value = serde_json::from_str(&post.content).unwrap();
+        assert_eq!(
+            content["ext"]["music"]["source_order"],
+            serde_json::json!(["tidal", "library"])
+        );
+        assert_eq!(content["items"][0]["ext"]["music"]["source"]["service"], "tidal");
+        let Some(MusicContent::Playlist(back)) = from_social(&post, &id, &id) else {
+            panic!("reads back")
+        };
+        assert_eq!(back.items[0].source, pl.items[0].source);
+        assert_eq!(back.items[1].source, pl.items[1].source);
+        assert_eq!(back.source_order, pl.source_order);
     }
 
     #[test]
