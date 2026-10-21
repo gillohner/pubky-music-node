@@ -171,7 +171,8 @@ enabled = false
         until("the node", lambda: api("GET", "/v1/info"))
         api("POST", "/v1/library/scan", {})
         tracks = until("the scan", lambda: len(api("GET", "/v1/library/tracks")["tracks"]) == 3 and api("GET", "/v1/library/tracks")["tracks"])
-        ids = {t["title"]: t["id"] for t in tracks}
+        # By file name: titles of untagged files are tidied ("a-noise-16-44100" -> "A-noise-16-44100")
+        ids = {Path(t["file"]["path"]).stem: t["id"] for t in tracks}
         bit_exact("16-44100", ids["a-noise-16-44100"], music / "a-noise-16-44100.wav", 44100, 16, 6)
         # The node keeps the capabilities a player first said it has: a new node for 96 kHz.
         node.terminate()
