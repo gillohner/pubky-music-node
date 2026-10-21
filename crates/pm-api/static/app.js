@@ -1063,7 +1063,13 @@
     toast(on ? 'Added to favourites' : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
-  const pubkyUser = async () => { if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
+  const pubkyUser = async () => { if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
+  // A session approved for fewer folders than the node uses: one plain line with the way out.
+  const RESIGN_TEXT = 'This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.';
+  const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span><button class="btn sm primary" data-resign>Sign in again</button></div>` : '';
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = () => { state.autoResign = true; if (state.view === 'settings') render(); else setView('settings'); });
+  // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
+  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
   const pageAll = async (path, idOf, unwrap = (r) => r) => {
     const out = []; let after = null;
@@ -1108,7 +1114,8 @@
           if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch { state.sources = []; } }
           const win = state.homeWindow || '7d';
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
-          main.innerHTML = pageHead('Home')
+          await pubkyUser();
+          main.innerHTML = pageHead('Home') + resignNotice()
             + `<section class="section" id="h-jump"><div class="section-head"><h3>Jump back in</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`
             + sec('trending-songs', 'Trending songs', { windows: true, h: 300 }) + sec('trending-albums', 'Trending albums', { windows: true }) + sec('trending-artists', 'Trending artists', { windows: true })
             + sec('following', 'From people you follow', { h: 120 }) + sec('tags', 'Tags people use for music', { h: 60 }) + sec('concerts', 'Concerts near you', { h: 80 })
@@ -1452,6 +1459,7 @@
           break;
         }
         case 'item': {
+          await pubkyUser();
           const { kind, id } = state.viewArg;
           loading();
           let pg;
@@ -1491,7 +1499,7 @@
             + (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : '')
             + `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">your library and every service that has it</span>${kind !== 'song' || pg.versions.length <= 2 ? `<button class="btn sm ghost" id="ifind" title="Search your connected services for the same ${kind}">Find on other services</button>` : ''}</div><div id="ifindbox"></div>${pg.versions.length ? `<div class="chips">${pg.versions.map(versionChip).join('')}</div>` : empty(pg.connect.length ? 'Only on ' + esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(', ')) + ' so far.' : `Only on ${esc(pg.source)} so far.`)}</section>`
             + `<section class="section" id="ipubky"><div class="section-head"><h3>On Pubky</h3><span class="scope small"><button class="on" data-scope="all">🌐 Everywhere</button><button data-scope="this">▣ This version</button></span></div><div id="ipubkybody">${pg.on_pubky && pg.on_pubky.tags.length ? `<p class="muted small">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : empty('No one has tagged this on Pubky yet.')}</div></section>`
-            + `<section class="section" id="iyours"><div class="section-head"><h3>Yours</h3></div>${myTags ? tagRow(myTags, target) : empty('Tags need an identity for this item first.')}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="iyours"><div class="section-head"><h3>Yours</h3></div>${resignNotice()}${myTags ? tagRow(myTags, target) : empty('Tags need an identity for this item first.')}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + (pg.related && pg.related.length ? `<section class="section" id="irelated"><div class="section-head"><h3>People who tagged this also tagged</h3></div>${itemTileGrid(pg.related.map(asTile), 'album')}</section>` : '')
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -1655,7 +1663,7 @@
           const outs = await api('GET', '/outputs');
           const folders = await api('GET', '/library/folders').catch(() => []);
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
-          let pk = null; try { pk = await api('GET', '/pubky'); } catch { /* no pubky config */ }
+          let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           if (state.view !== 'settings') return;
           main.innerHTML = pageHead('Settings') + `
             <div class="cards">
@@ -1665,7 +1673,7 @@
               <div class="card" id="loccard"><h3>Concerts near you</h3><p class="muted small">Your city, for Home's concerts. It is looked up once on OpenStreetMap and stays on this node.</p><div class="toolbar"><input class="input" id="loccity" placeholder="City" style="width:220px"><button class="btn primary" id="locsave">Save</button><button class="btn ghost" id="locclear">Clear</button><span class="muted small" id="loccur"></span></div></div>
               <div class="card"><h3>Upstream contact</h3><p class="muted small">An email or URL sent in the node's User-Agent. Pinakes (Discover, On Pubky), MusicBrainz and Wikipedia ask for one.</p><div class="toolbar"><input class="input" id="contact" placeholder="you@example.org or https://your.site" value="${esc(ns.contact)}" style="width:280px"><button class="btn primary" id="contactsave">Save</button><span class="pill ${ns.discovery ? 'ok' : 'warn'}">${ns.discovery ? 'Discover on' : 'Discover off'}</span></div>
                 <h3 style="margin-top:16px">Subsonic jukebox</h3><p class="muted small">The zone Subsonic clients (Symfonium, Feishin…) drive with their jukebox control.</p><select class="input" id="jukeboxzone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select></div>
-              <div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p><div class="actions" style="margin-top:14px">${pk.user ? '' : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync">Sync with Pubky</button>${pk.user ? `<button class="btn" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Mirror files to this node</button>` : ''}</div><div id="pkurl"></div><div class="row" style="gap:8px;margin-top:12px;align-items:center"><input id="bulklabel" value="library" style="width:140px" aria-label="Tag label"><button class="btn sm" id="bulktag" title="Put one public tag on every track that has a MusicBrainz id or ISRC, so Pinakes matches your songs across services (pushed by the next sync)">${icon('plus')} Tag my whole library on Pubky</button></div><div id="bulkout" class="muted small"></div>${pk.user ? `<div id="pkfiles" class="muted small" style="margin-top:12px">Loading homeserver files…</div>` : ''}` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
+              <div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p>${pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : ''}<div class="actions" style="margin-top:14px">${pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : ''}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync" ${pk.needs_resign ? `disabled title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Sync with Pubky</button>${pk.user ? `<button class="btn" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Mirror files to this node</button>` : ''}</div><div id="pkurl"></div><div class="row" style="gap:8px;margin-top:12px;align-items:center"><input id="bulklabel" value="library" style="width:140px" aria-label="Tag label"><button class="btn sm" id="bulktag" title="Put one public tag on every track that has a MusicBrainz id or ISRC, so Pinakes matches your songs across services (pushed by the next sync)">${icon('plus')} Tag my whole library on Pubky</button></div><div id="bulkout" class="muted small"></div>${pk.user ? `<div id="pkfiles" class="muted small" style="margin-top:12px">Loading homeserver files…</div>` : ''}` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
             </div>
             <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
               ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
@@ -1727,15 +1735,16 @@
           }
           const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; try { const r = await api('POST', '/pubky/files/mirror'); toast(`Mirrored ${r.fetched} file${r.fetched === 1 ? '' : 's'} (${r.present} already here${r.errors.length ? `, ${r.errors.length} errors` : ''})`); } catch (e) { toast(e.message, 'error'); } mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
-          const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); render(); } catch (e) { toast(e.message, 'error'); } };
+          const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
           const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
             try {
               const r = await api('POST', '/pubky/login');
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve. This page updates by itself.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
-              const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); toast('Signed in as ' + st.user); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
+              const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); state.pubkyUser = undefined; toast('Signed in as ' + st.user); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
           };
+          if (state.autoResign && pl) { state.autoResign = false; pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }
         default:
@@ -1745,6 +1754,7 @@
       $$('[data-artist]', main).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
       $$('[data-back]', main).forEach((b) => b.onclick = () => goBack(b.dataset.back));
       $$('[data-empty-action]', main).forEach((b) => b.onclick = () => setView(b.dataset.emptyAction));
+      bindResign(main);
       if (Object.keys(lists).length) bindTrackRows(main, lists);
     } catch (e) {
       main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;

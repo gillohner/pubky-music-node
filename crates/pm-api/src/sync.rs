@@ -31,7 +31,12 @@ pub struct PubkySync {
     homeserver: NodeHomeserver,
     session: PubkySession,
     z32: String,
+    /// Set when the homeserver refused a path for lack of access.
+    refused: std::sync::atomic::AtomicBool,
 }
+
+/// What the owner reads when the session cannot reach every folder the node uses.
+pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
 
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
@@ -43,6 +48,7 @@ impl PubkySync {
             homeserver,
             session,
             z32,
+            refused: Default::default(),
         })
     }
 
@@ -53,7 +59,26 @@ impl PubkySync {
             homeserver,
             session,
             z32,
+            refused: Default::default(),
         }
+    }
+
+    /// The folders the node asks for at sign-in that this session was not granted.
+    pub fn missing_capabilities(&self) -> Vec<String> {
+        pm_pubky::homeserver::missing_capabilities(
+            &pm_pubky::homeserver::session_capabilities(&self.session),
+            pm_pubky::homeserver::LOGIN_CAPABILITIES,
+        )
+    }
+
+    /// The session must be approved again: it lacks folders, or the homeserver refused one.
+    pub fn needs_resign(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed) || !self.missing_capabilities().is_empty()
+    }
+
+    /// Remember a refusal (an access 403 from the homeserver).
+    pub fn note_refusal(&self) {
+        self.refused.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn session(&self) -> &PubkySession {
@@ -114,7 +139,36 @@ impl PubkySync {
         &self.z32
     }
 
+    /// One sync. A session the homeserver refuses (an old approval) ends with the plain
+    /// [`RESIGN_NOTICE`] in the report and [`Self::needs_resign`] set, never a raw 403; the
+    /// unsynced objects stay queued.
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+        match self.sync_once(library).await {
+            Ok(mut report) => {
+                if report
+                    .errors
+                    .iter()
+                    .any(|e| e == RESIGN_NOTICE || is_forbidden(e))
+                {
+                    self.note_refusal();
+                    report.errors.retain(|e| e != RESIGN_NOTICE && !is_forbidden(e));
+                    report.errors.insert(0, RESIGN_NOTICE.to_string());
+                }
+                Ok(report)
+            }
+            Err(e) if is_forbidden(&e.to_string()) => {
+                tracing::warn!("sync refused by the homeserver: {e}");
+                self.note_refusal();
+                Ok(SyncReport {
+                    errors: vec![RESIGN_NOTICE.to_string()],
+                    ..Default::default()
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn sync_once(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
         let owner = v1::PubkyId::try_from(raw_key(&self.z32))
             .map_err(|e| SyncError::Store(format!("signed-in key: {e}")))?;
@@ -634,14 +688,15 @@ impl Heads {
 }
 
 fn is_forbidden(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    msg.contains("403") || lower.contains("forbidden") || lower.contains("capabilit")
+    pm_pubky::homeserver::is_capability_error(msg) || msg.to_lowercase().contains("capabilit")
 }
 
-/// A session approved before step 3 cannot write `social/v1` or `music/v1`.
+/// A session approved before the node used its current folders: the plain notice, never the
+/// homeserver's raw 403.
 fn namespace_hint(msg: String) -> String {
     if is_forbidden(&msg) {
-        format!("{msg} (sign the node in with Pubky Ring again: music data now goes to /social/v1/ and /music/v1/, which this session may not write)")
+        tracing::warn!("homeserver refused a path: {msg}");
+        RESIGN_NOTICE.to_string()
     } else {
         msg
     }

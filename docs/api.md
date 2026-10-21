@@ -132,7 +132,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT | `/v1/radio/stations` | PUT: a `Station` | saved stations (node-local settings); PUT adds or updates by id/url |
 | DELETE | `/v1/radio/stations/{id}` | | remaining stations; 404 when unknown |
 | POST | `/v1/radio/play` | `{zone, station}` | replaces the zone's queue with the stream and plays it |
-| GET | `/v1/pubky` | | `{user, unsynced}` |
+| GET | `/v1/pubky` | | `{user, unsynced, needs_resign, missing?, notice?}`: `needs_resign` when the session was approved for fewer folders than the node asks for at sign-in (`missing` lists them) or the homeserver refused one; sign in again (same Pubky Ring flow) to replace the session |
 | POST / GET | `/v1/pubky/login` | | POST starts a Pubky Ring sign-in and returns `{url}` (`pubkyauth://…`); GET polls `{status: none\|pending\|signed_in, user?, url?}`. On approval the node stores the session secret, publishes its record and syncs |
 | POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors, notes?}` (`notes`: things worth knowing that are not errors, such as playlists kept in the old format); 412 without a session. The first sync on a node moves what only the old `/priv/pubky.app/` folders hold to v1 and keeps the old files |
 | GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |

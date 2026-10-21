@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Fix: a node with an old Pubky session can be approved again** (owner report, STEWARD-FIX-resign.md). A session approved before the node used `/pub/pubky.music/`, `social/v1` and `music/v1` made Sync fail with a raw "403 Forbidden - Session does not have read access to path", and the Pubky card hid the sign-in button once signed in.
+  - `GET /v1/pubky` compares the session's granted capabilities with what the node asks for and reports `needs_resign` and the `missing` folders. A homeserver refusal sets it too.
+  - The Pubky card always offers **Sign in again** (the same Pubky Ring flow; the new session replaces the old one). When the session is short, a plain notice explains why, Sign in again is the primary button, and Sync is disabled with the notice as its tooltip.
+  - A refused sync ends with that one sentence instead of the raw 403, and unsynced objects stay queued.
+  - Home and the item page's "Yours" section (tags, rating) show the same one-line notice with the button.
+  - Tests: unit test for the capability check; `tests/testnet_sync.rs::an_old_session_asks_to_sign_in_again` (a real homeserver approving the old folder list, then the full one); `tools/ui-resign.js`. Shots: `docs/ux/shots/resign/`.
 - **Ratings in half stars.** Ratings are 1–10, shown as five stars with halves on every item page. Hovering previews the rating; a click on a star's left or right half sets it; the same click again clears it. `PUT /v1/reviews` takes `rating: 1–10`. The node's stored envelope moved to version 2, and older 1–5 ratings (on the node and in old homeserver files) read doubled. A review can be a rating alone, including one pulled from another client. `tools/ui-item-pages.js` checks hover, save and clear. Shots: `docs/ux/shots/ratings/`.
 - **Music data moves to pubky-social-specs v1** (steward plan step 3, ADR 0014). The node keeps its working copy and converts at the homeserver:
   - Playlists become private social `collection` posts (`layout: list`, each song's added time in `ext.music.added_at`).

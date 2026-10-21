@@ -424,3 +424,84 @@ async fn old_private_objects_move_to_v1_once() {
     let r = sync.sync(&n.library).await.unwrap();
     assert_eq!((r.pulled, r.pushed, r.deleted), (0, 0, 0), "{r:?}");
 }
+
+/// A session approved before the node used its current folders (STEWARD-FIX-resign.md): the
+/// status says so, a sync ends with the plain notice and keeps the queue, and a new approval
+/// with every folder clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_old_session_asks_to_sign_in_again() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let approve = |caps: &'static str| {
+        let homeserver = homeserver.clone();
+        let signer = signer.clone();
+        async move {
+            let flow = homeserver.start_login("pm-api-test").unwrap();
+            let granted: pubky::Capabilities = caps.parse().unwrap();
+            signer
+                .approve_auth_with_capabilities(flow.url(), &granted)
+                .await
+                .unwrap();
+            flow.await_approval().await.unwrap()
+        }
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "old");
+    let app = router(n.clone());
+    let (st, _) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({
+            "name": "Queued",
+            "uris": ["https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862"]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // The approval the owner's node got before step 3
+    let old = approve("/priv/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw").await;
+    n.set_sync(Some(Arc::new(PubkySync::from_session(homeserver.clone(), old))));
+    let (_, pk) = call(&app, "GET", "/v1/pubky", None).await;
+    assert_eq!(pk["needs_resign"], true, "{pk}");
+    assert!(
+        pk["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "/priv/social/v1/:rw"),
+        "{pk}"
+    );
+    assert!(pk["notice"]
+        .as_str()
+        .unwrap()
+        .starts_with("This node needs permission"));
+    let (st, r) = call(&app, "POST", "/v1/pubky/sync", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let errors = r["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{r}");
+    assert_eq!(errors[0], pm_api::sync::RESIGN_NOTICE);
+    assert!(!r.to_string().contains("403"), "no raw 403: {r}");
+    let (_, pk) = call(&app, "GET", "/v1/pubky", None).await;
+    assert_eq!(pk["unsynced"], 1, "the queue stays: {pk}");
+
+    // Sign in again, approving everything the node asks for
+    let full = approve(pm_pubky::homeserver::LOGIN_CAPABILITIES).await;
+    n.set_sync(Some(Arc::new(PubkySync::from_session(homeserver.clone(), full))));
+    let (_, pk) = call(&app, "GET", "/v1/pubky", None).await;
+    assert_eq!(pk["needs_resign"], false, "{pk}");
+    assert!(pk.get("missing").is_none(), "{pk}");
+    let (_, r) = call(&app, "POST", "/v1/pubky/sync", None).await;
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let (_, pk) = call(&app, "GET", "/v1/pubky", None).await;
+    assert_eq!(pk["unsynced"], 0, "{pk}");
+}

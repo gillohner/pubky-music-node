@@ -608,6 +608,51 @@ pub struct LoginFlow {
 /// (`social/v1`, `music/v1`; STEWARD-PLAN step 3), so one approval covers both.
 pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
+/// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
+/// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
+/// parent of it and it has every wanted action.
+pub fn missing_capabilities<S: AsRef<str>>(granted: &[S], wanted: &str) -> Vec<String> {
+    let split = |c: &str| -> Option<(String, String)> {
+        let (scope, actions) = c.trim().rsplit_once(':')?;
+        Some((scope.to_string(), actions.to_string()))
+    };
+    let have: Vec<(String, String)> = granted.iter().filter_map(|g| split(g.as_ref())).collect();
+    wanted
+        .split(',')
+        .filter(|w| !w.trim().is_empty())
+        .filter(|w| {
+            let Some((scope, actions)) = split(w) else {
+                return false;
+            };
+            !have.iter().any(|(hs, ha)| {
+                let parent =
+                    hs == "/" || (hs.ends_with('/') && scope.starts_with(hs.as_str())) || *hs == scope;
+                parent && actions.chars().all(|a| ha.contains(a))
+            })
+        })
+        .map(|w| w.trim().to_string())
+        .collect()
+}
+
+/// The capabilities this session was granted, as `scope:actions` strings.
+pub fn session_capabilities(session: &PubkySession) -> Vec<String> {
+    session
+        .info()
+        .capabilities()
+        .iter()
+        .map(|c| c.to_string())
+        .collect()
+}
+
+/// Whether a homeserver error says the session lacks access to a path (a session approved for
+/// fewer folders than the node now uses).
+pub fn is_capability_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("does not have") && lower.contains("access")
+        || lower.contains("403")
+        || lower.contains("forbidden")
+}
+
 /// What a controller asks for: read access to the user's public pubky.app
 /// data only, enough to prove who is signing in. The node never keeps this
 /// session.
@@ -664,4 +709,34 @@ pub async fn export_session_secret(session: &PubkySession) -> Option<String> {
         }
     }
     session.as_cookie().and_then(|c| c.export_secret())
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_session_misses_the_new_folders() {
+        let old = [
+            "/priv/pubky.music/:rw",
+            "/pub/pubky.app/:rw",
+            "/priv/pubky.app/:rw",
+        ];
+        let missing = missing_capabilities(&old, LOGIN_CAPABILITIES);
+        assert!(missing.contains(&"/pub/social/v1/:rw".to_string()));
+        assert!(missing.contains(&"/pub/pubky.music/:rw".to_string()));
+        assert!(!missing.contains(&"/priv/pubky.app/:rw".to_string()));
+        let full: Vec<&str> = LOGIN_CAPABILITIES.split(',').collect();
+        assert!(missing_capabilities(&full, LOGIN_CAPABILITIES).is_empty());
+        assert!(missing_capabilities(&["/:rw"], LOGIN_CAPABILITIES).is_empty());
+        assert_eq!(
+            missing_capabilities(&["/pub/social/v1/:r"], "/pub/social/v1/:rw"),
+            vec!["/pub/social/v1/:rw".to_string()],
+            "read-only does not cover write"
+        );
+        assert!(is_capability_error(
+            "Server responded with an error: 403 Forbidden - Session does not have read access to path"
+        ));
+        assert!(!is_capability_error("connection reset"));
+    }
 }

@@ -289,6 +289,8 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .empty .btn { margin-top: 16px; }
 .notice { padding: 12px 14px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); }
 .notice.warn { border-color: rgba(232, 178, 74, 0.4); }
+.notice.resign { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+.notice.resign span { flex: 1 1 260px; }
 .skeleton { background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 8px; }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }

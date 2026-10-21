@@ -677,6 +677,16 @@ pub struct PubkyStatus {
     /// Signed-in user's raw z32 key, when the node has a session.
     pub user: Option<String>,
     pub unsynced: usize,
+    /// The session must be approved again in Pubky Ring (it lacks folders the node uses, or the
+    /// homeserver refused one).
+    #[serde(default)]
+    pub needs_resign: bool,
+    /// The folders the session lacks (`/pub/social/v1/:rw`, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    /// The sentence to show when `needs_resign`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 // ---- activity and import (integrations) ----

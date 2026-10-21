@@ -1870,9 +1870,17 @@ async fn pubky_status(State(s): State<Arc<NodeState>>) -> ApiResult<PubkyStatus>
         .expect("library poisoned")
         .unsynced_music_posts()?
         .len();
+    let sync = s.sync_handle();
+    let needs_resign = sync.as_ref().is_some_and(|h| h.needs_resign());
     Ok(Json(PubkyStatus {
-        user: s.sync_handle().map(|h| h.z32().to_string()),
+        user: sync.as_ref().map(|h| h.z32().to_string()),
         unsynced,
+        needs_resign,
+        missing: sync
+            .as_ref()
+            .map(|h| h.missing_capabilities())
+            .unwrap_or_default(),
+        notice: needs_resign.then(|| sync::RESIGN_NOTICE.to_string()),
     }))
 }
 
