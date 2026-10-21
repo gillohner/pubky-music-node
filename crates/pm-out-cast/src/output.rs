@@ -101,6 +101,14 @@ impl Output for CastOutput {
         }
     }
 
+    fn sync(&self) -> pm_zones::SyncClass {
+        if self.device.is_group() {
+            pm_zones::SyncClass::Tight
+        } else {
+            pm_zones::SyncClass::Single
+        }
+    }
+
     fn now_playing(&self, item: Option<&QueueItem>) {
         let meta = item.map(|it| match &self.describe {
             Some(d) => d(it),

@@ -177,6 +177,22 @@ impl Output for GroupOutput {
         &self.caps
     }
 
+    /// Tight only when every member is the node's own endpoint, or every member a Slimproto
+    /// player: those share a clock the group corrects against. Anything mixed is loose.
+    fn sync(&self) -> crate::SyncClass {
+        let protocols: Vec<String> = self
+            .members
+            .iter()
+            .map(|m| m.id().protocol().to_string())
+            .collect();
+        let same = protocols.windows(2).all(|w| w[0] == w[1]);
+        if same && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim")) {
+            crate::SyncClass::Tight
+        } else {
+            crate::SyncClass::Loose
+        }
+    }
+
     fn now_playing(&self, item: Option<&crate::QueueItem>) {
         for m in &self.members {
             m.now_playing(item);
@@ -434,6 +450,42 @@ impl AudioSink for GroupSink {
 mod tests {
     use super::*;
     use crate::outputs::{read_wav, NullOutput, WavFileOutput};
+
+    /// An output that only has an id (for the sync label).
+    struct Named(OutputId, OutputCaps);
+
+    #[async_trait]
+    impl Output for Named {
+        fn id(&self) -> OutputId {
+            self.0.clone()
+        }
+        fn name(&self) -> String {
+            self.0 .0.clone()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.1
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Err(SinkError::UnsupportedFormat(self.id(), fmt))
+        }
+    }
+
+    #[test]
+    fn the_sync_label_is_honest() {
+        let o = |p: &str, id: &str| {
+            Arc::new(Named(OutputId::new(p, id), OutputCaps::unlimited())) as Arc<dyn Output>
+        };
+        let g = |m: Vec<Arc<dyn Output>>| GroupOutput::new("g", m).unwrap().sync();
+        assert_eq!(g(vec![o("net", "a"), o("net", "b")]), crate::SyncClass::Tight);
+        assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Tight);
+        assert_eq!(g(vec![o("net", "a"), o("slim", "b")]), crate::SyncClass::Loose);
+        assert_eq!(
+            g(vec![o("upnp", "a"), o("airplay", "b")]),
+            crate::SyncClass::Loose
+        );
+        assert_eq!(g(vec![o("cast", "a"), o("cast", "b")]), crate::SyncClass::Loose);
+        assert_eq!(o("alsa", "hw").sync(), crate::SyncClass::Single);
+    }
 
     #[tokio::test]
     async fn fans_out_identically_and_reports_members() {

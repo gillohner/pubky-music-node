@@ -129,6 +129,21 @@ pub trait AudioSink: Send {
     }
 }
 
+/// How closely a zone's speakers stay together (the Zones view says it plainly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncClass {
+    /// One device.
+    #[default]
+    Single,
+    /// Sample-accurate: the node's own endpoints (ADR 0009), Slimproto players, a Snapcast group,
+    /// a Sonos group, a Cast group (each kept in sync by its own protocol).
+    Tight,
+    /// Started together, drifting apart within a second or so: devices on different protocols, or
+    /// on a protocol without a shared clock (AirPlay 1, DLNA, single Cast devices).
+    Loose,
+}
+
 /// What a renderer with a screen shows for a track (Cast, DLNA TVs, Sonos).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackMeta {
@@ -188,6 +203,11 @@ pub trait Output: Send + Sync {
     /// The output's clock, if it exposes one.
     fn clock(&self) -> Option<Arc<dyn ClockSource>> {
         None
+    }
+
+    /// How closely this output's speakers stay together.
+    fn sync(&self) -> SyncClass {
+        SyncClass::Single
     }
 
     /// The track about to play (before its sink opens, when one opens) or `None` when the zone

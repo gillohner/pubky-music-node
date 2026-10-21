@@ -88,6 +88,9 @@ pub struct ZoneState {
     pub error: Option<String>,
     /// Sequence number of the last command the engine handled (see [`Zone::wait_stopped`]).
     pub acked: u64,
+    /// How closely the zone's speakers stay together.
+    #[serde(default)]
+    pub sync: crate::SyncClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +164,7 @@ impl Zone {
             radio: false,
             error: None,
             acked: 0,
+            sync: output.sync(),
         };
         let (state_tx, state) = watch::channel(initial);
         engine::spawn(

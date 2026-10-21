@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- Zones say how closely their speakers stay together (`sync`: `single`, `tight` or `loose`). Groups of the node's own endpoints or of Slimproto players, Snapcast groups, Sonos groups and Cast groups are tight; mixed protocols are loose. `docs/ZONES.md` maps zone kinds, labels and actions for the Zones view.
 - **AirPlay** (`crates/pm-out-airplay`, infra brief §3.4): AirPlay 1 (RAOP) receivers found over mDNS (`_raop._tcp`) become zones, unless `[outputs] airplay = false`.
   - The node sends unencrypted Apple Lossless (verbatim frames), 44.1 kHz 16-bit, over RTP. It answers the receiver's timing requests, sends sync packets, resends lost packets, and sets volume and title/artist/album as text.
   - Receivers that require encryption are skipped, and the log says why. AirPlay 2 is not built, because its pairing is only reverse-engineered.

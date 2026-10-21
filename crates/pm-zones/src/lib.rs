@@ -28,7 +28,7 @@ pub use queue::{Insert, Queue, QueueItem, Repeat};
 pub use registry::OutputRegistry;
 pub use sink::{
     AudioSink, BufferLevel, ClockSource, Describe, MemberStatus, Output, OutputId, OutputInfo, SinkError,
-    TrackMeta,
+    SyncClass, TrackMeta,
 };
 pub use source::{FrameSource, Processor, ReplayGain, SourceError, SourceFactory, WithReplayGain};
 pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

@@ -199,6 +199,10 @@ impl Output for SonosGroup {
         self.lead.caps()
     }
 
+    fn sync(&self) -> pm_zones::SyncClass {
+        pm_zones::SyncClass::Tight
+    }
+
     fn now_playing(&self, item: Option<&QueueItem>) {
         self.lead.now_playing(item);
     }

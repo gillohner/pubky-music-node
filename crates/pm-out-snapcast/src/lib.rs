@@ -261,6 +261,14 @@ impl Output for SnapcastOutput {
         &self.caps
     }
 
+    fn sync(&self) -> pm_zones::SyncClass {
+        if self.group.clients.len() > 1 {
+            pm_zones::SyncClass::Tight
+        } else {
+            pm_zones::SyncClass::Single
+        }
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
