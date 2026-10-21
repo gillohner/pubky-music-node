@@ -1531,3 +1531,39 @@ pub struct ListenImport {
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
+
+// ---- bulk upload to the homeserver's private storage (files.rs) ----
+
+/// `POST /v1/pubky/files/upload`: what to copy. One of `album_id`, `track_ids` or `all`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UploadRequest {
+    #[serde(default)]
+    pub album_id: Option<i64>,
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    /// The whole library.
+    #[serde(default)]
+    pub all: bool,
+    /// Only say how many files and bytes it would be.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// A bulk upload: planned (`dry_run`), running or finished.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UploadProgress {
+    pub id: String,
+    pub total: usize,
+    pub bytes_total: u64,
+    /// Uploaded now.
+    pub done: usize,
+    pub bytes_done: u64,
+    /// Already on the homeserver (same content), not sent again.
+    pub skipped: usize,
+    pub failed: usize,
+    /// The file being sent.
+    pub current: Option<String>,
+    pub finished: bool,
+    /// The last few problems, plainly.
+    pub errors: Vec<String>,
+}

@@ -318,6 +318,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))
         .route("/pubky/files", get(files::list).post(files::upload))
         .route("/pubky/files/mirror", post(files::mirror))
+        .route("/pubky/files/upload", post(files::upload_many))
+        .route("/pubky/files/upload/{id}", get(files::upload_progress))
         .route("/events", get(events::events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state.clone());

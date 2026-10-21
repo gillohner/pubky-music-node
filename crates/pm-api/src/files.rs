@@ -96,6 +96,155 @@ pub(crate) async fn upload(
     Ok(Json(UploadedFile { path: remote, size }))
 }
 
+/// `POST /v1/pubky/files/upload`: copy an album, some tracks or the whole library to the
+/// homeserver's private storage, as a background job (`GET …/upload/{id}` for progress). Files
+/// already there (same content) are skipped, so running it again only sends what is new.
+pub(crate) async fn upload_many(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<UploadRequest>,
+) -> ApiResult<UploadProgress> {
+    let files: Vec<(PathBuf, u64)> = {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut tracks = Vec::new();
+        if body.all {
+            let mut after = None;
+            loop {
+                let page = lib.list_tracks(after, 500)?;
+                after = page.last().and_then(|t| t.id);
+                let n = page.len();
+                tracks.extend(page);
+                if n < 500 {
+                    break;
+                }
+            }
+        } else if let Some(a) = body.album_id {
+            tracks = lib.album_tracks(a)?;
+        } else {
+            for id in &body.track_ids {
+                tracks.extend(lib.get_track(TrackId(*id))?);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        tracks
+            .into_iter()
+            .filter(|t| seen.insert(t.file.path.clone()))
+            .map(|t| (t.file.path.clone(), t.file.size_bytes))
+            .collect()
+    };
+    if files.is_empty() {
+        return Err(ApiError::bad_request("nothing to upload"));
+    }
+    let mut progress = UploadProgress {
+        id: crate::tidal::random_urlsafe(9),
+        total: files.len(),
+        bytes_total: files.iter().map(|(_, b)| b).sum(),
+        ..Default::default()
+    };
+    if body.dry_run {
+        return Ok(Json(progress));
+    }
+    let sync = needs_session(&s)?;
+    {
+        let mut jobs = s.upload_jobs.lock().expect("upload jobs");
+        jobs.retain(|_, j| !j.finished);
+        if let Some(running) = jobs.values().next() {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "an upload is running ({} of {} files)",
+                    running.done + running.skipped,
+                    running.total
+                ),
+            ));
+        }
+        jobs.insert(progress.id.clone(), progress.clone());
+    }
+    let s2 = s.clone();
+    let id = progress.id.clone();
+    tokio::spawn(async move {
+        let set = |f: &dyn Fn(&mut UploadProgress)| {
+            if let Some(j) = s2.upload_jobs.lock().expect("upload jobs").get_mut(&id) {
+                f(j);
+            }
+        };
+        let present: std::collections::HashSet<String> = match sync.list_private_files().await {
+            Ok(l) => l.into_iter().map(|f| f.path).collect(),
+            Err(e) => {
+                let msg = e.to_string();
+                set(&|j| {
+                    j.errors
+                        .push(format!("the homeserver did not list its files: {msg}"));
+                    j.finished = true;
+                });
+                return;
+            }
+        };
+        for (path, size) in files {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            set(&|j| j.current = Some(name.clone()));
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let msg = format!("{name}: {e}");
+                    set(&|j| {
+                        j.failed += 1;
+                        j.errors.push(msg.clone());
+                    });
+                    continue;
+                }
+            };
+            let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &path));
+            if present.contains(&remote) {
+                set(&|j| {
+                    j.skipped += 1;
+                    j.bytes_done += size;
+                });
+                continue;
+            }
+            match sync.upload_private(&remote, bytes).await {
+                Ok(()) => set(&|j| {
+                    j.done += 1;
+                    j.bytes_done += size;
+                }),
+                Err(e) => {
+                    let msg = format!("{name}: {e}");
+                    set(&|j| {
+                        j.failed += 1;
+                        j.errors.push(msg.clone());
+                    });
+                }
+            }
+        }
+        set(&|j| {
+            j.current = None;
+            j.finished = true;
+            let n = j.errors.len();
+            if n > 5 {
+                j.errors.drain(..n - 5);
+            }
+        });
+    });
+    progress.current = None;
+    Ok(Json(progress))
+}
+
+/// `GET /v1/pubky/files/upload/{id}`.
+pub(crate) async fn upload_progress(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<UploadProgress> {
+    s.upload_jobs
+        .lock()
+        .expect("upload jobs")
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("no such upload"))
+}
+
 /// Download every remote file that is not in the mirror folder yet, then
 /// scan the folder. Returns what was fetched.
 pub(crate) async fn mirror(State(s): State<Arc<NodeState>>) -> ApiResult<MirrorReport> {

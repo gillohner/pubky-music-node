@@ -759,3 +759,10 @@ a.btn { text-decoration: none; }
 .sharelink { font-size: 12px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .eyebrow code { text-transform: none; letter-spacing: 0; }
 .subform { max-width: 520px; margin: 12px 0; display: flex; flex-direction: column; gap: 10px; }
+/* A node job's progress (copying to the homeserver) */
+.jobcard { position: fixed; right: 16px; bottom: calc(var(--player) + 16px); width: min(360px, calc(100vw - 32px)); z-index: 30; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 12px 14px; }
+.jobhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.jobbar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; margin-bottom: 8px; }
+.jobbar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s var(--ease); }
+.jobcur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.joberr { color: var(--bad); }

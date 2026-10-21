@@ -88,6 +88,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/playlists/{id}/play` (entries that are Internet Archive file URLs stream directly; other unresolved entries are reported as `missing`) | `{zone, replace?}` | `{queued, missing}` |
 | GET | `/v1/playlists/{id}/play-from` | | `{order: {order, services}, own_order, items: [{index, uri, title, artist, plays_from, pin, pin_unavailable, sources: [{service, name, url, label, mode, available, chosen}], reason, connect, track_id, stream_uri}]}`: where each song plays from (ADR 0015) |
 | PUT | `/v1/playlists/{id}/items/{index}/source` | `{service, uri?}`, or `{service: null}` for Auto | the playlist; pins the song to a source |
+| POST | `/v1/pubky/files/upload` | `{album_id \| track_ids \| all, dry_run?}` | a copy job to the homeserver's private storage (files already there are skipped); with `dry_run` only the totals |
+| GET | `/v1/pubky/files/upload/{id}` | | `{total, done, skipped, failed, bytes_total, bytes_done, current, finished, errors}` |
 | GET | `/v1/shared/resolve?link=` | | `{user, id?}` from a pasted `pubky://` link or key |
 | GET | `/v1/shared/{user}/playlists` | | someone's shared playlists `[{user, id, link, name, description, items, updated_at}]` (no session needed) |
 | GET | `/v1/shared/{user}/playlists/{id}` | | `{summary, play_from}`: the playlist and where each song plays from on this node |

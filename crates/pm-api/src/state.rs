@@ -114,6 +114,8 @@ pub struct NodeState {
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
     /// Controller sign-ins in progress: id → (flow, started).
+    /// Bulk uploads to the homeserver's private storage, by job id (files.rs).
+    pub upload_jobs: std::sync::Mutex<std::collections::HashMap<String, crate::types::UploadProgress>>,
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant)>,
     >,
@@ -270,6 +272,7 @@ impl NodeState {
             contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            upload_jobs: Default::default(),
             events,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),

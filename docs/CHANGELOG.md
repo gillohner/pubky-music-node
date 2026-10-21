@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Copy albums or the whole library to your homeserver** (private storage, never public).
+  - The ⋯ menu on a library song or album has "Copy N songs to my homeserver", and Settings › Pubky has "Copy my library to the homeserver".
+  - A dialog first says how many files and how much data. The copy then runs on the node as a job, so you can leave the page, and a small card shows its progress (files, data, the current file, anything that failed).
+  - Files already there (same content) are skipped, so running it again sends only what's new. One copy runs at a time.
+  - API: `POST /v1/pubky/files/upload {album_id | track_ids | all, dry_run?}`, `GET /v1/pubky/files/upload/{id}`.
+  - Test: testnet (dry run totals, copy, a second run skips both files). Browser: dialog and progress. Shots: `docs/ux/shots/upload/`.
 - **Fix: the edge release could vanish.** Publishing deleted the old edge release first. When an upload then timed out (HTTP 408, on the first build with the updater), there was no edge at all until I republished it by hand from that run's files. Now the edge release stays up: its tag moves to the new commit, files are replaced in place with retries, the update feed and checksums go last, and files the new build lacks are removed. Versioned releases retry their uploads too.
 - **QA sweep of today's screens:** every browser suite passes on a fresh copy of the dev data, and the control audit clicked 447 controls with no dead ones. The Jamendo, server and Jellyfin tabs and the ListenBrainz card have no sideways scroll at phone width, light or dark. Fixed: a source that isn't set up yet (Jellyfin before sign-in) no longer offers a "Search …" button that could only fail. Shots: `docs/ux/shots/qa/`.
 - **The owner's Discover findings, fixed on the node** (step 4 list).

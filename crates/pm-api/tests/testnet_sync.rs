@@ -800,3 +800,111 @@ async fn a_long_playlist_is_a_collection_too() {
     assert_eq!(st, StatusCode::OK, "{one}");
     assert_eq!(one["summary"]["items"], 301);
 }
+
+/// Copying an album to the homeserver's private storage (bulk upload): a dry run says how much,
+/// the job reports progress, and a second run sends nothing again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_album_is_copied_to_the_homeserver_once() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pm-audio/tests/fixtures");
+    for f in ["14_wasted_bits.flac", "60_mono_audio.flac"] {
+        std::fs::copy(fixtures.join(f), music.join(f)).unwrap();
+    }
+    let n = node(dir.path(), "upload");
+    let app = router(n.clone());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        session,
+    ))));
+    let (st, r) = call(
+        &app,
+        "POST",
+        "/v1/library/folders",
+        Some(serde_json::json!({"path": music})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    let mut ids = Vec::new();
+    for _ in 0..200 {
+        let (_, t) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        ids = t["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        if ids.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(ids.len(), 2);
+    let (_, plan) = call(
+        &app,
+        "POST",
+        "/v1/pubky/files/upload",
+        Some(serde_json::json!({"track_ids": ids, "dry_run": true})),
+    )
+    .await;
+    assert_eq!(plan["total"], 2);
+    assert!(plan["bytes_total"].as_u64().unwrap() > 1000);
+    let run = |expect_done: u64, expect_skipped: u64| {
+        let app = app.clone();
+        let ids = ids.clone();
+        async move {
+            let (st, job) = call(
+                &app,
+                "POST",
+                "/v1/pubky/files/upload",
+                Some(serde_json::json!({"track_ids": ids})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{job}");
+            let id = job["id"].as_str().unwrap().to_string();
+            let mut last = serde_json::Value::Null;
+            for _ in 0..400 {
+                let (_, p) = call(&app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+                last = p;
+                if last["finished"] == true {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(last["finished"], true, "{last}");
+            assert_eq!(
+                (
+                    last["done"].as_u64(),
+                    last["skipped"].as_u64(),
+                    last["failed"].as_u64()
+                ),
+                (Some(expect_done), Some(expect_skipped), Some(0)),
+                "{last}"
+            );
+            assert_eq!(last["bytes_done"], last["bytes_total"]);
+        }
+    };
+    run(2, 0).await;
+    run(0, 2).await;
+    let (_, files) = call(&app, "GET", "/v1/pubky/files", None).await;
+    assert_eq!(files.as_array().unwrap().len(), 2, "{files}");
+    assert!(files[0]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("/priv/pubky.music/files/"));
+}
