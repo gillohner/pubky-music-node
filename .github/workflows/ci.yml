@@ -81,7 +81,9 @@ jobs:
       - run: npm test
   alsa-loopback:
     # The ALSA hw: output stays bit-perfect: played through the kernel's loopback card and compared byte for byte
-    # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C).
+    # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C). The runner's Azure kernel has no sound modules,
+    # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
+    # (virtme-ng).
     runs-on: ubuntu-24.04
     needs: check
     steps:
@@ -90,15 +92,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: alsa
-      - name: the loopback card
+      - name: a generic kernel with snd-aloop, and virtme-ng
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils "linux-modules-extra-$(uname -r)"
-          sudo modprobe snd-aloop
-          sudo chmod a+rw /dev/snd/*
-          aplay -l
+          sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils qemu-system-x86 busybox-static \
+            linux-image-generic
+          kver=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
+          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$kver"
+          sudo chmod a+r "/boot/vmlinuz-$kver"
+          echo "KVER=$kver" >> "$GITHUB_ENV"
+          pip install --user virtme-ng==1.41
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - run: cargo build -p pm-node --features pm-out-local/alsa
-      - run: python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb
+      - name: bit-perfect through snd-aloop
+        run: |
+          vng -r "$KVER" --user root -m 2G -- bash -c \
+            "modprobe snd-aloop && aplay -l && python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb"
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04
