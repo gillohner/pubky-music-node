@@ -35,6 +35,7 @@ fn state(dir: &std::path::Path) -> Arc<NodeState> {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,

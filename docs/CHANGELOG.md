@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Jamendo** (step 5.4): Creative Commons music, full length and lossless, no account needed.
+  - Search (albums and tracks) in Sources and in the one search; album and track pages; the licence on each item.
+  - Tracks play in zones as FLAC (`jamendo:track:<id>`, falling back to MP3), and in the browser through a node relay.
+  - The stream URL carries the app's `client_id`, so it's looked up only when a track plays and is never stored, shown or logged. A test checks responses for it.
+  - `jamendo.com/track|album|artist/<id>` links are music links now (ADR 0001 service URLs). They join playlist resolution, the play order (`jamendo` after Spotify) and item pages.
+  - Config: `[jamendo] client_id / client_secret` or `PM_JAMENDO_CLIENT_ID` / `PM_JAMENDO_CLIENT_SECRET` (the dev node's start script loads them).
+  - Checked live: search, a track page (FLAC, CC BY-NC-ND), and the browser relay (full MP3, no redirect).
+  - `docs/STREAMING-PROVIDERS.md` gains Jamendo and the providers not offered, with the reasons.
 - **Open playlists other people share** (step 3 leftover).
   - Playlists has "Open" for a pasted `pubky://` link or a Pubky key. A key lists that person's shared playlists.
   - A shared playlist shows where each song plays from on your node: the author's pins count as suggestions, and unavailable songs stay greyed in place.

@@ -22,6 +22,9 @@ pub struct NodeConfig {
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
+    /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
+    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = Jamendo off.
+    pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
 }
@@ -43,6 +46,29 @@ impl Default for RemoteConfig {
             enabled: true,
             relay: String::new(),
         }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct JamendoConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl std::fmt::Debug for JamendoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JamendoConfig")
+            .field("client_id", &if self.client_id.is_empty() { "" } else { "<set>" })
+            .field(
+                "client_secret",
+                &if self.client_secret.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .finish()
     }
 }
 
@@ -113,6 +139,7 @@ impl Default for NodeConfig {
             tidal: TidalConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
+            jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
         }
     }

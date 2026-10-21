@@ -200,6 +200,10 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                 .ok()
                 .filter(|k| !k.trim().is_empty())
                 .unwrap_or_else(|| cfg.acoustid.api_key.clone()),
+            jamendo: pm_api::jamendo::JamendoCredentials {
+                client_id: env_or("PM_JAMENDO_CLIENT_ID", &cfg.jamendo.client_id),
+                client_secret: env_or("PM_JAMENDO_CLIENT_SECRET", &cfg.jamendo.client_secret),
+            },
         },
         lib,
         registry,
@@ -484,4 +488,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// An environment variable when set and not blank, else the config value.
+fn env_or(var: &str, config: &str) -> String {
+    std::env::var(var)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| config.to_string())
 }

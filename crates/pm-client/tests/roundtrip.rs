@@ -55,6 +55,7 @@ async fn client_round_trip() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,

@@ -114,6 +114,7 @@ async fn playlist_lifecycle() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,
@@ -842,6 +843,7 @@ async fn covers_fall_back_to_the_cover_art_archive() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),
@@ -972,6 +974,7 @@ async fn artist_info_comes_from_open_sources_and_is_cached() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),
@@ -1062,6 +1065,7 @@ async fn items_resolve_their_source_with_pins_and_orders() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         outputs,
@@ -1093,7 +1097,7 @@ async fn items_resolve_their_source_with_pins_and_orders() {
     assert_eq!(pf["own_order"], false);
     assert_eq!(
         pf["order"]["order"],
-        serde_json::json!(["library", "tidal", "spotify"])
+        serde_json::json!(["library", "tidal", "spotify", "jamendo"])
     );
     let items = pf["items"].as_array().unwrap();
     assert_eq!(items[0]["plays_from"]["service"], "library");
@@ -1162,7 +1166,7 @@ async fn items_resolve_their_source_with_pins_and_orders() {
     .await;
     assert_eq!(
         d["playlist"]["source_order"],
-        serde_json::json!(["spotify", "tidal", "library"])
+        serde_json::json!(["spotify", "tidal", "library", "jamendo"])
     );
     let (_, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
     assert_eq!(pf["own_order"], true);
@@ -1187,7 +1191,10 @@ async fn items_resolve_their_source_with_pins_and_orders() {
         Some(serde_json::json!({"order": ["tidal"]})),
     )
     .await;
-    assert_eq!(o["order"], serde_json::json!(["tidal", "library", "spotify"]));
+    assert_eq!(
+        o["order"],
+        serde_json::json!(["tidal", "library", "spotify", "jamendo"])
+    );
     assert_eq!(o["services"][0]["connected"], false);
     let (_, o) = call(&app, "GET", "/v1/play-order", None).await;
     assert_eq!(o["order"][0], "tidal");

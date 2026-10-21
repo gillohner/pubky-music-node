@@ -93,6 +93,7 @@ async fn record_and_import_resolve_through_the_library() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

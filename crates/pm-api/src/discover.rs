@@ -157,6 +157,7 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
         "tidal.com" => "tidal",
         "deezer.com" => "deezer",
         "spotify.com" => "spotify",
+        "jamendo.com" => "jamendo",
         _ => return None,
     };
     // Deezer pages carry a language segment (`/en/track/1`); TIDAL a `/browse/`.
@@ -199,12 +200,19 @@ pub(crate) enum Access {
 /// any library lock: the session loaders take that lock themselves.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ServiceAccess {
+    jamendo: Access,
     tidal: Access,
     spotify: Access,
 }
 
 pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
     ServiceAccess {
+        // No account: the node's developer app is enough
+        jamendo: if crate::jamendo::configured(s) {
+            Access::Full
+        } else {
+            Access::No
+        },
         tidal: if crate::tidal::connected(s) {
             Access::Full
         } else {
@@ -221,6 +229,7 @@ pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
 pub(crate) fn access(acc: &ServiceAccess, service: &str) -> Access {
     match service {
         "tidal" => acc.tidal,
+        "jamendo" => acc.jamendo,
         "deezer" => Access::Preview,
         "spotify" => acc.spotify,
         _ => Access::No,
@@ -235,6 +244,7 @@ pub(crate) fn service_title(id: &str) -> String {
         "spotify" => "Spotify".into(),
         "archive" => "Internet Archive".into(),
         "audius" => "Audius".into(),
+        "jamendo" => "Jamendo".into(),
         other => other.to_string(),
     }
 }
@@ -244,6 +254,7 @@ pub(crate) fn service_name(id: &str) -> &'static str {
         "tidal" => "TIDAL",
         "deezer" => "Deezer",
         "spotify" => "Spotify",
+        "jamendo" => "Jamendo",
         _ => "service",
     }
 }
@@ -601,6 +612,7 @@ pub(crate) async fn describe_from_provider(s: &NodeState, u: &str) -> Option<Dis
     let acc = service_access(s);
     let svc: Box<dyn StreamingService> = match (l.service, access(&acc, l.service)) {
         ("tidal", Access::Full) => Box::new(crate::tidal::Tidal),
+        ("jamendo", Access::Full) => Box::new(crate::jamendo::Jamendo),
         ("deezer", _) => Box::new(crate::deezer::Deezer),
         ("spotify", Access::External) => Box::new(crate::spotify::Spotify),
         _ => return None,
@@ -1073,11 +1085,13 @@ async fn expand_link(
     let svc: Box<dyn StreamingService> = match l.service {
         "tidal" => Box::new(crate::tidal::Tidal),
         "deezer" => Box::new(crate::deezer::Deezer),
+        "jamendo" => Box::new(crate::jamendo::Jamendo),
         _ => return Ok(Vec::new()),
     };
     if l.kind == "track" {
         let uri = match l.service {
             "tidal" => crate::tidal::track_uri(&l.id),
+            "jamendo" => crate::jamendo::track_uri(&l.id),
             _ => crate::deezer::track_uri(&l.id),
         };
         return Ok(vec![pm_zones::QueueItem {
@@ -1391,6 +1405,7 @@ pub(crate) fn playable_uri(url: &str) -> Option<String> {
     match host {
         "tidal.com" => after("track").map(|id| crate::tidal::track_uri(&id)),
         "deezer.com" => after("track").map(|id| crate::deezer::track_uri(&id)),
+        "jamendo.com" => after("track").map(|id| crate::jamendo::track_uri(&id)),
         _ => None,
     }
 }

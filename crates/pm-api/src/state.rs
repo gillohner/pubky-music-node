@@ -65,6 +65,8 @@ pub struct NodeSettings {
     /// AcoustID application key (acoustid.org/new-application); empty = fingerprints
     /// are computed and cached but not looked up.
     pub acoustid_key: String,
+    /// Jamendo developer app; empty = Jamendo not offered.
+    pub jamendo: crate::jamendo::JamendoCredentials,
 }
 
 pub struct NodeState {
@@ -151,6 +153,8 @@ pub struct NodeState {
     pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
     pub deezer_base: crate::deezer::SharedBase,
+    /// Jamendo credentials and origin, shared with the audio thread.
+    pub jamendo: crate::jamendo::SharedEndpoints,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -180,6 +184,11 @@ impl NodeState {
                 ..Default::default()
             }));
         let deezer_base = crate::deezer::shared_base();
+        let jamendo: crate::jamendo::SharedEndpoints =
+            Arc::new(std::sync::RwLock::new(crate::jamendo::JamendoEndpoints {
+                creds: settings.jamendo.clone(),
+                ..Default::default()
+            }));
         let spotify: crate::spotify::SharedEndpoints =
             Arc::new(std::sync::RwLock::new(crate::spotify::SpotifyEndpoints {
                 creds: settings.spotify.clone(),
@@ -190,6 +199,7 @@ impl NodeState {
             settings.pipeline,
             tidal.clone(),
             deezer_base.clone(),
+            jamendo.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
         // A contact saved through the API wins over an unset config value.
@@ -257,6 +267,7 @@ impl NodeState {
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
             deezer_base,
+            jamendo,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
                 api_key: settings.acoustid_key.clone(),

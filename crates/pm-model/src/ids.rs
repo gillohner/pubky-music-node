@@ -151,6 +151,8 @@ pub enum Service {
     InternetArchive,
     /// audius.co tracks and artists.
     Audius,
+    /// jamendo.com tracks, albums and artists (Creative Commons).
+    Jamendo,
 }
 
 impl Service {
@@ -169,6 +171,7 @@ impl Service {
             Service::Bandcamp => "bandcamp",
             Service::InternetArchive => "internet-archive",
             Service::Audius => "audius",
+            Service::Jamendo => "jamendo",
             Service::Audiomack => "audiomack",
         }
     }
@@ -392,6 +395,7 @@ mod service {
             "audiomack.com" => audiomack(segs),
             "archive.org" | "www.archive.org" => archive(segs),
             "audius.co" | "www.audius.co" => audius(segs),
+            "jamendo.com" | "www.jamendo.com" => jamendo(segs),
             h if h.starts_with("music.amazon.") => amazon(url, host, segs),
             h if h.ends_with(".bandcamp.com") => bandcamp(host, segs),
             _ => None,
@@ -822,6 +826,28 @@ mod service {
         }
     }
 
+    /// `jamendo.com/{track,album,artist}/<id>[/<slug>]`, also behind a language segment.
+    fn jamendo(segs: &[&str]) -> Option<ServiceLink> {
+        let segs: Vec<&str> = if segs.len() >= 3 && segs[0].len() == 2 {
+            segs[1..].to_vec()
+        } else {
+            segs.to_vec()
+        };
+        let (kind, seg, id) = match segs.as_slice() {
+            ["track", id, ..] => (ServiceLinkKind::Track, "track", *id),
+            ["album", id, ..] => (ServiceLinkKind::Album, "album", *id),
+            ["artist", id, ..] => (ServiceLinkKind::Artist, "artist", *id),
+            _ => return None,
+        };
+        let id = numeric(id)?;
+        link(
+            Service::Jamendo,
+            kind,
+            Some(id),
+            format!("https://www.jamendo.com/{seg}/{id}"),
+        )
+    }
+
     fn audiomack(segs: &[&str]) -> Option<ServiceLink> {
         match segs {
             [artist, "song", slug, ..] => link(
@@ -911,6 +937,26 @@ mod tests {
     fn upc() {
         assert_eq!(Upc::parse("0 60254 71795 5").unwrap().as_str(), "060254717955");
         assert!(Upc::parse("abc").is_err());
+    }
+
+    #[test]
+    fn jamendo_links() {
+        let t = svc("https://www.jamendo.com/track/1369762/trifle-9");
+        assert_eq!((t.service, t.kind), (Service::Jamendo, ServiceLinkKind::Track));
+        assert_eq!(t.url, "https://www.jamendo.com/track/1369762");
+        assert_eq!(
+            svc("https://jamendo.com/en/album/164070").kind,
+            ServiceLinkKind::Album
+        );
+        assert_eq!(
+            svc("https://www.jamendo.com/artist/7908").kind,
+            ServiceLinkKind::Artist
+        );
+        assert!(!matches!(
+            MusicUri::parse("https://www.jamendo.com/track/abc"),
+            Ok(MusicUri::Service(_))
+        ));
+        assert_eq!(Service::Jamendo.label(), "jamendo");
     }
 
     #[test]

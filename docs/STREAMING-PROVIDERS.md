@@ -14,6 +14,7 @@ legal review.
 | Deezer | none for the catalogue (**built**: `/v1/sources/deezer`, in the unified search and in Versions by ISRC/UPC); an app at developers.deezer.com only for user library access | yes | partner-only; 30 s previews play today (`deezer:track:<id>`) | ISRC/UPC on every track/album |
 | Spotify | App at developer.spotify.com (**built**: `[spotify] client_id / client_secret` or `PM_SPOTIFY_*`; redirect `<public_url>/spotify/callback`; in development mode the owner's account must be added under the app's user management) | **built**: search with ISRC/UPC in the unified search, album/artist pages, Versions by ISRC/UPC, library and playlist import by ISRC | no raw audio (DRM): **built** as "Play on Spotify" on the user's Connect devices (Premium) | one account per node, never proxied |
 | Apple Music | Apple developer account, MusicKit token | yes | no raw audio (DRM) | browse and playlist source |
+| Jamendo | Free app at devportal.jamendo.com (`[jamendo] client_id / client_secret` or `PM_JAMENDO_*`; redirect `<public_url>/jamendo/callback` for the sign-in) | **built**: search (albums and tracks), album and track pages, in the unified search and in playlist resolution (`jamendo.com/track/<id>` links) | **built**: full-length streams with no account, FLAC (`jamendo:track:<id>`, the stream URL is looked up at play time because it carries the app id; browsers get it relayed by the node) | Creative Commons licences on every track (shown on the item); no ISRC, so Jamendo joins other services only through MusicBrainz or Pinakes links |
 
 Full-length audio is granted to the **application**, never to the person signing in: no identity scheme
 (Pubky, Nostr, a different OAuth account) changes the tier TIDAL assigned to the app, and borrowing another
@@ -27,3 +28,11 @@ provider's developer terms, which go into an ADR before the module is written.
 
 What follows once they arrive: the provider module, "Connect …" in both Settings screens with
 token refresh on the node, playlist import by canonical URL, the service in the Sources view.
+
+## Not offered, and why (STEWARD-PLAN step 5)
+
+- **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).
+- **Apple Music:** needs a paid developer account, and MusicKit plays in the browser only, never on the node's outputs.
+- **No official playback API:** YouTube Music, Amazon Music, Bandcamp streaming, Mixcloud. The node's rule is no reverse
+  engineering. The `qobuz-api` crate is out for the same reason (it scrapes the web player's credentials) and its GPL-3.0
+  licence does not fit the node's MIT.

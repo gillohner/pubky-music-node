@@ -24,7 +24,7 @@ use pm_pubky::{ItemSource, Playlist};
 use std::sync::Arc;
 
 /// The services a play order can name, in the default order.
-pub const ORDER_SERVICES: &[&str] = &["library", "tidal", "spotify"];
+pub const ORDER_SERVICES: &[&str] = &["library", "tidal", "spotify", "jamendo"];
 const ORDER_KEY: &str = "play.provider_order";
 
 /// Known services first in the given order, unknown names dropped, missing ones appended in the
@@ -123,10 +123,16 @@ fn link_candidate(l: ServiceLink, a: Access, it: &DiscoverItem) -> Candidate {
         Access::Preview => (false, "preview"),
         Access::No => (false, "none"),
     };
-    let stream =
-        (a == Access::Full && l.kind == "track" && l.service == "tidal").then(|| pm_zones::QueueItem {
+    let queue_uri = match l.service {
+        "tidal" => Some(crate::tidal::track_uri(&l.id)),
+        "jamendo" => Some(crate::jamendo::track_uri(&l.id)),
+        _ => None,
+    };
+    let stream = queue_uri
+        .filter(|_| a == Access::Full && l.kind == "track")
+        .map(|uri| pm_zones::QueueItem {
             id: 0,
-            uri: crate::tidal::track_uri(&l.id),
+            uri,
             title: it.title.clone(),
             artist: it.artist.clone(),
             album: None,
@@ -578,9 +584,9 @@ mod tests {
     fn the_order_is_tidied_and_complete() {
         assert_eq!(
             order(&["Spotify", "nope", "spotify"]),
-            ["spotify", "library", "tidal"]
+            ["spotify", "library", "tidal", "jamendo"]
         );
-        assert_eq!(order(&[]), ["library", "tidal", "spotify"]);
+        assert_eq!(order(&[]), ["library", "tidal", "spotify", "jamendo"]);
         assert!(checked_order(&["qobuz".into()]).is_err());
     }
 

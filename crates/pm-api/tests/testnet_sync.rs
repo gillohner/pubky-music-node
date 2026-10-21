@@ -49,6 +49,7 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),
@@ -700,7 +701,7 @@ async fn another_node_opens_and_copies_a_shared_playlist() {
     );
     assert_eq!(
         copy["playlist"]["source_order"],
-        serde_json::json!(["tidal", "library", "spotify"])
+        serde_json::json!(["tidal", "library", "spotify", "jamendo"])
     );
     // A private playlist is not readable
     call(

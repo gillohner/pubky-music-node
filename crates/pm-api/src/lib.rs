@@ -23,6 +23,7 @@ pub mod hls;
 pub mod home;
 pub mod identify;
 pub mod item;
+pub mod jamendo;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod pinakes_reader;
@@ -234,6 +235,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
+        .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
         .route("/sources/spotify/login", get(spotify::login))
         .route("/sources/spotify/status", get(spotify::status))
         .route("/sources/spotify/session", delete(spotify::logout))
@@ -2198,6 +2200,7 @@ mod tests {
                 tidal: Default::default(),
                 spotify: Default::default(),
                 acoustid_key: String::new(),
+                jamendo: Default::default(),
             },
             lib,
             outputs,
@@ -2677,6 +2680,127 @@ mod tests {
 
     /// Audius against a local mock: the discovery host is configured, a search
     /// yields track hits, an item has one streamable track, and it plays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jamendo_searches_plays_lossless_and_keeps_the_app_id_to_itself() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let track = move |fmt: &str| {
+            serde_json::json!({"id": "1369762", "name": "Trifle 9", "duration": 5, "artist_name": "Vladimir",
+                "album_name": "Trifles", "album_id": "164070", "releasedate": "2016-08-20", "position": 1,
+                "image": "https://usercontent.jamendo.com/x.jpg",
+                "audio": format!("{base}/stream?trackid=1369762&format={fmt}&from=app-SECRETID"),
+                "license_ccurl": "http://creativecommons.org/licenses/by/3.0/", "shareurl": "https://www.jamendo.com/track/1369762"})
+        };
+        type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
+        let mock = Router::new()
+            .route(
+                "/tracks/",
+                get(move |q: Q| {
+                    let t = track(q.get("audioformat").map(String::as_str).unwrap_or("mp31"));
+                    async move {
+                        assert_eq!(q.get("client_id").map(String::as_str), Some("SECRETID"));
+                        Json(serde_json::json!({"headers": {"status": "success"}, "results": [t]}))
+                    }
+                }),
+            )
+            .route(
+                "/albums/",
+                get(|| async {
+                    Json(serde_json::json!({"headers": {"status": "success"}, "results": [
+                        {"id": "164070", "name": "Trifles", "artist_name": "Vladimir", "releasedate": "2016-08-20", "image": "https://usercontent.jamendo.com/a.jpg"}]}))
+                }),
+            )
+            .route(
+                "/stream",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        {
+            let mut j = s.jamendo.write().unwrap();
+            j.base = format!("http://127.0.0.1:{port}");
+            j.creds = crate::jamendo::JamendoCredentials {
+                client_id: "SECRETID".into(),
+                client_secret: "SECRETKEY".into(),
+            };
+        }
+        let app = router(s.clone());
+        let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == "jamendo" && x["status"] == "ready"));
+        let (st, r) = call(&app, "GET", "/v1/sources/jamendo/search?q=trifle", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["items"][0]["kind"], "album");
+        assert_eq!(r["items"][1]["uri"], "jamendo:track:1369762");
+        let (st, al) = call(&app, "GET", "/v1/sources/jamendo/items/album:164070", None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        assert_eq!(al["tracks"][0]["url"], "jamendo:track:1369762");
+        assert_eq!(al["tracks"][0]["format"], "FLAC (Jamendo)");
+        for body in [&r, &al] {
+            assert!(
+                !body.to_string().contains("SECRET"),
+                "the app id never leaves the node: {body}"
+            );
+        }
+        // A zone plays it (the lossless stream, looked up at play time)
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": "jamendo:track:1369762", "title": "Trifle 9"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        // Browsers get it relayed by the node
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/v1/sources/jamendo/stream/1369762")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("location").is_none(),
+            "relayed, not redirected"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..4], b"fLaC");
+        // A Jamendo link in a playlist plays from Jamendo
+        let (_, pl) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "CC", "uris": ["https://www.jamendo.com/track/1369762"]})),
+        )
+        .await;
+        let id = pl["summary"]["id"].as_str().unwrap().to_string();
+        let (_, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+        assert_eq!(pf["items"][0]["plays_from"]["service"], "jamendo", "{pf}");
+        assert_eq!(pf["items"][0]["stream_uri"], "jamendo:track:1369762");
+        assert!(!pf.to_string().contains("SECRET"));
+    }
+
     #[tokio::test]
     async fn audius_source_searches_and_plays() {
         let flac = std::fs::read(concat!(

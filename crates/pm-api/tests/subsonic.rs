@@ -130,6 +130,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
             tidal: Default::default(),
             spotify: Default::default(),
             acoustid_key: String::new(),
+            jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
         OutputRegistry::new(),

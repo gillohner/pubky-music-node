@@ -25,6 +25,8 @@ pub struct NodeSources {
     tidal: crate::tidal::SharedEndpoints,
     /// Deezer API origin, for `deezer:track:` URIs (previews).
     deezer: crate::deezer::SharedBase,
+    /// Jamendo credentials, for `jamendo:track:` URIs.
+    jamendo: crate::jamendo::SharedEndpoints,
 }
 
 impl NodeSources {
@@ -33,6 +35,7 @@ impl NodeSources {
         cfg: PipelineConfig,
         tidal: crate::tidal::SharedEndpoints,
         deezer: crate::deezer::SharedBase,
+        jamendo: crate::jamendo::SharedEndpoints,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -52,6 +55,7 @@ impl NodeSources {
             dsp: RwLock::new(dsp),
             tidal,
             deezer,
+            jamendo,
         }
     }
 
@@ -504,6 +508,9 @@ impl SourceFactory for NodeSources {
         }
         if let Some(id) = item.uri.strip_prefix(crate::deezer::TRACK_URI_PREFIX) {
             return crate::deezer::open_track_blocking(&self.deezer, id);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::jamendo::TRACK_URI_PREFIX) {
+            return crate::jamendo::open_track_blocking(&self.jamendo, id);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

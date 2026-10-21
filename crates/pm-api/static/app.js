@@ -177,7 +177,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); $('#zonename').textContent = z ? z.name : 'Zone'; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { const m = /^(tidal|deezer):track:([A-Za-z0-9]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { const m = /^(tidal|deezer|jamendo):track:([A-Za-z0-9]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -521,7 +521,7 @@
   // A page id is the canonical identity in short form: mb-<mbid>, isrc-<ISRC>, else u-<base64url of the link>.
   const idOf = (uri) => { let m = uri.match(/^https:\/\/musicbrainz\.org\/(recording|artist|release-group)\/([0-9a-f-]{36})$/); if (m) return 'mb-' + m[2]; m = uri.match(/^https:\/\/musicbrainz\.org\/isrc\/([A-Za-z0-9]{12})$/); if (m) return 'isrc-' + m[1].toUpperCase(); return 'u-' + b64u(uri); };
   // The song page for a queue item: a library track, or a service track by its page.
-  const npPageId = (uri) => { if (!uri) return null; let m = uri.match(/^track:(\d+)$/); if (m) return 'lib-' + m[1]; m = uri.match(/^(tidal|deezer):track:([A-Za-z0-9]+)$/); if (m) return idOf(m[1] === 'tidal' ? `https://tidal.com/track/${m[2]}` : `https://www.deezer.com/track/${m[2]}`); if (/^https?:\/\//.test(uri)) return idOf(uri); return null; };
+  const npPageId = (uri) => { if (!uri) return null; let m = uri.match(/^track:(\d+)$/); if (m) return 'lib-' + m[1]; m = uri.match(/^(tidal|deezer|jamendo):track:([A-Za-z0-9]+)$/); if (m) return idOf({ tidal: `https://tidal.com/track/${m[2]}`, deezer: `https://www.deezer.com/track/${m[2]}`, jamendo: `https://www.jamendo.com/track/${m[2]}` }[m[1]]); if (/^https?:\/\//.test(uri)) return idOf(uri); return null; };
   const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } return null; };
   const pathFor = (v, arg) => {
     if (v === 'item' && arg && arg.kind && arg.id) return `/${arg.kind}/${arg.id}`;
@@ -916,6 +916,7 @@
     amazonmusic: '<path d="M3 13c5 3.5 13 3.5 18 0l-1 2.5c-5 3-11 3-16 0zM19 15l2-1 0 3zM9 4h2v8H9zm4 0h2v8h-2z"/>',
     applemusic: '<path d="M16 3v11.5a3.5 3.5 0 1 1-2-3.2V7.2l-5 1.4v7.9A3.5 3.5 0 1 1 7 13.3V5.3z"/>',
     audius: '<path d="M12 3l9 17h-4.5L12 11l-4.5 9H3z"/>',
+    jamendo: '<path d="M13 3h4v11.5a5.5 5.5 0 1 1-11 0h4a1.5 1.5 0 0 0 3 0z"/>',
     archive: '<path d="M3 20h18v2H3zM4 9h2v9H4zm4 0h2v9H8zm4 0h2v9h-2zm4 0h2v9h-2zm4 0h1v9h-1zM2 7l10-5 10 5v1H2z"/>',
     qobuz: '<path d="M12 3a8 8 0 1 0 4.9 14.3l2.4 2.4 1.4-1.4-2.4-2.4A8 8 0 0 0 12 3zm0 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11z"/>',
     musicbrainz: '<path d="M12 2l9 5v10l-9 5-9-5V7zm-1 4.5L6 9v6l5 2.5zm2 0v11l5-2.5V9z"/>',
@@ -929,7 +930,7 @@
   const itemName = (it) => it.title || `Untitled on ${it.site || 'another service'}`;
   // Describe music URLs that are not in the library (favourites, playlists, history).
   const describe = async (uris) => { if (!uris.length) return []; try { return await api('POST', '/discover/describe', { uris }); } catch { return uris.map((u) => ({ uri: u, page: u, title: null, site: null, also_on: [], kind: 'other' })); } };
-  const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', library: 'your library' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', library: 'your library' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
