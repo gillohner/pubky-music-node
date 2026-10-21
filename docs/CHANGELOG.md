@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Jamendo sign-in** (step 5.4, part 2).
+  - Sources › Jamendo has **Sign in to Jamendo** (OAuth, scope `music`, redirect `/jamendo/callback`). The sign-in is optional: search and playback need no account.
+  - **Add my Jamendo likes to Favourites** brings the tracks you liked or favourited on Jamendo.
+  - Tokens last two hours and renew with the refresh token.
+  - A Jamendo song page now uses Jamendo's own title, artist and cover instead of the web page title Pinakes read.
+  - API: `GET /v1/sources/jamendo/status`, `POST …/login`, `POST …/logout`, `POST …/collection/import`.
+  - Test: a mock Jamendo covers sign-in, a stale sign-in state, an expired-token refresh, the import (deduplicated) and sign-out. The live sign-in waits for the owner's Jamendo account. Shots: `docs/ux/shots/jamendo/`.
 - **Jamendo** (step 5.4): Creative Commons music, full length and lossless, no account needed.
   - Search (albums and tracks) in Sources and in the one search; album and track pages; the licence on each item.
   - Tracks play in zones as FLAC (`jamendo:track:<id>`, falling back to MP3), and in the browser through a node relay.

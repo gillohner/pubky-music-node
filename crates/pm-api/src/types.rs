@@ -1439,3 +1439,13 @@ pub struct SharedPlaylist {
     /// Where each song plays from on this node.
     pub play_from: PlaylistPlayFrom,
 }
+
+/// `GET /v1/sources/jamendo/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JamendoStatus {
+    pub configured: bool,
+    pub signed_in: bool,
+    pub name: Option<String>,
+    /// What the Jamendo app's redirect URL must allow (same domain).
+    pub redirect_uri: String,
+}

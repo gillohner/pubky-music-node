@@ -236,6 +236,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
+        .route("/sources/jamendo/status", get(jamendo::status))
+        .route("/sources/jamendo/login", post(jamendo::login))
+        .route("/sources/jamendo/logout", post(jamendo::logout))
+        .route(
+            "/sources/jamendo/collection/import",
+            post(jamendo::import_collection),
+        )
         .route("/sources/spotify/login", get(spotify::login))
         .route("/sources/spotify/status", get(spotify::status))
         .route("/sources/spotify/session", delete(spotify::logout))
@@ -304,6 +311,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             Router::new()
                 .route("/tidal/callback", get(tidal::callback))
                 .route("/spotify/callback", get(spotify::callback))
+                .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
                 // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
@@ -2722,6 +2730,34 @@ mod tests {
                     let flac = flac.clone();
                     async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
                 }),
+            )
+            .route(
+                "/oauth/grant",
+                post(|body: String| async move {
+                    let form: std::collections::HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+                    assert_eq!(form["client_secret"], "SECRETKEY");
+                    let ok = match form["grant_type"].as_str() {
+                        "authorization_code" => form["code"] == "C0DE" && form["redirect_uri"].ends_with("/jamendo/callback"),
+                        "refresh_token" => form["refresh_token"] == "R1",
+                        _ => false,
+                    };
+                    assert!(ok, "{form:?}");
+                    let token = if form["grant_type"] == "refresh_token" { "A2" } else { "A1" };
+                    Json(serde_json::json!({"access_token": token, "expires_in": 7200, "token_type": "bearer", "scope": "music", "refresh_token": "R1"}))
+                }),
+            )
+            .route(
+                "/users/",
+                get(|| async { Json(serde_json::json!({"headers": {"status": "success"}, "results": [{"id": "9", "name": "owner", "dispname": "The Owner"}]})) }),
+            )
+            .route(
+                "/users/tracks/",
+                get(|q: Q| async move {
+                    assert_eq!(q.get("access_token").map(String::as_str), Some("A2"), "the renewed token");
+                    assert_eq!(q.get("relation").map(String::as_str), Some("like favorite"));
+                    Json(serde_json::json!({"headers": {"status": "success"}, "results": [{"id": "9", "tracks": [{"id": "1369762"}, {"id": "1427344"}, {"id": "1369762"}]}]}))
+                }),
             );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
 
@@ -2799,6 +2835,61 @@ mod tests {
         assert_eq!(pf["items"][0]["plays_from"]["service"], "jamendo", "{pf}");
         assert_eq!(pf["items"][0]["stream_uri"], "jamendo:track:1369762");
         assert!(!pf.to_string().contains("SECRET"));
+
+        // Sign in (OAuth, scope music), import likes and favourites, sign out
+        let (_, st0) = call(&app, "GET", "/v1/sources/jamendo/status", None).await;
+        assert_eq!(st0["signed_in"], false);
+        let (st, l) = call(&app, "POST", "/v1/sources/jamendo/login", None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        let url = url::Url::parse(l["url"].as_str().unwrap()).unwrap();
+        assert!(url.path().ends_with("/oauth/authorize"));
+        let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(q["scope"], "music");
+        assert!(q["redirect_uri"].ends_with("/jamendo/callback"));
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!("/jamendo/callback?code=C0DE&state={}", q["state"]))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["location"], "/source/jamendo?jamendo=signed_in");
+        let (_, st1) = call(&app, "GET", "/v1/sources/jamendo/status", None).await;
+        assert_eq!(st1["signed_in"], true);
+        assert_eq!(st1["name"], "The Owner");
+        // The access token has expired: the import renews it first
+        {
+            let lib = s.library.lock().unwrap();
+            let mut u: serde_json::Value =
+                serde_json::from_str(&lib.get_setting("jamendo.user").unwrap().unwrap()).unwrap();
+            u["expires_at"] = serde_json::json!(0);
+            lib.set_setting("jamendo.user", &u.to_string()).unwrap();
+        }
+        let (st, r) = call(&app, "POST", "/v1/sources/jamendo/collection/import", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["imported"], 2, "two tracks, one listed twice");
+        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        assert!(
+            favs.to_string().contains("https://www.jamendo.com/track/1427344"),
+            "{favs}"
+        );
+        let (_, st2) = call(&app, "POST", "/v1/sources/jamendo/logout", None).await;
+        assert_eq!(st2["signed_in"], false);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/jamendo/callback?code=C0DE&state=unknown")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.headers()["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/source/jamendo?jamendo=error"));
     }
 
     #[tokio::test]

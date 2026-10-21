@@ -412,6 +412,285 @@ pub(crate) async fn stream(
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+// ---- sign-in (OAuth 2, scope `music`): the user's likes and favourites ----
+
+const USER_KEY: &str = "jamendo.user";
+
+/// The signed-in Jamendo account. Access tokens last two hours; the refresh token renews them.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UserSession {
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn now_unix() -> i64 {
+    pm_library::db::now_unix()
+}
+
+fn pending() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, i64)>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, i64)>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+    format!("{}/jamendo/callback", crate::tidal::external_base(s, headers))
+}
+
+fn load_user(s: &NodeState) -> Option<UserSession> {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(USER_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+}
+
+fn store_user(s: &NodeState, u: Option<&UserSession>) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    match u {
+        Some(u) => lib.set_setting(USER_KEY, &serde_json::to_string(u).expect("serializes"))?,
+        None => {
+            lib.delete_setting(USER_KEY)?;
+        }
+    }
+    Ok(())
+}
+
+async fn grant(s: &NodeState, form: &[(&str, &str)]) -> Result<UserSession, ApiError> {
+    let e = endpoints(s)?;
+    let mut body: Vec<(&str, &str)> = vec![
+        ("client_id", e.creds.client_id.as_str()),
+        ("client_secret", e.creds.client_secret.as_str()),
+    ];
+    body.extend_from_slice(form);
+    let body: String = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(body.iter())
+        .finish();
+    let resp = s
+        .http_client()
+        .post(format!("{}/oauth/grant", e.base.trim_end_matches('/')))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| upstream(err.without_url()))?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|err| upstream(err.without_url()))?;
+    let token = v["access_token"].as_str().filter(|t| !t.is_empty());
+    match (status.is_success(), token) {
+        (true, Some(t)) => Ok(UserSession {
+            access_token: t.to_string(),
+            refresh_token: v["refresh_token"].as_str().unwrap_or("").to_string(),
+            expires_at: now_unix() + v["expires_in"].as_i64().unwrap_or(7200),
+            name: None,
+        }),
+        _ => Err(upstream(format!(
+            "sign-in refused: {}",
+            v["error_description"]
+                .as_str()
+                .or(v["error"].as_str())
+                .or(v["headers"]["error_message"].as_str())
+                .unwrap_or("no access token")
+        ))),
+    }
+}
+
+/// The user's access token, renewed when it is about to expire.
+async fn user_token(s: &NodeState) -> Result<String, ApiError> {
+    let u = load_user(s).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "sign in to Jamendo first (Sources › Jamendo)",
+        )
+    })?;
+    if u.expires_at - now_unix() > 60 {
+        return Ok(u.access_token);
+    }
+    let mut fresh = grant(
+        s,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &u.refresh_token),
+        ],
+    )
+    .await?;
+    fresh.name = u.name;
+    store_user(s, Some(&fresh))?;
+    Ok(fresh.access_token)
+}
+
+/// `POST /v1/sources/jamendo/login`: the Jamendo page where the user approves the node.
+pub(crate) async fn login(
+    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> crate::ApiResult<crate::tidal::LoginUrl> {
+    let e = endpoints(&s)?;
+    if e.creds.client_secret.trim().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "Jamendo sign-in needs the app's client_secret too ([jamendo] or PM_JAMENDO_CLIENT_SECRET)",
+        ));
+    }
+    let state = crate::tidal::random_urlsafe(24);
+    let redirect = redirect_uri(&s, &headers);
+    {
+        let mut p = pending().lock().expect("pending");
+        p.retain(|_, (_, at)| now_unix() - *at < 600);
+        p.insert(state.clone(), (redirect.clone(), now_unix()));
+    }
+    let mut url =
+        url::Url::parse(&format!("{}/oauth/authorize", e.base.trim_end_matches('/'))).map_err(upstream)?;
+    url.query_pairs_mut()
+        .append_pair("client_id", &e.creds.client_id)
+        .append_pair("redirect_uri", &redirect)
+        .append_pair("scope", "music")
+        .append_pair("response_type", "code")
+        .append_pair("state", &state);
+    Ok(axum::Json(crate::tidal::LoginUrl { url: url.to_string() }))
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub(crate) struct CallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// `GET /jamendo/callback`: finishes the sign-in and sends the browser back to Sources › Jamendo.
+pub(crate) async fn callback(
+    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
+    axum::extract::Query(q): axum::extract::Query<CallbackQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match finish_login(&s, q).await {
+        Ok(()) => axum::response::Redirect::to("/source/jamendo?jamendo=signed_in").into_response(),
+        Err(e) => {
+            let msg: String = url::form_urlencoded::byte_serialize(e.message.as_bytes()).collect();
+            axum::response::Redirect::to(&format!("/source/jamendo?jamendo=error&message={msg}"))
+                .into_response()
+        }
+    }
+}
+
+async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
+    if let Some(err) = q.error {
+        return Err(ApiError::bad_request(format!(
+            "Jamendo refused the sign-in: {err}"
+        )));
+    }
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return Err(ApiError::bad_request("missing code or state"));
+    };
+    let (redirect, _) = pending()
+        .lock()
+        .expect("pending")
+        .remove(&state)
+        .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in; start again"))?;
+    let mut session = grant(
+        s,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", &redirect),
+        ],
+    )
+    .await?;
+    if let Ok(v) = get_json(s, "/users/", &[("access_token", session.access_token.clone())]).await {
+        session.name = v["results"][0]["dispname"]
+            .as_str()
+            .or(v["results"][0]["name"].as_str())
+            .map(str::to_string);
+    }
+    store_user(s, Some(&session))?;
+    tracing::info!("Jamendo sign-in stored");
+    Ok(())
+}
+
+fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> JamendoStatus {
+    let u = load_user(s);
+    JamendoStatus {
+        configured: configured(s),
+        signed_in: u.is_some(),
+        name: u.and_then(|u| u.name),
+        redirect_uri: redirect_uri(s, headers),
+    }
+}
+
+/// `GET /v1/sources/jamendo/status`.
+pub(crate) async fn status(
+    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> crate::ApiResult<JamendoStatus> {
+    Ok(axum::Json(status_view(&s, &headers)))
+}
+
+/// `POST /v1/sources/jamendo/logout`: forgets the tokens.
+pub(crate) async fn logout(
+    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+) -> crate::ApiResult<JamendoStatus> {
+    store_user(&s, None)?;
+    Ok(axum::Json(status_view(&s, &headers)))
+}
+
+/// `POST /v1/sources/jamendo/collection/import`: the tracks the user liked or added to favourites
+/// on Jamendo, as favourites on this node (by their Jamendo link).
+pub(crate) async fn import_collection(
+    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
+) -> crate::ApiResult<crate::tidal::ImportReport> {
+    let token = user_token(&s).await?;
+    let mut report = crate::tidal::ImportReport::default();
+    let mut ids: Vec<String> = Vec::new();
+    for offset in (0..2000).step_by(200) {
+        let v = get_json(
+            &s,
+            "/users/tracks/",
+            &[
+                ("access_token", token.clone()),
+                ("relation", "like favorite".into()),
+                ("track_type", "single albumtrack".into()),
+                ("limit", "200".into()),
+                ("offset", offset.to_string()),
+            ],
+        )
+        .await?;
+        let page: Vec<String> = v["results"][0]["tracks"]
+            .as_array()
+            .map(|a| a.iter().filter_map(id_of).collect())
+            .unwrap_or_default();
+        let n = page.len();
+        for id in page {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if n < 200 {
+            break;
+        }
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    for id in ids {
+        match pm_model::MusicUri::parse(&page_url("track", &id)) {
+            Ok(uri) => {
+                crate::favourites::add(&lib, uri)?;
+                report.imported += 1;
+            }
+            Err(_) => report.skipped += 1,
+        }
+    }
+    drop(lib);
+    s.notify_library();
+    Ok(axum::Json(report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

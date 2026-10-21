@@ -597,6 +597,7 @@ fn site_of(u: &str) -> Option<String> {
             "musicbrainz.org" => "MusicBrainz",
             "youtube.com" | "music.youtube.com" => "YouTube",
             "bandcamp.com" => "Bandcamp",
+            "jamendo.com" => "Jamendo",
             "music.amazon.com" => "Amazon Music",
             h if h.ends_with(".bandcamp.com") => "Bandcamp",
             other => return Some(other.to_string()),
@@ -893,6 +894,15 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     };
     if r.is_some() {
         fill_from_key(s, &mut it, album_id).await;
+        // Jamendo's own API knows the song; Pinakes may only have the web page's title
+        if service_link(&uri, false).is_some_and(|l| l.service == "jamendo") {
+            if let Some(p) = describe_from_provider(s, &uri).await {
+                it.title = p.title.or(it.title.take());
+                it.artist = p.artist.or(it.artist.take());
+                it.image = p.image.or(it.image.take());
+                it.site = p.site;
+            }
+        }
     }
     // The owner's own matches ("Find on other services") count like Pinakes's links.
     for m in crate::item::matches_for(s, &uri) {
