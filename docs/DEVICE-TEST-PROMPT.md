@@ -110,6 +110,28 @@ Checked here with real snapserver 0.34 and snapclient:
    (snapclient log).
 ```
 
-## AirPlay
+## AirPlay (Apple TV, AirPort Express, AirPlay speakers, shairport-sync)
 
-Not built yet: a section follows with the output.
+Checked here with shairport-sync 4.3.7, a real AirPlay 1 receiver:
+- Found over mDNS (`_raop._tcp`) with its TXT; the node made a zone "<name> (AirPlay)".
+- The zone played in real time (the planner converted to 44.1 kHz 16-bit, and the signal path
+  says so).
+- A test pattern came out of the receiver bit-exact.
+
+What is sent: AirPlay 1 (RAOP), unencrypted, Apple Lossless, 44.1/16. Receivers that require
+encryption (`et` without 0; older AirPort Express firmware) are skipped, and the log says why.
+AirPlay 2 is not built: its open implementations rely on reverse-engineered pairing (handoff §2).
+Most AirPlay 2 devices still take AirPlay 1.
+
+```
+1. Every AirPlay receiver appears as a zone after a scan, or is named in the log with the reason
+   it was skipped (paste those lines).
+2. Play an album: audio after about 2 s (AirPlay's buffer); the receiver shows title, artist and
+   album where it has a screen (Apple TV).
+3. Pause and resume, next, seek: each is heard within about 2 s.
+4. Volume from the node moves the receiver's volume (Apple TV shows it).
+5. An Apple TV (tvOS 17/18) and a HomePod: does it play, is it skipped (encryption), or does it
+   refuse (log "the receiver refused …")? Note the model and OS version.
+6. Two AirPlay zones grouped in the node: "loosely synced" (AirPlay 1 has no shared clock);
+   note the audible offset.
+```

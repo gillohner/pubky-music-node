@@ -147,6 +147,8 @@ pub struct OutputsConfig {
     /// A snapserver (`host` or `host:port` of its JSON-RPC, port 1705 by default): every Snapcast
     /// group becomes a zone. Empty = off.
     pub snapcast: String,
+    /// Discover AirPlay 1 receivers (mDNS `_raop._tcp`) and offer them as outputs.
+    pub airplay: bool,
 }
 
 impl Default for OutputsConfig {
@@ -159,6 +161,7 @@ impl Default for OutputsConfig {
             slimproto_port: 3483,
             cast: true,
             snapcast: String::new(),
+            airplay: true,
         }
     }
 }

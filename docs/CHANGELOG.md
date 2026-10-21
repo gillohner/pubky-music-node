@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **AirPlay** (`crates/pm-out-airplay`, infra brief §3.4): AirPlay 1 (RAOP) receivers found over mDNS (`_raop._tcp`) become zones, unless `[outputs] airplay = false`.
+  - The node sends unencrypted Apple Lossless (verbatim frames), 44.1 kHz 16-bit, over RTP. It answers the receiver's timing requests, sends sync packets, resends lost packets, and sets volume and title/artist/album as text.
+  - Receivers that require encryption are skipped, and the log says why. AirPlay 2 is not built, because its pairing is only reverse-engineered.
+  - Checked with shairport-sync: discovered, played in real time, and a pattern came out bit-exact.
 - **Snapcast** (`crates/pm-out-snapcast`, infra brief §3): with `[outputs] snapcast = "<host>"`, every group on that snapserver becomes a zone. Playing adds a stream to snapserver over its JSON-RPC (snapserver connects to the node and reads raw PCM in the zone's exact format, FLAC on the wire), routes the group to it, and paces the music in real time. Stopping gives the group its previous stream back. Snapcast keeps Pis and old phones in tight sync. Checked with real snapserver 0.34 and snapclient: the zone played and a pattern came out of the client bit-exact at 16 and 24 bits.
 - **Sonos** (infra brief §3).
   - A Sonos player that is a member of a Sonos group plays through its group's coordinator. Members refuse transport commands, so the whole Sonos group plays, as the Sonos app shows it.

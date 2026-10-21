@@ -3683,6 +3683,7 @@ dependencies = [
  "pm-endpoint",
  "pm-library",
  "pm-model",
+ "pm-out-airplay",
  "pm-out-cast",
  "pm-out-net",
  "pm-out-slimproto",
@@ -3841,6 +3842,19 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pm-out-airplay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mdns-sd",
+ "pm-model",
+ "pm-zones",
+ "rand 0.8.8",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

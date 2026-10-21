@@ -83,6 +83,8 @@ pub struct NodeState {
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
+    /// Offer AirPlay 1 receivers (`[outputs] airplay`).
+    airplay: std::sync::atomic::AtomicBool,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -219,6 +221,7 @@ impl NodeState {
             stream_secret,
             sonos: Default::default(),
             snapcast: Default::default(),
+            airplay: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -897,6 +900,38 @@ impl NodeState {
         new
     }
 
+    pub fn set_airplay(&self, on: bool) {
+        self.airplay.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// AirPlay 1 receivers found over mDNS as outputs with zones; ones the node cannot play to (they
+    /// require encryption) are logged and skipped. Blocking.
+    pub fn discover_airplay(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
+        if !self.airplay.load(std::sync::atomic::Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut new = Vec::new();
+        for d in pm_out_airplay::discover(timeout) {
+            if let Some(why) = d.unsupported() {
+                tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                continue;
+            }
+            let out = Arc::new(
+                pm_out_airplay::AirPlayOutput::new(d.clone()).with_describe(self.describe_for_renderers()),
+            );
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            tracing::info!(receiver = %d.name, output = %id, "AirPlay receiver");
+            let zone_name = out.name();
+            self.outputs.register(out.clone());
+            self.create_zone(&zone_name, out);
+            new.push(id);
+        }
+        new
+    }
+
     /// Use the snapserver at `addr` (`host` or `host:port`) for Snapcast zones.
     pub fn set_snapcast(&self, addr: Option<String>) {
         *self.snapcast.lock().expect("snapcast lock") = addr;
@@ -939,6 +974,7 @@ impl NodeState {
         new.extend(self.restore_endpoint_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         new.extend(self.discover_snapcast());
+        new.extend(self.discover_airplay(std::time::Duration::from_millis(1500)));
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;
         };
