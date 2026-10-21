@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Slimproto works with real squeezelite** (infra item 2; it was tested only against a fake player before, and no real player had ever played). CI now runs real squeezelite on every push: 16/44.1 and 24/96 come out bit-exact from the first sample, the position follows real time, pause is silent within a second, play resumes, and a player that reconnects keeps its one zone. Fixed:
+  - A connecting player crashed its own session (the zone was created outside the async runtime). Its reconnect then got a new output while the zone kept the dead one ("Broken pipe"). Each player now has one output for the node's lifetime, and reconnects attach to it.
+  - squeezelite starts at volume 0 and played silence: the node now sends the volume on every connection, and remembers volume changes made while the player is away.
+  - `strm` sent autostart and transition fields as raw bytes where squeezelite reads ASCII digits.
+  - The WAV header was played as audio (a click at every start): players fetch `stream.pcm`, the raw PCM.
+  - The node handed a whole track to the player's buffers at once, declared it played, and cut it off: it now waits until the player reports the end (`STMu`), and stays at most 5 s ahead of what the player has played. The position comes from the player's own reports.
+  - Pause, seek and skip sent `strm f`, which squeezelite applies only to the next track: they now stop the player (`strm q`) and start a fresh stream.
+  - Groups of Slimproto players are "loosely synced" for now: each starts when its own buffer fills. Starting them together is next.
 - **Fix: on Android the status bar covered the top of the node's page** (the menu and search). The app draws edge to edge, and older Android WebViews tell the page nothing about the bars. The app now keeps the page clear of the status bar, navigation bar, camera cutout and keyboard, with bars that follow the system's light or dark mode, as the UI does (a theme picked in Settings › Appearance against the system's still gets the system's bar colour). The emulator test checks that the menu sits below the status bar.
 - **Fix: on Android the status bar covered the top of the node's page** (the menu and search). The app draws edge to edge, and older Android WebViews tell the page nothing about the bars. The app now keeps the page clear of the status bar, navigation bar, camera cutout and keyboard, with dark bars to match the UI. The emulator test checks that the menu sits below the status bar.
 - **Your server, checked against a real Navidrome (0.64.2).** Connect, search, album pages and zone playback all work. A server that can't transcode (Navidrome without ffmpeg) answered the browser's MP3 request with an error, so the browser stream now falls back to the original file (FLAC plays in browsers). Empty MusicBrainz and ISRC fields are read as "not known".

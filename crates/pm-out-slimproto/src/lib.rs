@@ -11,6 +11,7 @@
 
 pub mod output;
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -160,7 +161,10 @@ pub fn rate_code(rate_hz: u32) -> Option<u8> {
 }
 
 /// `strm` payload for `command`; `request` is the HTTP request text sent
-/// after the 24-byte header (start only).
+/// after the 24-byte header (start only). `autostart` is ASCII as squeezelite
+/// reads it (`autostart - '0'`): `b'1'` starts when buffered, `b'0'` waits
+/// for `strm u`. For `p`, `a` and `u` the `replay_gain` field carries the
+/// interval or start time in ms.
 #[allow(clippy::too_many_arguments)]
 pub fn strm(
     command: u8,
@@ -181,9 +185,9 @@ pub fn strm(
     p.push(b'0' + channels);
     p.push(b'1'); // little endian
     p.push(10); // threshold: KB before autostart
-    p.push(0); // spdif auto
-    p.push(0); // transition period
-    p.push(0); // transition type
+    p.push(b'0'); // spdif auto
+    p.push(0); // transition period (seconds, binary)
+    p.push(b'0'); // transition type: none (ASCII)
     p.push(0); // flags
     p.push(1); // output threshold, tenths of a second
     p.push(0); // slaves / reserved
@@ -217,6 +221,8 @@ pub struct Stat {
     pub output_buffer_size: u32,
     pub output_buffer_fullness: u32,
     pub elapsed_ms: u32,
+    /// The player's millisecond clock when it sent this report.
+    pub jiffies: u32,
 }
 
 pub fn parse_stat(data: &[u8]) -> Option<Stat> {
@@ -230,6 +236,7 @@ pub fn parse_stat(data: &[u8]) -> Option<Stat> {
     let stream_buffer_size = u32_at(7);
     let stream_buffer_fullness = u32_at(11);
     // bytes received 8 (15..23), signal 2 (23..25), jiffies 4 (25..29)
+    let jiffies = u32_at(25);
     let output_buffer_size = u32_at(29);
     let output_buffer_fullness = u32_at(33);
     // elapsed seconds 4 (37..41), voltage 2 (41..43), elapsed ms 4 (43..47)
@@ -245,17 +252,20 @@ pub fn parse_stat(data: &[u8]) -> Option<Stat> {
         output_buffer_size,
         output_buffer_fullness,
         elapsed_ms,
+        jiffies,
     })
 }
 
-/// Serve players on `listener`; `on_player` is called once per connected
-/// player with its output. Blocks; run on a thread.
+/// Serve players on `listener`; `on_player` is called once per player (by
+/// MAC) with its output, the first time it connects. A player that connects
+/// again gets the same output back. Blocks; run on a thread.
 pub fn serve(
     listener: TcpListener,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
     on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
 ) -> io::Result<()> {
+    let players: Arc<Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>> = Default::default();
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -267,10 +277,11 @@ pub fn serve(
         let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         let on_player = on_player.clone();
         let stream_path = stream_path.clone();
+        let players = players.clone();
         std::thread::Builder::new()
             .name(format!("slimproto {peer}"))
             .spawn(move || {
-                if let Err(e) = session(stream, server_port, stream_path, on_player) {
+                if let Err(e) = session(stream, server_port, stream_path, &players, on_player) {
                     tracing::info!(%peer, "slimproto session ended: {e}");
                 }
             })?;
@@ -282,6 +293,7 @@ fn session(
     stream: TcpStream,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    players: &Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>,
     on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
 ) -> Result<(), SlimError> {
     stream.set_nodelay(true)?;
@@ -294,24 +306,35 @@ fn session(
         )));
     }
     let hello = parse_hello(&body)?;
-    tracing::info!(player = %hello.mac_string(), model = %hello.model(), max_rate = hello.max_sample_rate(), "slimproto player");
-    let writer = Arc::new(Mutex::new(stream));
-    let output = Arc::new(SlimOutput::new(
-        hello.clone(),
-        writer.clone(),
-        server_port,
-        stream_path,
-    ));
-    // Turn the DAC on and reset volume to the player's last setting (full).
-    write_frame(&mut *writer.lock().expect("writer"), b"aude", &[1, 1])?;
-    on_player(output.clone());
-    loop {
+    let (output, new) = {
+        let mut p = players.lock().expect("players");
+        match p.get(&hello.mac) {
+            Some(o) => {
+                if o.hello().max_sample_rate() != hello.max_sample_rate() {
+                    tracing::warn!(player = %hello.mac_string(), was = o.hello().max_sample_rate(),
+                        now = hello.max_sample_rate(),
+                        "player came back with another maximum rate; the node keeps the first until it restarts");
+                }
+                (o.clone(), false)
+            }
+            None => {
+                let o = Arc::new(SlimOutput::new(hello.clone(), server_port, stream_path));
+                p.insert(hello.mac, o.clone());
+                (o, true)
+            }
+        }
+    };
+    tracing::info!(player = %hello.mac_string(), model = %hello.model(), max_rate = hello.max_sample_rate(),
+        reconnected = !new, "slimproto player");
+    let generation = output.link().attach(stream);
+    output.greet().map_err(|e| SlimError::Protocol(e.to_string()))?;
+    if new {
+        on_player(output.clone());
+    }
+    let result = loop {
         let (op, body) = match read_frame(&mut reader) {
             Ok(f) => f,
-            Err(e) => {
-                output.mark_gone();
-                return Err(e.into());
-            }
+            Err(e) => break Err(e.into()),
         };
         match &op {
             b"STAT" => {
@@ -319,14 +342,12 @@ fn session(
                     output.on_stat(st);
                 }
             }
-            b"HELO" => {}
-            b"BYE!" => {
-                output.mark_gone();
-                return Ok(());
-            }
+            b"BYE!" => break Ok(()),
             _ => {}
         }
-    }
+    };
+    output.link().detach(generation);
+    result
 }
 
 /// Answer players' UDP discovery broadcasts on port 3483 with our name and
@@ -392,9 +413,11 @@ mod tests {
         let mut buf = Vec::new();
         write_frame(&mut buf, b"aude", &[1, 1]).unwrap();
         assert_eq!(buf, vec![0, 6, b'a', b'u', b'd', b'e', 1, 1]);
-        let p = strm(b's', 1, 24, 96_000, 2, 7788, 0, "GET /x HTTP/1.0\r\n\r\n");
-        assert_eq!(&p[0..7], &[b's', 1, b'p', b'2', b'9', b'2', b'1']);
+        let p = strm(b's', b'1', 24, 96_000, 2, 7788, 0, "GET /x HTTP/1.0\r\n\r\n");
+        assert_eq!(&p[0..7], b"s1p2921");
         assert_eq!(p[7], 10);
+        // squeezelite reads these as ASCII digits.
+        assert_eq!((p[8], p[10]), (b'0', b'0'));
         assert_eq!(&p[18..20], &7788u16.to_be_bytes());
         assert_eq!(&p[20..24], &[0, 0, 0, 0]);
         assert_eq!(&p[24..], b"GET /x HTTP/1.0\r\n\r\n");

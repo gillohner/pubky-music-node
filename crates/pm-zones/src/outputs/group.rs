@@ -177,8 +177,9 @@ impl Output for GroupOutput {
         &self.caps
     }
 
-    /// Tight only when every member is the node's own endpoint, or every member a Slimproto
-    /// player: those share a clock the group corrects against. Anything mixed is loose. So is
+    /// Tight only when every member is the node's own endpoint: those share a clock the group
+    /// corrects against. Anything mixed is loose. Slimproto players are loose until the node
+    /// starts them together (each starts when its own buffer fills). So is
     /// an endpoint playing through its system mixer (`cpal`: a phone, a Mac, a Windows PC):
     /// the system adds latency the group cannot see (hundreds of ms over Bluetooth).
     fn sync(&self) -> crate::SyncClass {
@@ -189,10 +190,7 @@ impl Output for GroupOutput {
             .collect();
         let same = protocols.windows(2).all(|w| w[0] == w[1]);
         let system_mixer = self.members.iter().any(|m| m.id().0.contains("/cpal:"));
-        if same
-            && !system_mixer
-            && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim"))
-        {
+        if same && !system_mixer && protocols.first().map(String::as_str) == Some("net") {
             crate::SyncClass::Tight
         } else {
             crate::SyncClass::Loose
@@ -491,7 +489,7 @@ mod tests {
             ]),
             crate::SyncClass::Loose
         );
-        assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Tight);
+        assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Loose);
         assert_eq!(g(vec![o("net", "a"), o("slim", "b")]), crate::SyncClass::Loose);
         assert_eq!(
             g(vec![o("upnp", "a"), o("airplay", "b")]),

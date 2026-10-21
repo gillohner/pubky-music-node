@@ -1,4 +1,4 @@
-# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Android phones
+# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Squeezebox, Android phones
 
 The multiroom outputs (infra brief §3) were built against mocks and open-source receivers on a machine
 with no speakers or TVs. Paste the section for each device you have into Claude Code on a laptop on
@@ -161,4 +161,25 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
 6. Battery: note the battery used over 30 minutes of playback with the screen off.
 7. If anything fails, attach `adb logcat -s pubky-music` (USB debugging on) and the phone's model
    and Android version.
+```
+
+## Squeezebox players and squeezelite (Slimproto)
+
+Checked here with real squeezelite 2.0 in CI (ci.yml, `slimproto`):
+- 16/44.1 and 24/96 came out bit-exact from the first sample, with no click.
+- The position followed real time; pause was silent within a second, and play resumed.
+- A player that reconnected kept its one zone and its volume.
+
+Players connect to the node on port 3483 (set `[outputs] slimproto_port` if LMS also runs on that machine).
+Groups of Slimproto players are "loosely synced" until the node starts them together.
+
+```
+1. Point the player at the node: squeezelite `-s <node>`, or a Squeezebox's server setting (it may
+   also find the node by itself). It appears as a zone "<model> (<MAC>)".
+2. Play an album: audio within about a second; pause, next and seek take effect at once; the
+   position in the UI follows the music.
+3. A 24/96 or 24/192 album: the signal path stays bit-perfect up to the player's maximum rate
+   (squeezelite `-r`), and the node converts above it.
+4. Restart the player during playback: the zone stays and plays again on play; the volume stays.
+5. Note the model, firmware (or squeezelite version and `-o` device), and anything audible.
 ```

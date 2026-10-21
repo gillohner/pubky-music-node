@@ -1,4 +1,6 @@
-//! A connected Slimproto player as an `Output`.
+//! A connected Slimproto player as an `Output`. One per player (MAC) for the
+//! node's lifetime: a player that reconnects (Wi-Fi drop, restart) gets its
+//! new connection attached to the same output, so its zone keeps working.
 
 use crate::{audg, strm, write_frame, Hello, Stat, FIXED_ONE};
 use async_trait::async_trait;
@@ -6,7 +8,6 @@ use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, 
 use pm_zones::outputs::PullOutput;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, SinkError};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The last `STAT` we saw.
@@ -17,24 +18,95 @@ pub struct PlayerStatus {
     pub output_buffer_size: u32,
     pub output_buffer_fullness: u32,
     pub elapsed_ms: u32,
+    pub jiffies: u32,
     pub last_event: [u8; 4],
+    /// When this report arrived.
+    pub at: Option<std::time::Instant>,
+}
+
+impl PlayerStatus {
+    /// Milliseconds played of the current stream now: the report's, plus the
+    /// time since it while the player is running.
+    pub fn played_ms(&self) -> u64 {
+        let running = matches!(&self.last_event, b"STMt" | b"STMs" | b"STMr" | b"STMo");
+        let since = match (running, self.at) {
+            (true, Some(at)) => at.elapsed().as_millis() as u64,
+            _ => 0,
+        };
+        self.elapsed_ms as u64 + since
+    }
+}
+
+/// The player's current connection and what it last reported, shared by the
+/// output and its open sink.
+#[derive(Default)]
+pub(crate) struct Link {
+    /// The control connection's write side and its number (`attach`).
+    conn: Mutex<Option<(u64, TcpStream)>>,
+    generation: std::sync::atomic::AtomicU64,
+    status: Mutex<PlayerStatus>,
+    /// False after `reset` until the player confirms it dropped its old stream (`STMf`): reports
+    /// already on the way describe the old one.
+    fresh: std::sync::atomic::AtomicBool,
+    /// The last volume set (16.16), sent again on every connection: squeezelite starts at gain 0
+    /// and plays silence until it gets an `audg`.
+    gain: Mutex<Option<u32>>,
+}
+
+impl Link {
+    /// A new connection replaces the old one; returns its number for `detach`.
+    pub(crate) fn attach(&self, stream: TcpStream) -> u64 {
+        let g = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        *self.conn.lock().expect("conn") = Some((g, stream));
+        g
+    }
+
+    /// Connection `g` ended. A later connection that is already attached stays.
+    pub(crate) fn detach(&self, g: u64) {
+        let mut c = self.conn.lock().expect("conn");
+        if c.as_ref().map(|(cur, _)| *cur) == Some(g) {
+            *c = None;
+        }
+    }
+
+    fn connected(&self) -> bool {
+        self.conn.lock().expect("conn").is_some()
+    }
+
+    fn send(&self, op: &[u8; 4], data: &[u8]) -> std::io::Result<()> {
+        let mut c = self.conn.lock().expect("conn");
+        let Some((_, w)) = c.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "player disconnected",
+            ));
+        };
+        write_frame(w, op, data)
+    }
+
+    fn status(&self) -> PlayerStatus {
+        *self.status.lock().expect("status")
+    }
+
+    /// A new stream starts: forget what the player said about the old one.
+    fn reset(&self) {
+        *self.status.lock().expect("status") = PlayerStatus::default();
+        self.fresh.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub struct SlimOutput {
     hello: Hello,
-    writer: Arc<Mutex<TcpStream>>,
+    link: Arc<Link>,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
     pull: Arc<PullOutput>,
     caps: OutputCaps,
-    status: Mutex<PlayerStatus>,
-    gone: AtomicBool,
 }
 
 impl SlimOutput {
     pub fn new(
         hello: Hello,
-        writer: Arc<Mutex<TcpStream>>,
         server_port: u16,
         stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
     ) -> Self {
@@ -63,13 +135,11 @@ impl SlimOutput {
         let name = format!("slim-{}", hello.mac_string().replace(':', ""));
         Self {
             hello,
-            writer,
+            link: Arc::new(Link::default()),
             server_port,
             stream_path,
             pull: Arc::new(PullOutput::new(&name)),
             caps,
-            status: Mutex::new(PlayerStatus::default()),
-            gone: AtomicBool::new(false),
         }
     }
 
@@ -83,33 +153,53 @@ impl SlimOutput {
     }
 
     pub fn status(&self) -> PlayerStatus {
-        *self.status.lock().expect("status")
+        self.link.status()
     }
 
+    /// No connection right now (it may come back: the output stays).
     pub fn is_gone(&self) -> bool {
-        self.gone.load(Ordering::Relaxed)
+        !self.link.connected()
+    }
+
+    pub(crate) fn link(&self) -> &Arc<Link> {
+        &self.link
+    }
+
+    /// A new connection: the DAC on, and the volume (full until one is set).
+    pub(crate) fn greet(&self) -> Result<(), SinkError> {
+        self.send(b"aude", &[1, 1])?;
+        let g = self.link.gain.lock().expect("gain").unwrap_or(FIXED_ONE);
+        self.send(b"audg", &audg(g))
     }
 
     pub(crate) fn on_stat(&self, st: Stat) {
-        let mut s = self.status.lock().expect("status");
+        tracing::debug!(event = %String::from_utf8_lossy(&st.event), elapsed_ms = st.elapsed_ms, jiffies = st.jiffies,
+            output_full = st.output_buffer_fullness, stream_full = st.stream_buffer_fullness, "STAT");
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.link.fresh.load(Relaxed) {
+            if &st.event != b"STMf" {
+                return;
+            }
+            self.link.fresh.store(true, Relaxed);
+        }
+        let mut s = self.link.status.lock().expect("status");
         s.stream_buffer_size = st.stream_buffer_size;
         s.stream_buffer_fullness = st.stream_buffer_fullness;
         s.output_buffer_size = st.output_buffer_size;
         s.output_buffer_fullness = st.output_buffer_fullness;
         s.elapsed_ms = st.elapsed_ms;
+        s.jiffies = st.jiffies;
         s.last_event = st.event;
+        s.at = Some(std::time::Instant::now());
     }
 
-    pub(crate) fn mark_gone(&self) {
-        self.gone.store(true, Ordering::Relaxed);
-    }
-
-    fn send(&self, op: &[u8; 4], data: &[u8]) -> Result<(), SinkError> {
-        if self.is_gone() {
-            return Err(SinkError::Unavailable(self.id(), "player disconnected".into()));
-        }
-        let mut w = self.writer.lock().expect("writer");
-        write_frame(&mut *w, op, data).map_err(|e| SinkError::Device(format!("{}: {e}", self.id())))
+    pub(crate) fn send(&self, op: &[u8; 4], data: &[u8]) -> Result<(), SinkError> {
+        self.link.send(op, data).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotConnected => {
+                SinkError::Unavailable(self.id(), "player disconnected".into())
+            }
+            _ => SinkError::Device(format!("{}: {e}", self.id())),
+        })
     }
 }
 
@@ -132,11 +222,12 @@ impl Output for SlimOutput {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let inner = self.pull.open(fmt).await?;
-        let path = (self.stream_path)(self.pull.stream_name());
+        // Raw PCM: squeezelite plays a WAV header as audio (a click) unless started with -W.
+        let path = (self.stream_path)(self.pull.stream_name()).replacen("/stream.wav", "/stream.pcm", 1);
         let request = format!("GET {path} HTTP/1.0\r\n\r\n");
-        let payload = strm(
+        let start = strm(
             b's',
-            1,
+            b'1',
             fmt.bits,
             fmt.rate_hz,
             fmt.channels,
@@ -144,12 +235,16 @@ impl Output for SlimOutput {
             0,
             &request,
         );
-        self.send(b"strm", &payload)?;
+        self.link.reset();
+        self.send(b"strm", &start)?;
         Ok(Box::new(SlimSink {
-            inner,
-            writer: self.writer.clone(),
-            status: self.status(),
+            inner: Some(inner),
+            link: self.link.clone(),
+            pull: self.pull.clone(),
+            start,
             fmt,
+            written: 0,
+            base: 0,
         }))
     }
 
@@ -165,15 +260,81 @@ impl Output for SlimOutput {
                 ));
             }
         };
-        self.send(b"audg", &audg((gain * FIXED_ONE as f64).round() as u32))
+        let g = (gain * FIXED_ONE as f64).round() as u32;
+        *self.link.gain.lock().expect("gain") = Some(g);
+        self.send(b"audg", &audg(g))
     }
 }
 
 struct SlimSink {
-    inner: Box<dyn AudioSink>,
-    writer: Arc<Mutex<TcpStream>>,
-    status: PlayerStatus,
+    /// The HTTP stream the player fetches; dropped at `drain` so the player sees its end.
+    inner: Option<Box<dyn AudioSink>>,
+    link: Arc<Link>,
+    pull: Arc<PullOutput>,
+    /// The `strm s` that starts the player on the stream (sent again after a flush).
+    start: Vec<u8>,
     fmt: AudioFormat,
+    written: u64,
+    /// Frames written before the player's current stream started (it counts from zero).
+    base: u64,
+}
+
+/// How far the node runs ahead of what the player has played. Socket and player buffers would
+/// take a minute or more at once; this keeps the position live, `drain` short, and bounds what
+/// a flush throws away.
+const AHEAD: std::time::Duration = std::time::Duration::from_secs(5);
+/// A player that plays nothing for this long while audio waits has stopped taking it.
+const STALLED: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long `drain` waits beyond the audio still queued in the player.
+const DRAIN_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl SlimSink {
+    fn command(&self, c: u8) {
+        let _ = self.link.send(
+            b"strm",
+            &strm(
+                c,
+                b'0',
+                self.fmt.bits,
+                self.fmt.rate_hz,
+                self.fmt.channels,
+                0,
+                0,
+                "",
+            ),
+        );
+    }
+
+    fn played_frames(&self) -> u64 {
+        let ms = self.link.status().played_ms();
+        (self.base + ms * self.fmt.rate_hz as u64 / 1000).min(self.written)
+    }
+
+    fn ahead_frames(&self) -> u64 {
+        self.written - self.played_frames()
+    }
+
+    /// Wait while the player has more than `AHEAD` to play.
+    fn pace(&self) -> Result<(), SinkError> {
+        let limit = AHEAD.as_millis() as u64 * self.fmt.rate_hz as u64 / 1000;
+        let mut last = (self.played_frames(), std::time::Instant::now());
+        while self.ahead_frames() > limit {
+            if !self.link.connected() {
+                return Err(SinkError::Device("the player disconnected".into()));
+            }
+            let played = self.played_frames();
+            if played != last.0 {
+                last = (played, std::time::Instant::now());
+            } else if last.1.elapsed() > STALLED {
+                return Err(SinkError::Device(format!(
+                    "the player played nothing for {} s",
+                    STALLED.as_secs()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok(())
+    }
 }
 
 impl AudioSink for SlimSink {
@@ -181,59 +342,61 @@ impl AudioSink for SlimSink {
         self.fmt
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
-        self.inner.write(block)
+        self.pace()?;
+        match self.inner.as_mut() {
+            Some(inner) => inner.write(block)?,
+            None => return Err(SinkError::Device("the stream has ended".into())),
+        }
+        self.written += block.frames() as u64;
+        Ok(())
     }
     fn buffer_level(&self) -> BufferLevel {
-        // The player's output buffer in frames; the pull channel adds a little.
-        let frame_bytes = (self.fmt.bits as u64).div_ceil(8) * self.fmt.channels as u64;
+        // Everything sent and not yet played, by the player's own count (STAT every second
+        // while playing, interpolated in between): its stream and output buffers together.
         BufferLevel {
-            queued_frames: self.status.output_buffer_fullness as u64 / frame_bytes.max(1),
-            capacity_frames: self.status.output_buffer_size as u64 / frame_bytes.max(1),
+            queued_frames: self.ahead_frames(),
+            capacity_frames: AHEAD.as_millis() as u64 * self.fmt.rate_hz as u64 / 1000,
         }
     }
     fn flush(&mut self) -> Result<(), SinkError> {
-        let mut w = self.writer.lock().expect("writer");
-        let _ = write_frame(
-            &mut *w,
-            b"strm",
-            &strm(
-                b'f',
-                0,
-                self.fmt.bits,
-                self.fmt.rate_hz,
-                self.fmt.channels,
-                0,
-                0,
-                "",
-            ),
-        );
-        self.inner.flush()
+        // Stop at once and drop everything queued (`q`; `f` would only drop the next track),
+        // then start the player on a new stream for what comes next.
+        self.command(b'q');
+        self.inner = None;
+        self.inner = Some(self.pull.open_now(self.fmt)?);
+        self.link.reset();
+        self.base = self.written;
+        self.link
+            .send(b"strm", &self.start)
+            .map_err(|e| SinkError::Device(format!("restart the player's stream: {e}")))
     }
     fn drain(&mut self) -> Result<(), SinkError> {
-        self.inner.drain()
+        // End the HTTP stream so the player decodes to the end, then wait until it has played
+        // everything out (STMu: stream over, output empty).
+        if let Some(mut inner) = self.inner.take() {
+            inner.drain()?;
+        }
+        let left = self.ahead_frames();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(left * 1000 / self.fmt.rate_hz.max(1) as u64)
+            + DRAIN_SLACK;
+        while std::time::Instant::now() < deadline {
+            let st = self.link.status();
+            if &st.last_event == b"STMu" || !self.link.connected() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok(())
     }
     fn frames_written(&self) -> u64 {
-        self.inner.frames_written()
+        self.written
     }
 }
 
 impl Drop for SlimSink {
     fn drop(&mut self) {
-        let mut w = self.writer.lock().expect("writer");
-        let _ = write_frame(
-            &mut *w,
-            b"strm",
-            &strm(
-                b'q',
-                0,
-                self.fmt.bits,
-                self.fmt.rate_hz,
-                self.fmt.channels,
-                0,
-                0,
-                "",
-            ),
-        );
+        self.command(b'q');
     }
 }
 
@@ -273,17 +436,21 @@ mod tests {
         let (op, data) = read_frame_server(&mut player).unwrap();
         assert_eq!(&op, b"aude");
         assert_eq!(data, vec![1, 1]);
+        // Full volume: squeezelite plays silence until it gets one.
+        let (op, data) = read_frame_server(&mut player).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(&data[10..14], &FIXED_ONE.to_be_bytes());
 
         let fmt = AudioFormat::pcm(48_000, 24, 2);
         let mut sink = out.open(fmt).await.unwrap();
         let (op, data) = read_frame_server(&mut player).unwrap();
         assert_eq!(&op, b"strm");
-        assert_eq!(&data[0..7], &[b's', 1, b'p', b'2', b'4', b'2', b'1']);
+        assert_eq!(&data[0..7], b"s1p2421");
         assert_eq!(&data[18..20], &7788u16.to_be_bytes());
         let req = String::from_utf8_lossy(&data[24..]).to_string();
         assert_eq!(
             req,
-            "GET /v1/outputs/pull/slim-aabbcc001122/stream.wav?token=t HTTP/1.0\r\n\r\n"
+            "GET /v1/outputs/pull/slim-aabbcc001122/stream.pcm?token=t HTTP/1.0\r\n\r\n"
         );
 
         // The "player" fetches: take the pull stream and read a block.
@@ -313,31 +480,44 @@ mod tests {
         let g = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
         assert!((g as f64 / FIXED_ONE as f64 - 0.501).abs() < 0.01, "{g}");
 
-        // STAT updates the status.
-        let mut st = Vec::new();
-        st.extend_from_slice(b"STMt");
-        st.extend_from_slice(&[0, 0, 0]);
-        st.extend_from_slice(&1000u32.to_be_bytes());
-        st.extend_from_slice(&500u32.to_be_bytes());
-        st.extend_from_slice(&[0u8; 8]);
-        st.extend_from_slice(&0xffffu16.to_be_bytes());
-        st.extend_from_slice(&1u32.to_be_bytes());
-        st.extend_from_slice(&4000u32.to_be_bytes());
-        st.extend_from_slice(&2000u32.to_be_bytes());
-        st.extend_from_slice(&7u32.to_be_bytes());
-        st.extend_from_slice(&0u16.to_be_bytes());
-        st.extend_from_slice(&7500u32.to_be_bytes());
-        st.extend_from_slice(&0u32.to_be_bytes());
-        st.extend_from_slice(&0u16.to_be_bytes());
-        player.write_all(b"STAT").unwrap();
-        player.write_all(&(st.len() as u32).to_be_bytes()).unwrap();
-        player.write_all(&st).unwrap();
+        // STAT updates the status, once the player has confirmed the new stream (STMf):
+        // a report already on its way describes the old one.
+        let stat = |event: &[u8; 4], elapsed_ms: u32| {
+            let mut st = Vec::new();
+            st.extend_from_slice(event);
+            st.extend_from_slice(&[0, 0, 0]);
+            st.extend_from_slice(&1000u32.to_be_bytes());
+            st.extend_from_slice(&500u32.to_be_bytes());
+            st.extend_from_slice(&[0u8; 8]);
+            st.extend_from_slice(&0xffffu16.to_be_bytes());
+            st.extend_from_slice(&1u32.to_be_bytes());
+            st.extend_from_slice(&4000u32.to_be_bytes());
+            st.extend_from_slice(&2000u32.to_be_bytes());
+            st.extend_from_slice(&(elapsed_ms / 1000).to_be_bytes());
+            st.extend_from_slice(&0u16.to_be_bytes());
+            st.extend_from_slice(&elapsed_ms.to_be_bytes());
+            st.extend_from_slice(&0u32.to_be_bytes());
+            st.extend_from_slice(&0u16.to_be_bytes());
+            let mut f = b"STAT".to_vec();
+            f.extend_from_slice(&(st.len() as u32).to_be_bytes());
+            f.extend_from_slice(&st);
+            f
+        };
+        player.write_all(&stat(b"STMt", 99_000)).unwrap();
+        player.write_all(&stat(b"STMf", 0)).unwrap();
+        player.write_all(&stat(b"STMt", 7500)).unwrap();
         for _ in 0..100 {
             if out.status().elapsed_ms == 7500 {
                 break;
             }
+            assert_ne!(
+                out.status().elapsed_ms,
+                99_000,
+                "a report from before the new stream counted"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        assert_eq!(out.status().elapsed_ms, 7500);
         assert_eq!(out.status().output_buffer_fullness, 2000);
         drop(player);
         for _ in 0..100 {
@@ -351,5 +531,23 @@ mod tests {
             out.set_volume(Volume::Db(0.0)).await,
             Err(SinkError::Unavailable(..))
         ));
+
+        // The player comes back (Wi-Fi drop, restart): same output, not announced again,
+        // and commands reach the new connection.
+        let mut again = TcpStream::connect(addr).unwrap();
+        again.write_all(b"HELO").unwrap();
+        again.write_all(&(hello.len() as u32).to_be_bytes()).unwrap();
+        again.write_all(&hello).unwrap();
+        let (op, _) = read_frame_server(&mut again).unwrap();
+        assert_eq!(&op, b"aude");
+        // The last volume set (0 dB, while it was away) comes back with the connection.
+        let (op, data) = read_frame_server(&mut again).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(&data[10..14], &FIXED_ONE.to_be_bytes());
+        assert!(!out.is_gone());
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err());
+        out.set_volume(Volume::Db(0.0)).await.unwrap();
+        let (op, _) = read_frame_server(&mut again).unwrap();
+        assert_eq!(&op, b"audg");
     }
 }

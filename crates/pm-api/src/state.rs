@@ -616,7 +616,7 @@ impl NodeState {
     }
 
     /// Start the Slimproto server (players connect to us) and the UDP
-    /// discovery responder. Each connecting player becomes an output with a
+    /// discovery responder. Call from inside the tokio runtime. Each connecting player becomes an output with a
     /// zone; its pull stream is registered for the HTTP route.
     pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
@@ -631,22 +631,22 @@ impl NodeState {
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> =
             Arc::new(move |name| keys.pull_path(name));
         let state = self.clone();
+        // Players connect on the server's own threads; zones need the runtime.
+        let runtime = tokio::runtime::Handle::current();
+        // Once per player: a player that reconnects keeps its output and zone.
         let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
+            let _rt = runtime.enter();
             let name = out.pull().stream_name().to_string();
             state
                 .pulls
                 .lock()
                 .expect("pulls lock")
                 .insert(name, out.pull().clone());
-            let id = out.id();
-            if state.outputs.get(&id).is_some() {
-                // Reconnecting player: replace the output behind the same zone.
-                state.outputs.register(out.clone());
-                return;
-            }
             let zone_name = out.name();
             state.outputs.register(out.clone());
-            state.create_zone(&zone_name, out);
+            if state.zones.list().iter().all(|z| z.output != out.id()) {
+                state.create_zone(&zone_name, out);
+            }
         });
         let name = self.name.clone();
         std::thread::Builder::new()

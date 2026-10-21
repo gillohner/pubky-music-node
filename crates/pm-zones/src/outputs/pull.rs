@@ -94,6 +94,14 @@ impl Output for PullOutput {
     }
 
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.open_now(fmt)
+    }
+}
+
+impl PullOutput {
+    /// `open` without the runtime: a sink that restarts its listener's stream (Slimproto after a
+    /// flush) opens the next one from its own thread.
+    pub fn open_now(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }

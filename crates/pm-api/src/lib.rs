@@ -573,6 +573,10 @@ async fn pull_stream(
             mime: "audio/wav".into(),
         },
         "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
+        // Slimproto players: the WAV's PCM without its header (squeezelite would play the header).
+        "stream.pcm" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "application/octet-stream".into(),
+        },
         _ => return Err(ApiError::not_found(format!("no stream {file}"))),
     };
     let out = s
@@ -628,6 +632,12 @@ async fn pull_stream(
     let mime = kind.mime(fmt.rate_hz, fmt.channels);
     let rx = tokio_stream::wrappers::ReceiverStream::new(live.rx);
     let body = match kind {
+        pm_out_upnp::dlna::StreamKind::Wav { .. } if file == "stream.pcm" => {
+            let mut pcm = RawPcm::default();
+            axum::body::Body::from_stream(
+                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(pcm.convert(&chunk))),
+            )
+        }
         pm_out_upnp::dlna::StreamKind::Wav { .. } => {
             axum::body::Body::from_stream(rx.map(Ok::<_, std::convert::Infallible>))
         }
@@ -639,6 +649,40 @@ async fn pull_stream(
         }
     };
     Ok(with_headers(mime, body))
+}
+
+/// WAV to its raw PCM: the header (any length: 24-bit streams use WAVE_FORMAT_EXTENSIBLE) is
+/// dropped up to the end of the `data` chunk header, across chunk boundaries.
+#[derive(Default)]
+struct RawPcm {
+    /// Header bytes seen so far, until the `data` chunk starts.
+    head: Vec<u8>,
+    started: bool,
+}
+
+impl RawPcm {
+    fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if self.started {
+            return chunk.to_vec();
+        }
+        self.head.extend_from_slice(chunk);
+        // RIFF, size, WAVE, then chunks: id (4), size (u32 LE), body (padded to even).
+        let mut i = 12;
+        while i + 8 <= self.head.len() {
+            let size = u32::from_le_bytes([
+                self.head[i + 4],
+                self.head[i + 5],
+                self.head[i + 6],
+                self.head[i + 7],
+            ]);
+            if &self.head[i..i + 4] == b"data" {
+                self.started = true;
+                return self.head.split_off(i + 8);
+            }
+            i += 8 + size as usize + (size as usize & 1);
+        }
+        Vec::new()
+    }
 }
 
 /// WAV (44-byte header, little-endian 16-bit) to DLNA LPCM (no header, big-endian), across chunk
@@ -2143,7 +2187,35 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
 
 #[cfg(test)]
 mod l16_tests {
-    use super::L16;
+    use super::{RawPcm, L16};
+
+    #[test]
+    fn raw_pcm_drops_any_wav_header_across_any_chunking() {
+        // The pull sink's own 44-byte header, and a longer one: an extensible fmt chunk (40
+        // bytes) and an odd-sized LIST chunk with its pad byte before `data`.
+        let pcm: Vec<u8> = (1..=12).collect();
+        let mut long = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        long.extend_from_slice(&40u32.to_le_bytes());
+        long.extend_from_slice(&[7u8; 40]);
+        long.extend_from_slice(b"LIST");
+        long.extend_from_slice(&3u32.to_le_bytes());
+        long.extend_from_slice(&[1, 2, 3, 0]);
+        long.extend_from_slice(b"data\xff\xff\xff\xff");
+        let short = pm_zones::outputs::wav_header(pm_model::AudioFormat::pcm(96_000, 24, 2));
+        for header in [short, long] {
+            let mut wav = header;
+            wav.extend_from_slice(&pcm);
+            for cut in 1..wav.len() {
+                for cut2 in cut..wav.len() {
+                    let mut c = RawPcm::default();
+                    let mut got = c.convert(&wav[..cut]);
+                    got.extend(c.convert(&wav[cut..cut2]));
+                    got.extend(c.convert(&wav[cut2..]));
+                    assert_eq!(got, pcm, "cuts at {cut}, {cut2}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn wav_becomes_big_endian_lpcm_across_any_chunking() {

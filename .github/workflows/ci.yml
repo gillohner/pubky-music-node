@@ -110,6 +110,20 @@ jobs:
         run: |
           vng -r "$KVER" --user root -m 2G -- bash -c \
             "modprobe snd-aloop && aplay -l && python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb"
+  slimproto:
+    # Slimproto against real squeezelite: bit-exact at 16/44.1 and 24/96, position, pause and play,
+    # reconnects (tools/slim-squeezelite.py).
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends squeezelite
+      - run: cargo build -p pm-node
+      - run: python3 -I tools/slim-squeezelite.py target/debug/pm-node /tmp/slim
+      - if: failure()
+        run: tail -50 /tmp/slim/node.log /tmp/slim/squeezelite.log
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

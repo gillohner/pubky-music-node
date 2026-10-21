@@ -31,8 +31,8 @@ Every zone state has `sync`:
 | `sync` | Meaning | Label |
 | :-- | :-- | :-- |
 | `single` | one device | nothing |
-| `tight` | sample-accurate: the node's own endpoints on `hw:` DACs and Slimproto (ADR 0009), a Snapcast group, a Sonos group, a Cast group | "In sync" |
-| `loose` | started together, may drift by a fraction of a second: mixed protocols; AirPlay 1, DLNA and single Cast devices together; any endpoint on a system mixer (`…/cpal:…`: a phone, a Mac, a Windows PC), whose latency the node cannot see | "Loosely synced" |
+| `tight` | sample-accurate: the node's own endpoints on `hw:` DACs (ADR 0009), a Snapcast group, a Sonos group, a Cast group | "In sync" |
+| `loose` | started together, may drift by a fraction of a second: mixed protocols; AirPlay 1, DLNA and single Cast devices together; any endpoint on a system mixer (`…/cpal:…`: a phone, a Mac, a Windows PC), whose latency the node cannot see; Slimproto players, until the node starts them together | "Loosely synced" |
 
 ## Actions
 
