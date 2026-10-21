@@ -5,7 +5,9 @@
 //!
 //! The feed (`latest.json`, written by the release workflow) lists a signed
 //! bundle per platform; the app installs only bundles signed with the
-//! project's key (tauri.conf.json, `plugins.updater.pubkey`). Linux updates
+//! project's key, and only for the version the signature names
+//! (`tauri.{linux,macos,windows}.conf.json`, `plugins.updater`: kept out of
+//! the shared config, which Android builds read too). Linux updates
 //! itself only as an AppImage: a .deb is the package manager's to update.
 //! Local builds have no channel and never check.
 

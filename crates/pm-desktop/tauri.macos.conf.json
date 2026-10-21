@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk1QTA0OUFGQTY5MkJFRjgKUldUNHZwS21yMG1nbGVLMmRtenlmSTVNRGQ5S0xQZFVTZFBkNHNkK2E4Ry9CYmN2L2dqdUVNazQK",
+      "requireSignedVersion": true
+    }
+  }
+}

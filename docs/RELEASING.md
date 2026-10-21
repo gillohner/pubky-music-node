@@ -51,7 +51,7 @@ nodes, the TLS verifier's Kotlin classes). Nothing in `gen/` is committed.
   the Windows `certificateThumbprint` or a sign command; they get added to the app job then.
 - **Updater:** the desktop updater's own minisign key (not an Apple or Windows certificate):
   repo secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; the public
-  key is in `crates/pm-desktop/tauri.conf.json` (`plugins.updater.pubkey`). Backup: the infra
+  key is in `crates/pm-desktop/tauri.{linux,macos,windows}.conf.json` (`plugins.updater`; not in the shared config, which Android builds read). Backup: the infra
   machine's `~/.secrets/pubky-music-updater/` (the steward copies it offline). Losing it means
   installed apps cannot update themselves any more: users install a new version by hand once.
 
@@ -70,7 +70,7 @@ lists the signed bundle per platform:
 - Windows: the setup `.exe`, installed passively;
 - Linux: the AppImage, for x86_64 and arm64.
 
-The app installs only bundles signed with the project's key. A Linux `.deb` does not update itself;
+The app installs only bundles signed with the project's key, for the version the signature names (no downgrade by a tampered feed). A Linux `.deb` does not update itself;
 the package manager does.
 
 ## Android version codes
