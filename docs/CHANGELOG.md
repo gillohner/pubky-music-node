@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **The desktop app updates itself** (infra item 3). At start it checks the channel it was built for: builds of main follow edge, and tagged releases follow the latest release. When there is a newer version it asks, then installs it and restarts. This works on macOS, on Windows, and on Linux as an AppImage. Updates are signed with the project's own update key, and the app installs nothing else. Edge builds now carry `0.1.0-<run>` versions so each is newer than the last. Each release has a `latest.json` feed. Details in `docs/RELEASING.md`.
 - **Jellyfin (and Emby) as a source** (step 5.2).
   - Sources › Jellyfin signs in once with a user and password. The node keeps only the access token Jellyfin gives it, never the password, and signing out ends the session on the server too.
   - Search (albums and songs, also in the one search), album and song pages, covers relayed by the node.

@@ -34,6 +34,8 @@ jobs:
     outputs:
       channel: ${{ steps.m.outputs.channel }}
       version: ${{ steps.m.outputs.version }}
+      app_version: ${{ steps.m.outputs.app_version }}
+      update_channel: ${{ steps.m.outputs.update_channel }}
       publish: ${{ steps.m.outputs.publish }}
       android_version_code: ${{ steps.m.outputs.android_version_code }}
     steps:
@@ -63,10 +65,19 @@ jobs:
           else
             code=$(( base + 999 ))
           fi
-          echo "channel=$channel version=$version publish=$publish android_version_code=$code"
+          # The desktop app's version: edge builds are 0.1.0-<run>, so each is newer than the last
+          # for the updater, and older than the 0.1.0 release (MSI needs a numeric pre-release).
+          # It follows the channel it was built for; manual runs follow edge.
+          if [ "$channel" = edge ] || [ "$channel" = dev ]; then
+            app_version="$version-$GITHUB_RUN_NUMBER"; update_channel=edge
+          else
+            app_version="$version"; update_channel=latest
+          fi
+          echo "channel=$channel version=$version app=$app_version ($update_channel) publish=$publish android_version_code=$code"
           {
             echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"
             echo "android_version_code=$code"
+            echo "app_version=$app_version"; echo "update_channel=$update_channel"
           } >> "$GITHUB_OUTPUT"
 
   app:
@@ -79,7 +90,8 @@ jobs:
           - platform: macos-universal
             os: macos-15
             targets: aarch64-apple-darwin,x86_64-apple-darwin
-            args: --target universal-apple-darwin --bundles dmg
+            # `app` too: the updater installs the .app.tar.gz made from it.
+            args: --target universal-apple-darwin --bundles app,dmg
           - platform: windows-x86_64
             os: windows-2025
             targets: ""
@@ -115,10 +127,18 @@ jobs:
             libxdo-dev libasound2-dev patchelf file libfuse2
       - name: version
         shell: bash
-        run: echo '{"version":"${{ needs.meta.outputs.version }}"}' > crates/pm-desktop/release.conf.json
+        run: |
+          echo '{"version":"${{ needs.meta.outputs.app_version }}","bundle":{"createUpdaterArtifacts":true}}' \
+            > crates/pm-desktop/release.conf.json
       - name: build
         shell: bash
         working-directory: crates/pm-desktop
+        env:
+          # Updater bundles are signed with the project's update key (~/.secrets/pubky-music-updater
+          # on the infra machine; the public key is in tauri.conf.json).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PM_UPDATE_CHANNEL: ${{ needs.meta.outputs.update_channel }}
         run: |
           npm ci --no-audit --no-fund
           build() { npx tauri build --ci ${{ matrix.args }} --config release.conf.json; }
@@ -359,6 +379,12 @@ jobs:
           pattern: "{app,binaries}-*"
           path: dist
           merge-multiple: true
+      - name: update feed
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/${{ needs.meta.outputs.channel }}"
+          python3 -I tools/release/updater-manifest.py dist "${{ needs.meta.outputs.app_version }}" "$base" \
+            > dist/latest.json
+          cat dist/latest.json
       - name: checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS

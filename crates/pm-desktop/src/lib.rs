@@ -15,6 +15,8 @@ mod node;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
 mod settings;
+#[cfg(desktop)]
+mod update;
 
 use serde::Serialize;
 use settings::Settings;
@@ -346,8 +348,12 @@ pub fn run() {
         .without_time()
         .try_init();
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             saved,
             open_saved,
@@ -419,6 +425,8 @@ pub fn run() {
             }
             #[allow(unused_variables)]
             let window = builder.build()?;
+            #[cfg(desktop)]
+            update::spawn(app.handle());
             #[cfg(target_os = "android")]
             android::init_tls(&window);
             Ok(())

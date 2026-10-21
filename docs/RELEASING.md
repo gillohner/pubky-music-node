@@ -49,8 +49,29 @@ nodes, the TLS verifier's Kotlin classes). Nothing in `gen/` is committed.
   notarization) and a Windows code-signing certificate. Tauri reads them from
   `APPLE_CERTIFICATE`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` and
   the Windows `certificateThumbprint` or a sign command; they get added to the app job then.
-- **Updater:** not yet. Tauri's updater needs its own signing key and a `latest.json` per
-  release; it comes with the signed desktop builds.
+- **Updater:** the desktop updater's own minisign key (not an Apple or Windows certificate):
+  repo secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; the public
+  key is in `crates/pm-desktop/tauri.conf.json` (`plugins.updater.pubkey`). Backup: the infra
+  machine's `~/.secrets/pubky-music-updater/` (the steward copies it offline). Losing it means
+  installed apps cannot update themselves any more: users install a new version by hand once.
+
+## App updates
+
+The desktop app checks once at start for a newer version on the channel it was built for, and asks
+before installing ("Install and restart" / "Later"):
+- Builds of `main` follow **edge**. Their version is `0.1.0-<run number>`, so each one is newer
+  than the last, and all are older than the `0.1.0` release.
+- Tagged releases follow **latest**: GitHub's latest release, never a pre-release.
+- Manual runs follow edge. Local builds never check.
+
+The publish job writes `latest.json` into each release (`tools/release/updater-manifest.py`). It
+lists the signed bundle per platform:
+- macOS: `.app.tar.gz` (universal);
+- Windows: the setup `.exe`, installed passively;
+- Linux: the AppImage, for x86_64 and arm64.
+
+The app installs only bundles signed with the project's key. A Linux `.deb` does not update itself;
+the package manager does.
 
 ## Android version codes
 
