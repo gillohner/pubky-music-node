@@ -19,6 +19,7 @@ pub mod discover;
 pub mod events;
 pub mod favourites;
 pub mod files;
+pub mod first_run;
 pub mod health;
 pub mod hls;
 pub mod home;
@@ -167,6 +168,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/library/folders",
             get(folders).post(add_folder).delete(remove_folder),
         )
+        .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/from-queue", post(playlists::from_queue))
@@ -2185,8 +2187,9 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
                 Ok(None) => {}
                 Err(e) => tracing::warn!("settings restore failed: {e}"),
             }
-            if let Err(e) = sync.sync(&s.library).await {
-                tracing::warn!("first sync failed: {e}");
+            match sync.sync(&s.library).await {
+                Ok(r) => sync.carry_on(&s, &r),
+                Err(e) => tracing::warn!("first sync failed: {e}"),
             }
             sync.backup_settings(&s).await;
             s.notify_library();
@@ -2219,6 +2222,7 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
     if report.pulled > 0 {
         s.notify_library();
     }
+    sync.carry_on(&s, &report);
     Ok(Json(report))
 }
 

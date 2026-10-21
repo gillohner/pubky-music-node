@@ -100,6 +100,8 @@ impl<'a> Scanner<'a> {
             scan_id,
             ..Default::default()
         };
+        // Writes go in batches of a few hundred files (or half a second), not one commit each.
+        let batch = Batch::new(self.lib)?;
 
         for entry in WalkDir::new(&root).follow_links(true).into_iter() {
             let entry = match entry {
@@ -114,6 +116,7 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             report.files_seen += 1;
+            batch.tick()?;
             let path = entry.path().to_path_buf();
             let meta = match entry.metadata() {
                 Ok(m) => m,
@@ -157,6 +160,7 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        batch.finish()?;
         report.files_removed = self.lib.mark_missing_under(&root, scan_id)?;
         self.lib.finish_scan(
             scan_id,
@@ -198,6 +202,51 @@ impl<'a> Scanner<'a> {
             }
         }
         Ok(id)
+    }
+}
+
+/// A scan's write batch: committed every [`Batch::FILES`] files or [`Batch::MAX_AGE`], and when
+/// dropped (an error ends the scan early, what was written stays).
+struct Batch<'a> {
+    lib: &'a Library,
+    files: std::cell::Cell<u32>,
+    since: std::cell::Cell<std::time::Instant>,
+}
+
+impl<'a> Batch<'a> {
+    const FILES: u32 = 250;
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    fn new(lib: &'a Library) -> Result<Self> {
+        lib.begin_batch()?;
+        Ok(Self {
+            lib,
+            files: 0.into(),
+            since: std::time::Instant::now().into(),
+        })
+    }
+
+    fn tick(&self) -> Result<()> {
+        self.files.set(self.files.get() + 1);
+        if self.files.get() >= Self::FILES || self.since.get().elapsed() >= Self::MAX_AGE {
+            self.lib.commit_batch()?;
+            self.lib.begin_batch()?;
+            self.files.set(0);
+            self.since.set(std::time::Instant::now());
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<()> {
+        self.lib.commit_batch()
+    }
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.lib.commit_batch() {
+            tracing::warn!("scan batch: {e}");
+        }
     }
 }
 

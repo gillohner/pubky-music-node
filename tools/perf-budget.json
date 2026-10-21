@@ -1,0 +1,13 @@
+{
+  "_about": "Speed budgets for the CI fixture: 5,000 generated tracks (cargo run -p pm-library --example big_library -- <dir> 5000), a debug pm-node, tools/ui-perf.js. Measured 2026-10-21 on the dev machine: pages ready in 55-180 ms, search 7-9 ms on the node, first scan 2.3 s, rescan 0.18 s. The budgets leave room for a slower CI machine and fail when a page or search gets much slower; sizes (JSON, DOM nodes) do not depend on the machine and catch a list that loads or draws everything again.",
+  "scan": { "first_ms": 12000, "rescan_ms": 2000 },
+  "pages": {
+    "Home": { "interactive_ms": 1500, "json_kb": 60, "dom_nodes": 3000 },
+    "Albums": { "interactive_ms": 1500, "json_kb": 300, "dom_nodes": 4000 },
+    "Artists": { "interactive_ms": 1500, "json_kb": 60, "dom_nodes": 4000 },
+    "Tracks": { "interactive_ms": 1500, "json_kb": 600, "dom_nodes": 15000 },
+    "Album page": { "interactive_ms": 1000, "json_kb": 60, "dom_nodes": 3000 },
+    "Artist page": { "interactive_ms": 1000, "json_kb": 60, "dom_nodes": 3000 }
+  },
+  "search": { "node_max_ms": 150, "after_last_key_ms": 900 }
+}

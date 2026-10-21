@@ -33,7 +33,16 @@ pub struct PubkySync {
     z32: String,
     /// Set when the homeserver refused a path for lack of access.
     refused: std::sync::atomic::AtomicBool,
+    /// One pass at a time (a manual sync and the background carry-on never overlap).
+    pass: tokio::sync::Mutex<()>,
 }
+
+/// At most this many writes and deletes per sync pass: a big change (thousands of favourites from
+/// an import) goes out in bounded batches with a pause between them, and every object is marked
+/// synced as it lands, so a sync cut short carries on where it stopped.
+pub const WRITES_PER_PASS: usize = 200;
+/// The pause between two passes of a big sync.
+pub const PASS_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What the owner reads when the session cannot reach every folder the node uses.
 pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
@@ -49,6 +58,7 @@ impl PubkySync {
             session,
             z32,
             refused: Default::default(),
+            pass: Default::default(),
         })
     }
 
@@ -60,6 +70,7 @@ impl PubkySync {
             session,
             z32,
             refused: Default::default(),
+            pass: Default::default(),
         }
     }
 
@@ -147,6 +158,7 @@ impl PubkySync {
     /// [`RESIGN_NOTICE`] in the report and [`Self::needs_resign`] set, never a raw 403; the
     /// unsynced objects stay queued.
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+        let _one_at_a_time = self.pass.lock().await;
         match self.sync_once(library).await {
             Ok(mut report) => {
                 if report
@@ -170,6 +182,41 @@ impl PubkySync {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Carry on with what a sync left pending, a pass at a time with [`PASS_PAUSE`] between,
+    /// until nothing is left, a pass makes no progress, or another session replaced this one.
+    pub fn carry_on(self: &Arc<Self>, s: &Arc<crate::state::NodeState>, report: &SyncReport) {
+        if report.pending == 0 {
+            return;
+        }
+        tracing::info!(pending = report.pending, "syncing the rest in batches");
+        let (me, s) = (self.clone(), s.clone());
+        let mut left = report.pending;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PASS_PAUSE).await;
+                if !s.sync_handle().is_some_and(|h| Arc::ptr_eq(&h, &me)) {
+                    break;
+                }
+                match me.sync(&s.library).await {
+                    Ok(r) => {
+                        if r.pulled > 0 {
+                            s.notify_library();
+                        }
+                        if r.pending == 0 || r.pending >= left {
+                            tracing::info!(pending = r.pending, "batched sync done");
+                            break;
+                        }
+                        left = r.pending;
+                    }
+                    Err(e) => {
+                        tracing::warn!("batched sync stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     async fn sync_once(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
@@ -200,7 +247,12 @@ impl PubkySync {
             ))),
         }
         let pending = library.lock().expect("library poisoned").unsynced_tags()?;
-        for row in pending {
+        let total = pending.len();
+        for (done, row) in pending.into_iter().enumerate() {
+            if spent(&report) {
+                report.pending += total - done;
+                break;
+            }
             let path = pm_pubky::schemas::music_tag_path(&row.id);
             if row.deleted {
                 // Also the legacy path, for a tag written there and never moved.
@@ -236,7 +288,12 @@ impl PubkySync {
                 .expect("library poisoned")
                 .mark_tag_synced(&row.id, now_micros())?;
         }
-        match self.homeserver.read_music_tags(&self.z32).await {
+        let known_tags = library.lock().expect("library poisoned").tag_ids()?;
+        match self
+            .homeserver
+            .read_music_tags_except(&self.z32, &known_tags)
+            .await
+        {
             Ok(remote_tags) => {
                 let lib = library.lock().expect("library poisoned");
                 for (path, t) in remote_tags {
@@ -271,7 +328,22 @@ impl PubkySync {
                 heads.0.insert((is_pub(root), ns), found);
             }
         }
-        let remote_favs = self.homeserver.read_v1_favourites(&self.session).await?;
+        // Favourites the node has are listed, not downloaded again
+        let known_favs: std::collections::HashMap<String, (pm_model::MusicUri, i64)> = library
+            .lock()
+            .expect("library poisoned")
+            .list_favourites()?
+            .into_iter()
+            .filter_map(|f| {
+                let uri = pm_model::MusicUri::parse(&f.uri).ok()?;
+                let path = v1::favourite_bookmark_path(&uri).ok()?;
+                Some((path.rsplit('/').next()?.to_string(), (uri, f.created_at)))
+            })
+            .collect();
+        let remote_favs = self
+            .homeserver
+            .read_v1_favourites_except(&self.session, &known_favs)
+            .await?;
 
         // The migration: queue every object the homeserver has only in the old format.
         if !migrated {
@@ -322,7 +394,7 @@ impl PubkySync {
                 lib.mark_favourite_synced(&id, now_micros())?;
                 report.pulled += 1;
             }
-            if !migrated && report.errors.is_empty() {
+            if !migrated && report.errors.is_empty() && report.pending == 0 {
                 lib.set_setting(V1_MIGRATED, &now_micros().to_string())?;
                 tracing::info!("music data is on social/v1 and music/v1");
             }
@@ -385,7 +457,12 @@ impl PubkySync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let pending = library.lock().expect("library poisoned").unsynced_music_posts()?;
-        for row in pending {
+        let total = pending.len();
+        for (done, row) in pending.into_iter().enumerate() {
+            if spent(report) {
+                report.pending += total - done;
+                break;
+            }
             let public = row.visibility == "public";
             // Every version is written privately (the draft); a public playlist is also published:
             // the same version copied under /pub/ (pubky-social-specs plan_publish)
@@ -487,7 +564,12 @@ impl PubkySync {
     ) -> Result<HashSet<String>, SyncError> {
         let mut removed = HashSet::new();
         let pending = library.lock().expect("library poisoned").unsynced_favourites()?;
-        for row in pending {
+        let total = pending.len();
+        for (done, row) in pending.into_iter().enumerate() {
+            if spent(report) {
+                report.pending += total - done;
+                break;
+            }
             let Ok(uri) = pm_model::MusicUri::parse(&row.uri) else {
                 report
                     .errors
@@ -618,6 +700,11 @@ impl PubkySync {
 const V1_MIGRATED: &str = "pubky.v1_migrated";
 
 /// The bare z32 key, without a `pubky` prefix.
+/// This pass has written all it may.
+fn spent(report: &SyncReport) -> bool {
+    report.pushed + report.deleted >= WRITES_PER_PASS
+}
+
 fn raw_key(z32: &str) -> &str {
     z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
 }

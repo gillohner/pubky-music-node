@@ -272,13 +272,17 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                         Err(e) => tracing::warn!("settings restore failed: {e}"),
                     }
                     match sync.sync(&state.library).await {
-                        Ok(r) => tracing::info!(
-                            pushed = r.pushed,
-                            pulled = r.pulled,
-                            deleted = r.deleted,
-                            errors = r.errors.len(),
-                            "initial sync"
-                        ),
+                        Ok(r) => {
+                            tracing::info!(
+                                pushed = r.pushed,
+                                pulled = r.pulled,
+                                deleted = r.deleted,
+                                pending = r.pending,
+                                errors = r.errors.len(),
+                                "initial sync"
+                            );
+                            sync.carry_on(&state, &r);
+                        }
                         Err(e) => tracing::warn!("initial sync failed: {e}"),
                     }
                 }

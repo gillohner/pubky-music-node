@@ -118,7 +118,8 @@ pub(crate) async fn section(
     }
     let mut out = build(&s, &name, &q).await;
     out.section = name;
-    if out.error.is_none() {
+    // "Needs a contact / sign-in" is not kept: it changes the moment the owner acts
+    if out.error.is_none() && out.needs.is_none() {
         cache()
             .lock()
             .expect("home cache")

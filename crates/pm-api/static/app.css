@@ -787,3 +787,22 @@ a.btn { text-decoration: none; }
   .player .zone-btn { min-height: 44px; }
   .player .quality { min-height: 44px; min-width: 44px; padding: 0 12px; justify-content: center; }
 }
+.grow-more { height: 1px; }
+
+/* First run: Home's "Get started" card (steward next-3, item 2) */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.setup-card { padding: 18px 20px; }
+.setup-card .section-head { margin-bottom: 6px; }
+.setup-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.setup-step { display: flex; gap: 14px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--line); }
+.setup-step:first-child { border-top: 0; }
+.setup-step .name { font-weight: 600; }
+.setup-step .sub { color: var(--muted); font-size: 13px; margin: 2px 0 10px; max-width: 70ch; }
+.setup-step.done .sub { margin-bottom: 0; }
+.setup-step .toolbar .input { flex: 1 1 260px; min-width: 0; }
+.stepmark { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; font-size: 13px; background: var(--surface-3); color: var(--fg-2); }
+.setup-step.done .stepmark { background: var(--accent-soft); color: var(--accent-strong); }
+.setup-step.done .stepmark .ic { width: 16px; height: 16px; }
+.setup-suggest { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.setup-suggest .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setup-step .lnk { color: var(--accent-strong); text-decoration: underline; }

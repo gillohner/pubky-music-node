@@ -759,10 +759,11 @@
   // A library track's page id: its canonical identity when known, else lib-<id>.
   const trackPageId = (t) => { const c = Array.isArray(t.canonical) ? t.canonical[0] : t.canonical; const u = canonicalUrl(c); return u ? idOf(u) : 'lib-' + t.id; };
   const trackHasId = (t) => !!canonicalUrl(Array.isArray(t.canonical) ? t.canonical[0] : t.canonical);
-  const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr' } = {}) => {
+  const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
     const z = currentZone(); const np = z && z.now_playing;
-    return `<div class="tracks" data-list="${key}">${tracks.map((t, i) => {
+    const rows = tracks.map((t, k) => {
+      const i = start + k;
       const cur = np && np.item.uri === 'track:' + t.id;
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}">
@@ -778,7 +779,8 @@
           <button class="icon-btn" data-act="more" title="More">${icon('more')}</button>
         </div>
       </div>`;
-    }).join('')}</div>`;
+    }).join('');
+    return bare ? rows : `<div class="tracks" data-list="${key}">${rows}</div>`;
   };
   const bindTrackRows = (container, lists) => {
     container.addEventListener('click', async (e) => {
@@ -1168,7 +1170,8 @@
     if (c && Date.now() - c.at < 60000) return c.sec;
     const sec = await api('GET', `/home/${name}?${new URLSearchParams({ ...(window ? { window } : {}), ...(limit ? { limit } : {}) })}`).catch((e) => ({ section: name, items: [], tags: [], error: e.message }));
     sec.items = sec.items || []; sec.tags = sec.tags || [];
-    if (!sec.error) homeCache.set(key, { at: Date.now(), sec });
+    // "Needs a contact / a sign-in" answers are not kept: they change as soon as the owner acts
+    if (!sec.error && !sec.needs) homeCache.set(key, { at: Date.now(), sec });
     return sec;
   };
   const mins = (ms) => { const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
@@ -1212,7 +1215,7 @@
   const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span><button class="btn sm primary" data-resign>Sign in again</button></div>` : '';
   const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = () => { state.autoResign = true; if (state.view === 'settings') render(); else setView('settings'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
-  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
+  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
   const pageAll = async (path, idOf, unwrap = (r) => r) => {
     const out = []; let after = null;
@@ -1223,6 +1226,30 @@
       after = idOf(rows[rows.length - 1]); if (after == null) break;
     }
     return out;
+  };
+  // Long lists draw a screenful at a time and add more as their end scrolls into view, so a
+  // library of 50,000 tracks opens as fast as a small one. `more()` appends the next part and
+  // says whether anything is left (it may fetch). Returns a function that stops the growing.
+  const growList = (box, more) => {
+    const sentinel = document.createElement('div'); sentinel.className = 'grow-more'; sentinel.setAttribute('aria-hidden', 'true');
+    box.after(sentinel);
+    let busy = false; let done = false;
+    const io = new IntersectionObserver(async (es) => {
+      if (busy || done || !es.some((e) => e.isIntersecting)) return;
+      busy = true;
+      try { done = !(await more()); } catch (e) { done = true; toast(e.message, 'error'); }
+      busy = false;
+      if (done) { io.disconnect(); sentinel.remove(); } else { io.unobserve(sentinel); io.observe(sentinel); }
+    }, { rootMargin: '1200px 0px' });
+    io.observe(sentinel);
+    return () => { done = true; io.disconnect(); sentinel.remove(); };
+  };
+  // The same over items already in memory: `html(slice, start)` draws a part; `bind()` wires it.
+  const growItems = (box, items, html, bind, step = 120) => {
+    let n = 0;
+    const more = () => { const part = items.slice(n, n + step); if (part.length) { box.insertAdjacentHTML('beforeend', html(part, n)); n += part.length; if (bind) bind(); } return n < items.length; };
+    more();
+    return n < items.length ? growList(box, more) : () => {};
   };
   // A client-side filter box for long lists: hides rows/tiles whose text does not contain the query.
   const filterBox = (placeholder) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">`;
@@ -1247,6 +1274,60 @@
   };
   const focusChips = (albums) => `<div class="chips" role="tablist" aria-label="Focus">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" role="tab" aria-selected="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
 
+  // ---- first run (steward next-3, item 2) ------------------------------------
+  // Home's "Get started" card: add music (suggested folders, or a path), play something, the
+  // contact Discover needs, and Pubky sign-in. It stays until done or hidden.
+  const setupHidden = () => { try { return localStorage.getItem('pm.setupHidden') === '1'; } catch { return false; } };
+  const renderSetup = async () => {
+    const box = $('#h-setup'); if (!box) return;
+    const [info, ns, hist, user] = await Promise.all([
+      api('GET', '/info'), api('GET', '/node/settings').catch(() => ({ contact: '' })),
+      api('GET', '/library/history?limit=1').catch(() => ({ plays: [] })), pubkyUser(),
+    ]).catch(() => [null]);
+    if (!info || state.view !== 'home' || !box.isConnected) return;
+    state.info = info;
+    const has = { music: info.library.tracks > 0, played: (hist.plays || []).length > 0, contact: !!(ns.contact || '').trim(), pubky: !!user };
+    const done = Object.values(has).filter(Boolean).length;
+    state.setupShown = !(done === 4 || (has.music && setupHidden()));
+    if (!state.setupShown) { box.innerHTML = ''; return; }
+    let suggestions = [];
+    if (!has.music && !info.scanning) suggestions = await api('GET', '/library/folders/suggest').catch(() => []);
+    if (state.view !== 'home' || !box.isConnected) return;
+    const n = (x) => Number(x).toLocaleString();
+    const step = (k, no, title, sub, body = '') => `<li class="setup-step ${has[k] ? 'done' : ''}"><span class="stepmark" aria-hidden="true">${has[k] ? icon('check') : no}</span><div class="grow"><div class="name">${title}${has[k] ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${has[k] ? '' : body}</div></li>`;
+    const musicBody = info.scanning
+      ? `<p class="small" role="status">Reading your files… ${n(info.library.tracks)} tracks so far.</p>`
+      : `${suggestions.length ? `<div class="setup-suggest">${suggestions.map((f) => `<button class="btn sm" data-addfolder="${esc(f.path)}">${icon('plus')} ${esc(f.path)} <span class="muted">${f.more ? 'over ' : ''}${n(f.audio_files)} audio files</span></button>`).join('')}</div>` : ''}
+        <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
+        <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from Internet Archive, Audius or Jamendo</a>, no account needed.</p>`;
+    box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of 4 done</span>${has.music ? '<button class="link" id="setuphide">Hide</button>' : ''}</div><ol class="setup-steps">`
+      + step('music', 1, 'Add your music', has.music ? `${n(info.library.tracks)} tracks${info.library.albums ? ` · ${n(info.library.albums)} albums` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
+      + step('played', 2, 'Play something', has.music ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : 'Once your music is in.', has.music ? '<button class="btn sm primary" id="setupplay">' + icon('play') + ' Shuffle my music</button>' : '')
+      + step('contact', 3, 'See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>')
+      + step('pubky', 4, 'Keep your playlists on Pubky (optional)', has.pubky ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>')
+      + '</ol></div></section>';
+    const again = () => setTimeout(() => { if (state.view === 'home') renderSetup(); }, 1500);
+    const addFolder = async (path) => {
+      if (!path) return;
+      try { const r = await api('POST', '/library/folders', { path }); toast(r.scan_started ? 'Folder added: reading your files' : 'Folder added'); watchScan({ scanning: true }); renderSetup(); } catch (e) { toast(e.message, 'error'); }
+    };
+    $$('[data-addfolder]', box).forEach((b) => b.onclick = () => addFolder(b.dataset.addfolder));
+    const fi = $('#setupfolder'); if (fi) { $('#setupadd').onclick = () => addFolder(fi.value.trim()); fi.onkeydown = (e) => { if (e.key === 'Enter') addFolder(fi.value.trim()); }; }
+    const so = $('[data-setup-sources]', box); if (so) so.onclick = (e) => { e.preventDefault(); setView('sources'); };
+    // While the files are read the card counts them; when done, Home shows the albums once
+    if (info.scanning) { state.setupScanning = true; again(); } else if (state.setupScanning) { state.setupScanning = false; render(); }
+    const pb = $('#setupplay'); if (pb) pb.onclick = async () => {
+      // Up to 200 tracks in a random order (albums or not: untagged files have none)
+      try { const r = await api('GET', '/library/tracks?limit=200'); const t = r.tracks.slice(); for (let i = t.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [t[i], t[j]] = [t[j], t[i]]; } await playTracks(t, true); again(); } catch (e) { toast(e.message, 'error'); }
+    };
+    const ci = $('#setupcontact'); if (ci) {
+      const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
+      $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') save(); };
+    }
+    const si = $('#setupsignin'); if (si) si.onclick = () => { state.autoResign = true; setView('settings'); };
+    const hide = $('#setuphide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } state.setupShown = false; box.innerHTML = ''; };
+  };
+
   // ---- render --------------------------------------------------------------
   const render = async () => {
     const v = state.view;
@@ -1258,7 +1339,7 @@
           const win = state.homeWindow || '7d';
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
-          main.innerHTML = pageHead('Home') + resignNotice()
+          main.innerHTML = pageHead('Home') + resignNotice() + '<div id="h-setup"></div>'
             + `<section class="section" id="h-jump"><div class="section-head"><h3>Jump back in</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`
             + '<div id="h-lbwrap"></div>'
             + sec('trending-songs', 'Trending songs', { windows: true, h: 300 }) + sec('trending-albums', 'Trending albums', { windows: true }) + sec('trending-artists', 'Trending artists', { windows: true })
@@ -1266,10 +1347,12 @@
             + sec('podcasts', 'Podcasts') + sec('yours', 'Yours on Pubky', { h: 120 }) + sec('new', 'New on Pubky', { h: 120 });
           $$('[data-win]', main).forEach((b) => b.onclick = () => { state.homeWindow = b.dataset.win; render(); });
           $$('[data-seeall]', main).forEach((b) => b.onclick = () => setView('home-section', { section: b.dataset.seeall, window: state.homeWindow || '7d' }));
+          renderSetup();
           // Local first: recently played and added.
           api('GET', '/library/home?limit=12').then((h) => {
             const el = $('#h-jump .hbody'); if (!el || state.view !== 'home') return;
             const albums = [...(h.recently_played || []), ...(h.recently_added || [])].filter((a, k, all) => a.id != null && all.findIndex((x) => x.id === a.id) === k).slice(0, 12);
+            if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
             el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : '<p class="muted small">Play or add some music and it shows up here.</p>';
             el.parentElement.classList.add('fadein');
             if (albums.length) bindItemTiles(el, albums.map((a) => ({ id: 'lib-' + a.id, title: a.title })), 'album');
@@ -1287,6 +1370,8 @@
           for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new']) {
             loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
               const el = $(`#h-${name} .hbody`); if (!el || state.view !== 'home') return;
+              // Without a contact Pubky has nothing to show yet: Get started says how, once
+              if (sc.needs === 'contact') { el.parentElement.remove(); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);
             });
@@ -1338,17 +1423,39 @@
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
           const shown = albums.filter((a) => inFocus(a, state.focus));
-          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) : '') + (shown.length ? albumGrid(shown) : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
-          bindFilter('.grid .tile');
+          const grid = $('#albumgrid');
+          if (grid) {
+            let stop = () => {};
+            const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles); };
+            draw(shown);
+            const f = $('#filter');
+            if (f) {
+              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
+            }
+          }
           break;
         }
         case 'artists': {
           loading();
           state.artists = await api('GET', '/library/artists');
           if (state.view !== 'artists') return;
-          main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? `<div class="list">${state.artists.map((a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
-          bindFilter('.list .list-row');
+          main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? '<div class="list" id="artistlist"></div>' : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
+          const alist = $('#artistlist');
+          if (alist) {
+            const row = (a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`;
+            const bindRows = () => $$('[data-artist]', alist).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
+            let stop = () => {};
+            const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
+            draw(state.artists);
+            const f = $('#filter');
+            if (f) {
+              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? state.artists.filter((a) => a.name.toLowerCase().includes(q)) : state.artists; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
+            }
+          }
           break;
         }
         case 'identify': {
@@ -1396,22 +1503,55 @@
         }
         case 'tracks': {
           loading();
-          const tracks = await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks);
+          // Pages from the node as the list scrolls; the filter is a library search on the node.
+          const PAGE = 300;
+          const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
           if (state.view !== 'tracks') return;
-          // Big libraries: render 500 rows at a time; the filter searches all of them.
-          const PAGE = 500;
-          const matches = (t, q) => !q || [t.title, artists(t), t.album && t.album.title].filter(Boolean).some((x) => x.toLowerCase().includes(q));
-          main.innerHTML = pageHead('Tracks', tracks.length, (tracks.length > 12 ? filterBox('Filter tracks') : '') + (tracks.length ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (tracks.length ? `<div id="tracklist"></div>` : emptyState('notes', 'No tracks yet', 'Scan a folder from Settings to fill the library.', { view: 'settings', label: 'Open settings' }));
-          const renderList = (subset, all) => {
-            const box = $('#tracklist'); if (!box) return;
-            const shown = all ? subset : subset.slice(0, PAGE);
-            lists.all = shown;
-            box.innerHTML = trackRows(shown, { key: 'all' }) + (shown.length < subset.length ? `<div class="actions" style="margin-top:12px"><button class="btn" id="showall">Show all ${subset.length}</button><span class="muted small">${shown.length} of ${subset.length} shown</span></div>` : '');
-            const sa = $('#showall'); if (sa) sa.onclick = () => renderList(subset, true);
-          };
-          renderList(tracks, false);
-          const f = $('#filter'); if (f) { f.oninput = () => { const q = f.value.trim().toLowerCase(); renderList(q ? tracks.filter((t) => matches(t, q)) : tracks, false); }; f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } }; }
-          const sh = $('#shuffle'); if (sh) sh.onclick = () => playTracks(tracks, true);
+          const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
+          main.innerHTML = pageHead('Tracks', total, (total > 12 ? filterBox('Filter tracks') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No tracks yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          const box = $('#tracklist');
+          if (box) {
+            const shown = []; lists.all = shown;
+            let stop = () => {}; let run = 0;
+            const reset = () => { stop(); stop = () => {}; box.innerHTML = ''; shown.length = 0; };
+            const append = (rows) => { box.insertAdjacentHTML('beforeend', trackRows(rows, { key: 'all', start: shown.length, bare: true })); shown.push(...rows); };
+            const browse = () => {
+              reset(); append(first.tracks); $('#tracknote').hidden = true;
+              if (first.tracks.length === PAGE) {
+                const mine = run;
+                stop = growList(box, async () => {
+                  const r = await api('GET', `/library/tracks?limit=${PAGE}&after=${shown[shown.length - 1].id}`);
+                  if (state.view !== 'tracks' || mine !== run) return false;
+                  append(r.tracks); return r.tracks.length === PAGE;
+                });
+              }
+            };
+            browse();
+            const f = $('#filter'); let timer = null;
+            if (f) {
+              f.oninput = () => {
+                clearTimeout(timer);
+                timer = setTimeout(async () => {
+                  const q = f.value.trim(); const mine = ++run; const c = $('.page-head .count');
+                  if (!q) { browse(); if (c) c.dataset.filtered = ''; return; }
+                  const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
+                  if (!r || mine !== run || state.view !== 'tracks') return;
+                  reset(); append(r.tracks);
+                  const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
+                  if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+                }, 200);
+              };
+              f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
+            }
+            // Play all: what is shown when filtered, else every track (fetched on the press).
+            const sh = $('#shuffle');
+            if (sh) sh.onclick = async () => {
+              if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true);
+              sh.disabled = true; toast(`Loading ${total} tracks…`);
+              try { playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true); } catch (e) { toast(e.message, 'error'); }
+              sh.disabled = false;
+            };
+          }
           break;
         }
         case 'search': {
@@ -1919,6 +2059,9 @@
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           if (state.view !== 'settings') return;
           main.innerHTML = pageHead('Settings') + `
+            <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
+              ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
+              <div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
             <div class="cards">
               <div class="card"><h3>Node</h3><dl class="kv"><dt>Name</dt><dd>${esc(info.name)}</dd><dt>Version</dt><dd>${esc(info.version)}</dd><dt>Library</dt><dd>${info.library.tracks} tracks · ${info.library.albums} albums · ${info.library.artists} artists</dd><dt>Files</dt><dd>${info.library.files}${info.library.missing_files ? ` · <span style="color:var(--warn)">${info.library.missing_files} missing</span>` : ''}</dd></dl>
                 <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><a class="btn" href="/v1/backup${tokenQ()}" download title="A snapshot of the library database: playlists, favourites, tags, history, settings. Restore with pm-node restore">${icon('download')} Download backup</a><button class="btn ghost" id="logout">Change token</button></div></div>
@@ -1928,9 +2071,6 @@
                 <h3 style="margin-top:16px">Subsonic jukebox</h3><p class="muted small">The zone Subsonic clients (Symfonium, Feishin…) drive with their jukebox control.</p><select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select></div>
               <div class="card" id="roonmove"><h3>Move from Roon</h3><ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div></div><div class="card" id="lbcard"><h3>ListenBrainz</h3><div id="lbbody"><div class="skeleton" style="height:80px"></div></div></div><div class="card" id="themecard"><h3>Appearance</h3><p class="muted small">Light or dark, or follow this device.</p><div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div></div><div class="card" id="gordercard"><h3>Play from</h3><p class="muted small">Songs play from the first source here that has them. A playlist can have its own order; a pinned song keeps its source.</p><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div><div class="card"><h3>Pubky</h3>${pk ? `<p class="muted">${pk.user ? 'Signed in as <code>' + esc(pk.user) + '</code>' : 'No session on the node yet'} · ${pk.unsynced} unsynced object${pk.unsynced === 1 ? '' : 's'}</p>${pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : ''}<div class="actions" style="margin-top:14px">${pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : ''}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn primary" id="pklogin">Sign in with Pubky Ring</button>`}<button class="btn" id="sync" ${pk.needs_resign ? `disabled title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Sync with Pubky</button>${pk.user ? `<button class="btn" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Mirror files to this node</button><button class="btn" id="pkcopyall" title="Copy every library file to your homeserver's private storage (files already there are skipped)">${icon('upload')} Copy my library to the homeserver</button>` : ''}</div><div id="pkurl"></div><div class="row" style="gap:8px;margin-top:12px;align-items:center"><input class="input" id="bulklabel" value="library" style="width:140px" aria-label="Tag label"><button class="btn sm" id="bulktag" title="Put one public tag on every track that has a MusicBrainz id or ISRC, so Pinakes matches your songs across services (pushed by the next sync)">${icon('plus')} Tag my whole library on Pubky</button></div><div id="bulkout" class="muted small"></div>${pk.user ? `<div id="pkfiles" class="muted small" style="margin-top:12px">Loading homeserver files…</div>` : ''}` : '<p class="muted">Pubky is not configured on this node.</p>'}</div>
             </div>
-            <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
-              ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
-              <div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
             <section class="section"><div class="section-head"><h3>Outputs</h3><button class="btn sm" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Scan the network</button></div><div id="netscanout"></div><div class="row" style="gap:8px;margin:6px 0 10px"><input class="input" id="rendaddr" placeholder="Renderer IP, description URL, or for a Linn: IP MAC serial" style="flex:1;min-width:200px"><button class="btn sm" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>${outs.length ? `<div class="list">${outs.map((o) => `<div class="list-row"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted">No outputs found.</p>'}</section>
             <section class="section"><div class="section-head"><h3>Zones</h3></div><div class="list">${zoneList().map((z) => `<div class="list-row"><div class="grow"><div class="name">${esc(z.name)}</div><div class="sub">${esc(z.output || '')}</div></div><span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : ''}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}</div>`).join('')}</div>
               <div id="dspbox"></div>
@@ -1944,7 +2084,7 @@
           if (state.dspOpen && state.zones[state.dspOpen]) {
             try { const cfg = await api('GET', `/zones/${encodeURIComponent(state.dspOpen)}/dsp`); $('#dspbox').innerHTML = dspEditor(state.zones[state.dspOpen], cfg); bindDspEditor(state.dspOpen, cfg); } catch (e) { $('#dspbox').innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
           }
-          const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
+          const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
           const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };

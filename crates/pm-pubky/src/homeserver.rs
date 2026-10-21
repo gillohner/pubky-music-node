@@ -153,6 +153,17 @@ impl NodeHomeserver {
         &self,
         session: &PubkySession,
     ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
+        self.read_v1_favourites_except(session, &Default::default()).await
+    }
+
+    /// The same, without downloading the bookmarks the caller already knows: `known` maps a
+    /// bookmark's file name to its music URL and time, and a listed file of that name is taken
+    /// from it. A sync then costs a listing, not one request per favourite.
+    pub async fn read_v1_favourites_except(
+        &self,
+        session: &PubkySession,
+        known: &std::collections::HashMap<String, (pm_model::MusicUri, i64)>,
+    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
         let user = session.public_key();
         let mut out = Vec::new();
         for path in self
@@ -164,6 +175,10 @@ impl NodeHomeserver {
             )
             .await?
         {
+            if let Some((uri, created_at)) = known.get(file_name(&path)) {
+                out.push((path, uri.clone(), *created_at));
+                continue;
+            }
             let bytes = self
                 .fetch(&user, &path, Visibility::Private, Some(session))
                 .await?;
@@ -301,6 +316,16 @@ impl NodeHomeserver {
         &self,
         user_z32: &str,
     ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
+        self.read_music_tags_except(user_z32, &Default::default()).await
+    }
+
+    /// The music tags whose id (file name) is not in `known`: the ones the caller does not have
+    /// yet. Known tags are listed but not downloaded.
+    pub async fn read_music_tags_except(
+        &self,
+        user_z32: &str,
+        known: &std::collections::HashSet<String>,
+    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
         let mut out = Vec::new();
         let mut paths = self
@@ -312,6 +337,9 @@ impl NodeHomeserver {
                 .await?,
         );
         for path in paths {
+            if known.contains(file_name(&path)) {
+                continue;
+            }
             let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
             match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
                 Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.push((path, t)),
@@ -709,6 +737,11 @@ pub async fn export_session_secret(session: &PubkySession) -> Option<String> {
         }
     }
     session.as_cookie().and_then(|c| c.export_secret())
+}
+
+/// The last segment of a path (a file name, which for tags and bookmarks is the object's id).
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 #[cfg(test)]

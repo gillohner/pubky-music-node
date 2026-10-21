@@ -80,6 +80,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/folders` | | `[path, present][]` |
 | POST | `/v1/library/folders` | `{path}` | adds a folder on the node (must exist), watches it and starts a scan; `{folders, scan_started}` |
 | DELETE | `/v1/library/folders` | `?path=` | forgets the folder and the tracks that lived only there; `{folders, removed_files, removed_tracks}`; 409 while a scan runs |
+| GET | `/v1/library/folders/suggest` | | where the music probably is, for a new install: `[{path, audio_files, more}]` for the usual places (the home Music folder, `/music`, drives under `/media`, `/mnt`, `/Volumes`) that hold playable files and are not in the library yet; `more`: at least that many |
 | POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs. With `[library] watch = true` (default) the node also rescans by itself after `watch_quiet_secs` without file changes |
 | GET / POST | `/v1/playlists` | POST: `{name, description?, image?, uris?, track_ids?}` | `PlaylistSummary[]` / `PlaylistDetail` |
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |
@@ -147,7 +148,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/radio/play` | `{zone, station}` | replaces the zone's queue with the stream and plays it |
 | GET | `/v1/pubky` | | `{user, unsynced, needs_resign, missing?, notice?}`: `needs_resign` when the session was approved for fewer folders than the node asks for at sign-in (`missing` lists them) or the homeserver refused one; sign in again (same Pubky Ring flow) to replace the session |
 | POST / GET | `/v1/pubky/login` | | POST starts a Pubky Ring sign-in and returns `{url}` (`pubkyauth://…`); GET polls `{status: none\|pending\|signed_in, user?, url?}`. On approval the node stores the session secret, publishes its record and syncs |
-| POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors, notes?}` (`notes`: things worth knowing that are not errors, such as playlists kept in the old format); 412 without a session. The first sync on a node moves what only the old `/priv/pubky.app/` folders hold to v1 and keeps the old files |
+| POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors, notes?, pending}` (`notes`: things worth knowing that are not errors, such as playlists kept in the old format; `pending`: changes left for later passes: a pass writes at most 200, and the node carries on in the background, 2 s apart); 412 without a session. The first sync on a node moves what only the old `/priv/pubky.app/` folders hold to v1 and keeps the old files |
 | GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |
 | POST | `/v1/pubky/files/mirror` | | download missing files into the node's mirror folder and scan it: `{fetched, present, bytes, errors}` |
 | GET | `/upnp/node.xml` | | (no token) the UPnP device description the SSDP announcement points at: name, version, `uuid:<node id>`, `presentationURL` `/`. See `docs/CONNECTION.md` |

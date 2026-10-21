@@ -4,6 +4,28 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **First run from zero** (steward next-3, item 2). A new install (no folders, no contact, no Pubky identity) walked as a new user would, until music plays. Fixed:
+  - **Home was a dead end:** nine sections each said "Set the upstream contact in Settings", and nothing said how to add music. Home now opens with **Get started**:
+    1. Add your music: the folders that hold music are suggested (the Music folder, `/music`, drives under `/media`, `/mnt` and `/Volumes`, with how many audio files each holds), or type a path. The card counts the files as they are read.
+    2. Play something: "Shuffle my music" plays in this browser (it works when files have no album tags, too).
+    3. See what people on Pubky play: the contact, asked for in plain words and saved right there.
+    4. Keep your playlists on Pubky (optional): opens the Pubky Ring sign-in.
+    It says how many steps are done, can be hidden once music is in, and goes when all four are done.
+  - Pubky's sections stay out of Home until a contact is set, instead of nine identical notices. Once it is saved they show at once: neither the node nor the page keeps a "needs a contact" answer any more.
+  - **Settings starts with Library folders** (it was at the bottom of the page).
+  - Empty Albums and Tracks pages point to Library folders and to Get started.
+  - API: `GET /v1/library/folders/suggest`.
+  - **CI:** `tools/ui-first-run.js` starts a node from nothing in the `ui-controls` job and walks the whole path. It checks: a folder is suggested and added, music plays in the browser, each step is ticked, the contact brings Pubky back, sign-in opens, there's no sideways scroll at 375 px, and Hide holds after a reload.
+  - A write from the app during a scan now waits for the scan's batch instead of failing with "database is locked" (SQLite busy timeout).
+- **A big library stays fast** (steward next-3, item 1). Measured on 50,000 generated tracks (5,000 albums, 1,500 artists; one album in five untagged), made with `cargo run -p pm-library --example big_library -- <dir> 50000`:
+  - **First scan: 4 min 21 s → 9.3 s.** The search index was keyed by an unindexed column, so every new track read the whole index. It is now keyed by the track id (migration 12, which upgrades an existing 50,000-track library in under a second). The scan also commits every 250 files instead of once per file.
+  - **Rescan with nothing changed: 4.1 s → 0.7 s.** It still opens no unchanged file.
+  - **Albums opens in 0.11 s (was 2.8 s), Artists in 0.10 s (was 0.65 s).** They draw a screenful and add more as you scroll; the filter works on all of them.
+  - **Tracks opens in 0.16 s (was 2.9 s) and downloads 224 KB (was 37 MB).** It pages from the node as you scroll; its filter is a library search on the node (the first 500 matches); Play all fetches every track only when pressed.
+  - **Search:** the node answers in 15–20 ms. The first result shows 280 ms after the last key, 250 ms of which is the box's wait for typing to stop.
+  - **Sync to the homeserver:** a sync no longer downloads every favourite and tag it already has (5,000 favourites cost 5,000 requests per sync; now a listing). It writes at most 200 changes per pass and carries on in the background with a pause between passes, marking each change as it lands, so an interrupted sync resumes. The sync message says how many are still going out.
+  - **CI keeps it fast:** a new `speed` job builds a 5,000-track library and checks scan, rescan, page and search times, page sizes and downloads against `tools/perf-budget.json` (`tools/ui-perf.js` in a real browser).
+
 - **Accessibility and small screens** (steward next-2, item 2). A new browser audit, `tools/ui-a11y.js` (in CI, `ui-controls` job), covers Home, search, an album, a song, Albums, Tracks, Playlists, the queue and Settings at 1280 and 375 px, in light and dark. It checks names on every control, alt text on every image, a visible focus ring along the Tab path, that rows open with Enter, that typing never reaches the player, that toasts are announced, WCAG AA text contrast, no sideways scroll at 375 px, and player buttons at least 40 px and on screen. It found, and this change fixes:
   - **On phones the player's play, previous and next buttons and the seek bar were below the screen** (the page reserved one 88 px row for a player that wraps to two). The player row now takes the height it needs.
   - Player controls at thumb size on phones (44 px): previous, next, the zone button and the quality badge.

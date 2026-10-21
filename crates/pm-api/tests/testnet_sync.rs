@@ -908,3 +908,63 @@ async fn an_album_is_copied_to_the_homeserver_once() {
         .unwrap()
         .starts_with("/priv/pubky.music/files/"));
 }
+
+/// A big change goes out in bounded batches (steward next-3: no request storm): 450 favourites
+/// take three passes of at most 200 writes, each marking what landed, and a later sync downloads
+/// none of them again. A fresh node still pulls all 450.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_favourites_sync_in_batches() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "n");
+    {
+        let lib = n.library.lock().unwrap();
+        for i in 0..450u32 {
+            let uri = pm_model::MusicUri::parse(&format!(
+                "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
+            ))
+            .unwrap();
+            lib.add_favourite(
+                &pm_pubky::Favourite::id_for(&uri),
+                &uri.to_url(),
+                1_700_000_000_000_000 + i as i64,
+            )
+            .unwrap();
+        }
+    }
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    let mut passes = Vec::new();
+    loop {
+        let r = sync.sync(&n.library).await.unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.pushed <= pm_api::sync::WRITES_PER_PASS, "{r:?}");
+        passes.push((r.pushed, r.pending));
+        if r.pending == 0 {
+            break;
+        }
+        assert!(passes.len() < 5, "{passes:?}");
+    }
+    assert_eq!(passes, vec![(200, 250), (200, 50), (50, 0)]);
+    let r = sync.sync(&n.library).await.unwrap();
+    assert_eq!((r.pushed, r.pulled, r.pending), (0, 0, 0), "{r:?}");
+
+    let fresh = node(dir.path(), "fresh");
+    let r = sync.sync(&fresh.library).await.unwrap();
+    assert_eq!(r.pulled, 450, "{r:?}");
+    assert_eq!(
+        fresh.library.lock().unwrap().list_favourites().unwrap().len(),
+        450
+    );
+}

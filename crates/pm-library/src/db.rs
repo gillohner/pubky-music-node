@@ -8,7 +8,7 @@ use crate::error::{LibraryError, Result};
 use crate::import::ImportedTrack;
 use pm_model::AudioFormat;
 use pm_model::{Album, Artist, AudioFile, Confidence, Isrc, Mbid, MusicUri, SampleKind, Track, TrackId, Upc};
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +25,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (9, include_str!("migrations/0009_lyrics.sql")),
     (10, include_str!("migrations/0010_identify.sql")),
     (11, include_str!("migrations/0011_identify_release.sql")),
+    (12, include_str!("migrations/0012_fts_rowid.sql")),
 ];
 
 pub struct Library {
@@ -218,6 +219,9 @@ impl Library {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // A scan writes from its own connection in batches of a few hundred files; a write from
+        // the API meanwhile waits for the batch instead of failing with "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;",
         )?;
@@ -254,7 +258,7 @@ impl Library {
             }
             conn.execute("UPDATE tracks SET title = ?2 WHERE id = ?1", params![id, tidy])?;
             conn.execute(
-                "UPDATE tracks_fts SET title = ?2 WHERE track_id = ?1",
+                "UPDATE tracks_fts SET title = ?2 WHERE rowid = ?1",
                 params![id, tidy],
             )?;
             n += 1;
@@ -305,12 +309,33 @@ impl Library {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Start grouping writes into one commit (a scan writes thousands of rows; one commit per
+    /// file made a first scan of 50,000 tracks wait on the disk for most of its time). Writes
+    /// made meanwhile, by the scan or anything else, land in the batch; [`Self::commit_batch`]
+    /// commits them. Keep a batch short: commit every few hundred files.
+    pub fn begin_batch(&self) -> Result<()> {
+        let conn = self.lock();
+        if conn.is_autocommit() {
+            conn.execute_batch("BEGIN")?;
+        }
+        Ok(())
+    }
+
+    /// Commit what [`Self::begin_batch`] grouped (nothing to do without a batch).
+    pub fn commit_batch(&self) -> Result<()> {
+        let conn = self.lock();
+        if !conn.is_autocommit() {
+            conn.execute_batch("COMMIT")?;
+        }
+        Ok(())
+    }
+
     // ----- tracks -------------------------------------------------------
 
     /// Insert or update a track, keyed by its file path. Returns the id.
     pub fn upsert_track(&self, track: &Track) -> Result<TrackId> {
         let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let album_id = match &track.album {
             Some(a) => Some(upsert_album(&tx, a)?),
             None => None,
@@ -407,9 +432,9 @@ impl Library {
             album_text.push(' ');
             album_text.push_str(g);
         }
-        tx.execute("DELETE FROM tracks_fts WHERE track_id = ?1", params![track_id])?;
+        tx.execute("DELETE FROM tracks_fts WHERE rowid = ?1", params![track_id])?;
         tx.execute(
-            "INSERT INTO tracks_fts(track_id, title, artist, album) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO tracks_fts(rowid, track_id, title, artist, album) VALUES (?1, ?1, ?2, ?3, ?4)",
             params![track_id, track.title, artist_text, album_text],
         )?;
         tx.commit()?;
@@ -448,7 +473,7 @@ impl Library {
         }
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} JOIN tracks_fts f ON f.track_id = t.id WHERE tracks_fts MATCH ?1 ORDER BY bm25(tracks_fts) LIMIT ?2"
+            "{TRACK_SELECT} JOIN tracks_fts f ON f.rowid = t.id WHERE tracks_fts MATCH ?1 ORDER BY bm25(tracks_fts) LIMIT ?2"
         ))?;
         let raws: Vec<RawTrack> = stmt
             .query_map(params![q, limit as i64], row_to_track_raw)?
@@ -475,7 +500,7 @@ impl Library {
 
     pub fn remove_track(&self, id: TrackId) -> Result<bool> {
         let conn = self.lock();
-        conn.execute("DELETE FROM tracks_fts WHERE track_id = ?1", params![id.0])?;
+        conn.execute("DELETE FROM tracks_fts WHERE rowid = ?1", params![id.0])?;
         Ok(conn.execute("DELETE FROM tracks WHERE id = ?1", params![id.0])? > 0)
     }
 
@@ -958,6 +983,16 @@ impl Library {
             params![id, at_micros],
         )?;
         Ok(())
+    }
+
+    /// Every tag id the node holds, removed ones included (a sync skips downloading these).
+    pub fn tag_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached("SELECT id FROM tags")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     pub fn tag_by_id(&self, id: &str) -> Result<Option<TagRow>> {
@@ -1573,7 +1608,7 @@ impl Library {
     /// and the albums and artists left empty. Returns `(files, tracks)` removed.
     pub fn remove_folder(&self, root: &Path) -> Result<(u64, u64)> {
         let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let root_s = root.to_string_lossy().into_owned();
         let prefix = format!("{}/", root_s.trim_end_matches('/'));
         let escaped = prefix
@@ -1593,7 +1628,7 @@ impl Library {
             [],
         )?;
         tx.execute(
-            "DELETE FROM tracks_fts WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
+            "DELETE FROM tracks_fts WHERE rowid IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
             [],
         )?;
         let tracks = tx.execute(
@@ -1783,7 +1818,7 @@ fn sample_kind_str(k: SampleKind) -> &'static str {
     }
 }
 
-fn upsert_artist(tx: &Transaction<'_>, a: &Artist) -> Result<i64> {
+fn upsert_artist(tx: &Connection, a: &Artist) -> Result<i64> {
     let mbid = a.mbid.map(|m| m.to_string());
     tx.execute(
         "INSERT INTO artists(name, mbid, sort_name) VALUES (?1, ?2, ?3) ON CONFLICT(name, COALESCE(mbid, '')) DO UPDATE SET sort_name = COALESCE(excluded.sort_name, artists.sort_name)",
@@ -1796,7 +1831,7 @@ fn upsert_artist(tx: &Transaction<'_>, a: &Artist) -> Result<i64> {
     )?)
 }
 
-fn upsert_album(tx: &Transaction<'_>, a: &Album) -> Result<i64> {
+fn upsert_album(tx: &Connection, a: &Album) -> Result<i64> {
     let release = a.release_mbid.map(|m| m.to_string());
     tx.execute(
         "INSERT INTO albums(title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs) VALUES (?1,?2,?3,?4,?5,?6,?7)
@@ -2170,10 +2205,31 @@ mod tests {
         assert_eq!(restored.lyrics(id).unwrap().unwrap().0, "la la");
     }
 
+    /// The search index is keyed by track id: a rescan replaces the entry (one hit, new title),
+    /// and a batch commits everything written inside it.
+    #[test]
+    fn search_index_follows_rescans_inside_a_batch() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.begin_batch().unwrap();
+        let id = lib
+            .upsert_track(&sample_track("/music/a.flac", "Get Lucky"))
+            .unwrap();
+        let again = lib
+            .upsert_track(&sample_track("/music/a.flac", "Get Luckier"))
+            .unwrap();
+        lib.commit_batch().unwrap();
+        assert_eq!(id, again);
+        assert!(lib.search_tracks("lucky", 10).unwrap().is_empty());
+        let hits = lib.search_tracks("luckier", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some(id));
+        lib.commit_batch().unwrap(); // nothing open: nothing to do
+    }
+
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 11);
+        assert_eq!(lib.schema_version().unwrap(), 12);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

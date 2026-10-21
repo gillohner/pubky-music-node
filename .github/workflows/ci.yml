@@ -211,7 +211,57 @@ jobs:
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
       - if: failure()
-        run: tail -50 /tmp/pm/node.log
+        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true
+
+  speed:
+    # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
+    # times, pages and search in a real browser, against tools/perf-budget.json.
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
+      - name: scan 5,000 tracks, then rescan with nothing changed
+        run: |
+          mkdir -p /tmp/big/data
+          ./target/debug/examples/big_library /tmp/big/music 5000
+          cat > /tmp/big/node.toml <<'TOML'
+          data_dir = "/tmp/big/data"
+          [library]
+          folders = ["/tmp/big/music"]
+          watch = false
+          [api]
+          listen = "127.0.0.1:7788"
+          token = "ci-token"
+          [outputs]
+          discover = false
+          upnp = false
+          cast = false
+          slimproto_port = 0
+          TOML
+          budget() { node -p "require('./tools/perf-budget.json').scan.$1"; }
+          for run in first rescan; do
+            start=$(date +%s%N)
+            ./target/debug/pm-node -c /tmp/big/node.toml scan
+            ms=$(( ($(date +%s%N) - start) / 1000000 ))
+            echo "$run scan: $ms ms (budget $(budget ${run}_ms))"
+            [ "$ms" -le "$(budget ${run}_ms)" ] || { echo "SLOWER: $run scan"; exit 1; }
+          done
+      - name: pages and search (real browser)
+        timeout-minutes: 20
+        run: |
+          nohup ./target/debug/pm-node -c /tmp/big/node.toml serve > /tmp/big/node.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node $GITHUB_WORKSPACE/tools/ui-perf.js ci-token http://127.0.0.1:7788 --budget $GITHUB_WORKSPACE/tools/perf-budget.json
+      - if: failure()
+        run: tail -50 /tmp/big/node.log
 
   ui-controls:
     runs-on: ubuntu-24.04
@@ -254,5 +304,14 @@ jobs:
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788
+      - name: first run from zero (a new node, no folders, contact or Pubky identity, until music plays)
+        timeout-minutes: 10
+        run: |
+          mkdir -p /tmp/fresh/home/Music /tmp/fresh/data
+          cp crates/pm-audio/tests/fixtures/*.flac /tmp/fresh/home/Music/
+          printf '[api]\nlisten = "127.0.0.1:7790"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n' > /tmp/fresh/node.toml
+          (cd /tmp/fresh && HOME=/tmp/fresh/home nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/fresh/node.toml serve > /tmp/fresh/node.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:7790/v1/info && break; sleep 1; done
+          cd /tmp/pw && PM_MUSIC_DIR=/tmp/fresh/home/Music node $GITHUB_WORKSPACE/tools/ui-first-run.js http://127.0.0.1:7790
       - if: failure()
-        run: tail -50 /tmp/pm/node.log
+        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true

@@ -681,6 +681,10 @@ pub struct SyncReport {
     /// Things worth knowing that are not errors (playlists kept in the old format).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Changes still waiting: a sync writes at most [`crate::sync::WRITES_PER_PASS`] at a time and
+    /// the node carries on with the rest in the background.
+    #[serde(default)]
+    pub pending: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
