@@ -440,13 +440,20 @@ pub(crate) async fn stream(
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = valid_id(&id)?.to_string();
-    relay(
-        &s,
-        "stream",
-        &[("id", &id), ("format", "mp3"), ("maxBitRate", "320")],
-        "audio/mpeg",
-    )
-    .await
+    let mp3 = [("id", id.as_str()), ("format", "mp3"), ("maxBitRate", "320")];
+    match relay(&s, "stream", &mp3, "audio/mpeg").await {
+        // A server that cannot transcode (no ffmpeg) refuses MP3: the original file then
+        Err(e) if e.status == StatusCode::NOT_FOUND => {
+            relay(
+                &s,
+                "stream",
+                &[("id", id.as_str()), ("format", "raw")],
+                "audio/flac",
+            )
+            .await
+        }
+        other => other,
+    }
 }
 
 /// `GET /v1/sources/subsonic/cover/{id}`.

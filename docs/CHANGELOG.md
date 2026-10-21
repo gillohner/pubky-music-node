@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Your server, checked against a real Navidrome (0.64.2).** Connect, search, album pages and zone playback all work. A server that can't transcode (Navidrome without ffmpeg) answered the browser's MP3 request with an error, so the browser stream now falls back to the original file (FLAC plays in browsers). Empty MusicBrainz and ISRC fields are read as "not known".
 - **Your own music server as a source** (step 5.1, OpenSubsonic client): Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node.
   - Sources › "Your server" connects with an address, user and password. It's checked with `ping` first, and the tab takes the server's own name ("Navidrome").
   - The password stays on the node and never comes back from the API. Every request is signed with a fresh token (md5 of password and salt).
