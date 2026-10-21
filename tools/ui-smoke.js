@@ -32,7 +32,7 @@ w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   await sleep(1500);
-  const views = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'discover', 'queue', 'zones', 'settings'];
+  const views = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings'];
   for (const v of views) {
     w.document.querySelector(`.nav-item[data-view="${v}"]`).click();
     await sleep(900);
@@ -116,10 +116,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const more = w.document.querySelector('.track [data-act="more"]');
   if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('New playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
   // Discover: the chart tabs render; with a contact set the rows carry site badges and a details menu.
-  w.document.querySelector('.nav-item[data-view="discover"]').click(); await sleep(2500);
-  const dtabs = [...w.document.querySelectorAll('#main .tabs .chip')].map((c) => c.textContent.trim());
-  console.log('discover tabs:', dtabs.join(' | '), '| rows', w.document.querySelectorAll('#main [data-ditem]').length);
-  if (!dtabs.includes('Top tracks') || !dtabs.includes('Search Pubky')) errors.push('discover tabs incomplete');
+  // Home replaces Discover: its sections render (each on its own).
+  w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);
+  const hsecs = [...w.document.querySelectorAll('#main .section h3')].map((h) => h.textContent);
+  console.log('home sections:', hsecs.join(' | '), '| rows', w.document.querySelectorAll('#main .srow').length);
+  if (!hsecs.includes('Trending songs') || !hsecs.includes('Tags people use for music')) errors.push('home sections incomplete');
+  if (w.document.querySelector('.nav-item[data-view="discover"]')) errors.push('the Discover sidebar entry is still there');
   // Identify library: a card in Settings; an unidentified row's mark opens the review view.
   w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(1500);
   const idbox = w.document.querySelector('#idbox');
@@ -133,26 +135,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('identify view:', idh);
     if (!/Confirm matches/.test(idh)) errors.push('identify review view missing');
   }
-  w.document.querySelector('.nav-item[data-view="discover"]').click(); await sleep(3000);
-  const drow = w.document.querySelector('#main [data-dmore]');
-  if (drow) { drow.click(); await sleep(300); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('discover menu:', items.join(' | ')); if (!items.some((t) => t.startsWith('Details'))) errors.push('discover row menu lacks details'); w.document.body.click(); await sleep(100); }
-  const first = w.document.querySelector('#main [data-ditem]');
-  if (first) { first.click(); await sleep(3000); const h1 = w.document.querySelector('#main h1'); console.log('discover item:', h1 && h1.textContent, '| also on rows', w.document.querySelectorAll('#main [data-vplay], #main .list-row').length, '| tag input', !!w.document.querySelector('#tagadd')); if (!h1) errors.push('discover item page did not render'); }
-  // Navigation: the item page has a real path; back returns to Discover with its path.
+  // An item page from Home: the shared ⋯ menu, a real path, Back returns Home.
+  w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);
+  const hmore = w.document.querySelector('#h-trending-songs [data-smore]');
+  if (hmore) { hmore.click(); await sleep(300); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('home row menu:', items.join(' | ')); if (!items.includes('Play next')) errors.push('the row menu is incomplete'); w.document.body.click(); }
+  const first = w.document.querySelector('#h-trending-songs [data-ssong]');
   if (first) {
+    first.click(); await sleep(4000);
+    const h1 = w.document.querySelector('#main h1'); console.log('item from Home:', h1 && h1.textContent, '| sections', w.document.querySelectorAll('#main #isongs, #main #iversions, #main #ipubky, #main #iyours, #main #iabout').length + 1);
     const itemPath = w.location.pathname;
-    console.log('item path:', itemPath, '| back label:', (w.document.querySelector('#main .back') || {}).textContent.trim());
-    if (!/^\/(song|album|artist)\/(mb-|isrc-|u-)/.test(itemPath)) errors.push('item page has no /song|/album|/artist path');
+    console.log('item path:', itemPath, '| back label:', (w.document.querySelector('#main .back') || { textContent: '' }).textContent.trim());
+    if (!/^\/(song|album|artist)\/(mb-|isrc-|u-|lib-)/.test(itemPath)) errors.push('item page has no /song|/album|/artist path');
     w.history.back(); await sleep(2500);
-    console.log('after back:', w.location.pathname, '| view tabs', !!w.document.querySelector('[data-dmode]'));
-    if (w.location.pathname !== '/discover') errors.push('back from an item page did not return to Discover');
-  }
+    console.log('after back:', w.location.pathname);
+    if (w.location.pathname !== '/') errors.push('back from an item page did not return Home');
+  } else errors.push('no trending song row on Home');
   // Search has a path with the query; back from an item opened there restores the query.
   const sbox = w.document.querySelector('#search');
   sbox.value = 'bohemian'; sbox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter' })); await sleep(4000);
   console.log('search path:', w.location.pathname + w.location.search);
   if (w.location.pathname !== '/search' || !/q=bohemian/.test(w.location.search)) errors.push('search has no /search?q= path');
-  const sItem = w.document.querySelector('#main [data-ditem]');
+  await sleep(4000);
+  const sItem = w.document.querySelector('#main [data-ssong]');
   if (sItem) {
     sItem.click(); await sleep(3000);
     w.history.back(); await sleep(4000);

@@ -22,16 +22,54 @@ fn discovery(s: &NodeState) -> Result<Arc<Discovery>, ApiError> {
     })
 }
 
-/// `MusicRecording` → `track`, `MusicAlbum` → `album`, `MusicGroup`/`Person` → `artist`.
+/// `MusicRecording` → `track`, `MusicAlbum` → `album`, `MusicGroup`/`Person`
+/// → `artist`, podcasts → `podcast`, `MusicEvent` → `concert`.
 fn kind_of(card: &pm_pubky::pinakes::Card) -> String {
     match card.type_.as_deref() {
         Some("MusicRecording" | "MusicComposition") => "track",
         Some("MusicAlbum" | "MusicRelease") => "album",
         Some("MusicGroup" | "Person") => "artist",
         Some("MusicPlaylist") => "playlist",
+        Some("PodcastSeries" | "PodcastEpisode") => "podcast",
+        Some("MusicEvent") => "concert",
         _ => "other",
     }
     .into()
+}
+
+pub(crate) fn kind_of_card(card: &pm_pubky::pinakes::Card) -> String {
+    kind_of(card)
+}
+
+/// A row for any card: music links through the library and the resolver,
+/// podcasts and concerts as they are (they open their own page).
+pub(crate) fn card_item(acc: &ServiceAccess, lib: &Library, c: &pm_pubky::pinakes::Card) -> DiscoverItem {
+    if let Ok(uri) = MusicUri::parse(&c.uri) {
+        let d = DiscoveredItem {
+            uri,
+            card: c.clone(),
+            taggers: None,
+        };
+        return item(acc, lib, &d);
+    }
+    DiscoverItem {
+        uri: c.uri.clone(),
+        title: c.name.clone(),
+        artist: c.artist_hint(),
+        description: c.description.clone().or_else(|| c.start.clone()),
+        image: c.image.clone(),
+        taggers: None,
+        in_library: None,
+        kind: kind_of(c),
+        site: c.site.clone(),
+        pinakes_id: Some(c.id.clone()),
+        group_size: c.group.as_ref().map(|g| g.size),
+        playable: None,
+        also_on: also_on_rows(&c.also_on),
+        page: Some(c.uri.clone()),
+        plays_from: None,
+        connect: Vec::new(),
+    }
 }
 
 fn site_slug(site: &str) -> String {

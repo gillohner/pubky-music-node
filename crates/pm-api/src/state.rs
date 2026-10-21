@@ -143,6 +143,8 @@ pub struct NodeState {
     pub acoustid: std::sync::RwLock<crate::identify::AcoustIdSettings>,
     /// MusicBrainz ws/2 origin for identification suggestions (tests: a mock).
     pub mb_base: std::sync::RwLock<String>,
+    /// OpenStreetMap Nominatim origin for the Home city (tests: a mock).
+    pub nominatim_base: std::sync::RwLock<String>,
     /// The library identification job's progress.
     pub identify: Mutex<crate::identify::IdentifyProgress>,
     /// Pinakes cards for any link: by-uri, then paced resolves, cached.
@@ -261,6 +263,7 @@ impl NodeState {
                 base_url: "https://api.acoustid.org".into(),
             }),
             mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
+            nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),
             identify: Mutex::new(Default::default()),
             pinakes_reader: Default::default(),
             tidal,

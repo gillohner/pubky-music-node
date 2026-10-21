@@ -20,6 +20,7 @@ pub mod events;
 pub mod favourites;
 pub mod files;
 pub mod hls;
+pub mod home;
 pub mod identify;
 pub mod item;
 pub mod mbproxy;
@@ -29,6 +30,7 @@ pub mod playlists;
 pub mod radio;
 pub mod remote;
 pub mod reviews;
+pub mod search;
 pub mod sources;
 pub mod spotify;
 pub mod state;
@@ -193,6 +195,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/play", get(discover::play_plan))
         .route("/discover/describe", post(discover::describe))
         .route("/discover/contents", get(discover::contents))
+        .route("/search", get(search::search))
+        .route("/home/location", get(home::get_location).put(home::set_location))
+        .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
         .route("/item/matches", post(item::confirm_match))
         .route("/item/{kind}/{id}", get(item::page))
@@ -263,6 +268,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlist/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
         .route("/source/{id}", get(web_ui))
+        .route("/home/{section}", get(web_ui))
+        .route("/tag/{labels}", get(web_ui))
+        .route("/discover", get(web_ui))
+        .route("/discover/{*rest}", get(web_ui))
         .route("/search", get(web_ui));
     for view in WEB_VIEWS {
         web = web.route(&format!("/{view}"), get(web_ui));
@@ -343,7 +352,7 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 13] = [
+const WEB_VIEWS: [&str; 12] = [
     "favourites",
     "albums",
     "artists",
@@ -352,7 +361,6 @@ const WEB_VIEWS: [&str; 13] = [
     "playlists",
     "radio",
     "sources",
-    "discover",
     "queue",
     "zones",
     "settings",
@@ -4086,7 +4094,7 @@ mod tests {
         );
         assert_eq!(pg["plays_from"]["mode"], "preview");
         assert_eq!(pg["target"]["uri"], "https://www.deezer.com/album/1999");
-        assert_eq!(pg["section"], "discover");
+        assert_eq!(pg["section"], "home");
         // The library: an album and a song answer the same shape.
         let (aid, tid) = {
             let lib = s.library.lock().unwrap();
@@ -4140,6 +4148,213 @@ mod tests {
         );
         let (st, _) = call(&app, "GET", "/v1/item/playlist/x", None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// One search, streamed per source: the library answers first, a slow
+    /// source still arrives, a failing one reports itself without holding
+    /// the others back, and a second ask comes from the cache.
+    #[tokio::test]
+    async fn search_streams_each_source_as_it_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let track = serde_json::json!({"id": 3135556, "title": "Bohemian Rhapsody", "isrc": "GBUM71029604", "duration": 355, "preview": "http://x/p.mp3",
+            "artist": {"id": 412, "name": "Queen"}, "album": {"id": 1, "title": "A Night at the Opera", "cover_medium": "http://img/o.jpg"}});
+        let mock = Router::new()
+            .route(
+                "/search/track",
+                get(move || {
+                    let t = track.clone();
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                        Json(serde_json::json!({"data": [t]}))
+                    }
+                }),
+            )
+            .route(
+                "/search/album",
+                get(|| async { Json(serde_json::json!({"data": []})) }),
+            )
+            .route(
+                "/search/artist",
+                get(|| async { Json(serde_json::json!({"data": []})) }),
+            )
+            .route(
+                "/v1/search",
+                get(|| async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"error":"index rebuilding"}"#,
+                    )
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.deezer_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(
+                dir.path().join("b.flac"),
+                "Bohemian Rhapsody",
+                "Queen",
+            ))
+            .unwrap();
+        }
+        let app = router(s.clone());
+        let ask = |app: Router| async move {
+            let resp = app
+                .oneshot(
+                    axum::http::Request::get("/v1/search?q=bohemian")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.headers()["content-type"], "application/x-ndjson");
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            String::from_utf8(body.to_vec())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str::<search::SourceAnswer>(l).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let lines = ask(app.clone()).await;
+        let order: Vec<&str> = lines.iter().map(|a| a.source.as_str()).collect();
+        assert_eq!(order.len(), 3, "{order:?}");
+        assert_eq!(order[0], "library", "the library answers first: {order:?}");
+        let lib = &lines[0];
+        assert_eq!(lib.status, "ok");
+        assert_eq!(lib.hits[0].kind, "song");
+        assert_eq!(lib.hits[0].title, "Bohemian Rhapsody");
+        let dz = lines.iter().find(|a| a.source == "deezer").unwrap();
+        assert_eq!(dz.status, "ok");
+        assert!(dz.ms >= 500, "the slow source: {} ms", dz.ms);
+        assert_eq!(
+            dz.hits[0].keys,
+            vec!["isrc:GBUM71029604".to_string()],
+            "rows merge by ISRC"
+        );
+        assert_eq!(dz.hits[0].uri.as_deref(), Some("deezer:track:3135556"));
+        let pk = lines.iter().find(|a| a.source == "pubky").unwrap();
+        assert_eq!(pk.status, "error", "{pk:?}");
+        assert!(pk.error.as_deref().unwrap().contains("index rebuilding"));
+        // Scoped to one source, and cached the second time.
+        let again = ask(app.clone()).await;
+        assert!(again.iter().find(|a| a.source == "deezer").unwrap().cached);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/v1/search?q=bohemian&in=library")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            String::from_utf8_lossy(&body).lines().count(),
+            1,
+            "in=library asks only the library"
+        );
+    }
+
+    /// Home: one Pinakes call per section; empty sections say why, a failing
+    /// one carries its own error, signed-out and city-less sections ask for
+    /// what they need, and a tag page returns co-tags.
+    #[tokio::test]
+    async fn home_sections_answer_items_reasons_or_their_own_error() {
+        let chart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/search-trending-tracks-7d.json"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/search",
+                get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let chart = chart.clone();
+                    async move {
+                        let t = q.get("type").map(String::as_str);
+                        let body = match (t, q.get("sort").map(String::as_str), q.get("facet").map(String::as_str)) {
+                            (Some("MusicRecording"), Some("trending"), _) => chart,
+                            (Some("MusicAlbum"), Some("trending"), _) => r#"{"items":[],"cursor":null}"#.into(),
+                            (Some("MusicGroup"), _, _) => return (StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"index rebuilding"}"#.to_string()),
+                            (Some("MusicRecording"), None, Some("tags")) => r#"{"items":[],"facets":{"tags":[{"label":"hip-hop","count":12},{"label":"german","count":4}]}}"#.into(),
+                            (None, None, Some("tags")) => r#"{"items":[],"facets":{"tags":[{"label":"hip-hop","count":12},{"label":"rap","count":7}]}}"#.into(),
+                            _ => r#"{"items":[]}"#.into(),
+                        };
+                        (StatusCode::OK, body)
+                    }
+                }),
+            )
+            .route(
+                "/search",
+                get(|| async { Json(serde_json::json!([{"name": "Zürich", "lat": "47.3744", "lon": "8.5410"}])) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.nominatim_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, songs) = call(&app, "GET", "/v1/home/trending-songs?window=7d", None).await;
+        assert_eq!(st, StatusCode::OK, "{songs}");
+        assert_eq!(songs["items"].as_array().unwrap().len(), 8);
+        assert!(songs["note"].is_null());
+        let (_, albums) = call(&app, "GET", "/v1/home/trending-albums", None).await;
+        assert!(albums["items"].as_array().unwrap().is_empty());
+        assert_eq!(albums["note"], "No albums were tagged in this window.");
+        let (st, artists) = call(&app, "GET", "/v1/home/trending-artists", None).await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "a failing section is still a 200 with its own error"
+        );
+        assert!(
+            artists["error"].as_str().unwrap().contains("index rebuilding"),
+            "{artists}"
+        );
+        let (_, following) = call(&app, "GET", "/v1/home/following", None).await;
+        assert_eq!(following["needs"], "pubky", "signed out: {following}");
+        let (_, tags) = call(&app, "GET", "/v1/home/tags", None).await;
+        assert_eq!(tags["tags"][0][0], "hip-hop");
+        let (_, concerts) = call(&app, "GET", "/v1/home/concerts", None).await;
+        assert_eq!(concerts["needs"], "location");
+        let (st, loc) = call(
+            &app,
+            "PUT",
+            "/v1/home/location",
+            Some(serde_json::json!({"city": "Zurich"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{loc}");
+        assert_eq!(loc["label"], "Zürich");
+        let (_, concerts) = call(&app, "GET", "/v1/home/concerts", None).await;
+        assert_eq!(concerts["note"], "No concerts near you in the next 30 days.");
+        let (_, tag) = call(&app, "GET", "/v1/home/tag?labels=hip-hop", None).await;
+        assert_eq!(tag["tags"][1][0], "rap", "co-tags on the tag page: {tag}");
+        let (st, _) = call(&app, "GET", "/v1/home/nope", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
     #[test]

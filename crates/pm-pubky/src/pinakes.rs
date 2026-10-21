@@ -345,10 +345,21 @@ pub struct TagFacet {
     pub count: i64,
 }
 
+/// One count of `facet=type`: a card type and how many matched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypeFacet {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Facets {
     #[serde(default)]
     pub tags: Vec<TagFacet>,
+    /// `facet=type`: counts by card type.
+    #[serde(default, rename = "type")]
+    pub types: Vec<TypeFacet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -461,6 +472,11 @@ pub struct SearchQuery {
     pub to: Option<String>,
     /// `tags` today; `type` from the next core release (answers §2).
     pub facet: Option<String>,
+    /// `lat,lon` (needs `radius`, in metres).
+    pub near: Option<String>,
+    /// A resource id: rank what its taggers also referenced (when Pinakes ships it).
+    pub related: Option<String>,
+    pub radius: Option<String>,
     /// `group` for one row per group.
     pub collapse: Option<String>,
     pub cursor: Option<String>,
@@ -518,6 +534,9 @@ impl SearchQuery {
         push("from", &self.from);
         push("to", &self.to);
         push("facet", &self.facet);
+        push("near", &self.near);
+        push("related", &self.related);
+        push("radius", &self.radius);
         push("collapse", &self.collapse);
         push("cursor", &self.cursor);
         if let Some(l) = self.limit {
@@ -643,6 +662,14 @@ impl PinakesClient {
                 body: error_message(&body),
             }),
         }
+    }
+
+    /// `/v1/info` as JSON, for what this instance ships (limits name its
+    /// optional features) without depending on every field.
+    pub async fn info_raw(&self) -> Result<Value, PinakesError> {
+        let url = self.url("/info");
+        let resp = self.send(|| self.http.get(&url)).await?;
+        Self::json(resp).await
     }
 
     pub async fn info(&self) -> Result<Info, PinakesError> {

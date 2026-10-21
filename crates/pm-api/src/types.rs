@@ -967,6 +967,12 @@ pub struct ItemPage {
     /// The "Open on" links (service pages), the item's own first.
     #[serde(default)]
     pub open_on: Vec<Version>,
+    /// "People who tagged this also tagged" (once Pinakes ships `related`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<DiscoverItem>,
+    /// An artist's upcoming concerts (once Pinakes keys event performers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub concerts: Vec<DiscoverItem>,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
 }

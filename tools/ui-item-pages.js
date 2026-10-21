@@ -46,17 +46,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ---- click path: search → artist → album → song → Back ×3 ----
   await p.goto(BASE + '/'); await sleep(1500);
   await p.fill('#search', 'radiohead'); await p.press('#search', 'Enter');
-  await p.waitForSelector('#main [data-src="tidal"][data-sartist]', { timeout: 40000 }).catch(() => {}); await sleep(1500);
+  await p.waitForSelector('#main [data-skind="artist"] [data-tile]', { timeout: 40000 }).catch(() => {}); await sleep(1500);
   // Wait until every source has answered (the page is full height), then scroll.
-  await p.waitForFunction(() => !/Asking your streaming services/.test(document.querySelector('#main').textContent), null, { timeout: 40000 }).catch(() => {});
+  await p.waitForFunction(() => document.querySelector('#sprog') && document.querySelector('#sprog').hidden, null, { timeout: 40000 }).catch(() => {});
   await sleep(500);
   await p.evaluate(() => { document.querySelector('#main').scrollTop = 180; });
   await sleep(300);
   const scroll0 = await p.evaluate(() => document.querySelector('#main').scrollTop);
   const path0 = new URL(p.url()); const steps = [path0.pathname + path0.search];
-  const artistHit = await p.$('#main [data-src="tidal"][data-sartist]');
-  if (!artistHit) errors.push('no TIDAL artist in the search results');
+  const tiles = await p.$$('#main [data-skind="artist"] [data-tile]');
+  let artistHit = null; for (const tl of tiles) { if (/radiohead/i.test(await tl.textContent())) { artistHit = tl; break; } }
+  if (!artistHit) errors.push('no Radiohead artist tile in the search results');
   else {
+    // The position the page has when it is left (the click scrolls the tile into view).
+    await artistHit.scrollIntoViewIfNeeded(); await sleep(200);
+    const scrollLeft = await p.evaluate(() => document.querySelector('#main').scrollTop);
     await artistHit.click(); await waitPage(); steps.push(new URL(p.url()).pathname);
     const back1 = (await p.textContent('#main .back')).trim();
     const tile = await p.$('#ialbums [data-tile]'); if (tile) { await tile.click(); await waitPage(); steps.push(new URL(p.url()).pathname); }
@@ -68,9 +72,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     for (let k = 0; k < 3; k++) { await p.click('#main .back'); await sleep(2500); }
     await sleep(2500);
     const end = new URL(p.url()); const scroll1 = await p.evaluate(() => document.querySelector('#main').scrollTop); const q = await p.inputValue('#search');
-    console.log('after Back ×3:', end.pathname + end.search, '| query', q, '| scroll', scroll0, '→', scroll1);
+    console.log('after Back ×3:', end.pathname + end.search, '| query', q, '| scroll when left', scrollLeft, '→ restored', scroll1);
     if (end.pathname !== '/search' || q !== 'radiohead') errors.push('Back ×3 did not land on the search results with the query');
-    if (Math.abs(scroll1 - scroll0) > 40) errors.push(`scroll not restored (${scroll0} → ${scroll1})`);
+    if (Math.abs(scroll1 - scrollLeft) > 40) errors.push(`scroll not restored (${scrollLeft} → ${scroll1})`);
     if (!/Results for/.test(back1)) errors.push(`artist back label is "${back1}"`);
   }
   // ---- deep link: Back goes to the section ----

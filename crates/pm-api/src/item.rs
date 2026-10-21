@@ -25,12 +25,13 @@ pub(crate) async fn page(
         let n: i64 = n
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
-        return match kind.as_str() {
+        let mut pg = match kind.as_str() {
             "song" => library_song(&s, n, None).await,
             "album" => library_album(&s, n).await,
             _ => library_artist(&s, n).await,
-        }
-        .map(Json);
+        }?;
+        extras(&s, &mut pg).await;
+        return Ok(Json(pg));
     }
     let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
     // A song the library owns (by its canonical identity) is the library's page.
@@ -48,7 +49,70 @@ pub(crate) async fn page(
             }
         }
     }
-    Ok(Json(external(&s, &kind, &id, &url).await))
+    let mut pg = external(&s, &kind, &id, &url).await;
+    extras(&s, &mut pg).await;
+    Ok(Json(pg))
+}
+
+/// Sections that appear once Pinakes ships them: related items (announced in
+/// its `/v1/info` limits) and an artist's upcoming concerts (events keyed by
+/// performer).
+async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) {
+    let Some(d) = s.discovery() else { return };
+    let acc = crate::discover::service_access(s);
+    let to_items = |cards: Vec<pm_pubky::pinakes::Card>| -> Vec<DiscoverItem> {
+        let lib = s.library.lock().expect("library poisoned");
+        cards
+            .iter()
+            .filter(|c| c.is_ok())
+            .map(|c| crate::discover::card_item(&acc, &lib, c))
+            .collect()
+    };
+    if let Some(card_id) = pg.uri.clone() {
+        if crate::home::pinakes_has_related(s).await {
+            if let Ok(Some(r)) = d.resource_for(&card_id).await {
+                let q = pm_pubky::pinakes::SearchQuery {
+                    related: Some(r.card.id.clone()),
+                    collapse: Some("group".into()),
+                    limit: Some(12),
+                    ..Default::default()
+                };
+                if let Ok(p) = d.pinakes().search(&q).await {
+                    pg.related = to_items(p.items);
+                }
+            }
+        }
+    }
+    if pg.kind == "artist" {
+        let mbid = pg
+            .uri
+            .as_deref()
+            .and_then(|u| u.strip_prefix("https://musicbrainz.org/artist/"))
+            .map(str::to_string)
+            .or_else(|| {
+                pg.about
+                    .iter()
+                    .find(|f| {
+                        f.href
+                            .as_deref()
+                            .is_some_and(|h| h.starts_with("https://musicbrainz.org/artist/"))
+                    })
+                    .map(|f| f.value.clone())
+            });
+        if let Some(m) = mbid {
+            let q = pm_pubky::pinakes::SearchQuery {
+                key: Some(format!("mbid:{m}")),
+                type_: Some("MusicEvent".into()),
+                from: Some("now".into()),
+                sort: Some("start".into()),
+                limit: Some(6),
+                ..Default::default()
+            };
+            if let Ok(p) = d.pinakes().search(&q).await {
+                pg.concerts = to_items(p.items);
+            }
+        }
+    }
 }
 
 /// A library track's page id: its canonical identity when known.
@@ -213,6 +277,8 @@ async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<
         about,
         blurb: None,
         section: "tracks".into(),
+        related: Vec::new(),
+        concerts: Vec::new(),
     })
 }
 
@@ -315,6 +381,8 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         about,
         blurb: None,
         section: "albums".into(),
+        related: Vec::new(),
+        concerts: Vec::new(),
     })
 }
 
@@ -400,6 +468,8 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         about,
         blurb: info.and_then(|i| i.bio),
         section: "artists".into(),
+        related: Vec::new(),
+        concerts: Vec::new(),
     })
 }
 
@@ -534,12 +604,9 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         on_pubky,
         about,
         blurb: it.description.clone().filter(|d| !d.is_empty() && kind != "song"),
-        section: if it.in_library.is_some() {
-            "albums"
-        } else {
-            "discover"
-        }
-        .into(),
+        section: if it.in_library.is_some() { "albums" } else { "home" }.into(),
+        related: Vec::new(),
+        concerts: Vec::new(),
     }
 }
 
