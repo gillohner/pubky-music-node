@@ -619,6 +619,17 @@ pub struct CreatePlaylist {
     /// Library tracks; each must have a canonical identity.
     #[serde(default)]
     pub track_ids: Vec<i64>,
+    /// Pins for `uris`, by position (ADR 0015); missing or `null` means Auto.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Option<pm_pubky::ItemSource>>,
+}
+
+/// `?keep_source=true` on a provider playlist import pins every song to its track on that
+/// provider; otherwise the songs follow the playlist's order (Auto).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImportOptions {
+    #[serde(default)]
+    pub keep_source: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

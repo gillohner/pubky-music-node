@@ -5104,6 +5104,28 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("tidal.com/track/20115557"));
+        assert!(items[0].get("source").is_none(), "Auto unless asked");
+        // "Keep TIDAL as the source": every song is pinned to its TIDAL track
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/playlists/pl-1/import?keep_source=true",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["playlist"]["playlist"]["items"].as_array().unwrap();
+        assert_eq!(
+            items[0]["uri"], "https://musicbrainz.org/isrc/USQX91300108",
+            "items stay canonical"
+        );
+        assert_eq!(items[0]["source"]["service"], "tidal");
+        assert!(
+            items[0]["source"]["uri"].as_str().unwrap().contains("tidal.com/"),
+            "{}",
+            items[0]
+        );
+        assert_eq!(items[1]["source"]["service"], "tidal");
         // A stale state is refused; sign-out forgets the tokens.
         let req = Request::builder()
             .uri("/tidal/callback?code=x&state=unknown")

@@ -181,6 +181,9 @@ pub(crate) async fn create(
 ) -> ApiResult<PlaylistDetail> {
     let lib = s.library.lock().expect("library poisoned");
     let mut items = parse_uris(&body.uris)?;
+    for (it, src) in items.iter_mut().zip(&body.sources) {
+        it.source = src.clone();
+    }
     for u in uris_for_tracks(&lib, &body.track_ids)? {
         items.push(PlaylistItem::new(&MusicUri::parse(&u).expect("canonical")));
     }

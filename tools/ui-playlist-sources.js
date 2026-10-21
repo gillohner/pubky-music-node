@@ -71,6 +71,20 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);
       check(g === globalBefore.length, `Settings lists the global order (${g})`);
       if (OUT) { await p.$eval('#gordercard', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/settings-play-from-1280-dark.png` }); }
+      // the import dialog asks once (opened and cancelled: nothing is imported)
+      for (const svc of ['tidal', 'spotify']) {
+        await p.goto(`${BASE}/source/${svc}`); await p.waitForSelector(`[data-${svc[0]}pl]`, { timeout: 20000 }).catch(() => {});
+        const btn = await p.$(`[data-${svc[0]}pl]`);
+        if (!btn) { console.log(`skip: no ${svc} playlists to import here`); continue; }
+        const before = (await api('GET', '/playlists')).length;
+        await btn.click(); await p.waitForSelector('dialog[open] .choice', { timeout: 10000 }).catch(() => {});
+        const choices = await p.$$eval('dialog[open] .choice-label', (e) => e.map((x) => x.textContent));
+        check(choices.length === 2 && choices[0].startsWith('Keep ') && choices[1] === 'Auto', `${svc} import asks: ${JSON.stringify(choices)}`);
+        if (OUT) await p.screenshot({ path: `${OUT}/import-dialog-${svc}-1280-dark.png` });
+        await p.keyboard.press('Escape'); await sleep(300);
+        check(!(await p.$('dialog[open]')) && (await api('GET', '/playlists')).length === before, `${svc}: Esc cancels without importing`);
+        break;
+      }
       await ctx.close();
     }
   } finally {

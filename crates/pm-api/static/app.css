@@ -677,3 +677,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 @media (hover: hover) { .srow .q-actions { opacity: 0; transition: opacity 0.12s; } .srow:hover .q-actions, .srow:focus-within .q-actions { opacity: 1; } }
 @media (max-width: 600px) { #plsongs .srow .thumb { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions .icon-btn { width: 28px; } }
 .porder-row .grow { flex: 1; min-width: 0; }
+/* Choice dialog (playlist import) */
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.btn.choice { flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 12px 14px; height: auto; white-space: normal; border-radius: 12px; }
+.choice-label { font-weight: 600; }
+.choice-note { font-size: 12px; font-weight: 400; opacity: 0.8; }

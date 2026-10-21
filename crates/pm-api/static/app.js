@@ -99,6 +99,30 @@
     return json;
   };
 
+  // A small dialog with a few choices; resolves to the picked value, or null (Esc, Cancel).
+  const choiceDialog = ({ title, text, choices }) => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
+    document.body.appendChild(d);
+    const done = (v) => { d.close(); d.remove(); resolve(v); };
+    $$('[data-ci]', d).forEach((b) => b.onclick = () => done(Number(b.dataset.ci) < 0 ? null : choices[Number(b.dataset.ci)].value));
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    d.showModal(); const first = $('.choice', d); if (first) first.focus();
+  });
+  // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
+  const importPlaylist = async (b, service, id) => {
+    const name = SERVICE_NAMES[service] || service;
+    let order = 'your play order'; try { const o = await api('GET', '/play-order'); order = o.order.map(srcName).join(' › '); } catch { /* keep the words */ }
+    const how = await choiceDialog({ title: 'Import this playlist', text: 'Where should its songs play from?', choices: [
+      { label: `Keep ${name}`, note: `Each song is pinned to its ${name} track.`, value: 'keep', primary: true },
+      { label: 'Auto', note: `Each song plays from the first source that has it (${order}).`, value: 'auto' },
+    ] });
+    if (!how) return;
+    b.disabled = true;
+    try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
+    catch (e) { toast(e.message, 'error'); }
+    b.disabled = false;
+  };
   const login = () => { const d = $('#login'); if (!d.open) { $('#tok').value = state.token; d.showModal(); } };
   // Pubky Ring sign-in: the node starts a flow, we show the link (and a QR when the device has a camera elsewhere), poll until the owner approves, and keep the token it hands out.
   let ringPoll = null;
@@ -1434,7 +1458,7 @@
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'spotify', id: b.dataset.sitem }));
                 $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); spotifyPlay([b.dataset.splay], b); });
                 $('#spotfav').onclick = async () => { try { const r = await api('POST', '/sources/spotify/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
-                $$('[data-spl]', box).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/spotify/playlists/${encodeURIComponent(b.dataset.spl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} tracks${r.skipped ? `, ${r.skipped} skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
+                $$('[data-spl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'spotify', b.dataset.spl));
               } catch (e) { box.innerHTML = `<p class="muted small">Spotify library: ${esc(e.message)}</p>`; }
             })();
           }
@@ -1450,7 +1474,7 @@
                   <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} tracks${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
                 $('#tidalfav').onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
-                $$('[data-tpl]', box).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/tidal/playlists/${encodeURIComponent(b.dataset.tpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} tracks${r.skipped ? `, ${r.skipped} skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
+                $$('[data-tpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'tidal', b.dataset.tpl));
               } catch (e) { box.innerHTML = `<p class="muted small">TIDAL collection: ${esc(e.message)}</p>`; }
             })();
           }

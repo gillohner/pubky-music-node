@@ -1432,7 +1432,9 @@ pub(crate) async fn playlists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<
 pub(crate) async fn import_playlist(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(opt): axum::extract::Query<ImportOptions>,
 ) -> ApiResult<ImportReport> {
+    let keep = opt.keep_source.unwrap_or(false);
     signed_in_user(&s)?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err(ApiError::bad_request("bad TIDAL playlist id"));
@@ -1447,6 +1449,7 @@ pub(crate) async fn import_playlist(
         .filter(|d| !d.is_empty())
         .map(str::to_string);
     let mut uris = Vec::new();
+    let mut sources = Vec::new();
     let mut skipped = 0usize;
     let mut page = get_json(
         &s,
@@ -1462,7 +1465,13 @@ pub(crate) async fn import_playlist(
                 d["id"].as_str().unwrap_or("").to_string(),
             );
             match inc.get(&key).and_then(|t| canonical_track(t)) {
-                Some(u) => uris.push(u.to_url()),
+                Some(u) => {
+                    uris.push(u.to_url());
+                    sources.push((keep && key.0 == "tracks").then(|| pm_pubky::ItemSource {
+                        service: SOURCE_ID.into(),
+                        uri: Some(tidal_url("track", &key.1)),
+                    }));
+                }
                 None => skipped += 1,
             }
         }
@@ -1486,6 +1495,7 @@ pub(crate) async fn import_playlist(
             image: None,
             uris,
             track_ids: Vec::new(),
+            sources,
         }),
     )
     .await?;

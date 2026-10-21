@@ -843,7 +843,9 @@ pub(crate) async fn playlists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<
 pub(crate) async fn import_playlist(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::extract::Query(opt): axum::extract::Query<ImportOptions>,
 ) -> ApiResult<ImportReport> {
+    let keep = opt.keep_source.unwrap_or(false);
     need_user(&s)?;
     let id = valid_id(&id)?.to_string();
     let head = get_json(
@@ -859,10 +861,19 @@ pub(crate) async fn import_playlist(
         .map(str::to_string);
     let items = paged_items(&s, &format!("/playlists/{id}/tracks"), &[("limit", "100".into())]).await?;
     let mut uris = Vec::new();
+    let mut sources = Vec::new();
     let mut skipped = 0usize;
     for it in &items {
         match canonical_track(&it["track"]) {
-            Some(u) => uris.push(u.to_url()),
+            Some(u) => {
+                uris.push(u.to_url());
+                sources.push(keep.then(|| it["track"]["id"].as_str()).flatten().map(|tid| {
+                    pm_pubky::ItemSource {
+                        service: SOURCE_ID.into(),
+                        uri: Some(format!("https://open.spotify.com/track/{tid}")),
+                    }
+                }));
+            }
             None => skipped += 1,
         }
     }
@@ -881,6 +892,7 @@ pub(crate) async fn import_playlist(
             image: None,
             uris,
             track_ids: Vec::new(),
+            sources,
         }),
     )
     .await?;

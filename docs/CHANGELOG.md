@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Importing a TIDAL or Spotify playlist asks once** (step 4, ADR 0015). "Keep TIDAL" pins every song to its exact TIDAL (or Spotify) track. "Auto" lets each song follow your play order. Items stay canonical either way. API: `POST /v1/sources/{tidal,spotify}/playlists/{id}/import?keep_source=true`, and `POST /v1/playlists` takes `sources` (pins by position). Esc or Cancel imports nothing. Shot: `docs/ux/shots/playlist-sources/import-dialog-tidal-1280-dark.png`.
 - **Where playlist songs play from** (step 4, STEWARD-UX-BRIEF §3, ADR 0015).
   - Each song row has a source chip (Library, TIDAL, Spotify, …), or "Unavailable" with the reason.
   - A click on the chip lists every source the song has on this node, plus "Auto (follow the playlist)". Picking one pins the song, shown by a pin mark on the chip.
