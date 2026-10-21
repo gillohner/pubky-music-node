@@ -26,9 +26,9 @@ A release run that is still building finishes and publishes; newer pushes queue 
 | `pubky-music-windows-x86_64.msi`, `-setup.exe` | windows-2025 | WiX and NSIS; unsigned |
 | `pubky-music-linux-{x86_64,arm64}.{AppImage,deb}` | ubuntu-22.04(-arm) | glibc 2.35, so Debian 12 and Ubuntu 22.04 run them |
 | `pubky-music-android-{arm64,universal}.apk`, `.aab` | ubuntu-24.04 | arm64-v8a, armeabi-v7a, x86_64; signed (below) |
-| `pubky-music-node-linux-{x86_64,arm64}.tar.gz` | ubuntu-22.04(-arm) | `pm-node`, `pm-endpoint` with ALSA (x86_64 adds the egui `pm-app`) |
+| `pubky-music-node-linux-{x86_64,arm64}.tar.gz` | ubuntu-22.04(-arm) | `pm-node`, `pm-endpoint` with ALSA |
 | `pubky-music-node-linux-armv7.tar.gz` | ubuntu-24.04 | cross-built in Debian bookworm (`tools/release/build-armv7.sh`), glibc 2.36: Raspberry Pi OS bookworm |
-| `pubky-music-node-{windows-x86_64.zip,macos-arm64.tar.gz}` | windows-2025, macos-15 | node, endpoint and `pm-app` |
+| `pubky-music-node-{windows-x86_64.zip,macos-arm64.tar.gz}` | windows-2025, macos-15 | node, and endpoint with the system's audio output |
 | `ghcr.io/gillohner/pubky-music-node` | ubuntu-24.04 | amd64 and arm64 (the Dockerfile cross-compiles) |
 
 The app's Android project (`crates/pm-desktop/gen/android`) is generated on every build by

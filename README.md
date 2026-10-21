@@ -40,7 +40,7 @@ ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, 
 **Controllers.** A built-in web UI at `/` (phone-friendly and installable to the home screen, keyboard
 shortcuts, media keys, Now Playing with the signal path and lyrics), the Pubky Music app (`pm-desktop`, Tauri 2: that UI in a
 native window on macOS, Windows, Linux and Android, connected with Pubky Ring, and on desktops a
-player for the computer's DACs), the older egui app (`pm-app`), an
+player for the computer's DACs), an
 OpenSubsonic server for Symfonium, Feishin, Amperfy and friends (their jukebox mode drives a zone of
 your choice), and a `/v1` API with a WebSocket event stream for anything else. Both UIs have a Zones
 overview for the whole house, Focus filters by file quality, and new releases from your artists.
@@ -76,7 +76,6 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 | `pm-api` | `/v1` HTTP + WebSocket API, OpenSubsonic `/rest`, the web UI, radio, sync, art fetching |
 | `pm-client` | Rust client for `/v1` |
 | `pm-desktop` | the app: the web UI in a Tauri 2 window for macOS, Windows, Linux and Android, with a built-in player on desktops (outside the workspace; ADR 0012) |
-| `pm-app` | native controller and player (egui; frozen, retirement proposed in ADR 0012) |
 | `pm-stream`, `pm-endpoint`, `pm-out-net` | the endpoint protocol, daemon and node-side output |
 | `pm-out-upnp`, `pm-out-slimproto`, `pm-out-cast` | UPnP/OpenHome, Squeezebox and Chromecast outputs |
 | `pm-node` | the binary: CLI plus `serve` |
@@ -136,7 +135,6 @@ pm-node -c node.toml serve                  # API, web UI at /, one zone per out
 pm-node -c node.toml login                  # sign in with Pubky Ring (QR), stores the session secret
 pm-node -c node.toml upload a.flac b.flac   # to the homeserver's private storage (needs a session)
 pm-endpoint --name "Kitchen Pi"            # on another machine; the node finds it over mDNS
-cargo run -p pm-app                         # native app (PM_NODE, PM_TOKEN)
 ```
 
 ## Upstream etiquette

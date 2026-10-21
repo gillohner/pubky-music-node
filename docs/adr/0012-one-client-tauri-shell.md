@@ -1,6 +1,6 @@
 # ADR 0012: One client: the node's web UI in a Tauri 2 shell; the egui app is frozen
 
-Status: accepted for the shell, 2026-10-20. Retiring `pm-app` is **proposed** and waits for the owner.
+Status: accepted, 2026-10-20 (the shell); retiring `pm-app` accepted by the owner 2026-10-21 and done the same day.
 
 ## Context
 
@@ -32,11 +32,11 @@ later. wry alone gives a window, not bundles, an Android project, signing or an 
   `.AppImage`/`.deb`; `tauri android build` gives the `.apk` and `.aab`. The release workflow
   builds them on every push to `main` (the `edge` pre-release) and on `v*` tags.
 
-**`pm-app` (egui): frozen now, retired after the shell is verified (proposed).** It gets bug
-fixes only; new features go to the web UI. It stays in CI and in releases for one more release
-cycle, as a fallback for machines without a usable WebView (old Linux without WebKitGTK 4.1).
-Once the owner has run the Tauri builds on macOS, Windows and Linux, `pm-app` leaves the
-release and then the workspace. It is not needed headless: `pm-endpoint` is the headless player.
+**`pm-app` (egui): retired.** The proposal was to freeze it and keep it one more release cycle as
+a fallback for machines without a usable WebView. The owner chose to retire it at once
+(2026-10-21): it left the workspace, CI and the release, and its code stays in git history. It is
+not needed headless: `pm-endpoint` is the headless player, and any browser reaches the web UI on
+machines where the app's WebView is missing.
 
 ## Consequences
 

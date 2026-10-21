@@ -8,8 +8,7 @@ name: release
 #   setup .exe, Linux .AppImage and .deb for x86_64 and arm64, Android .apk
 #   (arm64-v8a and universal) and .aab, signed with the repo's release key;
 # - pm-node and pm-endpoint for Linux x86_64, arm64 and armv7 (Raspberry Pi),
-#   plus Windows and macOS, with the egui pm-app where it was released before
-#   (frozen, ADR 0012);
+#   plus Windows and macOS;
 # - the multi-arch node image on GHCR.
 #
 # Builds are unsigned until the owner provides an Apple Developer ID and a
@@ -191,9 +190,9 @@ jobs:
         include:
           - platform: linux-x86_64
             os: ubuntu-22.04
-            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features alsa,pm-app/cpal
+            build: cargo build --release --locked -p pm-node -p pm-endpoint --features alsa
             dir: target/release
-            bins: pm-node pm-endpoint pm-app
+            bins: pm-node pm-endpoint
           - platform: linux-arm64
             os: ubuntu-22.04-arm
             build: cargo build --release --locked -p pm-node -p pm-endpoint --features alsa
@@ -206,14 +205,14 @@ jobs:
             bins: pm-node pm-endpoint
           - platform: windows-x86_64
             os: windows-2025
-            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features pm-app/cpal
+            build: cargo build --release --locked -p pm-node -p pm-endpoint --features pm-endpoint/cpal
             dir: target/release
-            bins: pm-node.exe pm-endpoint.exe pm-app.exe
+            bins: pm-node.exe pm-endpoint.exe
           - platform: macos-arm64
             os: macos-15
-            build: cargo build --release --locked -p pm-node -p pm-endpoint -p pm-app --features pm-app/cpal
+            build: cargo build --release --locked -p pm-node -p pm-endpoint --features pm-endpoint/cpal
             dir: target/release
-            bins: pm-node pm-endpoint pm-app
+            bins: pm-node pm-endpoint
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

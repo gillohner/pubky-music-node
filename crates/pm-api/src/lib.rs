@@ -1229,7 +1229,7 @@ async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
 }
 
 /// The track's audio file as stored, for a controller that plays locally
-/// (`pm-app`). Served only to authenticated callers of this node; never a
+/// (the web UI's browser zone). Served only to authenticated callers of this node; never a
 /// public URL (constraint 2).
 /// A whole body or the byte range a browser asked for (seeking, resuming),
 /// with `Accept-Ranges` so the browser knows seeking is possible.

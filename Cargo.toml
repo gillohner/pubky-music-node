@@ -10,7 +10,6 @@ members = [
     "crates/pm-api",
     "crates/pm-node",
     "crates/pm-client",
-    "crates/pm-app",
     "crates/pm-stream",
     "crates/pm-endpoint",
     "crates/pm-out-net",

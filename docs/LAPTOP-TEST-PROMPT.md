@@ -10,7 +10,7 @@ Do not change the audio pipeline or the sample layout to make a test pass; fix t
 wrong and say what it was.
 
 Setup
-1. Build with ALSA: `cargo build --release -p pm-node -p pm-app -p pm-endpoint --features alsa`.
+1. Build with ALSA: `cargo build --release -p pm-node -p pm-endpoint --features alsa`.
    Free the KA17 from PipeWire/PulseAudio as in docs/HARDWARE-TEST-PROMPT.md.
 2. `pm-node config > node.toml`; set `contact`, `[library] folders` to a real folder with FLACs
    (tagged with MusicBrainz ids where possible: Picard), `[api] token = "<something>"`.
@@ -20,8 +20,7 @@ Checks (pass/fail with evidence each)
 A. API: `curl -H 'Authorization: Bearer <token>' localhost:7788/v1/info`; `/v1/outputs` must list
    `alsa:hw:N,0` (KA17) and `null`; `/v1/zones` one zone per output; a cover at
    `/v1/library/albums/<id>/cover` for an album with embedded art.
-B. Native app: `PM_NODE=http://127.0.0.1:7788 PM_TOKEN=<token> ./target/release/pm-app`.
-   Desktop app (web UI in a window + built-in player): install WebKitGTK and ALSA headers
+B. Desktop app (web UI in a window + built-in player): install WebKitGTK and ALSA headers
    (Arch: `webkit2gtk-4.1 alsa-lib`; Debian: `libwebkit2gtk-4.1-dev libasound2-dev`), then
    `cargo build --release --manifest-path crates/pm-desktop/Cargo.toml` and run
    `./crates/pm-desktop/target/release/pm-desktop` (or `PM_NODE=… PM_TOKEN=… pm-desktop`).

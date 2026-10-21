@@ -1,6 +1,6 @@
 //! Client for the node's `/v1` API (see `docs/api.md`): the HTTP resources
 //! as async methods and the `/v1/events` WebSocket as a stream of
-//! [`ApiEvent`]s. The controller (`pm-app`) and tests use it; a future
+//! [`ApiEvent`]s, for Rust tools and the integration tests. A future
 //! remote-access layer (M5) only changes how the socket is reached.
 
 use futures_util::StreamExt;

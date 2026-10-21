@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **The egui app (`pm-app`) is retired** (owner decision, ADR 0012): it left the workspace, CI and the release archives. The Pubky Music app (Tauri) and the web UI are the controllers; `pm-endpoint` is the headless player. The Windows and macOS archives now ship `pm-endpoint` with the system's audio output.
 - **The connection survives outages** (infra brief §2, `docs/CONNECTION.md`).
   - The node numbers every `/v1/events` message (`seq`). The snapshot carries `boot` (new on every start) and `library_rev`.
   - The node answers `ping` and `resync`, pings sockets itself, and drops silent controllers after 45 s. A new zone is announced at once.
