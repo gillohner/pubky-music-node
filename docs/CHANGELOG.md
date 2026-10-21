@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **The UI says which outside part is down.**
+  - Under the node status in the sidebar, a quiet amber line appears only when something the node uses isn't answering: "Pinakes (Home, links, tags) not answering", "Your homeserver: sign in again", "TIDAL not answering" and so on.
+  - A click lists every part (answering, with its time, or why not), plus "Check again". The library keeps playing either way.
+  - Parts that aren't set up are left out. Each part is asked at most every 30 seconds, all at once, with a 4-second limit.
+  - API: `GET /v1/health`. Test: Pinakes on a closed port is "down · cannot connect", and any HTTP answer counts as answering. Shot: `docs/ux/shots/health/pinakes-down-1280-dark.png`.
 - **Copy albums or the whole library to your homeserver** (private storage, never public).
   - The ⋯ menu on a library song or album has "Copy N songs to my homeserver", and Settings › Pubky has "Copy my library to the homeserver".
   - A dialog first says how many files and how much data. The copy then runs on the node as a job, so you can leave the page, and a small card shows its progress (files, data, the current file, anything that failed).

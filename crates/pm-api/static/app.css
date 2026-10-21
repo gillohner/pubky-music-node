@@ -150,6 +150,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .nav-item.on .ic { color: var(--accent-strong); }
 .node-status { margin-top: auto; padding: 10px; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }
 .node-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.upstreams { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 4px 10px; border: 0; background: none; color: var(--warn); font: inherit; font-size: 12px; cursor: pointer; border-radius: 8px; text-align: left; width: 100%; }
+.upstreams:hover { background: var(--surface-2); }
+.upstreams .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+.upstreams .up-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-status.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(79, 207, 127, 0.18); }
 .node-status.bad .dot { background: var(--bad); }
 .node-status.wait .dot { background: var(--warn); animation: conn-pulse 1.2s ease-in-out infinite; }

@@ -1567,3 +1567,17 @@ pub struct UploadProgress {
     /// The last few problems, plainly.
     pub errors: Vec<String>,
 }
+
+/// `GET /v1/health`: one outside part the node uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthPart {
+    pub id: String,
+    pub name: String,
+    /// `ok`, `down` or `needs_sign_in`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// How long it took to answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+}

@@ -19,6 +19,7 @@ pub mod discover;
 pub mod events;
 pub mod favourites;
 pub mod files;
+pub mod health;
 pub mod hls;
 pub mod home;
 pub mod identify;
@@ -109,6 +110,7 @@ pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
+        .route("/health", get(health::health))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
@@ -2807,6 +2809,50 @@ mod tests {
 
     /// Audius against a local mock: the discovery host is configured, a search
     /// yields track hits, an item has one streamable track, and it plays.
+    #[tokio::test]
+    async fn health_says_which_part_is_down() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(|| async { StatusCode::NOT_FOUND }),
+            )
+            .await
+            .unwrap()
+        });
+        // A port nothing listens on
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{closed}"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        {
+            let mut j = s.jamendo.write().unwrap();
+            j.base = format!("http://127.0.0.1:{port}");
+            j.creds.client_id = "x".into();
+        }
+        let app = router(s.clone());
+        let (st, h) = call(&app, "GET", "/v1/health", None).await;
+        assert_eq!(st, StatusCode::OK, "{h}");
+        let by = |id: &str| h.as_array().unwrap().iter().find(|p| p["id"] == id).cloned();
+        let pinakes = by("pinakes").expect("pinakes is listed");
+        assert_eq!(pinakes["state"], "down", "{h}");
+        assert_eq!(pinakes["detail"], "cannot connect");
+        assert_eq!(by("jamendo").unwrap()["state"], "ok", "any HTTP answer counts");
+        assert!(
+            by("tidal").is_none() && by("homeserver").is_none(),
+            "parts not set up are left out"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn listenbrainz_gets_what_zones_play_and_gives_back_history_and_picks() {
         use std::sync::atomic::{AtomicBool, Ordering};

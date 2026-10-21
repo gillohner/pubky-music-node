@@ -153,6 +153,20 @@
     const tick = async () => { let p; try { p = await api('GET', `/pubky/files/upload/${id}`); } catch { return; } if (!document.body.contains(card)) return; draw(p); if (!p.finished) setTimeout(tick, 1000); };
     tick();
   };
+  // Outside parts that do not answer (Pinakes, the homeserver, a service): one quiet line under
+  // the node status, only when something is wrong; the library keeps playing without them.
+  let healthTimer = null;
+  const checkHealth = async () => {
+    clearTimeout(healthTimer); healthTimer = setTimeout(checkHealth, 60000);
+    let parts; try { parts = await api('GET', '/health'); } catch { return; }
+    const el = $('#upstreams'); if (!el) return;
+    const bad = parts.filter((p) => p.state !== 'ok');
+    el.hidden = !bad.length; if (!bad.length) return;
+    const first = bad[0];
+    $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? `${first.name}: sign in again` : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
+    el.title = bad.map((p) => `${p.name}: ${p.detail || p.state}`).join('\n') + '\nYour library keeps playing.';
+    el.onclick = () => showMenu(el, [{ title: 'Outside parts' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in', run: () => { state.autoResign = true; setView('settings'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
+  };
   const login = () => { const d = $('#login'); if (!d.open) { $('#tok').value = state.token; d.showModal(); } };
   // Pubky Ring sign-in: the node starts a flow, we show the link (and a QR when the device has a camera elsewhere), poll until the owner approves, and keep the token it hands out.
   let ringPoll = null;
@@ -2096,7 +2110,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel());
+    setConn('ok', nodeLabel()); checkHealth();
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {

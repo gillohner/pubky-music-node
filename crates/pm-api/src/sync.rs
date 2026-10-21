@@ -739,6 +739,11 @@ impl Heads {
     }
 }
 
+/// Whether a homeserver error is an access refusal (an old approval).
+pub(crate) fn is_refusal(msg: &str) -> bool {
+    is_forbidden(msg)
+}
+
 fn is_forbidden(msg: &str) -> bool {
     pm_pubky::homeserver::is_capability_error(msg) || msg.to_lowercase().contains("capabilit")
 }
