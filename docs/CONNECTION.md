@@ -81,7 +81,7 @@ One WebSocket per controller carries every change. The REST API (`/v1/...`) carr
 ## Remote access
 
 Today a node is reached outside the LAN over HTTPS (the address it publishes on the homeserver, ADR
-0008). See the ADR on iroh for the plan to dial nodes by key.
+0008). ADR 0013 proposes iroh: the node dialed by its own key from anywhere, through a tunnel to its HTTP API with relay fallback, found through the same private node record.
 
 ## Tests
 
