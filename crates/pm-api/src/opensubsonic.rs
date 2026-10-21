@@ -388,8 +388,10 @@ pub(crate) fn open_track_blocking(
         .clone()
         .ok_or_else(|| fail("no Subsonic server is connected".into()))?;
     let url = signed_url(&srv, "stream", &[("id", id), ("format", "raw")]).map_err(fail)?;
+    // An error names the URL: drop its signed query
+    let signed = url.query().map(str::to_string).unwrap_or_default();
     crate::sources::open_http_stream(url.as_str()).map_err(|e| match e {
-        pm_zones::SourceError::Open { reason, .. } => fail(reason),
+        pm_zones::SourceError::Open { reason, .. } => fail(reason.replace(&signed, "<signed>")),
         other => other,
     })
 }

@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Jellyfin (and Emby) as a source** (step 5.2).
+  - Sources › Jellyfin signs in once with a user and password. The node keeps only the access token Jellyfin gives it, never the password, and signing out ends the session on the server too.
+  - Search (albums and songs, also in the one search), album and song pages, covers relayed by the node.
+  - Zones play the original file (`jellyfin:track:<id>`), and browsers get it relayed.
+  - Playlists import by each song's MusicBrainz recording id (Jellyfin's `MusicBrainzTrack` is a release track and isn't used).
+  - Test: a mock Jellyfin covering a wrong password refused, the token on every call, search, album, zone playback, stream and cover relay, playlist import and sign-out.
+  - The owner's server (jellyfin.riginode.xyz, Jellyfin 10.11.11) answers the sign-in correctly. The live library check waits for a login.
+- **Fix:** the Subsonic source no longer puts its signed request query into a playback error message.
 - **Slimproto works with real squeezelite** (infra item 2; it was tested only against a fake player before, and no real player had ever played). CI now runs real squeezelite on every push: 16/44.1 and 24/96 come out bit-exact from the first sample, the position follows real time, pause is silent within a second, play resumes, and a player that reconnects keeps its one zone. Fixed:
   - A connecting player crashed its own session (the zone was created outside the async runtime). Its reconnect then got a new output while the zone kept the dead one ("Broken pipe"). Each player now has one output for the node's lifetime, and reconnects attach to it.
   - squeezelite starts at volume 0 and played silence: the node now sends the volume on every connection, and remembers volume changes made while the player is away.

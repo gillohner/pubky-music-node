@@ -31,9 +31,12 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 | Your server (OpenSubsonic) | The server's address, a user and password (Sources › Your server; kept in the node's database) | **built**: search, albums, songs, playlists (import by MusicBrainz id or ISRC) | **built**: original files into zones (`subsonic:track:<id>`), relayed to browsers | Navidrome, Airsonic, Gonic, Ampache, LMS, another Pubky Music node; token auth on every request |
 
+| Jellyfin / Emby | The server's address and a user (Sources › Jellyfin; signs in once, keeps only the access token) | **built**: search, albums, songs, playlists (import by MusicBrainz recording id) | **built**: original files into zones (`jellyfin:track:<id>`), relayed to browsers | the owner's server is jellyfin.riginode.xyz |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).
+- **Plex:** the owner has an account but no Plex server, so there is nothing to stream from; build it when there is one.
 - **Apple Music:** needs a paid developer account, and MusicKit plays in the browser only, never on the node's outputs.
 - **No official playback API:** YouTube Music, Amazon Music, Bandcamp streaming, Mixcloud. The node's rule is no reverse
   engineering. The `qobuz-api` crate is out for the same reason (it scrapes the web player's credentials) and its GPL-3.0

@@ -1476,3 +1476,23 @@ pub struct SubsonicPlaylist {
     pub name: String,
     pub songs: usize,
 }
+
+// ---- Jellyfin (jellyfin.rs) ----
+
+/// The signed-in Jellyfin as the UI sees it: never the token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JellyfinView {
+    pub connected: bool,
+    pub url: Option<String>,
+    pub user: Option<String>,
+    pub server_name: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct JellyfinSignIn {
+    pub url: String,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+}

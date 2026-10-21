@@ -24,6 +24,7 @@ pub mod home;
 pub mod identify;
 pub mod item;
 pub mod jamendo;
+pub mod jellyfin;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
@@ -244,6 +245,19 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .delete(opensubsonic::forget_server),
         )
         .route("/sources/subsonic/stream/{id}", get(opensubsonic::stream))
+        .route(
+            "/sources/jellyfin/server",
+            get(jellyfin::get_server)
+                .put(jellyfin::sign_in)
+                .delete(jellyfin::sign_out),
+        )
+        .route("/sources/jellyfin/stream/{id}", get(jellyfin::stream))
+        .route("/sources/jellyfin/cover/{id}", get(jellyfin::cover))
+        .route("/sources/jellyfin/playlists", get(jellyfin::playlists))
+        .route(
+            "/sources/jellyfin/playlists/{id}/import",
+            post(jellyfin::import_playlist),
+        )
         .route("/sources/subsonic/cover/{id}", get(opensubsonic::cover))
         .route("/sources/subsonic/playlists", get(opensubsonic::playlists))
         .route(
@@ -2774,6 +2788,207 @@ mod tests {
 
     /// Audius against a local mock: the discovery host is configured, a search
     /// yields track hits, an item has one streamable track, and it plays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jellyfin_signs_in_once_and_keeps_only_the_token() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        const SONG: &str = "0123456789abcdef0123456789abcdef";
+        const ALBUM: &str = "fedcba9876543210fedcba9876543210";
+        const PL: &str = "aaaabbbbccccddddeeeeffff00001111";
+        let song = serde_json::json!({"Id": SONG, "Name": "Bohemian Rhapsody", "Type": "Audio", "Artists": ["Queen"],
+            "Album": "A Night at the Opera", "AlbumId": ALBUM, "AlbumPrimaryImageTag": "x", "RunTimeTicks": 50_000_000u64, "IndexNumber": 11,
+            "ProviderIds": {"MusicBrainzRecording": "b1a9c0e9-d987-4042-ae91-78d6a3267d69"}, "MediaSources": [{"Container": "flac"}]});
+        let album = serde_json::json!({"Id": ALBUM, "Name": "A Night at the Opera", "Type": "MusicAlbum", "AlbumArtist": "Queen",
+            "ProductionYear": 1975, "ImageTags": {"Primary": "y"}});
+        // Every call but the public info and the sign-in carries the token
+        fn authed(h: &axum::http::HeaderMap, q: &std::collections::HashMap<String, String>) -> bool {
+            h.get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|a| a.contains("Token=\"T1\"") && a.contains("Client=\"Pubky Music\""))
+                || q.get("api_key").map(String::as_str) == Some("T1")
+        }
+        type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
+        let (s1, s2, a1) = (song.clone(), song.clone(), album.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route("/System/Info/Public", get(|| async { Json(serde_json::json!({"ServerName": "Rigifin", "Version": "10.11.11", "ProductName": "Jellyfin Server"})) }))
+            .route(
+                "/Users/AuthenticateByName",
+                post(|h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| async move {
+                    assert!(h["authorization"].to_str().unwrap().starts_with("MediaBrowser Client="));
+                    if b["Username"] == "owner" && b["Pw"] == "pw" {
+                        (StatusCode::OK, Json(serde_json::json!({"AccessToken": "T1", "User": {"Id": "u1", "Name": "owner"}})))
+                    } else {
+                        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})))
+                    }
+                }),
+            )
+            .route(
+                "/Items",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let (s1, a1) = (s1.clone(), a1.clone());
+                    async move {
+                        assert!(authed(&h, &q));
+                        let items = match (q.get("ParentId"), q.get("IncludeItemTypes").map(String::as_str)) {
+                            (Some(_), _) => vec![s1],
+                            (None, Some("Playlist")) => vec![serde_json::json!({"Id": PL, "Name": "Car", "Type": "Playlist", "MediaType": "Audio", "ChildCount": 2})],
+                            _ => vec![s1, a1],
+                        };
+                        Json(serde_json::json!({"Items": items}))
+                    }
+                }),
+            )
+            .route(
+                "/Items/{id}",
+                get(move |h: axum::http::HeaderMap, q: Q, axum::extract::Path(id): axum::extract::Path<String>| {
+                    let (s2, a2) = (s2.clone(), album.clone());
+                    async move {
+                        assert!(authed(&h, &q));
+                        Json(match id.as_str() {
+                            ALBUM => a2,
+                            PL => serde_json::json!({"Id": PL, "Name": "Car", "Type": "Playlist"}),
+                            _ => s2,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/Playlists/{id}/Items",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let s3 = song.clone();
+                    async move {
+                        assert!(authed(&h, &q));
+                        Json(serde_json::json!({"Items": [s3, {"Id": "b", "Name": "Untagged", "Type": "Audio", "ProviderIds": {}}]}))
+                    }
+                }),
+            )
+            .route(
+                "/Audio/{id}/stream",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let flac = flac.clone();
+                    async move {
+                        if !authed(&h, &q) {
+                            return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/plain")], Vec::new());
+                        }
+                        (StatusCode::OK, [(header::CONTENT_TYPE, "audio/flac")], flac)
+                    }
+                }),
+            )
+            .route(
+                "/Items/{id}/Images/Primary",
+                get(|h: axum::http::HeaderMap, q: Q| async move {
+                    assert!(authed(&h, &q));
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                }),
+            )
+            .route("/Sessions/Logout", post(|| async { StatusCode::NO_CONTENT }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let url = format!("http://127.0.0.1:{port}/");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/jellyfin/server",
+            Some(serde_json::json!({"url": url, "user": "owner", "password": "nope"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/sources/jellyfin/server",
+            Some(serde_json::json!({"url": url, "user": "owner", "password": "pw"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["server_name"], "Rigifin");
+        {
+            let stored = s
+                .library
+                .lock()
+                .unwrap()
+                .get_setting("jellyfin.server")
+                .unwrap()
+                .unwrap();
+            assert!(
+                stored.contains("T1") && !stored.contains("\"pw\""),
+                "the token is kept, the password is not"
+            );
+        }
+        let (st, r) = call(&app, "GET", "/v1/sources/jellyfin/search?q=bohemian", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["items"][0]["kind"], "album");
+        assert_eq!(r["items"][1]["uri"], format!("jellyfin:track:{SONG}"));
+        assert_eq!(
+            r["items"][1]["url"],
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
+        );
+        assert!(!r.to_string().contains("T1"));
+        let (st, al) = call(
+            &app,
+            "GET",
+            &format!("/v1/sources/jellyfin/items/album:{ALBUM}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        assert_eq!(al["tracks"][0]["format"], "FLAC (Jellyfin)");
+        // A zone plays the original file
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [{"uri": format!("jellyfin:track:{SONG}"), "title": "x"}], "replace": true, "play": true}))).await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        // Browsers and covers go through the node
+        for (path, magic) in [
+            (format!("/v1/sources/jellyfin/stream/{SONG}"), &b"fLaC"[..]),
+            (format!("/v1/sources/jellyfin/cover/{ALBUM}"), &b"\x89PNG"[..]),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+        }
+        // Playlists import by MusicBrainz recording
+        let (_, pls) = call(&app, "GET", "/v1/sources/jellyfin/playlists", None).await;
+        assert_eq!(pls[0]["name"], "Car");
+        let (st, imp) = call(
+            &app,
+            "POST",
+            &format!("/v1/sources/jellyfin/playlists/{PL}/import"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{imp}");
+        assert_eq!(
+            (imp["imported"].as_u64(), imp["skipped"].as_u64()),
+            (Some(1), Some(1))
+        );
+        let (_, v) = call(&app, "DELETE", "/v1/sources/jellyfin/server", None).await;
+        assert_eq!(v["connected"], false);
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("jellyfin.server")
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn jamendo_searches_plays_lossless_and_keeps_the_app_id_to_itself() {
         let flac = std::fs::read(concat!(
