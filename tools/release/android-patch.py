@@ -17,6 +17,10 @@ silently cannot connect.
    library (2.) brings one that allows http only to certificate-revocation
    hosts, and a network security config overrides usesCleartextTraffic (1.),
    so the WebView refused every http:// node (ERR_CLEARTEXT_NOT_PERMITTED).
+7. Room for the system bars: Tauri's MainActivity draws edge to edge, and the
+   WebView (before Chromium 136) reports no safe-area insets to the page, so
+   the status bar covered the node's menu and search. The content view is
+   padded by the bars' (and the keyboard's) insets, on the UI's background.
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -150,7 +154,32 @@ if "pubky_music_network" not in mtext:
     )
     manifest.write_text(mtext)
 
+# 7. pad the content view by the system bars, keyboard and cutout
+activity = activities[0]
+atext = activity.read_text()
+if "pubky-music: insets" not in atext:
+    call = "super.onCreate(savedInstanceState)"
+    if atext.count(call) != 1:
+        die(f"expected one `{call}` in {activity}")
+    atext = atext.replace(call, call + """
+    // pubky-music: insets (tools/release/android-patch.py)
+    val root = findViewById<android.view.View>(android.R.id.content)
+    root.setBackgroundColor(0xFF0F1014.toInt()) // the web UI's --bg
+    androidx.core.view.WindowCompat.getInsetsController(window, root).apply {
+      isAppearanceLightStatusBars = false
+      isAppearanceLightNavigationBars = false
+    }
+    androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+      val t = androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+        androidx.core.view.WindowInsetsCompat.Type.displayCutout() or
+        androidx.core.view.WindowInsetsCompat.Type.ime()
+      val bars = insets.getInsets(t)
+      v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+      androidx.core.view.WindowInsetsCompat.CONSUMED
+    }""")
+    activity.write_text(atext)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config added"
+    f"player service ({pkg.group(1)}), network config, insets added"
 )
