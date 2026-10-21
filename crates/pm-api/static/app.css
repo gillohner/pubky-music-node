@@ -457,6 +457,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .toolbar .input { width: 260px; }
 .file-btn input { display: none; }
+/* Account pills carry names (users, servers): their case is kept */
+.pill.account { text-transform: none; letter-spacing: 0; font-size: 12px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--surface-3); color: var(--fg-2); }
 .pill.ok { color: var(--ok); background: rgba(79, 207, 127, 0.12); }
 .pill.warn { color: var(--warn); background: rgba(232, 178, 74, 0.12); }
