@@ -27,6 +27,8 @@ pub struct NodeSources {
     deezer: crate::deezer::SharedBase,
     /// Jamendo credentials, for `jamendo:track:` URIs.
     jamendo: crate::jamendo::SharedEndpoints,
+    /// The user's Subsonic server, for `subsonic:track:` URIs.
+    opensubsonic: crate::opensubsonic::Shared,
 }
 
 impl NodeSources {
@@ -36,6 +38,7 @@ impl NodeSources {
         tidal: crate::tidal::SharedEndpoints,
         deezer: crate::deezer::SharedBase,
         jamendo: crate::jamendo::SharedEndpoints,
+        opensubsonic: crate::opensubsonic::Shared,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -56,6 +59,7 @@ impl NodeSources {
             tidal,
             deezer,
             jamendo,
+            opensubsonic,
         }
     }
 
@@ -511,6 +515,9 @@ impl SourceFactory for NodeSources {
         }
         if let Some(id) = item.uri.strip_prefix(crate::jamendo::TRACK_URI_PREFIX) {
             return crate::jamendo::open_track_blocking(&self.jamendo, id);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::opensubsonic::TRACK_URI_PREFIX) {
+            return crate::opensubsonic::open_track_blocking(&self.opensubsonic, id);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

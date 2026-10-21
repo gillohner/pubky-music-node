@@ -4,6 +4,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Your own music server as a source** (step 5.1, OpenSubsonic client): Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node.
+  - Sources › "Your server" connects with an address, user and password. It's checked with `ping` first, and the tab takes the server's own name ("Navidrome").
+  - The password stays on the node and never comes back from the API. Every request is signed with a fresh token (md5 of password and salt).
+  - Search (albums and songs, also in the one search), album and song pages. Covers and browser streams are relayed by the node.
+  - Zones play the original file (`subsonic:track:<id>`, signed at play time).
+  - The server's playlists import as private Pubky playlists, by each song's MusicBrainz id or ISRC.
+  - The node's own Subsonic server now lists ISRCs (OpenSubsonic `isrc`).
+  - API: `GET|PUT|DELETE /v1/sources/subsonic/server`, `…/stream/{id}`, `…/cover/{id}`, `…/playlists`, `…/playlists/{id}/import`.
+  - Test: two nodes, one serving Subsonic on a real port and the other connected to it (wrong password refused, search, album, zone playback, browser stream, playlist import, forget).
+- **Fix:** a search opened directly (a link or a reload) showed no chips for the services. The service list now loads on the search page too.
 - **Jamendo sign-in** (step 5.4, part 2).
   - Sources › Jamendo has **Sign in to Jamendo** (OAuth, scope `music`, redirect `/jamendo/callback`). The sign-in is optional: search and playback need no account.
   - **Add my Jamendo likes to Favourites** brings the tracks you liked or favourited on Jamendo.

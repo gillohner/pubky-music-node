@@ -758,3 +758,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 a.btn { text-decoration: none; }
 .sharelink { font-size: 12px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .eyebrow code { text-transform: none; letter-spacing: 0; }
+.subform { max-width: 520px; margin: 12px 0; display: flex; flex-direction: column; gap: 10px; }

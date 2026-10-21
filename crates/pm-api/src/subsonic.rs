@@ -353,6 +353,10 @@ fn song_json(t: &Track) -> Value {
         "isVideo": false,
         "musicBrainzId": t.recording_mbid.map(|m| m.to_string()),
     });
+    // OpenSubsonic: ISRCs as a list
+    if let Some(i) = &t.isrc {
+        m["isrc"] = json!([i.to_string()]);
+    }
     if let Some(aid) = album_id {
         m["albumId"] = json!(format!("al-{aid}"));
         m["parent"] = json!(format!("al-{aid}"));

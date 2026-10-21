@@ -1449,3 +1449,30 @@ pub struct JamendoStatus {
     /// What the Jamendo app's redirect URL must allow (same domain).
     pub redirect_uri: String,
 }
+
+// ---- your own Subsonic server as a source (opensubsonic.rs) ----
+
+/// The connected server as the UI sees it: never the password.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubsonicServerView {
+    pub connected: bool,
+    pub url: Option<String>,
+    pub user: Option<String>,
+    /// "Navidrome", "Gonic", … from the server's own answer.
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SubsonicServerForm {
+    pub url: String,
+    pub user: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubsonicPlaylist {
+    pub id: String,
+    pub name: String,
+    pub songs: usize,
+}

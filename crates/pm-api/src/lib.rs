@@ -26,6 +26,7 @@ pub mod item;
 pub mod jamendo;
 pub mod mbproxy;
 pub mod new_releases;
+pub mod opensubsonic;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -236,6 +237,19 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
+        .route(
+            "/sources/subsonic/server",
+            get(opensubsonic::get_server)
+                .put(opensubsonic::set_server)
+                .delete(opensubsonic::forget_server),
+        )
+        .route("/sources/subsonic/stream/{id}", get(opensubsonic::stream))
+        .route("/sources/subsonic/cover/{id}", get(opensubsonic::cover))
+        .route("/sources/subsonic/playlists", get(opensubsonic::playlists))
+        .route(
+            "/sources/subsonic/playlists/{id}/import",
+            post(opensubsonic::import_playlist),
+        )
         .route("/sources/jamendo/status", get(jamendo::status))
         .route("/sources/jamendo/login", post(jamendo::login))
         .route("/sources/jamendo/logout", post(jamendo::logout))

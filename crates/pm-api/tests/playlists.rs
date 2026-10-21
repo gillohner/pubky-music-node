@@ -1212,3 +1212,207 @@ async fn items_resolve_their_source_with_pins_and_orders() {
     assert_eq!(r["queued"], 2);
     assert_eq!(r["missing"], serde_json::json!([tidal]));
 }
+
+fn settings_for(
+    dir: &std::path::Path,
+    name: &str,
+    music: Option<std::path::PathBuf>,
+    token: Option<&str>,
+) -> NodeSettings {
+    let db = dir.join(format!("{name}.sqlite"));
+    NodeSettings {
+        name: name.into(),
+        version: "0".into(),
+        db_path: db,
+        scan_folders: music.into_iter().collect(),
+        art_dir: dir.join(format!("{name}-art")),
+        mirror_dir: dir.join(format!("{name}-homeserver")),
+        pipeline: PipelineConfig::default(),
+        token: token.map(str::to_string),
+        subsonic_user: "pubky".into(),
+        pubky: Default::default(),
+        public_url: "http://127.0.0.1:7788".into(),
+        upnp: false,
+        cast: false,
+        slimproto_port: 0,
+        session_secret_path: None,
+        tidal: Default::default(),
+        spotify: Default::default(),
+        acoustid_key: String::new(),
+        jamendo: Default::default(),
+    }
+}
+
+/// Your own Subsonic server as a source (step 5.1): node B connects to node A's Subsonic API
+/// (any OpenSubsonic server would do), searches it, plays a song from it, shows its covers and
+/// imports its playlist by MusicBrainz id. The password never comes back from the API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_subsonic_server_is_a_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("tagged.wav"), "Tagged", Some(MB));
+    // Node A: the server
+    let a = NodeState::new(
+        settings_for(dir.path(), "a", Some(music.clone()), Some("sesame")),
+        Library::open(&dir.path().join("a.sqlite")).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app_a = router(a.clone());
+    let req = |m: &str, u: &str, b: Option<serde_json::Value>| {
+        let mut r = Request::builder()
+            .method(m)
+            .uri(u)
+            .header("authorization", "Bearer sesame");
+        if b.is_some() {
+            r = r.header("content-type", "application/json");
+        }
+        r.body(match b {
+            Some(b) => Body::from(b.to_string()),
+            None => Body::empty(),
+        })
+        .unwrap()
+    };
+    let resp = app_a
+        .clone()
+        .oneshot(req("POST", "/v1/library/scan", Some(serde_json::json!({}))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    for _ in 0..500 {
+        if !a.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let resp = app_a
+        .clone()
+        .oneshot(req("POST", "/v1/playlists", Some(serde_json::json!({"name": "From the NAS", "uris": [format!("https://musicbrainz.org/recording/{MB}")]}))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app_a).await.unwrap() });
+
+    // Node B: connects to it
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    let b = NodeState::new(
+        settings_for(dir.path(), "b", None, None),
+        Library::open(&dir.path().join("b.sqlite")).unwrap(),
+        outputs,
+    );
+    b.zones_for_all_outputs();
+    let app = router(b.clone());
+    let (st, e) = call(
+        &app,
+        "PUT",
+        "/v1/sources/subsonic/server",
+        Some(serde_json::json!({"url": format!("http://127.0.0.1:{port}/rest"), "user": "pubky", "password": "wrong"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "a wrong password is refused: {e}");
+    let (st, v) = call(
+        &app,
+        "PUT",
+        "/v1/sources/subsonic/server",
+        Some(serde_json::json!({"url": format!("http://127.0.0.1:{port}"), "user": "pubky", "password": "sesame"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["name"], "Pubky Music node");
+    assert!(!v.to_string().contains("sesame"));
+    let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+    assert!(sources
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["id"] == "subsonic" && x["status"] == "ready"));
+
+    let (st, r) = call(&app, "GET", "/v1/sources/subsonic/search?q=Tagged", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let song = r["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "track")
+        .unwrap()
+        .clone();
+    assert_eq!(song["url"], format!("https://musicbrainz.org/recording/{MB}"));
+    let uri = song["uri"].as_str().unwrap().to_string();
+    assert!(uri.starts_with("subsonic:track:"), "{uri}");
+    assert!(!r.to_string().contains("sesame"));
+    let (_, ra) = call(&app, "GET", "/v1/sources/subsonic/search?q=Lists", None).await;
+    let album = ra["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "album")
+        .unwrap()
+        .clone();
+    let (st, al) = call(
+        &app,
+        "GET",
+        &format!("/v1/sources/subsonic/items/{}", album["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{al}");
+    assert_eq!(al["tracks"][0]["url"], uri);
+
+    // Plays in a zone, from a freshly signed stream URL
+    let zid = b.zones.list()[0].id.to_string();
+    let (st, q) = call(
+        &app,
+        "POST",
+        &format!("/v1/zones/{zid}/queue"),
+        Some(serde_json::json!({"items": [{"uri": uri, "title": "Tagged"}], "replace": true, "play": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{q}");
+    let zone = b.zones.get(&ZoneId::new(&zid)).unwrap();
+    assert_eq!(zone.wait_stopped().await.error, None);
+
+    // Browsers get the stream and covers relayed
+    let id = uri.trim_start_matches("subsonic:track:");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/sources/subsonic/stream/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..4], b"RIFF", "the original file");
+
+    // Its playlists import by MusicBrainz id
+    let (st, pls) = call(&app, "GET", "/v1/sources/subsonic/playlists", None).await;
+    assert_eq!(st, StatusCode::OK, "{pls}");
+    assert_eq!(pls[0]["name"], "From the NAS");
+    let (st, imp) = call(
+        &app,
+        "POST",
+        &format!(
+            "/v1/sources/subsonic/playlists/{}/import",
+            pls[0]["id"].as_str().unwrap()
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    assert_eq!(imp["imported"], 1);
+    assert_eq!(
+        imp["playlist"]["playlist"]["items"][0]["uri"],
+        format!("https://musicbrainz.org/recording/{MB}")
+    );
+
+    let (_, v) = call(&app, "DELETE", "/v1/sources/subsonic/server", None).await;
+    assert_eq!(v["connected"], false);
+    let (st, _) = call(&app, "GET", "/v1/sources/subsonic/search?q=x", None).await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+}

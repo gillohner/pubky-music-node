@@ -37,6 +37,7 @@ pub fn services() -> Vec<Box<dyn StreamingService>> {
         Box::new(crate::deezer::Deezer),
         Box::new(crate::spotify::Spotify),
         Box::new(crate::jamendo::Jamendo),
+        Box::new(crate::opensubsonic::OpenSubsonic),
     ]
 }
 

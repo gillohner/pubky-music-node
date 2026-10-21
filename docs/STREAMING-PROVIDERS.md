@@ -29,6 +29,8 @@ provider's developer terms, which go into an ADR before the module is written.
 What follows once they arrive: the provider module, "Connect …" in both Settings screens with
 token refresh on the node, playlist import by canonical URL, the service in the Sources view.
 
+| Your server (OpenSubsonic) | The server's address, a user and password (Sources › Your server; kept in the node's database) | **built**: search, albums, songs, playlists (import by MusicBrainz id or ISRC) | **built**: original files into zones (`subsonic:track:<id>`), relayed to browsers | Navidrome, Airsonic, Gonic, Ampache, LMS, another Pubky Music node; token auth on every request |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).
