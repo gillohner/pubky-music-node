@@ -44,7 +44,8 @@ pub mod limits {
     pub const PLAYLIST_NAME_MAX: usize = 100;
     pub const PLAYLIST_DESCRIPTION_MAX: usize = 500;
     pub const PLAYLIST_IMAGE_URL_MAX: usize = 200;
-    pub const PLAYLIST_ITEMS_MAX: usize = 500;
+    /// The node's own cap (a v1 collection is not capped for playlists, see `v1::validate_social`).
+    pub const PLAYLIST_ITEMS_MAX: usize = 10_000;
     pub const REVIEW_TEXT_MIN: usize = 1;
     pub const REVIEW_TEXT_MAX: usize = 2000;
     pub const REVIEW_RATING_MIN: u8 = 1;

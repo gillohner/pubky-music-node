@@ -52,3 +52,18 @@ Music uses the shared social objects and only adds what is musical.
   Ring approval covers it.
 - `docs/specs/pubky-music-playlist.md` describes the retired envelope and stays only for reading old
   data during migration.
+
+## Amendment (2026-10-21): playlists have no size cap
+
+The owner's decision: "make collections but remove the limit". pubky-social-specs caps a collection at
+100 items and 40,000 code points of content. A playlist is a v1 collection however long it is; the node
+caps it at 10,000 songs.
+- `v1::validate_social` checks a longer collection as consecutive parts that each fit the spec's caps,
+  so every other rule still applies to every item (references, `ext`, the envelope).
+- Edits mint their edit id from the first part (it only has to sort above the head).
+- Publishing an oversized collection skips `plan_publish` (which re-validates with the cap). Music
+  collections carry no private media, so it writes the same leaf under `/pub/`.
+- Readers (the node's pull and others' shared playlists) use the same lifted check. Other v1 clients
+  that keep the cap may refuse such a collection; the node never does.
+- Playlists kept in the old private format before this are written as v1 collections on the next
+  sync; the old files stay.

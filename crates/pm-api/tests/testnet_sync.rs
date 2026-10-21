@@ -715,3 +715,88 @@ async fn another_node_opens_and_copies_a_shared_playlist() {
     let (st, _) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists/{id}"), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+/// Long playlists (owner, 2026-10-21): a 300-song playlist is a v1 collection like any other.
+/// It syncs, edits, reads back on another node, publishes, and opens from a node with no session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_playlist_is_a_collection_too() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "long-a");
+    let app_a = router(a.clone());
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync_a.clone()));
+    let uris: Vec<String> = (0..300)
+        .map(|i| format!("https://musicbrainz.org/isrc/USQX9130{i:04}"))
+        .collect();
+    let (st, pl) = call(
+        &app_a,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({"name": "All of it", "uris": uris})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    let r = sync_a.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty() && r.notes.is_empty(), "{r:?}");
+    // An edit is a second version
+    let mut more = uris.clone();
+    more.push("https://musicbrainz.org/isrc/USQX91309999".into());
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}"),
+        Some(serde_json::json!({"uris": more})),
+    )
+    .await;
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}/visibility"),
+        Some(serde_json::json!({"public": true})),
+    )
+    .await;
+    let r = sync_a.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let heads = homeserver
+        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .await
+        .unwrap();
+    assert_eq!(heads[&id].versions.len(), 2, "{heads:?}");
+
+    // Node B with the same account reads all 301 songs back
+    let session_b = signer
+        .signin_blocking(ClientId::new("pm-api-test-b").unwrap())
+        .await
+        .unwrap();
+    let b = node(dir.path(), "long-b");
+    let app_b = router(b.clone());
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), session_b));
+    b.set_sync(Some(sync_b.clone()));
+    sync_b.sync(&b.library).await.unwrap();
+    let (st, back) = call(&app_b, "GET", &format!("/v1/playlists/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{back}");
+    assert_eq!(back["playlist"]["items"].as_array().unwrap().len(), 301);
+
+    // And anyone can open the shared copy
+    let c = node(dir.path(), "long-c");
+    let app_c = router(c.clone());
+    let (st, one) = call(&app_c, "GET", &format!("/v1/shared/{key}/playlists/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    assert_eq!(one["summary"]["items"], 301);
+}

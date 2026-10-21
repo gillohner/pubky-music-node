@@ -112,14 +112,88 @@ pub fn heads(paths: impl IntoIterator<Item = String>) -> BTreeMap<String, Head> 
     out
 }
 
-/// Why a node object has no v1 form (yet).
+/// Why a node object has no v1 form.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotV1 {
-    /// Longer than a collection may be; the playlist stays in the old private envelope.
-    #[error("{0} songs; a v1 collection holds at most {COLLECTION_MAX_ITEMS}")]
-    TooLong(usize),
     #[error("{0}")]
     Invalid(String),
+}
+
+/// Long playlists (owner, 2026-10-21: "make collections but remove the limit"): a playlist is a
+/// v1 collection however long it is. pubky-social-specs caps a collection at
+/// [`COLLECTION_MAX_ITEMS`] items and its content at `collection_content_max_length`; a longer one
+/// is checked as consecutive parts that each fit, so every rule but the size still applies (item
+/// references, `ext`, the envelope). `None` when the post is not an oversized collection.
+fn size_parts(post: &PubkySocialPost) -> Option<Vec<PubkySocialPost>> {
+    if post.kind != PubkySocialPostKind::Collection {
+        return None;
+    }
+    let cap = VALIDATION_LIMITS.collection_content_max_length;
+    if post.content.chars().count() <= cap
+        && serde_json::from_str::<PubkySocialCollectionContent>(&post.content)
+            .is_ok_and(|c| c.items.len() <= COLLECTION_MAX_ITEMS)
+    {
+        return None;
+    }
+    let content: PubkySocialCollectionContent = serde_json::from_str(&post.content).ok()?;
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < content.items.len() {
+        let mut take = COLLECTION_MAX_ITEMS;
+        loop {
+            let end = (start + take).min(content.items.len());
+            let mut part = content.clone();
+            part.items = content.items[start..end].to_vec();
+            let json = serde_json::to_string(&part).ok()?;
+            if json.chars().count() <= cap || take == 1 {
+                let mut p = post.clone();
+                p.content = json;
+                parts.push(p);
+                start = end;
+                break;
+            }
+            take /= 2;
+        }
+    }
+    Some(parts)
+}
+
+/// Whether this collection is longer than pubky-social-specs alone allows.
+pub fn is_oversized(post: &PubkySocialPost) -> bool {
+    size_parts(post).is_some()
+}
+
+/// The spec's validation and reference checks, with the collection size cap lifted
+/// (a longer collection is checked in parts that each fit).
+pub fn validate_social(post: &PubkySocialPost, id: &str, root: Root, owner: &PubkyId) -> Result<(), String> {
+    let ctx = pubky_social_specs::ValidationCtx { root };
+    for p in size_parts(post).unwrap_or_else(|| vec![post.clone()]) {
+        p.validate(Some(id), &ctx)?;
+        p.check_references(&ctx, Some(owner))?;
+    }
+    Ok(())
+}
+
+/// Publish one version of a private social post: `(public path, body)`. pubky-social-specs
+/// `plan_publish`, or for an oversized playlist the same leaf under `/pub/` after the lifted
+/// checks (music collections carry no private media to copy).
+pub fn publish_plan(
+    post: &PubkySocialPost,
+    id: &str,
+    edit_id: &str,
+    owner: &PubkyId,
+) -> Result<(String, serde_json::Value), String> {
+    if is_oversized(post) {
+        validate_social(post, id, Root::Pub, owner)?;
+        let body = serde_json::to_value(post).map_err(|e| e.to_string())?;
+        return Ok((
+            PubkySocialPost::create_path_in(Root::Pub, id, edit_id, None),
+            body,
+        ));
+    }
+    let plan = pubky_social_specs::plan_publish(id, edit_id, post, None, owner)?;
+    let body = serde_json::from_str(&plan.rewritten_post_json).map_err(|e| e.to_string())?;
+    Ok((plan.dest_path, body))
 }
 
 /// A node object as the v1 post it is written as.
@@ -148,13 +222,19 @@ impl V1Post {
     ) -> Result<String, String> {
         let ctx = pubky_social_specs::ValidationCtx { root };
         match (self, head) {
-            (V1Post::Social(p), Some(head)) => Ok(p.edit_version(id, head, root, owner, None)?.path),
+            (V1Post::Social(p), Some(head)) => match size_parts(p) {
+                // The edit id is minted from the first part (it only has to sort above the head)
+                Some(parts) => {
+                    validate_social(p, id, root, owner)?;
+                    Ok(parts[0].edit_version(id, head, root, owner, None)?.path)
+                }
+                None => Ok(p.edit_version(id, head, root, owner, None)?.path),
+            },
             (V1Post::Music(p), Some(head)) => {
                 Ok(pubky_music_specs::edit_version(p, id, head, root, owner)?.path)
             }
             (V1Post::Social(p), None) => {
-                p.validate(Some(id), &ctx)?;
-                p.check_references(&ctx, Some(owner))?;
+                validate_social(p, id, root, owner)?;
                 Ok(PubkySocialPost::create_path_in(root, id, id, None))
             }
             (V1Post::Music(p), None) => {
@@ -184,9 +264,6 @@ pub fn to_v1(content: &MusicContent) -> Result<V1Post, NotV1> {
 }
 
 fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
-    if p.items.len() > COLLECTION_MAX_ITEMS {
-        return Err(NotV1::TooLong(p.items.len()));
-    }
     let items = p
         .items
         .iter()
@@ -216,10 +293,6 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
             serde_json::from_str(&post.content).expect("the collection was just written");
         ext::set_source_order(&mut content, order);
         post.content = serde_json::to_string(&content).expect("a collection serializes");
-    }
-    // The content cap binds before the item cap for long URLs
-    if post.content.chars().count() > VALIDATION_LIMITS.collection_content_max_length {
-        return Err(NotV1::TooLong(p.items.len()));
     }
     Ok(post)
 }
@@ -276,9 +349,7 @@ pub fn is_music_collection(content: &PubkySocialCollectionContent) -> bool {
 /// hostile input.
 pub fn read_public_playlist(bytes: &[u8], id: &str, edit_id: &str, owner: &PubkyId) -> Option<Playlist> {
     let post: PubkySocialPost = serde_json::from_slice(bytes).ok()?;
-    let ctx = pubky_social_specs::ValidationCtx { root: Root::Pub };
-    post.validate(Some(id), &ctx).ok()?;
-    post.check_references(&ctx, Some(owner)).ok()?;
+    validate_social(&post, id, Root::Pub, owner).ok()?;
     let MusicContent::Playlist(p) = from_social(&post, id, edit_id)? else {
         return None;
     };
@@ -519,12 +590,33 @@ mod tests {
     }
 
     #[test]
-    fn long_playlists_stay_out_of_v1() {
-        assert!(to_v1(&MusicContent::Playlist(playlist(COLLECTION_MAX_ITEMS))).is_ok());
-        assert_eq!(
-            to_v1(&MusicContent::Playlist(playlist(COLLECTION_MAX_ITEMS + 1))),
-            Err(NotV1::TooLong(COLLECTION_MAX_ITEMS + 1))
-        );
+    fn long_playlists_are_collections_too() {
+        let short = to_v1(&MusicContent::Playlist(playlist(COLLECTION_MAX_ITEMS))).unwrap();
+        let V1Post::Social(short) = short else { panic!() };
+        assert!(!is_oversized(&short));
+        let pl = playlist(2500);
+        let id = id_of(pl.created_at);
+        let v1 = to_v1(&MusicContent::Playlist(pl.clone())).unwrap();
+        let V1Post::Social(post) = &v1 else { panic!() };
+        assert!(is_oversized(post));
+        assert!(size_parts(post).unwrap().len() >= 25, "checked in parts that fit");
+        // Created, edited and published like any collection, and read back whole
+        let path = v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
+        assert_eq!(path, format!("/priv/social/v1/posts/{id}/{id}.json"));
+        let edit = v1.version_path(&id, Some(&id), Root::Priv, &owner()).unwrap();
+        let (_, edit_id) = parse_version(&edit).unwrap();
+        assert!(edit_id.as_str() > id.as_str());
+        let (pub_path, body) = publish_plan(post, &id, &edit_id, &owner()).unwrap();
+        assert_eq!(pub_path, format!("/pub/social/v1/posts/{id}/{edit_id}.json"));
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let back = read_public_playlist(&bytes, &id, &edit_id, &owner()).unwrap();
+        assert_eq!(back.items.len(), 2500);
+        // The other rules still hold in every part
+        let mut bad = post.clone();
+        let mut c: PubkySocialCollectionContent = serde_json::from_str(&bad.content).unwrap();
+        c.items[2200].uri = "not a uri at all".into();
+        bad.content = serde_json::to_string(&c).unwrap();
+        assert!(validate_social(&bad, &id, Root::Priv, &owner()).is_err());
     }
 
     #[test]

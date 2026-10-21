@@ -295,6 +295,16 @@ impl PubkySync {
             }
         }
 
+        // Playlists the homeserver has only in the old format (the long ones, kept back before
+        // collections lost their size cap): write them as v1 collections now. Old files stay.
+        {
+            let lib = library.lock().expect("library poisoned");
+            for row in lib.list_music_posts(Some(pm_pubky::schemas::post::TYPE_PLAYLIST))? {
+                if row.synced_at.is_some() && !heads.has(&row.id) {
+                    lib.mark_music_post_unsynced(&row.id)?;
+                }
+            }
+        }
         self.push_posts(library, &owner, &mut heads, &mut report).await?;
         let removed_favs = self.push_favourites(library, &mut report).await?;
         self.pull_v1(library, &heads, &mut report).await?;
@@ -375,18 +385,11 @@ impl PubkySync {
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let pending = library.lock().expect("library poisoned").unsynced_music_posts()?;
-        let mut kept_legacy = 0;
         for row in pending {
             let public = row.visibility == "public";
-            let visibility = if public {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
             // Every version is written privately (the draft); a public playlist is also published:
             // the same version copied under /pub/ (pubky-social-specs plan_publish)
             let root = v1::Root::Priv;
-            let legacy_path = MusicPost::path(&row.id, visibility);
             if row.deleted {
                 // The old copies first, then every version, oldest first, public before private
                 let mut paths = vec![
@@ -460,19 +463,6 @@ impl PubkySync {
                             continue;
                         }
                     }
-                    Err(v1::NotV1::TooLong(_)) => {
-                        let post: pubky_app_specs::PubkyAppPost =
-                            serde_json::from_str(&row.json).expect("parsed above");
-                        if let Err(e) = self
-                            .homeserver
-                            .write_object(&self.session, &legacy_path, &post)
-                            .await
-                        {
-                            report.errors.push(format!("write {legacy_path}: {e}"));
-                            continue;
-                        }
-                        kept_legacy += 1;
-                    }
                     Err(e) => {
                         report.errors.push(format!("{}: {e}", row.id));
                         continue;
@@ -484,13 +474,6 @@ impl PubkySync {
                 .lock()
                 .expect("library poisoned")
                 .mark_music_post_synced(&row.id, now_micros())?;
-        }
-        if kept_legacy > 0 {
-            report.notes.push(format!(
-                "{kept_legacy} playlist{} longer than {} songs stay in the old private format for now.",
-                if kept_legacy == 1 { "" } else { "s" },
-                v1::COLLECTION_MAX_ITEMS
-            ));
         }
         Ok(())
     }
@@ -672,15 +655,13 @@ impl PubkySync {
         let Some((_, edit_id)) = v1::parse_version(private_path) else {
             return Err(format!("{id}: not a version path: {private_path}"));
         };
-        let plan = pubky_social_specs::plan_publish(id, &edit_id, social, None, owner)
-            .map_err(|e| format!("publish {id}: {e}"))?;
-        let body: serde_json::Value =
-            serde_json::from_str(&plan.rewritten_post_json).map_err(|e| format!("publish {id}: {e}"))?;
+        let (dest, body) =
+            v1::publish_plan(social, id, &edit_id, owner).map_err(|e| format!("publish {id}: {e}"))?;
         self.homeserver
-            .write_object(&self.session, &plan.dest_path, &body)
+            .write_object(&self.session, &dest, &body)
             .await
-            .map_err(|e| format!("write {}: {e}", plan.dest_path))?;
-        heads.record(v1::Root::Pub, ns, id, &plan.dest_path);
+            .map_err(|e| format!("write {dest}: {e}"))?;
+        heads.record(v1::Root::Pub, ns, id, &dest);
         Ok(())
     }
 }
