@@ -897,6 +897,145 @@ pub struct DescribeRequest {
     pub uris: Vec<String>,
 }
 
+/// A link from an item page to another one (artist, album).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PageLink {
+    pub name: String,
+    /// Page id (`lib-<n>`, `mb-…`, `isrc-…`, `u-…`); absent when there is no page yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// One fact in an item page's About section.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Fact {
+    pub label: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+/// `GET /v1/item/{kind}/{id}`: one item page (song, album, artist) from any
+/// source, with the same sections everywhere (docs/ux/08-item-page.md).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ItemPage {
+    /// `song`, `album` or `artist`.
+    pub kind: String,
+    /// This page's id (`lib-<n>`, `mb-…`, `isrc-…`, `u-…`).
+    pub id: String,
+    /// The canonical URL or the service link the page is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// What tags, ratings and favourites attach to (`{track_id}`, `{album_id}`,
+    /// `{artist_id}` or `{uri}`), for the existing `/v1/tags`, `/v1/reviews`
+    /// and `/v1/favourites` calls.
+    pub target: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<PageLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<PageLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Where the item comes from: "Your library", "TIDAL", "Deezer", "Pubky".
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_from: Option<PlaysFrom>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<String>,
+    /// Pinakes is still reading this link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reading: bool,
+    #[serde(default)]
+    pub songs: Vec<ItemTrack>,
+    #[serde(default)]
+    pub total_ms: u64,
+    #[serde(default)]
+    pub albums: Vec<ItemAlbum>,
+    #[serde(default)]
+    pub versions: Vec<Version>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pubky: Option<OnPubky>,
+    #[serde(default)]
+    pub about: Vec<Fact>,
+    /// A short description (Wikipedia for library artists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blurb: Option<String>,
+    /// The "Open on" links (service pages), the item's own first.
+    #[serde(default)]
+    pub open_on: Vec<Version>,
+    /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
+    pub section: String,
+}
+
+/// One song on an item page (an album's tracks, an artist's top songs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ItemTrack {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no: Option<u32>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Queue URI (`tidal:track:…`, `deezer:track:…`, `spotify:track:…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// The library track, when it plays from the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<i64>,
+    /// The service's page for this song (opens its own item page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// The song's own page id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<String>,
+}
+
+/// An album tile on an artist's item page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ItemAlbum {
+    /// The album's page id.
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub page: String,
+}
+
+/// `GET /v1/discover/contents`: what is inside an item, from the service
+/// it plays from (an album's songs; an artist's albums and top songs).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ItemContents {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_from: Option<PlaysFrom>,
+    /// Services that have it but are not connected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<String>,
+    #[serde(default)]
+    pub tracks: Vec<ItemTrack>,
+    /// Sum of the songs' durations.
+    #[serde(default)]
+    pub total_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub albums: Vec<ItemAlbum>,
+}
+
 /// Where an item plays from (the "Plays from" chip).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaysFrom {

@@ -21,6 +21,7 @@ pub mod favourites;
 pub mod files;
 pub mod hls;
 pub mod identify;
+pub mod item;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod pinakes_reader;
@@ -191,6 +192,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/item", get(discover::item_detail))
         .route("/discover/play", get(discover::play_plan))
         .route("/discover/describe", post(discover::describe))
+        .route("/discover/contents", get(discover::contents))
+        .route("/item/candidates", get(item::candidates))
+        .route("/item/matches", post(item::confirm_match))
+        .route("/item/{kind}/{id}", get(item::page))
         .route(
             "/library/identify",
             get(identify::get_status).post(identify::start),
@@ -255,6 +260,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/song/{id}", get(web_ui))
         .route("/album/{id}", get(web_ui))
         .route("/artist/{id}", get(web_ui))
+        .route("/playlist/{id}", get(web_ui))
+        .route("/genre/{id}", get(web_ui))
+        .route("/source/{id}", get(web_ui))
         .route("/search", get(web_ui));
     for view in WEB_VIEWS {
         web = web.route(&format!("/{view}"), get(web_ui));
@@ -1138,7 +1146,10 @@ fn merge_versions(out: &mut Vec<Version>, extra: Vec<Version>) {
 
 /// Where else a library track streams from (TIDAL and Deezer by ISRC, then
 /// every service Pinakes lists for it); empty when nothing is known.
-async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
+pub(crate) async fn track_versions(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Vec<Version>> {
     let track = s
         .library
         .lock()
@@ -1190,7 +1201,10 @@ async fn track_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) ->
 }
 
 /// Where else a library album streams from (TIDAL and Deezer by UPC).
-async fn album_versions(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Vec<Version>> {
+pub(crate) async fn album_versions(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Vec<Version>> {
     let album = s
         .library
         .lock()
@@ -3841,6 +3855,127 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1, "one backup per write");
         let _ = tid;
+    }
+
+    /// One item page (docs/ux/08-item-page.md): an album only a service knows
+    /// lists its songs (each with its own song page), Pinakes not knowing the
+    /// link is no error, and library albums and songs answer the same shape.
+    #[tokio::test]
+    async fn item_pages_list_songs_for_every_source() {
+        let t = |id: u64, title: &str, n: u64| {
+            serde_json::json!({"id": id, "title": title, "duration": 200 + n, "track_position": n, "preview": "http://x/p.mp3",
+                "artist": {"id": 7, "name": "DAT ADAM"}, "album": {"id": 1999, "title": "HYDRA 3D"}})
+        };
+        let album = serde_json::json!({"id": 1999, "title": "HYDRA 3D", "release_date": "2024-01-01", "cover_big": "http://img/h.jpg",
+            "artist": {"id": 7, "name": "DAT ADAM"}, "tracks": {"data": [t(11, "HYDRA", 1), t(12, "MEDUSA", 2), t(13, "NEBEL", 3)]}});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/album/{id}",
+                get(move || {
+                    let a = album.clone();
+                    async move { Json(a) }
+                }),
+            )
+            // Pinakes has never seen the link and cannot read it.
+            .route(
+                "/v1/resources/by-uri",
+                get(|| async { (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#) }),
+            )
+            .route(
+                "/v1/resolve",
+                post(|| async { (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.deezer_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let id = discover::page_id("https://www.deezer.com/album/1999");
+        assert_eq!(
+            discover::url_of_page("album", &id).as_deref(),
+            Some("https://www.deezer.com/album/1999"),
+            "page ids round-trip"
+        );
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert_eq!(pg["title"], "HYDRA 3D");
+        assert_eq!(pg["artist"]["name"], "DAT ADAM");
+        let songs = pg["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 3, "{pg}");
+        assert_eq!(songs[1]["title"], "MEDUSA");
+        assert_eq!(songs[1]["no"], 2);
+        assert_eq!(songs[1]["uri"], "deezer:track:12", "each row plays its own track");
+        let song_id = songs[1]["id"].as_str().unwrap();
+        assert_eq!(
+            discover::url_of_page("song", song_id).as_deref(),
+            Some("https://www.deezer.com/track/12"),
+            "the title opens that song's page"
+        );
+        assert_eq!(pg["plays_from"]["mode"], "preview");
+        assert_eq!(pg["target"]["uri"], "https://www.deezer.com/album/1999");
+        assert_eq!(pg["section"], "discover");
+        // The library: an album and a song answer the same shape.
+        let (aid, tid) = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("01.flac"), "Death on Two Legs", "Queen");
+            tr.album = Some(pm_model::Album {
+                id: None,
+                title: "A Night at the Opera".into(),
+                album_artist: Some("Queen".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1975),
+                upc: None,
+                total_discs: None,
+            });
+            let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+            tr.canonical = Some((
+                pm_model::MusicUri::Recording { mbid },
+                pm_model::Confidence::TaggedMbid,
+            ));
+            let tid = lib.upsert_track(&tr).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (t.album.unwrap().id.unwrap(), tid)
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        assert_eq!(al["songs"][0]["track_id"], tid.0);
+        assert_eq!(
+            al["songs"][0]["id"], "mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "matched songs use their canonical id"
+        );
+        assert_eq!(al["target"]["album_id"], aid);
+        assert_eq!(al["section"], "albums");
+        // The canonical id opens the library's song page.
+        let (st, so) = call(
+            &app,
+            "GET",
+            "/v1/item/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{so}");
+        assert_eq!(so["target"]["track_id"], tid.0);
+        assert_eq!(so["album"]["id"], format!("lib-{aid}"));
+        assert!(
+            so["about"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["label"] == "File"),
+            "library facts in About"
+        );
+        let (st, _) = call(&app, "GET", "/v1/item/playlist/x", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[test]

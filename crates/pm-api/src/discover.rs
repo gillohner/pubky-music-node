@@ -122,8 +122,14 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
         _ => return None,
     };
     // Deezer pages carry a language segment (`/en/track/1`); TIDAL a `/browse/`.
-    let i = segs.iter().position(|s| *s == "track" || *s == "album")?;
-    let kind = if segs[i] == "track" { "track" } else { "album" };
+    let i = segs
+        .iter()
+        .position(|s| matches!(*s, "track" | "album" | "artist"))?;
+    let kind = match segs[i] {
+        "track" => "track",
+        "album" => "album",
+        _ => "artist",
+    };
     let id = segs.get(i + 1)?.to_string();
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return None;
@@ -180,6 +186,18 @@ fn access(acc: &ServiceAccess, service: &str) -> Access {
         "deezer" => Access::Preview,
         "spotify" => acc.spotify,
         _ => Access::No,
+    }
+}
+
+/// A service's name as people say it ("TIDAL", "Deezer", …).
+pub(crate) fn service_title(id: &str) -> String {
+    match id {
+        "tidal" => "TIDAL".into(),
+        "deezer" => "Deezer".into(),
+        "spotify" => "Spotify".into(),
+        "archive" => "Internet Archive".into(),
+        "audius" => "Audius".into(),
+        other => other.to_string(),
     }
 }
 
@@ -571,6 +589,429 @@ async fn describe_from_provider(s: &NodeState, u: &str) -> Option<DiscoverItem> 
     Some(it)
 }
 
+/// An album's tracklist (a release, or the first release of a release
+/// group) or an artist's albums, from MusicBrainz.
+async fn musicbrainz_contents(s: &NodeState, kind: &str, mbid: &str) -> (Vec<ItemTrack>, Vec<ItemAlbum>) {
+    let contact = s.contact();
+    if contact.is_empty() || pm_model::Mbid::parse(mbid).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
+    cfg.base_url = s.mb_base.read().expect("mb lock").clone();
+    let Ok(mb) = pm_library::musicbrainz::MusicBrainzClient::new(cfg) else {
+        return (Vec::new(), Vec::new());
+    };
+    let ms = |v: &serde_json::Value| v.as_u64();
+    match kind {
+        "album" => {
+            // The MBID may name a release or a release group.
+            let mut rel = mb
+                .get_json(
+                    &format!("release/{mbid}"),
+                    &[("inc", "recordings artist-credits")],
+                )
+                .await
+                .ok()
+                .flatten();
+            if rel.is_none() {
+                if let Some(g) = mb
+                    .get_json(&format!("release-group/{mbid}"), &[("inc", "releases")])
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    if let Some(first) = g["releases"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|r| r["id"].as_str())
+                    {
+                        rel = mb
+                            .get_json(
+                                &format!("release/{first}"),
+                                &[("inc", "recordings artist-credits")],
+                            )
+                            .await
+                            .ok()
+                            .flatten();
+                    }
+                }
+            }
+            let Some(rel) = rel else {
+                return (Vec::new(), Vec::new());
+            };
+            let credit = |v: &serde_json::Value| {
+                v["artist-credit"].as_array().map(|a| {
+                    a.iter()
+                        .map(|c| {
+                            format!(
+                                "{}{}",
+                                c["name"].as_str().unwrap_or(""),
+                                c["joinphrase"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect::<String>()
+                })
+            };
+            let album_title = rel["title"].as_str().map(str::to_string);
+            let tracks = rel["media"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|m| m["tracks"].as_array().cloned().unwrap_or_default())
+                .map(|t| {
+                    let rec = t["recording"]["id"]
+                        .as_str()
+                        .map(|r| format!("https://musicbrainz.org/recording/{r}"));
+                    ItemTrack {
+                        no: t["position"].as_u64().map(|n| n as u32),
+                        title: t["title"].as_str().unwrap_or("").to_string(),
+                        artist: credit(&t["recording"])
+                            .or_else(|| credit(&rel))
+                            .filter(|a| !a.is_empty()),
+                        duration_ms: ms(&t["length"]),
+                        id: rec.as_deref().map(page_id),
+                        page: rec,
+                        album: album_title.clone(),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            (tracks, Vec::new())
+        }
+        "artist" => {
+            let Some(g) = mb
+                .get_json(
+                    "release-group",
+                    &[("artist", mbid), ("type", "album"), ("limit", "100")],
+                )
+                .await
+                .ok()
+                .flatten()
+            else {
+                return (Vec::new(), Vec::new());
+            };
+            let mut albums: Vec<ItemAlbum> = g["release-groups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|x| x["secondary-types"].as_array().is_none_or(|a| a.is_empty()))
+                .filter_map(|x| {
+                    let id = x["id"].as_str()?;
+                    let page = format!("https://musicbrainz.org/release-group/{id}");
+                    Some(ItemAlbum {
+                        id: page_id(&page),
+                        title: x["title"].as_str()?.to_string(),
+                        year: x["first-release-date"]
+                            .as_str()
+                            .and_then(|d| d.get(..4))
+                            .and_then(|y| y.parse().ok()),
+                        image: Some(format!(
+                            "https://coverartarchive.org/release-group/{id}/front-250"
+                        )),
+                        page,
+                    })
+                })
+                .collect();
+            albums.sort_by_key(|a| std::cmp::Reverse(a.year));
+            (Vec::new(), albums)
+        }
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+/// A page id for a link (mirrors the web UI): `mb-<mbid>` for MusicBrainz
+/// recordings, artists and release groups, `isrc-<ISRC>`, else
+/// `u-<base64url of the link>`.
+pub(crate) fn page_id(url: &str) -> String {
+    use base64::Engine;
+    for prefix in [
+        "https://musicbrainz.org/recording/",
+        "https://musicbrainz.org/artist/",
+        "https://musicbrainz.org/release-group/",
+    ] {
+        if let Some(m) = url.strip_prefix(prefix) {
+            if pm_model::Mbid::parse(m.trim_end_matches('/')).is_ok() {
+                return format!("mb-{}", m.trim_end_matches('/'));
+            }
+        }
+    }
+    if let Some(i) = url.strip_prefix("https://musicbrainz.org/isrc/") {
+        if pm_model::Isrc::parse(i).is_ok() {
+            return format!("isrc-{}", i.to_ascii_uppercase());
+        }
+    }
+    format!(
+        "u-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(url)
+    )
+}
+
+/// The link a page id names (`mb-`, `isrc-`, `u-`); `kind` picks the
+/// MusicBrainz entity for `mb-`.
+pub(crate) fn url_of_page(kind: &str, id: &str) -> Option<String> {
+    use base64::Engine;
+    if let Some(m) = id.strip_prefix("mb-") {
+        pm_model::Mbid::parse(m).ok()?;
+        let entity = match kind {
+            "artist" => "artist",
+            "album" => "release-group",
+            _ => "recording",
+        };
+        return Some(format!("https://musicbrainz.org/{entity}/{m}"));
+    }
+    if let Some(i) = id.strip_prefix("isrc-") {
+        pm_model::Isrc::parse(i).ok()?;
+        return Some(format!("https://musicbrainz.org/isrc/{i}"));
+    }
+    let b = id.strip_prefix("u-")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()?;
+    let u = String::from_utf8(bytes).ok()?;
+    url::Url::parse(&u).ok().map(|_| u)
+}
+
+/// The service page of a queue URI (`tidal:track:1` → `https://tidal.com/track/1`).
+pub(crate) fn page_of_queue_uri(uri: &str) -> Option<String> {
+    let (svc, rest) = uri.split_once(':')?;
+    let (kind, id) = rest.split_once(':')?;
+    Some(match svc {
+        "tidal" => format!("https://tidal.com/{kind}/{id}"),
+        "deezer" => format!("https://www.deezer.com/{kind}/{id}"),
+        "spotify" => format!("https://open.spotify.com/{kind}/{id}"),
+        _ => return None,
+    })
+}
+
+/// `GET /v1/discover/contents?uri=…`: an item's songs (albums) or albums and
+/// top songs (artists), from the service it plays from (Deezer previews when
+/// nothing full is connected). Cached six hours per link.
+pub(crate) async fn contents(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<DiscoverQuery>,
+) -> ApiResult<ItemContents> {
+    let Some(uri) = q.uri.clone().filter(|u| !u.trim().is_empty()) else {
+        return Err(ApiError::bad_request("uri is required"));
+    };
+    Ok(Json(load_external(&s, uri.trim()).await.contents))
+}
+
+/// Everything known about a music link that is not a library page: the
+/// item, its Pinakes card (or the provider's data while Pinakes reads it),
+/// and its contents.
+pub(crate) struct External {
+    pub it: DiscoverItem,
+    pub album_id: Option<i64>,
+    pub card: Option<pm_pubky::pinakes::ResourceDetail>,
+    pub reading: bool,
+    pub contents: ItemContents,
+}
+
+pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
+    use crate::streaming::StreamingService;
+    let uri = uri.trim().to_string();
+    let cache_key = format!("item.contents.{uri}");
+    let cached: Option<ItemContents> = {
+        let lib = s.library.lock().expect("library poisoned");
+        lib.get_setting(&cache_key)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<(i64, ItemContents)>(&j).ok())
+            .filter(|(at, c)| pm_library::db::now_unix() - at < 6 * 3600 && !c.tracks.is_empty())
+            .map(|(_, c)| c)
+    };
+    let card = crate::pinakes_reader::card(s, &uri).await;
+    let reading = matches!(card, crate::pinakes_reader::Card::Reading(_));
+    let r = match card {
+        crate::pinakes_reader::Card::Found(r) => Some(*r),
+        _ => None,
+    };
+    let (mut it, album_id) = match &r {
+        Some(r) => detail_item(s, r),
+        None => match describe_from_provider(s, &uri).await {
+            Some(it) => (it, None),
+            None => (bare_item(&uri), None),
+        },
+    };
+    if r.is_some() {
+        fill_from_key(s, &mut it, album_id).await;
+    }
+    // The owner's own matches ("Find on other services") count like Pinakes's links.
+    for m in crate::item::matches_for(s, &uri) {
+        if !it.also_on.iter().any(|v| v.url == m.url) {
+            it.also_on.push(m);
+        }
+    }
+    let acc = service_access(s);
+    let res = resolve(&acc, &it, album_id);
+    let mut out = ItemContents {
+        kind: it.kind.clone(),
+        plays_from: res.plays_from.clone(),
+        connect: res.connect.clone(),
+        ..Default::default()
+    };
+    if let Some(c) = cached {
+        return External {
+            it,
+            album_id,
+            card: r,
+            reading,
+            contents: c,
+        };
+    }
+    // The library album: its tracks, in order.
+    if let (Some(p), Some(a)) = (&res.plays_from, album_id) {
+        if p.service == "library" && p.kind == "album" {
+            let lib = s.library.lock().expect("library poisoned");
+            out.tracks = lib
+                .album_tracks(a)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| ItemTrack {
+                    no: t.track_no,
+                    artist: Some(
+                        t.artists
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    title: t.title,
+                    duration_ms: t.duration_ms,
+                    uri: None,
+                    track_id: t.id.map(|i| i.0),
+                    page: None,
+                    image: None,
+                    ..Default::default()
+                })
+                .collect();
+        }
+    }
+    // Otherwise the service it plays from; when that one lists nothing (Spotify
+    // refusing the app, a region gap), the page's own link, then Deezer's previews.
+    let mut candidates: Vec<ServiceLink> = res.link.clone().into_iter().collect();
+    if let Some(own) = it.page.as_deref().and_then(|p| service_link(p, false)) {
+        candidates.push(own);
+    }
+    candidates.extend(
+        it.also_on
+            .iter()
+            .filter_map(|v| service_link(&v.url, false))
+            .filter(|l| l.service == "deezer" && l.kind == it.kind),
+    );
+    let mut tried = std::collections::HashSet::new();
+    for cand in &candidates {
+        if !out.tracks.is_empty() || !out.albums.is_empty() {
+            break;
+        }
+        if !tried.insert((cand.service, cand.id.clone())) {
+            continue;
+        }
+        let l = cand;
+        {
+            let svc: Option<Box<dyn StreamingService>> = match l.service {
+                "tidal" => Some(Box::new(crate::tidal::Tidal)),
+                "deezer" => Some(Box::new(crate::deezer::Deezer)),
+                "spotify" => Some(Box::new(crate::spotify::Spotify)),
+                _ => None,
+            };
+            if let Some(svc) = svc {
+                match l.kind {
+                    "album" => {
+                        if let Ok(item) = svc.item(s, &format!("album:{}", l.id)).await {
+                            out.tracks = item
+                                .tracks
+                                .iter()
+                                .map(|t| ItemTrack {
+                                    no: t.track_no,
+                                    title: t.title.clone(),
+                                    artist: t.artist.clone().or_else(|| item.creator.clone()),
+                                    duration_ms: t.duration_ms,
+                                    uri: Some(t.url.clone()),
+                                    track_id: None,
+                                    page: page_of_queue_uri(&t.url),
+                                    image: item.image.clone(),
+                                    id: page_of_queue_uri(&t.url).map(|p| page_id(&p)),
+                                    album: Some(item.title.clone()),
+                                    ..Default::default()
+                                })
+                                .collect();
+                        }
+                    }
+                    "artist" => {
+                        if let Ok(a) = svc.artist(s, &format!("artist:{}", l.id)).await {
+                            out.albums = a
+                                .albums
+                                .iter()
+                                .map(|h| ItemAlbum {
+                                    id: page_id(&h.url),
+                                    title: h.title.clone(),
+                                    year: h.year,
+                                    image: h.image.clone(),
+                                    page: h.url.clone(),
+                                })
+                                .collect();
+                        }
+                        let top = match l.service {
+                            "tidal" => crate::tidal::artist_top_tracks(s, &l.id, 10).await.ok(),
+                            "deezer" => crate::deezer::artist_top_tracks(s, &l.id, 10).await.ok(),
+                            _ => None,
+                        };
+                        out.tracks = top
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|h| ItemTrack {
+                                no: None,
+                                title: h.title,
+                                artist: h.creator,
+                                duration_ms: h.duration_ms,
+                                page: h.uri.as_deref().and_then(page_of_queue_uri).or(Some(h.url)),
+                                uri: h.uri,
+                                track_id: None,
+                                image: h.image,
+                                ..Default::default()
+                            })
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if (!out.tracks.is_empty() || !out.albums.is_empty()) && res.link.as_ref() != Some(l) {
+            // Say where the list (and Play) actually comes from.
+            out.plays_from = Some(plays_from_link(l, access(&acc, l.service)));
+        }
+    }
+    // No service lists it: MusicBrainz by the card's MBID (owner's scope decision:
+    // Pinakes carries no tracklists or discographies). Rows open their pages;
+    // they play once a connected service has them.
+    if out.tracks.is_empty() && out.albums.is_empty() {
+        if let Some(mbid) = r.as_ref().and_then(|r| r.mbid()) {
+            let (t, a) = musicbrainz_contents(s, &it.kind, &mbid).await;
+            out.tracks = t;
+            out.albums = a;
+        }
+    }
+    for t in &mut out.tracks {
+        if t.id.is_none() {
+            t.id = t.page.as_deref().map(page_id);
+        }
+    }
+    out.total_ms = out.tracks.iter().filter_map(|t| t.duration_ms).sum();
+    if !out.tracks.is_empty() || !out.albums.is_empty() {
+        let lib = s.library.lock().expect("library poisoned");
+        let _ = lib.set_setting(
+            &cache_key,
+            &serde_json::to_string(&(pm_library::db::now_unix(), &out)).unwrap_or_default(),
+        );
+    }
+    External {
+        it,
+        album_id,
+        card: r,
+        reading,
+        contents: out,
+    }
+}
+
 /// Queue items for a service link: a track straight from the card, an
 /// album through the service's item (its tracks in order).
 async fn expand_link(
@@ -600,6 +1041,27 @@ async fn expand_link(
             duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
         }]);
+    }
+    if l.kind == "artist" {
+        // An artist plays its top songs.
+        let top = match l.service {
+            "tidal" => crate::tidal::artist_top_tracks(s, &l.id, 20).await?,
+            _ => crate::deezer::artist_top_tracks(s, &l.id, 20).await?,
+        };
+        return Ok(top
+            .into_iter()
+            .filter_map(|h| {
+                Some(pm_zones::QueueItem {
+                    id: 0,
+                    uri: h.uri?,
+                    title: Some(h.title),
+                    artist: h.creator,
+                    album: None,
+                    duration_ms: h.duration_ms,
+                    image: h.image,
+                })
+            })
+            .collect());
     }
     let album = svc.item(s, &format!("album:{}", l.id)).await?;
     Ok(album
@@ -726,26 +1188,7 @@ pub(crate) async fn item_detail(
     let facts = r.facts();
     let (mut item, in_library_album) = detail_item(&s, &r);
     fill_from_key(&s, &mut item, in_library_album).await;
-    let on_pubky = match s.discovery() {
-        Some(d) => match d.nexus().resource_by_uri(&r.card.uri).await {
-            Ok(view) => {
-                let mut tags: Vec<(String, u64)> = view
-                    .tags
-                    .iter()
-                    .map(|t| (t.label.clone(), t.taggers_count.max(t.taggers.len() as u64)))
-                    .collect();
-                tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                Some(OnPubky {
-                    uri: r.card.uri.clone(),
-                    indexed: true,
-                    taggers: view.distinct_taggers() as u64,
-                    tags,
-                })
-            }
-            Err(_) => None,
-        },
-        None => None,
-    };
+    let on_pubky = on_pubky_for(&s, &r.card.uri).await;
     Ok(Json(DiscoverDetail {
         item,
         mbid: r.mbid(),
@@ -760,6 +1203,24 @@ pub(crate) async fn item_detail(
         artist_info: None,
         reading: false,
     }))
+}
+
+/// Who tagged a URL on Pubky (Nexus): labels with counts, distinct taggers.
+pub(crate) async fn on_pubky_for(s: &NodeState, uri: &str) -> Option<OnPubky> {
+    let d = s.discovery()?;
+    let view = d.nexus().resource_by_uri(uri).await.ok()?;
+    let mut tags: Vec<(String, u64)> = view
+        .tags
+        .iter()
+        .map(|t| (t.label.clone(), t.taggers_count.max(t.taggers.len() as u64)))
+        .collect();
+    tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Some(OnPubky {
+        uri: uri.to_string(),
+        indexed: true,
+        taggers: view.distinct_taggers() as u64,
+        tags,
+    })
 }
 
 /// A row for a link nobody describes yet: its service, never the URL as a name.

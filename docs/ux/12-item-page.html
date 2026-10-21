@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX · One item page</title><link rel="stylesheet" href="ux.css"></head>
+<body><div class="wf" id="wf"></div>
+<script src="ux.js"></script>
+<script>
+// One template for every kind (08-item-page.md): the same six sections in the same order.
+const kind = new URLSearchParams(location.search).get('kind') || 'album';
+const D = {
+  song: { eyebrow: 'Song · plays from your library', title: 'Bohemian Rhapsody', by: '<a class="lnk">Queen</a> · <a class="lnk">A Night at the Opera</a> · 1975', shuffle: false, back: '‹ A Night at the Opera',
+    songs: '<div class="list"><div class="list-row"><span class="no"></span><span class="cover"></span><div><div class="name"><a class="lnk">A Night at the Opera</a></div><div class="sub">Album · 1975 · track 11 of 12</div></div><span></span><span></span><button class="icon-btn">›</button></div></div>', songsTitle: 'On the album' },
+  album: { eyebrow: 'Album · plays from TIDAL', title: 'HYDRA 3D', by: '<a class="lnk">DAT ADAM</a> · 2024', shuffle: true, back: '‹ Results for “hydra”',
+    songs: ['HYDRA', 'MEDUSA', 'NEBEL', 'PYTHON', 'KRAKEN'].map((t, i) => `<div class="list-row"><span class="no">${i + 1}</span><button class="icon-btn">▶</button><div><div class="name"><a class="lnk">${t}</a></div><div class="sub"><a class="lnk">DAT ADAM</a></div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL</span><span class="dur">2:4${i}</span><button class="icon-btn">⋯</button></div>`).join(''), songsTitle: 'Songs · 10 songs · 28 min' },
+  artist: { eyebrow: 'Artist · plays from TIDAL', title: 'Radiohead', by: 'Group · Abingdon, UK · 1985–', shuffle: true, back: '‹ Results for “radiohead”',
+    songs: ['Creep', 'Karma Police', 'No Surprises'].map((t, i) => `<div class="list-row"><span class="no">${i + 1}</span><button class="icon-btn">▶</button><div><div class="name"><a class="lnk">${t}</a></div><div class="sub"><a class="lnk">${['Pablo Honey', 'OK Computer', 'OK Computer'][i]}</a></div></div><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL</span><span class="dur">3:5${i}</span><button class="icon-btn">⋯</button></div>`).join('') + '</div><h3>Albums</h3><div class="grid">' + ['OK Computer', 'Kid A', 'In Rainbows', 'The Bends'].map((a) => `<div class="tile"><span class="art"></span><div class="t"><a class="lnk">${a}</a></div><div class="a">Album</div></div>`).join(''), songsTitle: 'Top songs' },
+  playlist: { eyebrow: 'Playlist · 12 songs · mixed sources', title: 'Queen, deep and loud', by: 'Yours · updated today', shuffle: true, back: '‹ Playlists',
+    songs: ['Bohemian Rhapsody', 'The Prophet\'s Song', 'Brighton Rock'].map((t, i) => `<div class="list-row"><span class="no">${i + 1}</span><button class="icon-btn">▶</button><div><div class="name"><a class="lnk">${t}</a></div><div class="sub"><a class="lnk">Queen</a> · <a class="lnk">${['A Night at the Opera', 'A Night at the Opera', 'Sheer Heart Attack'][i]}</a></div></div><span class="chip"><span class="mark" data-s="${i ? 'tidal' : 'local'}"></span>${i ? 'TIDAL' : 'Library'}</span><span class="dur">5:5${i}</span><button class="icon-btn">⋯</button></div>`).join(''), songsTitle: 'Songs' },
+}[kind];
+const sec = (n, t, body) => `<h3>${n}. ${t}</h3>${body}`;
+document.getElementById('wf').innerHTML = `
+<p class="wf-note"><b>One item page · ${kind}.</b> The same six sections for song, album, artist and playlist, from any source (library, TIDAL, Deezer, Spotify, a Pubky link). Empty sections say so in one line. Back = history, labelled with the previous page.</p>
+<div class="topbar"><span class="brand">Pubky Music</span><span class="search">Search</span></div>
+<div class="crumbs" style="margin-bottom:12px"><a class="lnk">${D.back}</a></div>
+<div class="header"><span class="cover lg"${kind === 'artist' ? ' style="border-radius:50%"' : ''}></span><div class="meta"><div class="muted small">${D.eyebrow.toUpperCase()}</div><h1 style="font-size:30px">${D.title}</h1><div class="by">${D.by}</div>
+<div class="actions"><button class="btn primary">▶ Play</button>${D.shuffle ? '<button class="btn">⇄ Shuffle</button>' : ''}<button class="btn">🔊 Play on…</button>${kind === 'playlist' ? '' : '<button class="btn">♡</button>'}<button class="btn ghost" title="Add to queue · Play next · Add to playlist · Go to artist · Go to album · Open on … · Copy link · Copy to homeserver">⋯</button></div></div></div>
+${sec(2, D.songsTitle, `<div class="list">${D.songs}</div>`)}
+${sec(3, 'Versions', kind === 'playlist' ? '<p class="muted small">Playlists are yours; their songs show their own versions.</p>' : '<div class="row" style="gap:8px;flex-wrap:wrap"><span class="chip"><span class="mark" data-s="local"></span>Library · FLAC 24/96 ▶</span><span class="chip"><span class="mark" data-s="tidal"></span>TIDAL ▶</span><span class="chip"><span class="mark" data-s="deezer"></span>Deezer · preview ▶</span><span class="chip"><span class="mark" data-s="spotify"></span>Spotify ↗</span></div>')}
+${sec(4, 'On Pubky', kind === 'playlist' ? '<p class="muted small">Not shared until the social primitives land.</p>' : '<div class="row" style="gap:8px;flex-wrap:wrap"><span class="scope"><button class="on">🌐 Everywhere (12)</button><button>▣ This version (3)</button></span><span class="tagchip">rock <span class="n">7</span></span><span class="tagchip">opera <span class="n">3</span></span><span class="muted small">5 people</span></div>')}
+${sec(5, 'Yours', `<div class="row" style="gap:10px;flex-wrap:wrap">${kind === 'playlist' ? '' : '<span class="tagchip">favourite-ever</span><span class="tagchip add">+ tag</span><span class="stars">★★★★☆</span>'}<button class="btn sm ghost">${kind === 'playlist' ? 'Edit description' : 'Add notes'}</button></div>`)}
+${sec(6, 'About', '<table class="facts"><tr><td>MusicBrainz</td><td><a>b1a9c0e9…</a></td></tr><tr><td>ISRC / UPC</td><td>GBUM71029604</td></tr><tr><td>Year</td><td>1975</td></tr>' + (kind === 'song' ? '<tr><td>File</td><td>FLAC 24/96 · /music/Queen/…/11.flac · RG −8.2 dB</td></tr>' : '') + '</table>')}`;
+document.querySelectorAll('.mark[data-s]').forEach((el) => { if (!el.querySelector('svg')) { el.classList.add(el.dataset.s); el.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>`); } });
+</script></body></html>

@@ -474,6 +474,11 @@
   const idOf = (uri) => { let m = uri.match(/^https:\/\/musicbrainz\.org\/(recording|artist|release-group)\/([0-9a-f-]{36})$/); if (m) return 'mb-' + m[2]; m = uri.match(/^https:\/\/musicbrainz\.org\/isrc\/([A-Za-z0-9]{12})$/); if (m) return 'isrc-' + m[1].toUpperCase(); return 'u-' + b64u(uri); };
   const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } return null; };
   const pathFor = (v, arg) => {
+    if (v === 'item' && arg && arg.kind && arg.id) return `/${arg.kind}/${arg.id}`;
+    if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
+    if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
+    if (v === 'sources' && arg && arg.source) return `/source/${encodeURIComponent(arg.source)}`;
+    if (v === 'source-item' || v === 'source-artist') return null;
     if (v === 'discover-item' && arg && arg.uri) return `/${itemSeg(arg.kind)}/${idOf(arg.uri)}`;
     if (v === 'search') return arg && arg.q ? `/search?q=${encodeURIComponent(arg.q)}` : '/search';
     if (v === 'home') return '/';
@@ -482,17 +487,50 @@
   const routeFromPath = () => {
     const p = location.pathname.replace(/\/+$/, '') || '/';
     let m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
-    if (m) { const uri = uriOf(m[1], m[2]); if (uri) return { v: 'discover-item', arg: { uri, kind: m[1] === 'song' ? 'track' : m[1] } }; }
+    if (m && (m[2].startsWith('lib-') || uriOf(m[1], m[2]))) return { v: 'item', arg: { kind: m[1], id: m[2] } };
+    m = p.match(/^\/(playlist|genre|source)\/([^/]+)$/);
+    if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
     if (p === '/search') { const q = new URLSearchParams(location.search).get('q') || ''; return { v: 'search', arg: q ? { q } : null }; }
     const v = p.slice(1);
     return NAV_VIEWS.includes(v) ? { v } : null;
   };
+  // The same thing gets the same page (docs/ux/08-item-page.md): old detail views open the item page.
+  const SERVICE_PAGE = { tidal: (k, id) => `https://tidal.com/${k}/${id}`, deezer: (k, id) => `https://www.deezer.com/${k}/${id}`, spotify: (k, id) => `https://open.spotify.com/${k}/${id}` };
+  const toItem = (v, arg) => {
+    if (v === 'discover-item' && arg && arg.uri) return { kind: itemSeg(arg.kind), id: idOf(arg.uri) };
+    if (v === 'album' && typeof arg === 'number') return { kind: 'album', id: 'lib-' + arg };
+    if (v === 'artist' && typeof arg === 'number') return { kind: 'artist', id: 'lib-' + arg };
+    if ((v === 'source-item' || v === 'source-artist') && arg && SERVICE_PAGE[arg.source]) {
+      const [k, id] = String(arg.id).includes(':') ? String(arg.id).split(':') : [v === 'source-artist' ? 'artist' : 'album', String(arg.id)];
+      return { kind: k === 'track' ? 'song' : k, id: idOf(SERVICE_PAGE[arg.source](k, id)) };
+    }
+    return null;
+  };
   // What the back arrow says on the next page.
-  const hereLabel = () => state.view === 'discover-item' ? (state.itemTitle || 'Back') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
+  const hereLabel = () => state.view === 'item' || state.view === 'discover-item' ? (state.itemTitle || 'Back') : state.view === 'playlist' ? (state.itemTitle || 'Playlist') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
   // History stores only what restores a view (search keeps its query, not its results).
   const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? { q: arg.q } : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
   let navDepth = 0;
+  // For tests (tools/ui-item-pages.js): every view with a path round-trips through routeFromPath.
+  window.pmRoutes = {
+    check: () => {
+      const cases = [['home'], ['albums'], ['artists'], ['tracks'], ['playlists'], ['discover'], ['queue'], ['zones'], ['settings'], ['favourites'], ['genres'], ['radio'], ['identify'],
+        ['item', { kind: 'song', id: 'lib-3' }], ['item', { kind: 'album', id: 'lib-1' }], ['item', { kind: 'artist', id: 'mb-0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }],
+        ['item', { kind: 'album', id: idOf('https://tidal.com/album/199574241') }], ['item', { kind: 'song', id: 'isrc-GBUM71029604' }],
+        ['playlist', 'abc123'], ['genre', 4], ['sources', { source: 'tidal' }], ['search', { q: 'queen' }]];
+      const saved = location.pathname + location.search;
+      const out = cases.map(([v, arg]) => {
+        const path = pathFor(v, arg); if (!path) return `FAIL ${v}: no path`;
+        history.replaceState(history.state, '', path); const r = routeFromPath() || { v: path === '/' ? 'home' : null };
+        const same = r.v === v && JSON.stringify(r.arg ?? null) === JSON.stringify(arg ?? null);
+        return `${same ? 'ok' : 'FAIL'} ${path}`;
+      });
+      history.replaceState(history.state, '', saved);
+      return out;
+    },
+  };
   const setView = (v, arg, how = 'push') => {
+    { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
       const cur = history.state || {};
@@ -504,7 +542,7 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || (v === 'playlist' && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if ($('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false'); } $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
     return render();
@@ -568,6 +606,8 @@
     if (u.service) return u.service.url || null;
     return null;
   };
+  // A library track's page id: its canonical identity when known, else lib-<id>.
+  const trackPageId = (t) => { const c = Array.isArray(t.canonical) ? t.canonical[0] : t.canonical; const u = canonicalUrl(c); return u ? idOf(u) : 'lib-' + t.id; };
   const trackHasId = (t) => !!canonicalUrl(Array.isArray(t.canonical) ? t.canonical[0] : t.canonical);
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr' } = {}) => {
     rememberTracks(tracks);
@@ -577,7 +617,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}">
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title">${can ? '' : `<button class="idmark" data-act="identify" title="Not identified yet: identify it so tags, playlists and Pubky can name it">?</button>`}${esc(t.title)}</div><div class="by">${esc(artists(t))}</div></div>
+        <div class="main-col"><div class="title">${can ? '' : `<button class="idmark" data-act="identify" title="Not identified yet: identify it so tags, playlists and Pubky can name it">?</button>`}<a class="lnk" data-act="song">${esc(t.title)}</a></div><div class="by">${t.artists && t.artists[0] && t.artists[0].id != null ? `<a class="lnk" data-act="tartist">${esc(artists(t))}</a>` : esc(artists(t))}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div><span class="fmt">${esc(fmtFormat(t.file && t.file.format))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -599,6 +639,11 @@
       const act = btn.dataset.act;
       if (act === 'album') { setView('album', Number(btn.dataset.album)); return; }
       if (act === 'identify') { setView('identify'); return; }
+      if (act === 'song' || act === 'tartist') {
+        const t0 = (lists[list ? list.dataset.list : 'tr'] || [])[Number(btn.closest('.track').dataset.i)]; if (!t0) return;
+        if (act === 'song') setView('item', { kind: 'song', id: trackPageId(t0) }); else setView('item', { kind: 'artist', id: 'lib-' + t0.artists[0].id });
+        return;
+      }
       if (i < 0) return;
       if (act === 'play') playTracks(tracks.slice(i), true);
       else if (act === 'next') playTracks([tracks[i]], false, 'next');
@@ -614,7 +659,7 @@
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
   const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div></button>`;
-  const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"><span class="muted small">Public pubky.app tags on the MusicBrainz URL; Discover reads them back via Pinakes.</span></div>`;
+  const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow" title="Public on Pubky">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"></div>`;
   const bindTagRow = (ref) => {
     const add = $('#tagadd'); if (!add) return;
     add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
@@ -668,12 +713,19 @@
       try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); const tv = vs.find((v) => v.source === 'tidal' && /^track:/.test(v.id)); if (tv) versionItems.push({ label: 'Full length in TIDAL\'s player (here)', icon: 'external', run: () => tidalEmbed('tracks', tv.id.replace(/^track:/, ''), single.title) }); } catch { /* no versions */ }
     }
     const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const nav = single ? [
+      ...(single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : []),
+      ...(single.album && single.album.id != null ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: 'lib-' + single.album.id }) }] : []),
+      { label: 'Song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
+      { label: 'Copy link', icon: 'compass', run: () => copyLink(`/song/${trackPageId(single)}`) },
+    ] : [];
     const items = [
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
       ...radioItem,
       ...versionItems,
+      ...nav,
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Upload to homeserver' : `Upload ${tracks.length} tracks to homeserver`, icon: 'download', run: async () => { let n = 0; for (const t of tracks) { try { await api('POST', '/pubky/files', { track_id: t.id }); n++; } catch (e) { toast(`${t.title}: ${e.message}`, 'error'); break; } } if (n) toast(n === 1 ? 'Uploaded to your homeserver (private)' : `${n} tracks uploaded to your homeserver (private)`); } }] : []),
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
@@ -770,6 +822,54 @@
   };
   // Play through the node's connected services: the library, else the best service link
   // (`GET /v1/discover/play`); nothing connected offers Sources and a preview.
+  // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
+  const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
+  const qOf = (t, fallback = {}) => ({ uri: t.uri, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
+  // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
+  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
+    const list = songs.slice(k).filter((t) => t.track_id != null || t.uri);
+    if (!list.length) return toast('Nothing here plays on your services', 'error');
+    if (pf && pf.mode === 'connect') return spotifyPlay(list.map((t) => t.uri).filter(Boolean), anchorEl);
+    if (list.every((t) => t.track_id != null)) { try { const tr = await Promise.all(list.map((t) => api('GET', `/library/tracks/${t.track_id}`))); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
+    const items = list.filter((t) => t.uri).map((t) => qOf(t, fallback));
+    return how === 'replace' ? playSourceItems(items, true) : playSourceItems(items, false, how);
+  };
+  const copyLink = async (path) => { const u = location.origin + path; try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { toast(u); } };
+  // The ⋯ menu, the same on a page's hero and on every song row.
+  const itemMenu = async (anchorEl, o) => {
+    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
+    const trackIds = (o.songs || []).filter((t) => t.track_id != null).map((t) => t.track_id);
+    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl.id, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl.id, [], uris.length ? uris : o.uri ? [o.uri] : []));
+    showMenu(anchorEl, [{ title: o.title || 'Item' },
+      { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
+      { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
+      ...state.playlists.slice(0, 6).map((pl) => ({ label: `Add to “${pl.name}”`, icon: 'playlist', run: () => addTo(pl) })),
+      ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
+      ...(o.albumId ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
+      ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0]}`, icon: 'external', run: () => window.open(v.url, '_blank', 'noopener') })),
+      ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
+    ]);
+  };
+  // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
+  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => `<div class="list-row clickable srow" data-srow="${k}"><span class="num muted small" style="width:24px;text-align:right">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button><div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  const bindSongRows = (box, songs, ctx = {}) => {
+    $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, Number(b.dataset.splay), 'replace', ctx.plays_from, b, ctx.fallback); });
+    $$('[data-srow]', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, Number(r.dataset.srow), 'replace', ctx.plays_from, r, ctx.fallback); });
+    $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: songs[Number(a.dataset.ssong)].id }); });
+    $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: songs[Number(a.dataset.sartist)].artist_id }); });
+    $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = songs[Number(a.dataset.sartistq)].artist; runSearch(); });
+    $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: songs[Number(a.dataset.salbum)].album_id }); });
+    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null }); });
+  };
+  // One tile for albums and artists: click opens the item page, the hover Play plays it.
+  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" onerror="this.remove()">` : ''}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div></button>`).join('')}</div>`;
+  const bindItemTiles = (box, tiles, kind) => {
+    $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
+    $$('[data-tileplay]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { const pg = await api('GET', `/item/${kind}/${tiles[Number(b.dataset.tileplay)].id}`); playSongs(pg.songs, 0, 'replace', pg.plays_from, b, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } });
+  };
+
+  const mins = (ms) => { const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
   const discoverPlay = async (it, v, anchor) => {
     if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], true);
     let plan;
@@ -792,7 +892,8 @@
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const pageHead = (title, count, actions = '') => `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
-  const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc(label)}</button>`;
+  // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
+  const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
 
   const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
@@ -896,67 +997,12 @@
           bindFilter('.grid .tile');
           break;
         }
-        case 'album': {
-          const id = state.viewArg;
-          const [albums, tr] = await Promise.all([albumsAll(), api('GET', `/library/albums/${id}/tracks`)]);
-          if (state.view !== 'album') return;
-          const a = albums.find((x) => x.id === id) || (tr.tracks[0] && tr.tracks[0].album) || { id, title: 'Album' };
-          const myTags = a.release_mbid ? (await api('GET', `/tags?album_id=${id}`).catch(() => ({ tags: [] }))).tags : [];
-          const myReview = a.release_mbid ? ((await api('GET', `/reviews?album_id=${id}`).catch(() => ({ reviews: [] }))).reviews[0] || null) : null;
-          const onPubky = a.release_mbid && !state.discoveryOff ? await api('GET', `/discover/uri?album_id=${id}`).catch((e) => { if (String(e.message).includes('discovery is off')) state.discoveryOff = true; return null; }) : null;
-          const tracks = tr.tracks;
-          const total = tracks.reduce((s, t) => s + (t.duration_ms || 0), 0);
-          const relUrl = a.release_mbid ? 'https://musicbrainz.org/release/' + a.release_mbid : null;
-          const fav = relUrl && state.favUris.has(relUrl);
-          main.innerHTML = backBtn('albums', 'Albums') + `
-            <div class="hero">${art(id, a.title)}<div>
-              <div class="eyebrow">Album</div><h1>${esc(a.title)}</h1>
-              <div class="sub">${esc(a.album_artist || artists(tracks[0] || {}))}</div>
-              <div class="facts">${[a.year, `${tracks.length} tracks`, fmtLong(total), tracks[0] ? fmtFormat(tracks[0].file.format) : ''].filter(Boolean).join(' · ')}</div>
-              <div class="actions"><button class="btn primary" id="playall">${icon('play')} Play</button><button class="btn" id="nextall">${icon('playnext')} Play next</button><button class="btn" id="addall">${icon('plus')} Add to queue</button><button class="btn" id="albummore" title="More">${icon('more')}</button><button class="btn heart ${fav ? 'on' : ''}" id="heart" ${relUrl ? '' : 'disabled'} title="${relUrl ? '' : 'No MusicBrainz release id yet'}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'Favourited' : 'Favourite'}</button></div>
-              <div id="versions"></div>
-              ${relUrl ? tagRow(myTags, { album_id: id }) : ''}
-              ${relUrl ? reviewRow(myReview) : ''}
-              ${onPubky ? `<div class="tagrow"><span class="eyebrow">On Pubky</span>${onPubky.indexed ? (onPubky.taggers ? `<span class="muted small">${onPubky.taggers} ${onPubky.taggers === 1 ? 'person' : 'people'}</span>` : '') + (onPubky.tags.length ? onPubky.tags.slice(0, 12).map(([l, n]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('') : '<span class="muted small">no tags yet</span>') : '<span class="muted small">not indexed yet</span>'}</div>` : ''}
-            </div></div>` + trackRows(tracks, { showAlbum: false, numbers: 'track', key: 'album' });
-          bindTagRow({ album_id: id });
-          bindReviewRow({ album_id: id }, myReview);
-          lists.album = tracks;
-          $('#playall').onclick = () => playTracks(tracks, true);
-          $('#nextall').onclick = () => playTracks(tracks, false, 'next');
-          $('#addall').onclick = () => playTracks(tracks, false, 'end');
-          $('#albummore').onclick = (e) => { e.stopPropagation(); trackMenu($('#albummore'), tracks); };
-          // Versions elsewhere (Roon's "Versions"): the same album on TIDAL by UPC.
-          api('GET', `/library/albums/${id}/versions`).then((vs) => {
-            const box = $('#versions'); if (!box || state.view !== 'album' || !vs.length) return;
-            box.innerHTML = `<div class="tagrow"><span class="eyebrow">Versions</span>${vs.map((v, i) => `<span class="chip"><span class="src-badge">${esc(v.source.toUpperCase())}</span> ${esc(v.label.replace(/^TIDAL · /, ''))} <button class="chiplink" data-vopen="${i}" title="Open on ${esc(v.source)}">open</button> ${v.id && ['tidal', 'deezer', 'archive', 'audius'].includes(v.source) ? `<button class="chiplink" data-vplay="${i}" title="Play this version">play</button>` : ''}</span>`).join('')}</div>`;
-            $$('[data-vopen]', box).forEach((b) => b.onclick = () => { const v = vs[Number(b.dataset.vopen)]; if (v.id && ['tidal', 'deezer', 'archive', 'audius'].includes(v.source)) setView('source-item', { source: v.source, id: v.id }); else window.open(v.url, '_blank', 'noopener'); });
-            $$('[data-vplay]', box).forEach((b) => b.onclick = async () => { const v = vs[Number(b.dataset.vplay)]; try { const it = await api('GET', `/sources/${encodeURIComponent(v.source)}/items/${encodeURIComponent(v.id)}`); playSourceItems(it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms })), true); } catch (e) { toast(e.message, 'error'); } });
-          }).catch(() => {});
-          $('#heart').onclick = async () => { try { await setFavourite({ album_id: id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
-          break;
-        }
         case 'artists': {
           loading();
           state.artists = await api('GET', '/library/artists');
           if (state.view !== 'artists') return;
           main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? `<div class="list">${state.artists.map((a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`).join('')}</div>` : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
           bindFilter('.list .list-row');
-          break;
-        }
-        case 'artist': {
-          const d = await api('GET', `/library/artists/${state.viewArg}`);
-          if (state.view !== 'artist') return;
-          const mbUrl = d.artist.mbid ? 'https://musicbrainz.org/artist/' + d.artist.mbid : null;
-          const fav = mbUrl && state.favUris.has(mbUrl);
-          const myTags = mbUrl ? (await api('GET', `/tags?artist_id=${d.artist.id}`).catch(() => ({ tags: [] }))).tags : [];
-          const info = await api('GET', `/library/artists/${d.artist.id}/info`).catch(() => ({}));
-          const links = [['Wikipedia', info.wikipedia], ['MusicBrainz', info.musicbrainz], ['Homepage', info.homepage]].filter(([, u]) => u);
-          main.innerHTML = backBtn('artists', 'Artists') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(d.artist.name)} 35% 28%)">${info.image ? `<img src="/v1/library/artists/${d.artist.id}/image${tokenQ()}" alt="" onerror="this.remove()">` : esc(initials(d.artist.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist</div><h1>${esc(d.artist.name)}</h1><div class="muted">${d.artist.albums} albums · ${d.artist.tracks} tracks${links.length ? ' · ' + links.map(([l, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener">${l}</a>`).join(' · ') : ''}</div>${mbUrl ? tagRow(myTags, { artist_id: d.artist.id }) : ''}</div><div class="actions"><button class="btn primary" id="artplay">${icon('play')} Play all</button>${isBrowser() ? '' : `<button class="btn" id="artradio" title="Play a random track by this artist, then keep going with similar music">${icon('radio')} Start radio</button>`}<button class="btn heart ${fav ? 'on' : ''}" id="heart" ${mbUrl ? '' : 'disabled'} title="${mbUrl ? '' : 'No MusicBrainz artist id yet'}">${icon(fav ? 'heart-fill' : 'heart')} Favourite</button></div></div>${info.bio ? `<p class="bio">${esc(info.bio)}</p>` : info.note ? `<p class="muted small">${esc(info.note)}</p>` : ''}</div></div>` + albumGrid(d.albums);
-          bindTagRow({ artist_id: d.artist.id });
-          $('#artplay').onclick = async () => { try { const r = await api('GET', `/library/artists/${state.viewArg}/tracks`); playTracks(r.tracks, true); } catch (er) { toast(er.message, 'error'); } };
-          const ar = $('#artradio'); if (ar) ar.onclick = async () => { try { const r = await api('GET', `/library/artists/${state.viewArg}/tracks`); const withId = r.tracks.filter((t) => t && t.id != null); if (!withId.length) return; const seed = withId[Math.floor(Math.random() * withId.length)]; await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from ${d.artist.name}: similar music follows`); } catch (er) { toast(er.message, 'error'); } };
-          $('#heart').onclick = async () => { try { await setFavourite({ artist_id: d.artist.id }, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
           break;
         }
         case 'identify': {
@@ -1039,7 +1085,7 @@
             + (pending ? `<p class="muted small">${icon('search')} Asking your streaming services and Pubky…</p>` : '')
             + (none && !pending ? emptyState('search', 'Nothing matched', 'Search looks at titles, artists, albums and genres in your library and on your streaming accounts.') : '')
             + (albums.length || tAlbums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3>${tAlbums.length ? `<span class="muted small">${albums.length ? 'yours first, then ' : ''}streaming</span>` : ''}</div><div class="strip">${albums.map(tile).join('')}${tAlbums.map(srcTile).join('')}</div></section>` : '')
-            + (artists.length || genres.length || tArtists.length ? `<section class="section"><div class="section-head"><h3>${artists.length || tArtists.length ? 'Artists' : ''}${(artists.length || tArtists.length) && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div>${tArtists.length ? `<div class="chips" style="margin-bottom:8px">${tArtists.map((h) => `<button class="chip" data-sartist="${esc(h.id)}" data-src="${esc(h.source)}">${h.image ? `<img class="chip-avatar" src="${esc(h.image)}" alt="">` : ''}${esc(h.title)} <span class="src-badge">${esc(h.source.toUpperCase())}</span></button>`).join('')}</div>` : ''}<div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
+            + (artists.length || genres.length || tArtists.length ? `<section class="section"><div class="section-head"><h3>${artists.length || tArtists.length ? 'Artists' : ''}${(artists.length || tArtists.length) && genres.length ? ' & ' : ''}${genres.length ? 'Genres' : ''}</h3></div>${tArtists.length ? `<div class="chips" style="margin-bottom:8px">${tArtists.map((h) => `<button class="chip" data-sartist="${esc(h.id)}" data-src="${esc(h.source)}">${h.image ? `<img class="chip-avatar" src="${esc(h.image)}" alt="">` : ''}${esc(h.title)} ${svcBadge(h.source)}</button>`).join('')}</div>` : ''}<div class="chips">${artists.map((a) => `<button class="chip" data-artist="${a.id}">${icon('artist')} ${esc(a.name)}</button>`).join('')}${genres.map((g) => `<button class="chip" data-genre="${g.id}">#${esc(g.name)}</button>`).join('')}</div></section>` : '')
             + (tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(tracks, { key: 'search' })}</section>` : '')
             + (tTracks.length ? `<section class="section"><div class="section-head"><h3>${tracks.length ? 'More tracks on streaming' : 'Tracks on streaming'}</h3><span class="muted small">${tTracks.some((h) => h.source === 'deezer') ? 'your accounts · Deezer plays 30 s previews' : 'from your accounts'}</span></div><div class="list">${tTracks.map((h, i) => `<div class="list-row"><button class="icon-btn" data-tplay="${i}" title="Play">${icon('play')}</button>${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(h.title)} ${badges(h)}</div><div class="sub">${esc([h.creator, h.year, h.duration_ms ? fmt(h.duration_ms) : null, h.others && h.others.length ? `same recording on ${h.others.length + 1} services` : null].filter(Boolean).join(' · '))}</div></div><span class="row-actions">${h.others && h.others.length ? `<button class="icon-btn" data-tplayon="${i}" title="Play on…">${icon('zone')}</button>` : ''}<button class="icon-btn" data-tnext="${i}" title="Play next">${icon('playnext')}</button><button class="icon-btn" data-tadd="${i}" title="Add to queue">${icon('plus')}</button></span></div>`).join('')}</div></section>` : '')
             + (pubky.length ? `<section class="section"><div class="section-head"><h3>On Pubky</h3><span class="muted small">tagged by people, via Pinakes</span></div>${discoverRows(pubky)}</section>` : '')
@@ -1080,21 +1126,41 @@
           break;
         }
         case 'playlist': {
-          const d = await api('GET', `/playlists/${state.viewArg}`);
+          loading();
+          const d = await api('GET', `/playlists/${encodeURIComponent(state.viewArg)}`);
           if (state.view !== 'playlist') return;
-          const present = d.tracks.filter(Boolean);
-          const total = present.reduce((s, t) => s + (t.duration_ms || 0), 0);
-          main.innerHTML = backBtn('playlists', 'Playlists') + `
-            <div class="page-head"><div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to homeserver' : 'local only'}</div><h1>${esc(d.summary.name)}</h1><div class="muted">${d.playlist.items.length} items · ${present.length} in this library · ${fmtLong(total)}</div></div>
-            <div class="actions"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div>`
-            + (d.playlist.items.length ? `<div class="list queue">${d.playlist.items.map((it, i) => { const t = d.tracks[i]; return `<div class="list-row"><span class="muted small" style="width:24px;text-align:right">${i + 1}</span>${t ? `<div class="grow"><div class="name">${esc(t.title)}</div><div class="sub">${esc(artists(t))}${t.album ? ' · ' + esc(t.album.title) : ''}</div></div><span class="fmt">${esc(fmtFormat(t.file.format))}</span><span class="muted small">${fmt(t.duration_ms)}</span>` : `<div class="grow" data-desc="${esc(it.uri)}"><div class="name muted">…</div><div class="sub">from another service</div></div><button class="icon-btn" data-descplay="${esc(it.uri)}" title="Play">${icon('play')}</button>`}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${i}" title="Move down" ${i === d.playlist.items.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${i}" title="Remove">${icon('close')}</button></span></div>`; }).join('')}</div>` : emptyState('playlist', 'This playlist is empty', 'Add tracks from any list with the ⋯ menu, or import a file.'));
-          $('#plplay').onclick = () => playPlaylist(d.summary.id);
+          state.itemTitle = d.summary.name;
+          // Songs: library tracks as they are; links from other services described (title, artist, how they play).
+          const others = d.playlist.items.map((it, k) => (d.tracks[k] ? null : it.uri)).filter(Boolean);
+          const described = new Map((await describe(others)).map((x) => [x.uri, x]));
+          if (state.view !== 'playlist') return;
+          const songs = d.playlist.items.map((it, k) => {
+            const t = d.tracks[k];
+            if (t) return { no: k + 1, title: t.title, artist: artists(t), artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) };
+            const x = described.get(it.uri) || { uri: it.uri, site: null };
+            return { no: k + 1, title: itemName(x), artist: x.artist || null, duration_ms: null, uri: x.playable || (x.plays_from && x.plays_from.service !== 'library' ? null : null), page: x.page || it.uri, id: idOf(it.uri) };
+          });
+          const total = songs.reduce((a, t) => a + (t.duration_ms || 0), 0);
+          const empty = (t) => `<p class="muted small">${t}</p>`;
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero"><div class="art placeholder" style="background:hsl(${hue(d.summary.name)} 35% 28%);border-radius:12px"></div><div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${songs.length} song${songs.length === 1 ? '' : 's'}${total ? ' · ' + mins(total) : ''}</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
+            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${songs.length ? songRows(songs, { numbers: 'index', extra: (t, k) => `<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + `<section class="section"><div class="section-head"><h3>Versions</h3></div>${empty('Playlists are yours; each song shows its own versions on its page.')}</section>`
+            + `<section class="section"><div class="section-head"><h3>On Pubky</h3></div>${empty(d.summary.synced ? 'Saved privately on your homeserver; not shared until the social primitives land.' : 'Not shared; it lives on this node.')}</section>`
+            + `<section class="section"><div class="section-head"><h3>Yours</h3></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : empty('No description.')}</section>`
+            + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
+          $('[data-back]', main).onclick = () => goBack('playlists');
+          bindSongRows($('#plsongs'), songs, {});
+          const playAll = (shuffle, anchorEl) => playSongs(shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs, 0, 'replace', null, anchorEl);
+          $('#plplay').onclick = (e) => (songs.every((t) => t.track_id != null) ? playPlaylist(d.summary.id) : playAll(false, e.currentTarget));
+          $('#plshuffle').onclick = (e) => playAll(true, e.currentTarget);
+          $('#plzone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; renderZoneName(); renderBar(); playAll(false); } }))]);
+          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}` });
           $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-rm]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); render(); } catch (e) { toast(e.message, 'error'); } });
-          const pmove = async (i, j) => { const uris = d.playlist.items.map((it) => it.uri); if (j < 0 || j >= uris.length) return; const [u] = uris.splice(i, 1); uris.splice(j, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); render(); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-pup]', main).forEach((b) => b.onclick = () => pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1));
-          { const els = $$('[data-desc]', main); if (els.length) { const items = await describe(els.map((e) => e.dataset.desc)); const byUri = new Map(items.map((x) => [x.uri, x])); els.forEach((e) => { const it = byUri.get(e.dataset.desc); if (!it) return; e.querySelector('.name').textContent = itemName(it); e.querySelector('.name').classList.toggle('muted', !it.title); e.querySelector('.sub').innerHTML = esc([it.artist, it.site].filter(Boolean).join(' · ')) + ' ' + playsChip(it); }); $$('[data-descplay]', main).forEach((b) => b.onclick = () => { const it = byUri.get(b.dataset.descplay); if (it) discoverPlay(it, null, b); }); $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources')); } }
-          $$('[data-pdown]', main).forEach((b) => b.onclick = () => pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1));
+          $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); render(); } catch (er) { toast(er.message, 'error'); } });
+          const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); render(); } catch (e) { toast(e.message, 'error'); } };
+          $$('[data-pup]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1); });
+          $$('[data-pdown]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1); });
           break;
         }
         case 'sources': {
@@ -1267,35 +1333,81 @@
           bindTabs();
           break;
         }
-        case 'discover-item': {
+        case 'item': {
+          const { kind, id } = state.viewArg;
           loading();
-          const uri = state.viewArg && state.viewArg.uri;
-          let d;
-          try { d = await api('GET', `/discover/item?uri=${encodeURIComponent(uri)}`); }
-          catch (e) { main.innerHTML = `<button class="back" id="dback">${icon('back')} ${esc((history.state && history.state.backLabel) || 'Discover')}</button>` + `<div class="notice">${esc(e.message)}</div>`; $('#dback').onclick = () => goBack('discover'); break; }
-          if (state.view !== 'discover-item') return;
-          const it = d.item;
-          const ref = { uri: it.uri };
-          let myTags = [], myReview = null;
-          try { myTags = (await api('GET', `/tags?uri=${encodeURIComponent(it.uri)}`)).tags; } catch { /* no identity */ }
-          try { myReview = ((await api('GET', `/reviews?uri=${encodeURIComponent(it.uri)}`)).reviews || [])[0] || null; } catch { /* no identity */ }
-          const facts = [d.mbid ? `<a class="chip" href="https://musicbrainz.org/${it.kind === 'artist' ? 'artist' : it.kind === 'album' ? 'release' : 'recording'}/${esc(d.mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a>` : '', ...(d.isrcs || []).slice(0, 3).map((i) => `<span class="chip" title="ISRC">${esc(i)}</span>`), d.upc ? `<span class="chip" title="Barcode">UPC ${esc(d.upc)}</span>` : '', d.duration_secs ? `<span class="chip">${fmt(d.duration_secs * 1000)}</span>` : '', d.artist_type ? `<span class="chip">${esc(d.artist_type)}</span>` : ''].filter(Boolean).join('');
-          const playOn = it.also_on.filter((v) => v.uri);
-          state.itemTitle = itemName(it);
-          main.innerHTML = `<button class="back" id="dback">${icon('back')} ${esc((history.state && history.state.backLabel) || 'Discover')}</button>` + (d.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '') + `<div class="hero"><div class="art">${it.image ? `<img src="${esc(it.image)}" alt="" style="width:100%;border-radius:12px">` : `<div class="art placeholder"></div>`}</div><div><div class="eyebrow">${esc(it.kind)} · ${esc(it.site || '')}${it.group_size ? ` · on ${it.group_size} services` : ''}</div><h1>${esc(itemName(it))}</h1><p class="sub">${esc([it.artist, d.album || d.original_album].filter(Boolean).join(' · '))}</p><div class="chips facts">${facts}</div>
-            <div class="actions" style="margin-top:12px"><button class="btn primary" id="dplay">${icon('play')} Play</button>${playOn.length ? `<button class="btn" id="dplayon">${icon('zone')} Play on…</button>` : ''}<a class="btn" href="${esc(it.uri)}" target="_blank" rel="noopener">${icon('external')} Open on ${esc(it.site || 'the service')}</a>${d.in_library_album ? `<button class="btn" data-album="${d.in_library_album}">${icon('disc')} In your library</button>` : ''}</div><div class="playsfrom">${playsChip(it, true) || `<span class="muted small">Nothing to play here yet.</span>`}</div></div></div>`
-            + (it.also_on.length ? `<section class="section"><div class="section-head"><h3>Also on</h3><span class="muted small">tagged links first; derived links may differ by country</span></div><div class="list">${it.also_on.map((v, i) => `<div class="list-row"><div class="grow"><div class="name">${svcBadge(v.source)} ${esc(v.label)}</div><div class="sub">${esc(v.url)}</div></div><span class="row-actions">${v.uri || /^(tidal|deezer)$/.test(v.source) ? `<button class="icon-btn" data-vplay="${i}" title="Play">${icon('play')}</button>` : ''}<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a></span></div>`).join('')}</div></section>` : '')
-            + `<section class="section"><div class="section-head"><h3>On Pubky</h3></div>${d.on_pubky ? `<p class="muted small">${d.on_pubky.taggers} ${d.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${d.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">Not indexed on Pubky yet.</p>'}${tagRow(myTags, ref)}${reviewRow(myReview)}</section>`;
-          $('#dplay') && ($('#dplay').onclick = (e) => discoverPlay(it, null, e.currentTarget));
-          $('#dback').onclick = () => goBack('discover');
-          if (d.reading) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 8) setTimeout(() => { if (state.view === 'discover-item' && state.viewArg && state.viewArg.uri === uri) { state.viewArg.tries = tries; render(); } }, 4000); }
+          let pg;
+          try { pg = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); }
+          catch (e) { main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'item' || state.viewArg.id !== id) return;
+          // The node leaves empty lists out of its answer.
+          for (const k of ['songs', 'albums', 'versions', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
+          state.itemTitle = pg.title || `Untitled on ${pg.source}`; state.itemSection = pg.section;
+          $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === pg.section));
+          const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
+          const songs = pg.songs || [];
+          const target = pg.target;
+          const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
+          const [myTags, myReview] = await Promise.all([
+            api('GET', `/tags?${qs}`).then((r) => r.tags).catch(() => null),
+            api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
+          ]);
+          if (state.view !== 'item' || state.viewArg.id !== id) return;
+          const favKey = pg.uri; const fav = !!(favKey && state.favUris && state.favUris.has(favKey));
+          const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', discover: 'Discover', playlists: 'Playlists' }[pg.section] || 'Home';
+          const pf = pg.plays_from;
+          const where = pf ? (pf.service === 'library' ? 'your library' : (SERVICE_NAMES[pf.service] || pf.service) + (pf.mode === 'preview' ? ' (previews)' : '')) : null;
+          const eyebrow = [{ song: 'Song', album: 'Album', artist: 'Artist' }[kind], where ? `plays from ${where}` : pg.connect.length ? `on ${pg.connect.map((c) => SERVICE_NAMES[c] || c).join(', ')}` : pg.source].filter(Boolean).join(' · ');
+          const by = [pg.artist ? (pg.artist.id ? `<a class="lnk" id="iartist">${esc(pg.artist.name)}</a>` : `<a class="lnk" id="iartistq">${esc(pg.artist.name)}</a>`) : '', pg.album ? (pg.album.id ? `<a class="lnk" id="ialbum">${esc(pg.album.name)}</a>` : esc(pg.album.name)) : '', pg.year].filter(Boolean).join(' · ');
+          const empty = (t) => `<p class="muted small">${t}</p>`;
+          const songsTitle = kind === 'artist' ? 'Top songs' : kind === 'song' ? 'Song' : 'Songs';
+          const songsInfo = songs.length ? `${songs.length} song${songs.length === 1 ? '' : 's'}${pg.total_ms ? ' · ' + mins(pg.total_ms) : ''}` : '';
+          const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
+          main.innerHTML = backBtn(pg.section, sectionName)
+            + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
+            + `<div class="hero">${pg.image ? `<div class="art"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" onerror="this.remove()"></div>` : `<div class="art placeholder" style="background:hsl(${hue(state.itemTitle)} 35% 28%);border-radius:${kind === 'artist' ? '50%' : '12px'}"></div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button></div>
+              <div class="playsfrom">${playsChip({ plays_from: pf, connect: pg.connect }, true) || ''}</div></div></div>`
+            + `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album' }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`
+            + (kind === 'artist' || kind === 'song' ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
+            + `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">your library and every service that has it</span>${kind !== 'song' || pg.versions.length <= 2 ? `<button class="btn sm ghost" id="ifind" title="Search your connected services for the same ${kind}">Find on other services</button>` : ''}</div><div id="ifindbox"></div>${pg.versions.length ? `<div class="chips">${pg.versions.map(versionChip).join('')}</div>` : empty(pg.connect.length ? 'Only on ' + esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(', ')) + ' so far.' : `Only on ${esc(pg.source)} so far.`)}</section>`
+            + `<section class="section" id="ipubky"><div class="section-head"><h3>On Pubky</h3><span class="scope small"><button class="on" data-scope="all">🌐 Everywhere</button><button data-scope="this">▣ This version</button></span></div><div id="ipubkybody">${pg.on_pubky && pg.on_pubky.tags.length ? `<p class="muted small">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : empty('No one has tagged this on Pubky yet.')}</div></section>`
+            + `<section class="section" id="iyours"><div class="section-head"><h3>Yours</h3></div>${myTags ? tagRow(myTags, target) : empty('Tags need an identity for this item first.')}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
+          $('[data-back]', main).onclick = () => goBack(pg.section);
+          bindSongRows($('#isongs'), songs, { plays_from: pf, fallback });
+          if (pg.albums.length) bindItemTiles($('#ialbums'), pg.albums, 'album');
+          if (myTags) bindTagRow(target);
+          if (myReview !== undefined) bindReviewRow(target, myReview);
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
-          $('#dplayon') && ($('#dplayon').onclick = (e) => showMenu(e.currentTarget, playOn.map((v) => ({ label: v.label, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true) }))));
-          // A version row plays that exact link: tracks straight away, albums through the resolver (their tracks on that service).
-          $$('[data-vplay]', main).forEach((b) => b.onclick = () => { const v = it.also_on[Number(b.dataset.vplay)]; if (v.uri) playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: d.album || '', duration_ms: d.duration_secs ? d.duration_secs * 1000 : null, image: it.image || null }], true); else discoverPlay({ ...it, uri: v.url, page: v.url }, null, b); });
-          $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
-          $$('[data-album]', main).forEach((b) => b.onclick = () => setView('album', { id: Number(b.dataset.album) }));
-          bindTagRow(ref); bindReviewRow(ref, myReview);
+          const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
+          const iq = $('#iartistq'); if (iq) iq.onclick = () => { search.value = pg.artist.name; runSearch(); };
+          const ial = $('#ialbum'); if (ial) ial.onclick = () => setView('item', { kind: 'album', id: pg.album.id });
+          const playAll = (shuffle, how = 'replace', anchorEl) => { if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
+          $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
+          const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
+          $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
+          $('#ifav').onclick = async () => { try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri });
+          $$('[data-vplay]', main).forEach((b) => b.onclick = async () => { const v = pg.versions[Number(b.dataset.vplay)]; if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); });
+          $$('[data-tag-open]', $('#ipubky')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+          // "Find on other services": the same title on the connected services, "possibly the same", which the owner confirms.
+          const fb = $('#ifind'); if (fb) fb.onclick = async () => {
+            const box = $('#ifindbox'); box.innerHTML = '<p class="muted small">Searching your services…</p>'; fb.disabled = true;
+            try {
+              const c = await api('GET', `/item/candidates?${new URLSearchParams({ uri: pg.uri || '', kind, title: pg.title || '', artist: (pg.artist && pg.artist.name) || '' })}`);
+              box.innerHTML = c.length ? `<p class="muted small">Possibly the same ${kind}. Confirm the ones that are; this stays on your node.</p><div class="list">${c.map((v, k) => `<div class="list-row">${svcBadge(v.source)}<div class="grow"><div class="name">${esc(v.label)}</div><div class="sub"><a href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a></div></div><button class="btn sm primary" data-same="${k}">Same ${kind}</button></div>`).join('')}</div>` : '<p class="muted small">Nothing with this title on your services.</p>';
+              $$('[data-same]', box).forEach((b) => b.onclick = async () => { try { await api('POST', '/item/matches', { uri: pg.uri, version: c[Number(b.dataset.same)] }); toast('Matched'); render(); } catch (e) { toast(e.message, 'error'); } });
+            } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }
+            fb.disabled = false;
+          };
+          $$('[data-scope]', main).forEach((b) => b.onclick = async () => {
+            $$('[data-scope]', main).forEach((x) => x.classList.toggle('on', x === b));
+            const body = $('#ipubkybody'); const link = b.dataset.scope === 'this' ? (pg.open_on[0] && pg.open_on[0].url) : pg.uri;
+            if (!link) { body.innerHTML = empty('This version has no public link.'); return; }
+            try { const v = await api('GET', `/discover/uri?uri=${encodeURIComponent(link)}`); body.innerHTML = v && v.tags && v.tags.length ? `<p class="muted small">${v.taggers} ${v.taggers === 1 ? 'person' : 'people'} · ${esc(link)}</p><div class="chips">${v.tags.map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : empty(`No one has tagged ${b.dataset.scope === 'this' ? 'this version' : 'this'} on Pubky yet.`); } catch { body.innerHTML = empty('Pubky did not answer.'); }
+          });
+          if (pg.reading) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 8) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, 4000); }
           break;
         }
         case 'queue': {
@@ -1505,7 +1617,7 @@
       }
       bindTiles();
       $$('[data-artist]', main).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
-      $$('[data-back]', main).forEach((b) => b.onclick = () => setView(b.dataset.back));
+      $$('[data-back]', main).forEach((b) => b.onclick = () => goBack(b.dataset.back));
       $$('[data-empty-action]', main).forEach((b) => b.onclick = () => setView(b.dataset.emptyAction));
       if (Object.keys(lists).length) bindTrackRows(main, lists);
     } catch (e) {

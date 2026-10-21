@@ -191,6 +191,12 @@ impl MusicBrainzClient {
         Ok(v.map(|v| parse_url_relations(&v)).unwrap_or_default())
     }
 
+    /// Any ws/2 lookup or browse as JSON (paced and identified like every call);
+    /// `Ok(None)` on 404.
+    pub async fn get_json(&self, path: &str, query: &[(&str, &str)]) -> Result<Option<Value>> {
+        self.get(path, query).await
+    }
+
     /// Search recordings by artist and title; `duration_ms` narrows to ± 2 s.
     /// Returns (MBID, score 0–100) as MusicBrainz ranks them.
     pub async fn search_recording(

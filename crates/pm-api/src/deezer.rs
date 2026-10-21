@@ -104,6 +104,20 @@ fn cover(v: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// An artist's top tracks on Deezer (30 s previews here), as hits.
+pub(crate) async fn artist_top_tracks(
+    s: &NodeState,
+    artist_id: &str,
+    limit: usize,
+) -> Result<Vec<SourceHit>, ApiError> {
+    let a = numeric(artist_id)?;
+    let v = get_json(s, &format!("/artist/{a}/top"), &[("limit", limit.to_string())]).await?;
+    Ok(v["data"]
+        .as_array()
+        .map(|l| l.iter().filter_map(|x| hit("track", x)).collect())
+        .unwrap_or_default())
+}
+
 fn hit(kind: &str, v: &Value) -> Option<SourceHit> {
     let id = id_of(v)?;
     let (title, creator) = match kind {

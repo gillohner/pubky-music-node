@@ -141,7 +141,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Navigation: the item page has a real path; back returns to Discover with its path.
   if (first) {
     const itemPath = w.location.pathname;
-    console.log('item path:', itemPath, '| back label:', (w.document.querySelector('#dback') || {}).textContent);
+    console.log('item path:', itemPath, '| back label:', (w.document.querySelector('#main .back') || {}).textContent.trim());
     if (!/^\/(song|album|artist)\/(mb-|isrc-|u-)/.test(itemPath)) errors.push('item page has no /song|/album|/artist path');
     w.history.back(); await sleep(2500);
     console.log('after back:', w.location.pathname, '| view tabs', !!w.document.querySelector('[data-dmode]'));

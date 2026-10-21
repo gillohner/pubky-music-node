@@ -1156,6 +1156,26 @@ pub(crate) fn canonical_track(track: &Value) -> Option<pm_model::MusicUri> {
     pm_model::MusicUri::parse(&tidal_url("track", id)).ok()
 }
 
+/// An artist's popular tracks on TIDAL (the artist's track relationship,
+/// duplicates by fingerprint collapsed), as hits with queue URIs.
+pub(crate) async fn artist_top_tracks(
+    s: &NodeState,
+    artist_id: &str,
+    limit: usize,
+) -> Result<Vec<SourceHit>, ApiError> {
+    if artist_id.is_empty() || !artist_id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::bad_request("bad TIDAL artist id"));
+    }
+    let ids = relationship_ids(
+        s,
+        &format!("/artists/{artist_id}/relationships/tracks"),
+        &[("countryCode", country(s)), ("collapseBy", "FINGERPRINT".into())],
+    )
+    .await?;
+    let ids: Vec<String> = ids.into_iter().take(limit).collect();
+    Ok(track_hits(s, &ids).await?.0)
+}
+
 async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Vec<Value>), ApiError> {
     let mut hits = Vec::new();
     let mut docs = Vec::new();
