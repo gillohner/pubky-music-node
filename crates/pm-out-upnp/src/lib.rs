@@ -9,6 +9,7 @@
 //! Blocking HTTP is used on purpose: `Output::open` runs on the zone's audio
 //! thread, and the few control calls per track do not justify a runtime.
 
+pub mod dlna;
 pub mod output;
 pub mod soap;
 
@@ -45,6 +46,8 @@ pub struct Renderer {
     /// Absolute control URLs.
     pub av_transport: String,
     pub rendering_control: Option<String>,
+    /// ConnectionManager control URL: what the renderer accepts (`dlna::sink_protocols`).
+    pub connection_manager: Option<String>,
     pub location: String,
 }
 
@@ -518,6 +521,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
     let mut in_service: Option<(Option<String>, Option<String>)> = None; // (serviceType, controlURL)
     let mut av = None;
     let mut rc = None;
+    let mut cm = None;
     let mut url_base: Option<String> = None;
     let mut text_target: Option<String> = None;
     loop {
@@ -571,6 +575,10 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                             && rc.is_none()
                         {
                             rc = Some(c);
+                        } else if t.starts_with("urn:schemas-upnp-org:service:ConnectionManager:")
+                            && cm.is_none()
+                        {
+                            cm = Some(c);
                         }
                     }
                 }
@@ -606,6 +614,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
         model,
         av_transport: abs(&av),
         rendering_control: rc.map(|c| abs(&c)),
+        connection_manager: cm.map(|c| abs(&c)),
         location: location.to_string(),
     }))
 }

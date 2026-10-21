@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Smart TVs over DLNA** (infra brief §3).
+  - The node asks each renderer what it accepts (`ConnectionManager.GetProtocolInfo`) and offers WAV under the MIME type it listed. TVs that take only DLNA LPCM get `stream.l16`; the zone converts to 16-bit 44.1/48 kHz, and the signal path says so.
+  - A renderer that takes no PCM stream gets no zone.
+  - DIDL metadata now carries the title, artist, album and cover (`upnp:albumArtURI`) and full DLNA protocolInfo (`DLNA.ORG_PN=LPCM`, live-stream flags).
+  - The stream answers with `transferMode.dlna.org` and `contentFeatures.dlna.org`, and a HEAD no longer takes the live stream from the GET that follows.
+  - A Stop goes before SetAVTransportURI, and Play is retried while a TV still loads (error 701).
+  - Checked with gmediarender limited to LPCM only and to MP3 only.
 - **Cast plays like a Cast sender should** (infra brief §3; `docs/DEVICE-TEST-PROMPT.md` lists what to check on real devices).
   - While a zone plays, a session keeps the link to the device. It answers and sends heartbeats, so STOP and volume still reach the TV after the first seconds.
   - After the connection drops, the session rejoins the same Cast session, or launches and loads again.

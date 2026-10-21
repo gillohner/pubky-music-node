@@ -1,13 +1,21 @@
 //! A UPnP renderer as an `Output`: open a pull stream, point the renderer
-//! at its URL, Play; the renderer's fetching paces the zone. Stop on close.
+//! at its URL with the track's metadata, Play; the renderer's fetching paces
+//! the zone. Stop on close.
+//!
+//! TV quirks handled here (see `dlna`): the stream is offered in a format the
+//! renderer listed (WAV, or DLNA LPCM for TVs that take nothing else), with
+//! full DLNA protocolInfo; a Stop goes first, because some TVs refuse a new
+//! URI while they hold one; Play is retried while the TV still loads (UPnP
+//! error 701, "transition not available").
 
+use crate::dlna::StreamKind;
 use crate::soap::{self, didl};
 use crate::{Renderer, UpnpError, AV_TRANSPORT, RENDERING_CONTROL};
 use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Volume};
 use pm_zones::outputs::PullOutput;
-use pm_zones::{AudioSink, BufferLevel, Output, OutputId, SinkError};
-use std::sync::Arc;
+use pm_zones::{AudioSink, BufferLevel, Describe, Output, OutputId, QueueItem, SinkError, TrackMeta};
+use std::sync::{Arc, Mutex};
 
 pub struct UpnpOutput {
     renderer: Renderer,
@@ -15,6 +23,9 @@ pub struct UpnpOutput {
     /// The URL the renderer fetches, as it can reach the node.
     stream_url: String,
     caps: OutputCaps,
+    kind: StreamKind,
+    describe: Option<Describe>,
+    meta: Mutex<Option<TrackMeta>>,
 }
 
 impl UpnpOutput {
@@ -43,7 +54,44 @@ impl UpnpOutput {
             pull,
             stream_url,
             caps,
+            kind: StreamKind::Wav {
+                mime: "audio/wav".into(),
+            },
+            describe: None,
+            meta: Mutex::new(None),
         }
+    }
+
+    /// Offer the stream as `kind` (from `dlna::choose`). DLNA LPCM is 16-bit at 44.1 or 48 kHz,
+    /// so the zone converts to it and the signal path says so.
+    pub fn with_stream_kind(mut self, kind: StreamKind) -> Self {
+        if kind == StreamKind::L16 {
+            self.caps.pcm_rates = vec![44_100, 48_000];
+            self.caps.pcm_bits = vec![16];
+            self.caps.max_pcm_bits = 16;
+            self.caps.quality_ceiling = QualityCeiling::LosslessUpTo {
+                rate_hz: 48_000,
+                bits: 16,
+            };
+        }
+        self.kind = kind;
+        self
+    }
+
+    /// Show artist, album and art from the node's library.
+    pub fn with_describe(mut self, describe: Describe) -> Self {
+        self.describe = Some(describe);
+        self
+    }
+
+    pub fn stream_kind(&self) -> &StreamKind {
+        &self.kind
+    }
+
+    /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`).
+    fn url(&self) -> String {
+        self.stream_url
+            .replacen("/stream.wav", &format!("/{}", self.kind.file()), 1)
     }
 
     pub fn renderer(&self) -> &Renderer {
@@ -85,15 +133,31 @@ impl Output for UpnpOutput {
         &self.caps
     }
 
+    fn now_playing(&self, item: Option<&QueueItem>) {
+        let meta = item.map(|it| match &self.describe {
+            Some(d) => d(it),
+            None => TrackMeta::from_item(it),
+        });
+        *self.meta.lock().expect("meta") = meta;
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let inner = self.pull.open(fmt).await?;
-        let meta = didl("Pubky Music", &self.stream_url, "audio/wav");
+        let url = self.url();
+        let protocol_info = self.kind.protocol_info(fmt.rate_hz, fmt.channels);
+        let meta = didl(
+            &self.meta.lock().expect("meta").clone().unwrap_or_default(),
+            &url,
+            &protocol_info,
+        );
         let av = self.renderer.av_transport.clone();
-        let url = self.stream_url.clone();
         offload(move || -> Result<(), UpnpError> {
+            // Some TVs refuse a new URI while they hold one; a renderer with nothing loaded may
+            // answer Stop with an error, which is fine.
+            let _ = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]);
             soap::call(
                 &av,
                 AV_TRANSPORT,
@@ -104,8 +168,19 @@ impl Output for UpnpOutput {
                     ("CurrentURIMetaData", &meta),
                 ],
             )?;
-            soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")])?;
-            Ok(())
+            // TVs answer 701 while they still open the URI: try again for a moment.
+            let mut tries = 0;
+            loop {
+                match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
+                    Ok(_) => return Ok(()),
+                    Err(e) if tries < 4 => {
+                        tries += 1;
+                        tracing::debug!(tries, "renderer Play refused, retrying: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         })
         .await
         .map_err(soap_err)?;
@@ -279,6 +354,7 @@ mod tests {
             model: None,
             av_transport: format!("{base}/av"),
             rendering_control: Some(format!("{base}/rc")),
+            connection_manager: None,
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("fake"));
@@ -312,7 +388,8 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav".to_string(),
+                "Stop".to_string(),
+                "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav".into(),
                 "Play".into(),
                 "Stop".into()
             ]

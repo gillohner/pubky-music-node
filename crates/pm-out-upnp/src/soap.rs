@@ -97,13 +97,31 @@ pub fn element_text(xml: &str, name: &str) -> Option<String> {
     }
 }
 
-/// DIDL-Lite metadata renderers show for the stream.
-pub fn didl(title: &str, uri: &str, mime: &str) -> String {
+/// DIDL-Lite metadata renderers show for the stream: title, artist, album and art when known,
+/// and the resource with its full protocolInfo (TVs match it against what they accept).
+pub fn didl(meta: &pm_zones::TrackMeta, uri: &str, protocol_info: &str) -> String {
+    let mut extra = String::new();
+    if let Some(a) = &meta.artist {
+        let a = xml_escape(a);
+        extra.push_str(&format!(
+            "<dc:creator>{a}</dc:creator><upnp:artist>{a}</upnp:artist>"
+        ));
+    }
+    if let Some(a) = &meta.album {
+        extra.push_str(&format!("<upnp:album>{}</upnp:album>", xml_escape(a)));
+    }
+    if let Some(i) = &meta.image {
+        extra.push_str(&format!(
+            "<upnp:albumArtURI dlna:profileID=\"JPEG_TN\">{}</upnp:albumArtURI>",
+            xml_escape(i)
+        ));
+    }
     format!(
-        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">\
-<item id=\"pm-stream\" parentID=\"0\" restricted=\"1\"><dc:title>{}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>\
-<res protocolInfo=\"http-get:*:{mime}:*\">{}</res></item></DIDL-Lite>",
-        xml_escape(title),
+        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">\
+<item id=\"pm-stream\" parentID=\"0\" restricted=\"1\"><dc:title>{}</dc:title>{extra}<upnp:class>object.item.audioItem.musicTrack</upnp:class>\
+<res protocolInfo=\"{}\">{}</res></item></DIDL-Lite>",
+        xml_escape(meta.title.as_deref().unwrap_or("Pubky Music")),
+        xml_escape(protocol_info),
         xml_escape(uri)
     )
 }
@@ -127,7 +145,23 @@ mod tests {
         let resp = "<s:Envelope xmlns:s=\"x\"><s:Body><u:GetVolumeResponse><CurrentVolume>37</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>";
         assert_eq!(element_text(resp, "CurrentVolume").as_deref(), Some("37"));
         assert!(element_text(resp, "Nope").is_none());
-        let d = didl("Pubky Music", "http://h/s.wav", "audio/wav");
+        let d = didl(
+            &pm_zones::TrackMeta::default(),
+            "http://h/s.wav",
+            "http-get:*:audio/wav:*",
+        );
         assert!(d.contains("<dc:title>Pubky Music</dc:title>") && d.contains("http-get:*:audio/wav:*"));
+        let m = pm_zones::TrackMeta {
+            title: Some("Bohemian Rhapsody".into()),
+            artist: Some("Queen".into()),
+            album: Some("A Night at the Opera".into()),
+            image: Some("http://n/v1/art/7?k=a&b".into()),
+        };
+        let d = didl(&m, "http://h/s.wav", "http-get:*:audio/wav:*");
+        assert!(d.contains("<upnp:artist>Queen</upnp:artist>"));
+        assert!(d.contains("<upnp:album>A Night at the Opera</upnp:album>"));
+        assert!(d.contains(
+            "<upnp:albumArtURI dlna:profileID=\"JPEG_TN\">http://n/v1/art/7?k=a&amp;b</upnp:albumArtURI>"
+        ));
     }
 }

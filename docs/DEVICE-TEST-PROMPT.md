@@ -46,15 +46,27 @@ Checked without devices (`crates/pm-out-cast` tests against a fake receiver):
 
 ## Smart TVs and other DLNA renderers (Samsung, LG, Sony, Philips)
 
-Checked without devices: gmediarender (a real DLNA renderer) on a token-protected node was found
-over SSDP, fetched the keyed stream URL and played in real time.
+Checked without devices, with gmediarender (a real DLNA renderer) on a token-protected node:
+- Found over SSDP; fetched the keyed stream URL and played in real time.
+- Limited to LPCM only (`--mime-filter audio/L16`, like many LG and Samsung TVs): offered DLNA LPCM.
+  The zone converted to 16-bit 48 kHz and the signal path says so.
+- Limited to MP3 only: no zone, and the log says why.
+- The answer carries `transferMode.dlna.org` and `contentFeatures.dlna.org`, and HEAD does not take
+  the stream away from the GET that follows.
 
 ```
-1. The TV appears as a zone after a scan (TVs often need "DLNA"/"Media sharing"/"Allow remote
-   control" turned on, and must be on, not in standby).
-2. Play: audio from the TV speakers; what the TV shows (title? a generic icon?).
-3. Pause/resume/next/seek and volume. Note anything the TV ignores or answers with an error
-   (log lines from pm_out_upnp).
+1. The TV appears as a zone after a scan. TVs often need "DLNA", "Media sharing" or "Allow remote
+   control" turned on, and must be on, not in standby. The node log line "UPnP renderer … stream="
+   says what it chose (Wav or L16); "accepts no PCM stream" means the TV takes only compressed
+   files, and no zone appears.
+2. Play an album with covers: audio from the TV speakers; the TV shows title, artist, album and
+   cover (photo it).
+3. Pause/resume, next, seek, volume. Note anything the TV ignores or answers with an error (log
+   lines from pm_out_upnp: "renderer Play refused, retrying" is fine once or twice).
+4. A 24/96 file: on a WAV TV the signal path stays bit-perfect up to what the TV listed; on an
+   LPCM TV it shows the conversion to 16-bit 44.1/48 kHz.
+5. Report the TV's GetProtocolInfo list (in the log at debug level, or from
+   `curl` on its ConnectionManager) so the device database can record it.
 ```
 
 ## Sonos, AirPlay, Snapcast

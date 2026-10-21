@@ -285,7 +285,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
-                .route("/v1/outputs/pull/{name}/stream.wav", get(pull_stream))
+                .route("/v1/outputs/pull/{name}/{file}", get(pull_stream))
                 // Album covers for TV screens, with that cover's key.
                 .route("/v1/art/{id}", get(keyed_cover))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
@@ -510,7 +510,8 @@ async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> 
 
 async fn pull_stream(
     State(s): State<Arc<NodeState>>,
-    Path(name): Path<String>,
+    Path((name, file)): Path<(String, String)>,
+    method: axum::http::Method,
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
@@ -521,6 +522,14 @@ async fn pull_stream(
             "missing or wrong stream key",
         ));
     }
+    // WAV for everyone; DLNA LPCM (raw big-endian 16-bit) for TVs that take nothing else.
+    let kind = match file.as_str() {
+        "stream.wav" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "audio/wav".into(),
+        },
+        "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
+        _ => return Err(ApiError::not_found(format!("no stream {file}"))),
+    };
     let out = s
         .pulls
         .lock()
@@ -528,22 +537,104 @@ async fn pull_stream(
         .get(&name)
         .cloned()
         .ok_or_else(|| ApiError::not_found(format!("no pull output {name}")))?;
+    // DLNA devices check these on the answer (some ask with HEAD first).
+    let dlna = [
+        ("transferMode.dlna.org", "Streaming".to_string()),
+        ("contentFeatures.dlna.org", kind.content_features()),
+    ];
+    let with_headers = |mime: String, body: axum::body::Body| {
+        let mut r = (
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+                (header::ACCEPT_RANGES, "none".to_string()),
+            ],
+            body,
+        )
+            .into_response();
+        for (k, v) in &dlna {
+            if let Ok(v) = axum::http::HeaderValue::from_str(v) {
+                r.headers_mut().insert(*k, v);
+            }
+        }
+        r
+    };
+    // A HEAD must not take the live stream: the GET that follows needs it.
+    if method == axum::http::Method::HEAD {
+        let mime = match &kind {
+            pm_out_upnp::dlna::StreamKind::L16 => "audio/L16".to_string(),
+            k => k.mime(0, 0),
+        };
+        return Ok(with_headers(mime, axum::body::Body::empty()));
+    }
     let Some(live) = out.take_stream(pm_zones::outputs::LISTENER_TIMEOUT).await else {
         return Err(ApiError::new(
             StatusCode::REQUEST_TIMEOUT,
             "no zone is playing into this stream; start playback to the Stream zone first",
         ));
     };
-    let stream = tokio_stream::wrappers::ReceiverStream::new(live.rx).map(Ok::<_, std::convert::Infallible>);
-    Ok((
-        [
-            (header::CONTENT_TYPE, "audio/wav".to_string()),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-            (header::ACCEPT_RANGES, "none".to_string()),
-        ],
-        axum::body::Body::from_stream(stream),
-    )
-        .into_response())
+    let fmt = live.format;
+    if kind == pm_out_upnp::dlna::StreamKind::L16 && fmt.bits != 16 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("LPCM is 16-bit; the zone plays {fmt}"),
+        ));
+    }
+    let mime = kind.mime(fmt.rate_hz, fmt.channels);
+    let rx = tokio_stream::wrappers::ReceiverStream::new(live.rx);
+    let body = match kind {
+        pm_out_upnp::dlna::StreamKind::Wav { .. } => {
+            axum::body::Body::from_stream(rx.map(Ok::<_, std::convert::Infallible>))
+        }
+        pm_out_upnp::dlna::StreamKind::L16 => {
+            let mut l16 = L16::default();
+            axum::body::Body::from_stream(
+                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(l16.convert(&chunk))),
+            )
+        }
+    };
+    Ok(with_headers(mime, body))
+}
+
+/// WAV (44-byte header, little-endian 16-bit) to DLNA LPCM (no header, big-endian), across chunk
+/// boundaries.
+#[derive(Default)]
+struct L16 {
+    /// Header bytes still to drop.
+    skipped: usize,
+    /// A sample's first byte when a chunk ended between its two bytes.
+    carry: Option<u8>,
+}
+
+impl L16 {
+    const HEADER: usize = 44;
+
+    fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let skip = (Self::HEADER - self.skipped).min(chunk.len());
+        self.skipped += skip;
+        let mut data = &chunk[skip..];
+        let mut out = Vec::with_capacity(data.len() + 1);
+        if let Some(lo) = self.carry.take() {
+            match data.split_first() {
+                Some((hi, rest)) => {
+                    out.extend_from_slice(&[*hi, lo]);
+                    data = rest;
+                }
+                None => {
+                    self.carry = Some(lo);
+                    return out;
+                }
+            }
+        }
+        let (pairs, rest) = data.as_chunks::<2>();
+        if let [lo] = rest {
+            self.carry = Some(*lo);
+        }
+        for [lo, hi] in pairs {
+            out.extend_from_slice(&[*hi, *lo]);
+        }
+        out
+    }
 }
 
 /// Discover outputs again (local devices, endpoints over mDNS and configured
@@ -1984,6 +2075,27 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
         s.notify_library();
     }
     Ok(Json(report))
+}
+
+#[cfg(test)]
+mod l16_tests {
+    use super::L16;
+
+    #[test]
+    fn wav_becomes_big_endian_lpcm_across_any_chunking() {
+        let mut wav = vec![0xAAu8; 44];
+        wav.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        let want = vec![0x02, 0x01, 0x04, 0x03, 0x06, 0x05];
+        for cut in 1..wav.len() {
+            for cut2 in cut..wav.len() {
+                let mut c = L16::default();
+                let mut got = c.convert(&wav[..cut]);
+                got.extend(c.convert(&wav[cut..cut2]));
+                got.extend(c.convert(&wav[cut2..]));
+                assert_eq!(got, want, "cuts at {cut}, {cut2}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

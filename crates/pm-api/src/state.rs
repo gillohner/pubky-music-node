@@ -668,17 +668,27 @@ impl NodeState {
                 .take(40)
                 .collect::<String>()
         );
-        let pull = self.pull_output(&name);
-        let out = Arc::new(pm_out_upnp::UpnpOutput::new(
-            r.clone(),
-            pull,
-            self.pull_url(&name),
-        ));
-        let id = out.id();
+        let id = OutputId::new("upnp", r.udn.trim_start_matches("uuid:"));
         if self.outputs.get(&id).is_some() {
             return None;
         }
-        tracing::info!(renderer = %r.friendly_name, output = %id, "UPnP renderer");
+        // What it accepts decides how the stream is offered; a renderer that takes no PCM stream
+        // (some TVs play only MP3/AAC files) gets no zone, rather than one that always fails.
+        let sinks = pm_out_upnp::dlna::sink_protocols(&r).unwrap_or_else(|e| {
+            tracing::debug!(renderer = %r.friendly_name, "GetProtocolInfo failed, offering WAV: {e}");
+            Vec::new()
+        });
+        let Some(kind) = pm_out_upnp::dlna::choose(&sinks) else {
+            tracing::info!(renderer = %r.friendly_name, "UPnP renderer accepts no PCM stream (WAV or LPCM); no zone");
+            return None;
+        };
+        let pull = self.pull_output(&name);
+        let out = Arc::new(
+            pm_out_upnp::UpnpOutput::new(r.clone(), pull, self.pull_url(&name))
+                .with_stream_kind(kind.clone())
+                .with_describe(self.describe_for_renderers()),
+        );
+        tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
         self.outputs.register(out.clone());
         self.create_zone(&r.friendly_name, out);
         Some(id)
