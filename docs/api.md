@@ -134,14 +134,17 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/radio/play` | `{zone, station}` | replaces the zone's queue with the stream and plays it |
 | GET | `/v1/pubky` | | `{user, unsynced}` |
 | POST / GET | `/v1/pubky/login` | | POST starts a Pubky Ring sign-in and returns `{url}` (`pubkyauth://…`); GET polls `{status: none\|pending\|signed_in, user?, url?}`. On approval the node stores the session secret, publishes its record and syncs |
-| POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors}`; 412 without a session |
+| POST | `/v1/pubky/sync` | | `{pushed, pulled, deleted, errors, notes?}` (`notes`: things worth knowing that are not errors, such as playlists kept in the old format); 412 without a session. The first sync on a node moves what only the old `/priv/pubky.app/` folders hold to v1 and keeps the old files |
 | GET / POST | `/v1/pubky/files` | POST: `{track_id}` or `{path}` | private files on the homeserver (`/priv/pubky.music/files/`); upload a node file |
 | POST | `/v1/pubky/files/mirror` | | download missing files into the node's mirror folder and scan it: `{fetched, present, bytes, errors}` |
 | GET | `/upnp/node.xml` | | (no token) the UPnP device description the SSDP announcement points at: name, version, `uuid:<node id>`, `presentationURL` `/`. See `docs/CONNECTION.md` |
 | GET | `/v1/events` | WebSocket | first `{"type":"snapshot","seq","boot","library_rev","zones":[...]}`, then numbered (`seq`) `zone` (full state; also sent when a zone is created), `zone_event` (track started/ended, skipped, paused, resumed, seeked, stopped, queue, `stream_title` for radio, error), `zone_removed`, `library_changed`. Send `{"type":"ping","id":n}` for `{"type":"pong","id":n}`, `{"type":"resync"}` for a fresh snapshot. See `docs/CONNECTION.md` |
 
-Playlists are v1 `PubkyAppPost` envelopes (ADR 0006) stored in the node and pushed to the user's private
-homeserver folder when `pubky.session_secret_file` is set. Items are canonical music URLs only.
+Playlists live in the node and sync to the user's homeserver as pubky-social-specs v1 objects (ADR 0014)
+when the node has a session: a playlist is a private social `collection` (up to 100 songs; longer ones stay
+in the old private envelope for now), a rated review a music `review`, a text-only review a social note
+embedding the music URL, a play a private music `listen`, a favourite a v1 bookmark. Items are canonical
+music URLs only.
 
 Queues (items and repeat mode) are saved per zone on every change and restored, stopped, when the node restarts. Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`; ICY titles arrive as `now_playing.stream_title`). Subscription streaming services add schemes later.
 Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.

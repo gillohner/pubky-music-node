@@ -1,6 +1,7 @@
 //! The `ext.music` hints on a playlist, which is a social `collection` post.
 //!
-//! - On an item: `ext.music.source = {service, uri}`, where the curator played it from. The item's
+//! - On an item: `ext.music.source = {service, uri}`, where the curator played it from, and
+//!   `ext.music.added_at` (Unix milliseconds). The item's
 //!   own `uri` stays the canonical music URL.
 //! - On the collection: `ext.music.source_order = ["tidal", "library", …]`, the services to try
 //!   first when playing it.
@@ -56,7 +57,7 @@ fn tidy(extra: &mut Map<String, Value>) {
 }
 
 /// The item's `ext.music.source`, when it is well formed: a service name and an http(s) or pubky
-/// URI that passes
+/// URI (required here) that passes
 /// the reference gate (returned canonical). `owner` is the playlist's author, for
 /// private references.
 pub fn item_source(
@@ -67,14 +68,16 @@ pub fn item_source(
     let value = music(&item.extra)?.get("source")?.clone();
     let mut source: MusicSource = serde_json::from_value(value).ok()?;
     check_source(&source).ok()?;
-    source.uri = validate_reference(
-        &source.uri,
-        AllowedSchemes::PubkyHttpHttps,
-        VALIDATION_LIMITS.reference_uri_max_length,
-        ctx,
-        owner,
-    )
-    .ok()?;
+    source.uri = Some(
+        validate_reference(
+            source.uri.as_deref()?,
+            AllowedSchemes::PubkyHttpHttps,
+            VALIDATION_LIMITS.reference_uri_max_length,
+            ctx,
+            owner,
+        )
+        .ok()?,
+    );
     Some(source)
 }
 
@@ -127,4 +130,16 @@ pub fn set_source_order(collection: &mut PubkySocialCollectionContent, order: &[
         music_mut(&mut collection.extra).insert("source_order".into(), Value::Array(list));
     }
     tidy(&mut collection.extra);
+}
+
+/// The item's `ext.music.added_at`, Unix milliseconds, when it is a JSON-safe integer from 2000 on.
+pub fn item_added_at(item: &PubkySocialCollectionItem) -> Option<i64> {
+    let ms = music(&item.extra)?.get("added_at")?.as_i64()?;
+    (pubky_social_specs::validate_safe_json_int(ms).is_ok() && ms >= crate::LISTEN_PLAYED_AT_MIN_MS)
+        .then_some(ms)
+}
+
+/// Sets the item's `ext.music.added_at` (Unix milliseconds).
+pub fn set_item_added_at(item: &mut PubkySocialCollectionItem, ms: i64) {
+    music_mut(&mut item.extra).insert("added_at".into(), Value::from(ms));
 }

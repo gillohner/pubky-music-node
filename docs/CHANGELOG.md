@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Music data moves to pubky-social-specs v1** (steward plan step 3, ADR 0014). The node keeps its working copy and converts at the homeserver:
+  - Playlists become private social `collection` posts (`layout: list`, each song's added time in `ext.music.added_at`).
+  - Rated reviews become music `review` posts (stars doubled to 1–10). Text-only reviews become social notes that embed the music URL.
+  - Plays become private music `listen` posts. Favourites become `/priv/social/v1/bookmarks/`.
+  - Edits are new versions. A delete removes every version and the old copy.
+  - The first sync on a node reads the old `/priv/pubky.app/` folders, moves what v1 lacks, and keeps the old files. Playlists over 100 songs (the v1 collection cap) stay in the old format for now; the sync report says so (`notes`), and the steward has the question.
+  - Checked against a local Pubky testnet: round trip, edit, delete and the one-time migration.
+  - The sign-in already asks for the new paths. A node signed in before today needs one Pubky Ring re-approval.
 - **`pubky-music-specs`** (new crate, steward plan step 3, ADR 0014): music kinds on the pubky-social-specs v1 post envelope, under `/{pub,priv}/music/v1/posts/`. A `review` is a rating from 1 to 10 with optional text; a `listen` is a private play record (`played_at`, `duration_ms`, `source`). Both embed the music URL. Also readers and writers for the `ext.music` hints on playlists (`source` on an item, `source_order` on the collection) that drop anything malformed. Nothing in the node uses it yet; the migration comes next. ADR 0014 supersedes ADR 0006.
 - Zones say how closely their speakers stay together (`sync`: `single`, `tight` or `loose`). Groups of the node's own endpoints or of Slimproto players, Snapcast groups, Sonos groups and Cast groups are tight; mixed protocols are loose. `docs/ZONES.md` maps zone kinds, labels and actions for the Zones view.
 - **AirPlay** (`crates/pm-out-airplay`, infra brief §3.4): AirPlay 1 (RAOP) receivers found over mDNS (`_raop._tcp`) become zones, unless `[outputs] airplay = false`.

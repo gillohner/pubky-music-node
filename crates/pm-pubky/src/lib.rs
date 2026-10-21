@@ -30,6 +30,7 @@ pub mod ids;
 pub mod nexus;
 pub mod pinakes;
 pub mod schemas;
+pub mod v1;
 
 pub use config::{Network, PmPubkyConfig};
 pub use discovery::{DiscoveredItem, Discovery};

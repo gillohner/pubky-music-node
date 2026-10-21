@@ -53,31 +53,43 @@ pub struct MusicListenContent {
 }
 
 /// A service and the item's own link there: `{"service": "tidal", "uri": "https://tidal.com/…"}`.
-/// Used by a listen and by the `ext.music.source` hint on a playlist item.
+/// Used by a listen (where the link may be unknown) and by the `ext.music.source` hint on a
+/// playlist item (where it is required).
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MusicSource {
     /// Lowercase name: ASCII letters, digits and `-`, at most [`SERVICE_MAX_LENGTH`] bytes.
     pub service: String,
     /// The item on that service: an http(s) or pubky URI, so it is safe to open.
-    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     /// Unknown members, preserved on rewrite.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 impl MusicSource {
-    /// A source with no unknown members.
+    /// A source with a link and no unknown members.
     pub fn new(service: impl Into<String>, uri: impl Into<String>) -> Self {
         Self {
             service: service.into(),
-            uri: uri.into(),
+            uri: Some(uri.into()),
+            extra: Map::new(),
+        }
+    }
+
+    /// A source known only by its service (`library`, `roon`).
+    pub fn service(service: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            uri: None,
             extra: Map::new(),
         }
     }
 }
 
-/// `true` for a well-formed service name.
-pub(crate) fn is_service_name(s: &str) -> bool {
+/// `true` for a well-formed service name: 1 to [`SERVICE_MAX_LENGTH`] lowercase ASCII letters,
+/// digits or `-`.
+pub fn is_service_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= SERVICE_MAX_LENGTH
         && s.bytes()
@@ -142,7 +154,8 @@ pub(crate) fn parse_listen(content: &str) -> Result<MusicListenContent, String> 
     }
     if let Some(source) = &listen.source {
         check_source(source)?;
-        if code_point_len(&source.uri) > VALIDATION_LIMITS.reference_uri_max_length {
+        let uri = source.uri.as_deref().unwrap_or("");
+        if code_point_len(uri) > VALIDATION_LIMITS.reference_uri_max_length {
             return Err("Validation Error: source.uri is too long".into());
         }
     }

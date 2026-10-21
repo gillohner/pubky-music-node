@@ -674,6 +674,15 @@ impl Library {
         Ok(v)
     }
 
+    /// Queue a live favourite for another push (the v1 migration).
+    pub fn mark_favourite_unsynced(&self, id: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE favourites SET synced_at = NULL WHERE id = ?1 AND deleted = 0",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Mark pushed; a pushed tombstone is purged.
     pub fn mark_favourite_synced(&self, id: &str, at_micros: i64) -> Result<()> {
         let conn = self.lock();

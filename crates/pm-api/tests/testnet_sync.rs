@@ -10,7 +10,7 @@ use pm_api::{router, NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_pubky::homeserver::NodeHomeserver;
-use pm_pubky::Visibility;
+use pm_pubky::{v1, Visibility};
 use pm_zones::OutputRegistry;
 use pubky::{ClientId, Keypair, Pubky, PublicKey};
 use std::sync::Arc;
@@ -119,16 +119,53 @@ async fn playlists_round_trip_through_the_private_folder() {
     let (_, list) = call(&app_a, "GET", "/v1/playlists", None).await;
     assert_eq!(list[0]["synced"], true);
 
-    // The post sits in the private folder: readable with the session, not publicly.
-    let private = homeserver
-        .read_music_posts(&z32, Visibility::Private, Some(sync_a.session()))
+    // The playlist is a private v1 collection (ADR 0014), nothing in the old folder or public.
+    let heads = homeserver
+        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
         .await
         .unwrap();
-    assert_eq!(private.len(), 1);
-    assert_eq!(private[0].0, format!("/priv/pubky.app/posts/{id}"));
-    assert_eq!(private[0].1.as_playlist().unwrap().name, "Testnet mix");
-    let public = homeserver.read_playlists_of(&z32).await.unwrap();
-    assert!(public.is_empty());
+    assert_eq!(heads.len(), 1, "{heads:?}");
+    assert_eq!(heads[&id].path, format!("/priv/social/v1/posts/{id}/{id}.json"));
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(
+                &z32,
+                &heads[&id].path,
+                Visibility::Private,
+                Some(sync_a.session()),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["kind"], "collection");
+    assert!(homeserver
+        .read_music_posts(&z32, Visibility::Private, Some(sync_a.session()))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(homeserver
+        .v1_heads(&z32, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // An edit is a second version; the pull on A takes nothing back.
+    let (st, _) = call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}"),
+        Some(serde_json::json!({"name": "Testnet mix 2"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let r = sync_a.sync(&a.library).await.unwrap();
+    assert_eq!((r.pushed, r.pulled), (1, 0), "{r:?}");
+    let heads = homeserver
+        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .await
+        .unwrap();
+    assert_eq!(heads[&id].versions.len(), 2);
 
     // Node B (fresh database, same user) pulls it.
     let signer_b = pubky.signer(keypair.clone());
@@ -143,18 +180,18 @@ async fn playlists_round_trip_through_the_private_folder() {
     let app_b = router(b.clone());
     let (st, got) = call(&app_b, "GET", &format!("/v1/playlists/{id}"), None).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(got["summary"]["name"], "Testnet mix");
+    assert_eq!(got["summary"]["name"], "Testnet mix 2");
 
     // Deleting on A removes it remotely; B's next sync keeps its local copy (no tombstone pull yet).
     let (st, _) = call(&app_a, "DELETE", &format!("/v1/playlists/{id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let r = sync_a.sync(&a.library).await.unwrap();
     assert_eq!(r.deleted, 1, "{r:?}");
-    let private = homeserver
-        .read_music_posts(&z32, Visibility::Private, Some(sync_a.session()))
+    assert!(homeserver
+        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
         .await
-        .unwrap();
-    assert!(private.is_empty());
+        .unwrap()
+        .is_empty());
 
     // Private files: upload a WAV, list it, mirror it into node B's folder.
     let wav = dir.path().join("song.wav");
@@ -286,4 +323,104 @@ async fn tags_move_to_the_node_namespace() {
             .len(),
         2
     );
+}
+
+/// The old private envelopes (ADR 0006) move to v1 on a node's first sync: a playlist becomes a
+/// collection, a rated review a music review, a favourite a v1 bookmark. The old files stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_private_objects_move_to_v1_once() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::schemas::{MusicContent, MusicPost, Playlist, PlaylistItem, Review};
+    let pubky = Pubky::testnet().unwrap();
+    let keypair = Keypair::random();
+    let signer = pubky.signer(keypair.clone());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+
+    // What a node wrote before step 3
+    let mb = pm_model::MusicUri::parse(song).unwrap();
+    let playlist = MusicPost::new(MusicContent::Playlist(Playlist::new(
+        "Old mix",
+        None,
+        None,
+        vec![PlaylistItem::new(&mb)],
+    )));
+    let pl_id = playlist.create_id();
+    let review = MusicPost::new(MusicContent::Review(Review::new(&mb, Some(4), "Good")));
+    let rv_id = review.create_id();
+    for (id, post) in [(&pl_id, &playlist), (&rv_id, &review)] {
+        homeserver
+            .write_object(&session, &MusicPost::path(id, Visibility::Private), &post.post)
+            .await
+            .unwrap();
+    }
+    let fav = pm_pubky::Favourite::new(mb.clone());
+    homeserver
+        .write_object(
+            &session,
+            &pm_pubky::Favourite::path(&fav.id, Visibility::Private),
+            &fav.to_bookmark(),
+        )
+        .await
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "n");
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!((r.pulled, r.pushed), (3, 3), "{r:?}");
+
+    let social = homeserver
+        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync.session()))
+        .await
+        .unwrap();
+    assert_eq!(
+        social[&pl_id].path,
+        format!("/priv/social/v1/posts/{pl_id}/{pl_id}.json")
+    );
+    let music = homeserver
+        .v1_heads(&z32, v1::Root::Priv, "music", Some(sync.session()))
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(
+                &z32,
+                &music[&rv_id].path,
+                Visibility::Private,
+                Some(sync.session()),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["kind"], "review");
+    assert_eq!(body["embed"], song);
+    let favs = homeserver.read_v1_favourites(sync.session()).await.unwrap();
+    assert_eq!(favs.len(), 1);
+    assert_eq!(favs[0].1, mb);
+    // The old files are still there
+    assert_eq!(
+        homeserver
+            .read_music_posts(&z32, Visibility::Private, Some(sync.session()))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Once only: the next sync moves nothing
+    let r = sync.sync(&n.library).await.unwrap();
+    assert_eq!((r.pulled, r.pushed, r.deleted), (0, 0, 0), "{r:?}");
 }

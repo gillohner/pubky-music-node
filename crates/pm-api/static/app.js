@@ -1715,7 +1715,7 @@
           }
           const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; try { const r = await api('POST', '/pubky/files/mirror'); toast(`Mirrored ${r.fetched} file${r.fetched === 1 ? '' : 's'} (${r.present} already here${r.errors.length ? `, ${r.errors.length} errors` : ''})`); } catch (e) { toast(e.message, 'error'); } mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
-          const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}`); render(); } catch (e) { toast(e.message, 'error'); } };
+          const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); toast(`Synced: ${r.pushed} pushed, ${r.pulled} pulled${r.errors.length ? `, ${r.errors.length} errors` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); render(); } catch (e) { toast(e.message, 'error'); } };
           const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
             try {
               const r = await api('POST', '/pubky/login');

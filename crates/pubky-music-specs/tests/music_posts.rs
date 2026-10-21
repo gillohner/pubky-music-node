@@ -123,6 +123,11 @@ fn listen_is_private_only() {
     assert_eq!(content.duration_ms, Some(213_000));
     assert_eq!(content.source, Some(source));
 
+    // A source known only by its service
+    let post = listen(PLAYED, None, Some(MusicSource::service("library")), SONG.into());
+    let back = written(&post, Root::Priv).unwrap();
+    assert_eq!(read_listen(&back).unwrap().source.unwrap().uri, None);
+
     let err = written(&post, Root::Pub).unwrap_err();
     assert!(err.contains("private"), "{err}");
     assert!(read_review(&back).is_err());
@@ -236,4 +241,22 @@ fn source_order_is_filtered_and_bounded() {
     set_source_order(&mut collection, &[]);
     assert!(serde_json::to_value(&collection).unwrap().get("ext").is_none());
     assert!(source_order(&collection).is_empty());
+}
+
+#[test]
+fn item_added_at_round_trips_and_ignores_junk() {
+    use pubky_music_specs::ext::{item_added_at, set_item_added_at};
+    let mut it = item(SONG, json!({}));
+    assert_eq!(item_added_at(&it), None);
+    set_item_added_at(&mut it, PLAYED);
+    assert_eq!(item_added_at(&it), Some(PLAYED));
+    for junk in [
+        json!("soon"),
+        json!(12),
+        json!(1.5e15),
+        json!(9_007_199_254_740_993_u64),
+    ] {
+        let it = item(SONG, json!({"ext": {"music": {"added_at": junk}}}));
+        assert_eq!(item_added_at(&it), None);
+    }
 }

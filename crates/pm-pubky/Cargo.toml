@@ -14,6 +14,8 @@ blake3 = { workspace = true }
 futures-util = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
+pubky-music-specs = { workspace = true }
+pubky-social-specs = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

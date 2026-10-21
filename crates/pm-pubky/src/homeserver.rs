@@ -102,6 +102,86 @@ impl NodeHomeserver {
         visibility: Visibility,
         session: Option<&PubkySession>,
     ) -> Result<Vec<String>, HomeserverError> {
+        self.list_paths(user, dir, visibility, session, true).await
+    }
+
+    /// Every file path under `dir` at any depth (a v1 post tree is `{id}/{editId}.json`).
+    pub async fn list_tree(
+        &self,
+        user_z32: &str,
+        dir: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        self.list_paths(&user, dir, visibility, session, false).await
+    }
+
+    /// The newest version of every v1 post of a user under one root and namespace.
+    pub async fn v1_heads(
+        &self,
+        user_z32: &str,
+        root: crate::v1::Root,
+        namespace: &str,
+        session: Option<&PubkySession>,
+    ) -> Result<std::collections::BTreeMap<String, crate::v1::Head>, HomeserverError> {
+        let visibility = match root {
+            crate::v1::Root::Pub => Visibility::Public,
+            crate::v1::Root::Priv => Visibility::Private,
+        };
+        let dir = crate::v1::posts_dir(root, namespace);
+        Ok(crate::v1::heads(
+            self.list_tree(user_z32, &dir, visibility, session).await?,
+        ))
+    }
+
+    /// The body at `path` of a user's storage.
+    pub async fn get_bytes(
+        &self,
+        user_z32: &str,
+        path: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<u8>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        self.fetch(&user, path, visibility, session).await
+    }
+
+    /// The signed-in user's v1 bookmarks of music URLs: `(path, uri, created_at)`. Bookmarks of
+    /// anything else, and invalid ones, are skipped.
+    pub async fn read_v1_favourites(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
+        let user = session.public_key();
+        let mut out = Vec::new();
+        for path in self
+            .list_dir(
+                &user,
+                &crate::v1::bookmarks_dir(),
+                Visibility::Private,
+                Some(session),
+            )
+            .await?
+        {
+            let bytes = self
+                .fetch(&user, &path, Visibility::Private, Some(session))
+                .await?;
+            if let Some((uri, created_at)) = crate::v1::favourite_from_bookmark(&path, &bytes) {
+                out.push((path, uri, created_at));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn list_paths(
+        &self,
+        user: &PublicKey,
+        dir: &str,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+        shallow: bool,
+    ) -> Result<Vec<String>, HomeserverError> {
         let dir = dir.to_string();
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
@@ -109,7 +189,10 @@ impl NodeHomeserver {
             let page = match (visibility, session) {
                 (Visibility::Public, _) => {
                     let public = self.pubky.public_storage();
-                    let mut b = public.list((user, dir.as_str()))?.limit(LIST_LIMIT).shallow(true);
+                    let mut b = public
+                        .list((user, dir.as_str()))?
+                        .limit(LIST_LIMIT)
+                        .shallow(shallow);
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
@@ -121,7 +204,7 @@ impl NodeHomeserver {
                 }
                 (Visibility::Private, Some(session)) => {
                     let storage = session.storage();
-                    let mut b = storage.list(dir.as_str())?.limit(LIST_LIMIT).shallow(true);
+                    let mut b = storage.list(dir.as_str())?.limit(LIST_LIMIT).shallow(shallow);
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }

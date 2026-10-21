@@ -26,8 +26,9 @@ pub mod ext;
 mod kind;
 
 pub use content::{
-    MusicListenContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS, LISTEN_PLAYED_AT_MIN_MS,
-    REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH, SERVICE_MAX_LENGTH,
+    is_service_name, MusicListenContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS,
+    LISTEN_PLAYED_AT_MIN_MS, REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH,
+    SERVICE_MAX_LENGTH,
 };
 pub use kind::MusicPostKind;
 

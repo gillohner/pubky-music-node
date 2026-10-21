@@ -45,9 +45,9 @@ OpenSubsonic server for Symfonium, Feishin, Amperfy and friends (their jukebox m
 your choice), and a `/v1` API with a WebSocket event stream for anything else. Both UIs have a Zones
 overview for the whole house, Focus filters by file quality, and new releases from your artists.
 
-**Pubky.** Sign in with Pubky Ring. Playlists, reviews and listening activity are private v1
-`PubkyAppPost`s with a JSON envelope (ADR 0006), favourites are private v1 bookmarks (ADR 0010),
-tags are public v1 `PubkyAppTag`s written only on your action (ADR 0011); all of it syncs with the
+**Pubky.** Sign in with Pubky Ring. Playlists are private pubky-social-specs v1 collections, reviews
+and listening history are music posts from the `pubky-music-specs` crate, favourites are private v1
+bookmarks (ADR 0014), tags are public and written only on your action (ADR 0011); all of it syncs with the
 homeserver and comes back on a fresh node. Audio can be uploaded to the homeserver's private
 storage, never under `/pub/`, from a track's menu in either UI, listed under Settings, and mirrored
 back into a fresh node. Discover reads trending music and tags through Pinakes and shows what

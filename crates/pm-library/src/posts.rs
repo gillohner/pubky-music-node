@@ -121,6 +121,16 @@ impl Library {
         Ok(out)
     }
 
+    /// Queue a live post for another push (the v1 migration re-writes posts the homeserver has
+    /// only in the old format).
+    pub fn mark_music_post_unsynced(&self, id: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE music_posts SET synced_at = NULL WHERE id = ?1 AND deleted = 0",
+            [id],
+        )?;
+        Ok(())
+    }
+
     /// Record a successful push; a tombstone is purged.
     pub fn mark_music_post_synced(&self, id: &str, at_micros: i64) -> Result<()> {
         let conn = self.lock();
@@ -184,6 +194,8 @@ mod tests {
         let unsynced = lib.unsynced_music_posts().unwrap();
         assert!(unsynced.iter().any(|r| r.id == "b" && r.deleted));
         lib.mark_music_post_synced("b", 60).unwrap();
+        lib.mark_music_post_unsynced("r").unwrap();
+        assert_eq!(lib.unsynced_music_posts().unwrap()[0].id, "r");
         assert!(!lib.unsynced_music_posts().unwrap().iter().any(|r| r.id == "b"));
     }
 }

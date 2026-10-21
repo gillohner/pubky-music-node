@@ -667,6 +667,9 @@ pub struct SyncReport {
     pub deleted: usize,
     #[serde(default)]
     pub errors: Vec<String>,
+    /// Things worth knowing that are not errors (playlists kept in the old format).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

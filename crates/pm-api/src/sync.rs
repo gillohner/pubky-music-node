@@ -1,18 +1,20 @@
-//! Sync the local music posts with the user's private homeserver folder.
+//! Sync the local music data with the user's homeserver (ADR 0014).
 //!
-//! Push: every row the library marks unsynced is written to its path
-//! (`/priv/pubky.app/posts/<id>` or the public path); tombstones are
-//! deleted remotely and purged. Pull: private posts on the homeserver that
-//! the node does not have are imported, so a fresh node recovers its
-//! playlists. Conflicts resolve by `updated_at`, newest wins.
+//! Push: every row the library marks unsynced is written as its v1 object
+//! (`/{root}/social/v1/posts/`, `/{root}/music/v1/posts/`, `/priv/social/v1/bookmarks/`), an edit
+//! as a new version; tombstones delete every copy and are purged. Pull: private v1 objects the
+//! node does not have, or has older, are imported, so a fresh node recovers its playlists. The
+//! first sync on a node also reads the old `/priv/pubky.app/` folders and moves what only they
+//! hold to v1, without deleting them.
 
 use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_PLAYLIST, TYPE_REVIEW};
-use pm_pubky::{Favourite, MusicContent, MusicPost, Network, Visibility};
+use pm_pubky::{v1, Favourite, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
@@ -114,98 +116,13 @@ impl PubkySync {
 
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
-
-        // Push local changes.
-        let pending = library.lock().expect("library poisoned").unsynced_music_posts()?;
-        for row in pending {
-            let visibility = if row.visibility == "public" {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
-            let path = MusicPost::path(&row.id, visibility);
-            if row.deleted {
-                match self.homeserver.delete(&self.session, &path).await {
-                    Ok(()) => report.deleted += 1,
-                    // Already gone remotely counts as done.
-                    Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => report.deleted += 1,
-                    Err(e) => {
-                        report.errors.push(format!("delete {path}: {e}"));
-                        continue;
-                    }
-                }
-            } else {
-                let post: pubky_app_specs::PubkyAppPost = match serde_json::from_str(&row.json) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        report.errors.push(format!("{}: stored json: {e}", row.id));
-                        continue;
-                    }
-                };
-                if let Err(e) = self.homeserver.write_object(&self.session, &path, &post).await {
-                    report.errors.push(format!("write {path}: {e}"));
-                    continue;
-                }
-                report.pushed += 1;
-            }
-            library
-                .lock()
-                .expect("library poisoned")
-                .mark_music_post_synced(&row.id, now_micros())?;
-        }
-
-        // Favourites: push bookmarks and tombstones the same way.
-        let pending = library.lock().expect("library poisoned").unsynced_favourites()?;
-        for row in pending {
-            let path = Favourite::path(&row.id, Visibility::Private);
-            if row.deleted {
-                match self.homeserver.delete(&self.session, &path).await {
-                    Ok(()) => report.deleted += 1,
-                    Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => report.deleted += 1,
-                    Err(e) => {
-                        report.errors.push(format!("delete {path}: {e}"));
-                        continue;
-                    }
-                }
-            } else {
-                let Ok(uri) = pm_model::MusicUri::parse(&row.uri) else {
-                    report
-                        .errors
-                        .push(format!("{}: not a canonical music URL", row.uri));
-                    continue;
-                };
-                let b = Favourite {
-                    id: row.id.clone(),
-                    uri,
-                    created_at: row.created_at,
-                }
-                .to_bookmark();
-                if let Err(e) = self.homeserver.write_object(&self.session, &path, &b).await {
-                    report.errors.push(format!("write {path}: {e}"));
-                    continue;
-                }
-                report.pushed += 1;
-            }
-            library
-                .lock()
-                .expect("library poisoned")
-                .mark_favourite_synced(&row.id, now_micros())?;
-        }
-        let remote_favs = self
-            .homeserver
-            .read_favourites(&self.z32, Visibility::Private, Some(&self.session))
-            .await?;
-        {
-            let lib = library.lock().expect("library poisoned");
-            for (_, f) in remote_favs {
-                let url = f.uri.to_url();
-                if lib.favourite_by_uri(&url)?.is_none() {
-                    lib.add_favourite(&f.id, &url, f.created_at)?;
-                    lib.mark_favourite_synced(&f.id, now_micros())?;
-                    report.pulled += 1;
-                }
-            }
-        }
+        let owner = v1::PubkyId::try_from(raw_key(&self.z32))
+            .map_err(|e| SyncError::Store(format!("signed-in key: {e}")))?;
+        let migrated = library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(V1_MIGRATED)?
+            .is_some_and(|v| !v.is_empty());
 
         // Tags: public PubkyAppTags under the node's namespace (Nexus indexes
         // tags on external links only there), pushed and pulled the same way.
@@ -276,12 +193,99 @@ impl PubkySync {
             Err(e) => report.errors.push(format!("reading tags: {e}")),
         }
 
-        // Pull what the homeserver has that we do not (or has newer).
+        // Before the move to v1 (ADR 0014): what only the old folders have comes in first, so a
+        // fresh node recovers everything. The old files are never deleted by the migration.
+        if !migrated {
+            self.pull_legacy(library, &mut report).await?;
+        }
+
+        // What the homeserver has in v1.
+        let mut heads = Heads::default();
+        for root in [v1::Root::Priv, v1::Root::Pub] {
+            for ns in [v1::SOCIAL_NAMESPACE, pubky_music_specs::MUSIC_NAMESPACE] {
+                let visibility = if root == v1::Root::Pub {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                };
+                let session = (visibility == Visibility::Private).then_some(&self.session);
+                let found = self.homeserver.v1_heads(&self.z32, root, ns, session).await?;
+                heads.0.insert((is_pub(root), ns), found);
+            }
+        }
+        let remote_favs = self.homeserver.read_v1_favourites(&self.session).await?;
+
+        // The migration: queue every object the homeserver has only in the old format.
+        if !migrated {
+            let lib = library.lock().expect("library poisoned");
+            let mut queued = 0;
+            for row in lib.list_music_posts(None)? {
+                if !heads.has(&row.id) {
+                    lib.mark_music_post_unsynced(&row.id)?;
+                    queued += 1;
+                }
+            }
+            let on_v1: HashSet<String> = remote_favs.iter().map(|(_, u, _)| u.to_url()).collect();
+            for f in lib.list_favourites()? {
+                if !on_v1.contains(&f.uri) {
+                    lib.mark_favourite_unsynced(&f.id)?;
+                    queued += 1;
+                }
+            }
+            if queued > 0 {
+                tracing::info!(queued, "moving music data to social/v1 and music/v1");
+            }
+        }
+
+        self.push_posts(library, &owner, &mut heads, &mut report).await?;
+        let removed_favs = self.push_favourites(library, &mut report).await?;
+        self.pull_v1(library, &heads, &mut report).await?;
+
+        // Favourites the homeserver has and this node does not.
+        {
+            let lib = library.lock().expect("library poisoned");
+            for (_, uri, created_at) in remote_favs {
+                let url = uri.to_url();
+                if removed_favs.contains(&url) || lib.favourite_by_uri(&url)?.is_some() {
+                    continue;
+                }
+                let id = Favourite::id_for(&uri);
+                lib.add_favourite(&id, &url, created_at)?;
+                lib.mark_favourite_synced(&id, now_micros())?;
+                report.pulled += 1;
+            }
+            if !migrated && report.errors.is_empty() {
+                lib.set_setting(V1_MIGRATED, &now_micros().to_string())?;
+                tracing::info!("music data is on social/v1 and music/v1");
+            }
+        }
+        Ok(report)
+    }
+
+    /// The old folders (`/priv/pubky.app/posts/`, `/priv/pubky.app/bookmarks/`), read until the
+    /// migration has run on this node.
+    async fn pull_legacy(
+        &self,
+        library: &Arc<Mutex<Library>>,
+        report: &mut SyncReport,
+    ) -> Result<(), SyncError> {
+        let remote_favs = self
+            .homeserver
+            .read_favourites(&self.z32, Visibility::Private, Some(&self.session))
+            .await?;
         let remote = self
             .homeserver
             .read_music_posts(&self.z32, Visibility::Private, Some(&self.session))
             .await?;
         let lib = library.lock().expect("library poisoned");
+        for (_, f) in remote_favs {
+            let url = f.uri.to_url();
+            if lib.favourite_by_uri(&url)?.is_none() {
+                lib.add_favourite(&f.id, &url, f.created_at)?;
+                lib.mark_favourite_synced(&f.id, now_micros())?;
+                report.pulled += 1;
+            }
+        }
         for (path, post) in remote {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
             if !matches!(post.content.type_name(), t if t == TYPE_PLAYLIST || t == TYPE_REVIEW) {
@@ -291,8 +295,7 @@ impl PubkySync {
                 MusicContent::Playlist(p) => p.updated_at,
                 other => other.created_micros(),
             };
-            let local = lib.get_music_post(&id)?;
-            let take = match &local {
+            let take = match lib.get_music_post(&id)? {
                 None => true,
                 Some(row) => remote_updated > row.updated_at,
             };
@@ -302,7 +305,345 @@ impl PubkySync {
                 report.pulled += 1;
             }
         }
-        Ok(report)
+        Ok(())
+    }
+
+    /// Push every unsynced post as its v1 object; tombstones delete every copy.
+    async fn push_posts(
+        &self,
+        library: &Arc<Mutex<Library>>,
+        owner: &v1::PubkyId,
+        heads: &mut Heads,
+        report: &mut SyncReport,
+    ) -> Result<(), SyncError> {
+        let pending = library.lock().expect("library poisoned").unsynced_music_posts()?;
+        let mut kept_legacy = 0;
+        for row in pending {
+            let public = row.visibility == "public";
+            let visibility = if public {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+            let root = v1::root_of(public);
+            let legacy_path = MusicPost::path(&row.id, visibility);
+            if row.deleted {
+                // The old copy first, then every version, oldest first, public before private
+                let mut paths = vec![legacy_path];
+                paths.extend(heads.take_all(&row.id));
+                let mut failed = false;
+                for path in &paths {
+                    if let Err(e) = self.delete_quietly(path).await {
+                        report.errors.push(format!("delete {path}: {e}"));
+                        failed = true;
+                    }
+                }
+                if failed {
+                    continue;
+                }
+                report.deleted += 1;
+            } else {
+                let content = match serde_json::from_str::<pubky_app_specs::PubkyAppPost>(&row.json)
+                    .map_err(|e| e.to_string())
+                    .and_then(|p| MusicPost::from_post(p, Some(&row.id)).map_err(|e| e.to_string()))
+                {
+                    Ok(Some(post)) => post.content,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        report.errors.push(format!("{}: stored json: {e}", row.id));
+                        continue;
+                    }
+                };
+                match v1::to_v1(&content) {
+                    Ok(post) => {
+                        let ns = post.namespace();
+                        let head = heads.edit_id(root, ns, &row.id);
+                        let path = match post.version_path(&row.id, head.as_deref(), root, owner) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                report.errors.push(format!("{}: {e}", row.id));
+                                continue;
+                            }
+                        };
+                        if let Err(e) = self
+                            .homeserver
+                            .write_object(&self.session, &path, &post.to_json())
+                            .await
+                        {
+                            let msg = format!("write {path}: {e}");
+                            let stop = is_forbidden(&msg);
+                            report.errors.push(namespace_hint(msg));
+                            if stop {
+                                // The session cannot write here; every other write would fail too
+                                break;
+                            }
+                            continue;
+                        }
+                        // The same id in the other namespace (a review that gained or lost
+                        // its rating) would read back twice
+                        for stale in heads.take_other(root, ns, &row.id) {
+                            let _ = self.delete_quietly(&stale).await;
+                        }
+                        heads.record(root, ns, &row.id, &path);
+                    }
+                    Err(v1::NotV1::TooLong(_)) => {
+                        let post: pubky_app_specs::PubkyAppPost =
+                            serde_json::from_str(&row.json).expect("parsed above");
+                        if let Err(e) = self
+                            .homeserver
+                            .write_object(&self.session, &legacy_path, &post)
+                            .await
+                        {
+                            report.errors.push(format!("write {legacy_path}: {e}"));
+                            continue;
+                        }
+                        kept_legacy += 1;
+                    }
+                    Err(e) => {
+                        report.errors.push(format!("{}: {e}", row.id));
+                        continue;
+                    }
+                }
+                report.pushed += 1;
+            }
+            library
+                .lock()
+                .expect("library poisoned")
+                .mark_music_post_synced(&row.id, now_micros())?;
+        }
+        if kept_legacy > 0 {
+            report.notes.push(format!(
+                "{kept_legacy} playlist{} longer than {} songs stay in the old private format for now.",
+                if kept_legacy == 1 { "" } else { "s" },
+                v1::COLLECTION_MAX_ITEMS
+            ));
+        }
+        Ok(())
+    }
+
+    /// Push favourites as v1 bookmarks. Returns the URLs removed, so the pull does not bring
+    /// them back from the listing taken before.
+    async fn push_favourites(
+        &self,
+        library: &Arc<Mutex<Library>>,
+        report: &mut SyncReport,
+    ) -> Result<HashSet<String>, SyncError> {
+        let mut removed = HashSet::new();
+        let pending = library.lock().expect("library poisoned").unsynced_favourites()?;
+        for row in pending {
+            let Ok(uri) = pm_model::MusicUri::parse(&row.uri) else {
+                report
+                    .errors
+                    .push(format!("{}: not a canonical music URL", row.uri));
+                continue;
+            };
+            if row.deleted {
+                let legacy = Favourite::path(&row.id, Visibility::Private);
+                let mut failed = false;
+                let mut paths = vec![legacy];
+                match v1::favourite_bookmark_path(&uri) {
+                    Ok(p) => paths.push(p),
+                    Err(e) => report.errors.push(format!("{}: {e}", row.uri)),
+                }
+                for path in &paths {
+                    if let Err(e) = self.delete_quietly(path).await {
+                        report.errors.push(format!("delete {path}: {e}"));
+                        failed = true;
+                    }
+                }
+                if failed {
+                    continue;
+                }
+                removed.insert(row.uri.clone());
+                report.deleted += 1;
+            } else {
+                let (bookmark, path) = match v1::favourite_bookmark(&uri, row.created_at) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        report.errors.push(format!("{}: {e}", row.uri));
+                        continue;
+                    }
+                };
+                if let Err(e) = self
+                    .homeserver
+                    .write_object(&self.session, &path, &bookmark)
+                    .await
+                {
+                    let msg = format!("write {path}: {e}");
+                    let stop = is_forbidden(&msg);
+                    report.errors.push(namespace_hint(msg));
+                    if stop {
+                        break;
+                    }
+                    continue;
+                }
+                report.pushed += 1;
+            }
+            library
+                .lock()
+                .expect("library poisoned")
+                .mark_favourite_synced(&row.id, now_micros())?;
+        }
+        Ok(removed)
+    }
+
+    /// Bring in private v1 playlists and reviews that are new or newer than the node's copy.
+    /// Listens stay on the homeserver (the node keeps its own history).
+    async fn pull_v1(
+        &self,
+        library: &Arc<Mutex<Library>>,
+        heads: &Heads,
+        report: &mut SyncReport,
+    ) -> Result<(), SyncError> {
+        for ns in [v1::SOCIAL_NAMESPACE, pubky_music_specs::MUSIC_NAMESPACE] {
+            let Some(found) = heads.0.get(&(false, ns)) else {
+                continue;
+            };
+            for (id, head) in found {
+                let wanted = {
+                    let lib = library.lock().expect("library poisoned");
+                    match lib.get_music_post(id)? {
+                        None => true,
+                        Some(row) => head.edited_micros() > row.updated_at.max(row.synced_at.unwrap_or(0)),
+                    }
+                };
+                if !wanted {
+                    continue;
+                }
+                let bytes = match self
+                    .homeserver
+                    .get_bytes(&self.z32, &head.path, Visibility::Private, Some(&self.session))
+                    .await
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        report.errors.push(format!("read {}: {e}", head.path));
+                        continue;
+                    }
+                };
+                let content = if ns == v1::SOCIAL_NAMESPACE {
+                    serde_json::from_slice::<pubky_social_specs::PubkySocialPost>(&bytes)
+                        .ok()
+                        .and_then(|p| v1::from_social(&p, id, &head.edit_id))
+                } else {
+                    serde_json::from_slice::<pubky_music_specs::MusicPost>(&bytes)
+                        .ok()
+                        .and_then(|p| v1::from_music(&p, id))
+                };
+                let Some(content) = content else {
+                    continue;
+                };
+                let post = MusicPost::new(content);
+                if let Err(e) = post.validate(Some(id)) {
+                    tracing::warn!(path = %head.path, error = %e, "skipping a v1 post the node cannot hold");
+                    continue;
+                }
+                let lib = library.lock().expect("library poisoned");
+                store(&lib, &post, id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
+                lib.mark_music_post_synced(id, now_micros())?;
+                report.pulled += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete, counting "already gone" as done.
+    async fn delete_quietly(&self, path: &str) -> Result<(), HomeserverError> {
+        match self.homeserver.delete(&self.session, path).await {
+            Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => Ok(()),
+            other => other,
+        }
+    }
+}
+
+/// Set once this node has moved its music data to v1 (ADR 0014); until then every sync reads
+/// the old folders first and queues what v1 lacks.
+const V1_MIGRATED: &str = "pubky.v1_migrated";
+
+/// The bare z32 key, without a `pubky` prefix.
+fn raw_key(z32: &str) -> &str {
+    z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
+}
+
+fn is_pub(root: v1::Root) -> bool {
+    root == v1::Root::Pub
+}
+
+/// The newest version of every v1 post, per root (public or not) and namespace.
+#[derive(Default)]
+struct Heads(BTreeMap<(bool, &'static str), BTreeMap<String, v1::Head>>);
+
+impl Heads {
+    fn has(&self, id: &str) -> bool {
+        self.0.values().any(|m| m.contains_key(id))
+    }
+
+    fn edit_id(&self, root: v1::Root, ns: &'static str, id: &str) -> Option<String> {
+        self.0
+            .get(&(is_pub(root), ns))?
+            .get(id)
+            .map(|h| h.edit_id.clone())
+    }
+
+    /// Every version of `id` everywhere, removed from the listing: oldest first, public first.
+    fn take_all(&mut self, id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for public in [true, false] {
+            for ((p, _), m) in self.0.iter_mut() {
+                if *p == public {
+                    if let Some(h) = m.remove(id) {
+                        out.extend(h.versions);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The versions of `id` in the other namespaces of `root`, removed from the listing.
+    fn take_other(&mut self, root: v1::Root, ns: &'static str, id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for ((p, n), m) in self.0.iter_mut() {
+            if *p == is_pub(root) && *n != ns {
+                if let Some(h) = m.remove(id) {
+                    out.extend(h.versions);
+                }
+            }
+        }
+        out
+    }
+
+    fn record(&mut self, root: v1::Root, ns: &'static str, id: &str, path: &str) {
+        let Some((_, edit_id)) = v1::parse_version(path) else {
+            return;
+        };
+        let head = self
+            .0
+            .entry((is_pub(root), ns))
+            .or_default()
+            .entry(id.to_string())
+            .or_insert_with(|| v1::Head {
+                edit_id: String::new(),
+                path: String::new(),
+                versions: Vec::new(),
+            });
+        head.edit_id = edit_id;
+        head.path = path.to_string();
+        head.versions.push(path.to_string());
+    }
+}
+
+fn is_forbidden(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    msg.contains("403") || lower.contains("forbidden") || lower.contains("capabilit")
+}
+
+/// A session approved before step 3 cannot write `social/v1` or `music/v1`.
+fn namespace_hint(msg: String) -> String {
+    if is_forbidden(&msg) {
+        format!("{msg} (sign the node in with Pubky Ring again: music data now goes to /social/v1/ and /music/v1/, which this session may not write)")
+    } else {
+        msg
     }
 }
 
