@@ -12,6 +12,7 @@
 pub mod dlna;
 pub mod output;
 pub mod soap;
+pub mod sonos;
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -48,6 +49,8 @@ pub struct Renderer {
     pub rendering_control: Option<String>,
     /// ConnectionManager control URL: what the renderer accepts (`dlna::sink_protocols`).
     pub connection_manager: Option<String>,
+    /// Sonos: where the group topology is read (`sonos::groups`).
+    pub zone_group_topology: Option<String>,
     pub location: String,
 }
 
@@ -522,6 +525,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
     let mut av = None;
     let mut rc = None;
     let mut cm = None;
+    let mut zgt = None;
     let mut url_base: Option<String> = None;
     let mut text_target: Option<String> = None;
     loop {
@@ -579,6 +583,10 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                             && cm.is_none()
                         {
                             cm = Some(c);
+                        } else if t.starts_with("urn:schemas-upnp-org:service:ZoneGroupTopology:")
+                            && zgt.is_none()
+                        {
+                            zgt = Some(c);
                         }
                     }
                 }
@@ -615,6 +623,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
         av_transport: abs(&av),
         rendering_control: rc.map(|c| abs(&c)),
         connection_manager: cm.map(|c| abs(&c)),
+        zone_group_topology: zgt.map(|c| abs(&c)),
         location: location.to_string(),
     }))
 }

@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Sonos** (infra brief §3).
+  - A Sonos player that is a member of a Sonos group plays through its group's coordinator. Members refuse transport commands, so the whole Sonos group plays, as the Sonos app shows it.
+  - A node zone made only of Sonos players groups them Sonos's own way (`x-rincon:` join, tight sync by Sonos) instead of streaming to each, and they leave the group when the zone stops.
+  - Sonos zones are capped at 16-bit 48 kHz, and the signal path shows any conversion.
+  - Tested against fake players.
 - **Smart TVs over DLNA** (infra brief §3).
   - The node asks each renderer what it accepts (`ConnectionManager.GetProtocolInfo`) and offers WAV under the MIME type it listed. TVs that take only DLNA LPCM get `stream.l16`; the zone converts to 16-bit 44.1/48 kHz, and the signal path says so.
   - A renderer that takes no PCM stream gets no zone.

@@ -69,6 +69,28 @@ Checked without devices, with gmediarender (a real DLNA renderer) on a token-pro
    `curl` on its ConnectionManager) so the device database can record it.
 ```
 
-## Sonos, AirPlay, Snapcast
+## Sonos
+
+Checked without devices (`crates/pm-out-upnp/src/sonos.rs` tests against two fake players):
+- A player in a Sonos group plays through its coordinator. The topology is read from
+  `GetZoneGroupState`, escaped as Sonos sends it.
+- A node zone made of Sonos players joins them with `x-rincon:` and they leave again on stop. The
+  lead stops before the others leave.
+- Sonos's ceiling is 16-bit up to 48 kHz.
+
+```
+1. Every Sonos player appears as a zone after a scan (UPnP on, same LAN; Sonos S1 and S2 both).
+2. Play an album to one player: audio plays, the Sonos app shows the title, artist and cover.
+   Check the signal path: anything above 16/48 shows the conversion.
+3. Group two players in the Sonos app, then play from the node to the member (not the first
+   one): the whole Sonos group plays (it went to the coordinator).
+4. Ungroup them in the Sonos app. In the node, make a zone of both (Zones → new zone with two
+   outputs) and play: the Sonos app shows them grouped, in sync. Stop: they are separate again.
+5. Leave a zone playing for an hour: Sonos does not stop the stream by itself (it is a live WAV
+   of unknown length; if Sonos stops near 4 GB or after some time, report when).
+6. Volume per player.
+```
+
+## AirPlay, Snapcast
 
 Not built yet: sections follow with each output.

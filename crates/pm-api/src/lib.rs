@@ -843,8 +843,19 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
         members.push(out);
     }
+    // Sonos players only: Sonos groups them itself, in tight sync (pm_out_upnp::sonos).
+    let sonos: Vec<Arc<pm_out_upnp::UpnpOutput>> = {
+        let map = s.sonos.lock().expect("sonos lock");
+        ids.iter()
+            .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
+            .collect()
+    };
     let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
         members.remove(0)
+    } else if sonos.len() == ids.len() {
+        let mut sonos = sonos;
+        let lead = sonos.remove(0);
+        Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
     } else {
         Arc::new(
             pm_zones::outputs::GroupOutput::new(body.name.trim(), members)

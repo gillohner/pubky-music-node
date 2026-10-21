@@ -49,6 +49,16 @@ impl UpnpOutput {
         caps.groupable = false;
         caps.fixed_latency_ms = Some(500);
         caps.quality_ceiling = QualityCeiling::BitPerfect;
+        if crate::sonos::is_sonos(&renderer) {
+            // Sonos plays WAV at 16 bits up to 48 kHz.
+            caps.pcm_rates = vec![44_100, 48_000];
+            caps.pcm_bits = vec![16];
+            caps.max_pcm_bits = 16;
+            caps.quality_ceiling = QualityCeiling::LosslessUpTo {
+                rate_hz: 48_000,
+                bits: 16,
+            };
+        }
         Self {
             renderer,
             pull,
@@ -153,8 +163,14 @@ impl Output for UpnpOutput {
             &url,
             &protocol_info,
         );
-        let av = self.renderer.av_transport.clone();
-        offload(move || -> Result<(), UpnpError> {
+        let renderer = self.renderer.clone();
+        let target = offload(move || -> Result<String, UpnpError> {
+            // A Sonos player in a Sonos group plays through its coordinator.
+            let av = if crate::sonos::is_sonos(&renderer) {
+                crate::sonos::transport_target(&renderer)
+            } else {
+                renderer.av_transport.clone()
+            };
             // Some TVs refuse a new URI while they hold one; a renderer with nothing loaded may
             // answer Stop with an error, which is fine.
             let _ = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]);
@@ -172,7 +188,7 @@ impl Output for UpnpOutput {
             let mut tries = 0;
             loop {
                 match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
-                    Ok(_) => return Ok(()),
+                    Ok(_) => return Ok(av),
                     Err(e) if tries < 4 => {
                         tries += 1;
                         tracing::debug!(tries, "renderer Play refused, retrying: {e}");
@@ -186,7 +202,7 @@ impl Output for UpnpOutput {
         .map_err(soap_err)?;
         Ok(Box::new(UpnpSink {
             inner,
-            av_transport: self.renderer.av_transport.clone(),
+            av_transport: target,
         }))
     }
 
@@ -355,6 +371,7 @@ mod tests {
             av_transport: format!("{base}/av"),
             rendering_control: Some(format!("{base}/rc")),
             connection_manager: None,
+            zone_group_topology: None,
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("fake"));

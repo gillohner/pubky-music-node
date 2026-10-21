@@ -79,6 +79,8 @@ pub struct NodeState {
     /// Keys the pull-stream URLs handed to renderers (`stream_key`), so a TV gets a URL for its
     /// own stream and never the API token. Kept in the library: URLs survive restarts.
     stream_secret: [u8; 32],
+    /// Sonos players by output id, so a zone of Sonos players only groups them the Sonos way.
+    pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -213,6 +215,7 @@ impl NodeState {
             remote: Default::default(),
             remote_id: Default::default(),
             stream_secret,
+            sonos: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -689,6 +692,12 @@ impl NodeState {
                 .with_describe(self.describe_for_renderers()),
         );
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        if pm_out_upnp::sonos::is_sonos(&r) {
+            self.sonos
+                .lock()
+                .expect("sonos lock")
+                .insert(id.clone(), out.clone());
+        }
         self.outputs.register(out.clone());
         self.create_zone(&r.friendly_name, out);
         Some(id)
