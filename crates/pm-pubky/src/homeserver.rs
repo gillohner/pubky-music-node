@@ -519,11 +519,11 @@ pub struct LoginFlow {
     url: String,
 }
 
-/// What the node asks for: its own private folders, pubky.app objects, and
-/// its public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
-/// external links).
-pub const LOGIN_CAPABILITIES: &str =
-    "/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw";
+/// What the node asks for: its own private folders, pubky.app objects, its
+/// public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
+/// external links today), and the v1 social and music namespaces it moves to
+/// (`social/v1`, `music/v1`; STEWARD-PLAN step 3), so one approval covers both.
+pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// What a controller asks for: read access to the user's public pubky.app
 /// data only, enough to prove who is signing in. The node never keeps this
