@@ -3686,6 +3686,7 @@ dependencies = [
  "pm-out-cast",
  "pm-out-net",
  "pm-out-slimproto",
+ "pm-out-snapcast",
  "pm-out-upnp",
  "pm-pubky",
  "pm-remote",
@@ -3898,6 +3899,18 @@ dependencies = [
  "pm-zones",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "pm-out-snapcast"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pm-model",
+ "pm-zones",
+ "serde_json",
+ "thiserror 2.0.21",
  "tracing",
 ]
 

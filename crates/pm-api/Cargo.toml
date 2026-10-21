@@ -21,6 +21,7 @@ pm-pubky = { workspace = true }
 pm-out-upnp = { workspace = true }
 pm-out-slimproto = { workspace = true }
 pm-out-cast = { workspace = true }
+pm-out-snapcast = { workspace = true }
 pm-out-net = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }

@@ -91,6 +91,25 @@ Checked without devices (`crates/pm-out-upnp/src/sonos.rs` tests against two fak
 6. Volume per player.
 ```
 
-## AirPlay, Snapcast
+## Snapcast (Raspberry Pis, old phones, any snapclient)
 
-Not built yet: sections follow with each output.
+Checked here with real snapserver 0.34 and snapclient:
+- Every Snapcast group became a zone, labelled by its clients.
+- Playing routed the group to the node's stream; the client received the tone in real time.
+- A test pattern came out of snapclient bit-exact at 16 and 24 bits (FLAC on the wire).
+- Stopping put the group back on its previous stream and removed the node's.
+
+```
+1. Install snapserver on the node's machine (or any machine on the LAN) and snapclient on two
+   Pis. In node.toml: [outputs] snapcast = "<snapserver host>". Restart the node: each Snapcast
+   group is a zone "<client names> (Snapcast)".
+2. Group both Pis in Snapcast (snapweb or the Snapcast app) and play to that zone: both play, in
+   tight sync (stand between them: no echo).
+3. Volume from the node changes both clients. Stop: the group goes back to what it played before.
+4. A 24/96 album: the signal path stays lossless to 24/96; note if a Pi's sound card resamples
+   (snapclient log).
+```
+
+## AirPlay
+
+Not built yet: a section follows with the output.

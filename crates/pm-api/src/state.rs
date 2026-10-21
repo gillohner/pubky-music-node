@@ -81,6 +81,8 @@ pub struct NodeState {
     stream_secret: [u8; 32],
     /// Sonos players by output id, so a zone of Sonos players only groups them the Sonos way.
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// The snapserver whose groups are zones (`[outputs] snapcast`).
+    snapcast: Mutex<Option<String>>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -216,6 +218,7 @@ impl NodeState {
             remote_id: Default::default(),
             stream_secret,
             sonos: Default::default(),
+            snapcast: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -894,6 +897,39 @@ impl NodeState {
         new
     }
 
+    /// Use the snapserver at `addr` (`host` or `host:port`) for Snapcast zones.
+    pub fn set_snapcast(&self, addr: Option<String>) {
+        *self.snapcast.lock().expect("snapcast lock") = addr;
+    }
+
+    /// Every Snapcast group as an output with a zone. Blocking.
+    pub fn discover_snapcast(self: &Arc<Self>) -> Vec<OutputId> {
+        let Some(addr) = self.snapcast.lock().expect("snapcast lock").clone() else {
+            return Vec::new();
+        };
+        let groups = match pm_out_snapcast::discover(&addr) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("Snapcast: {e}");
+                return Vec::new();
+            }
+        };
+        let mut new = Vec::new();
+        for g in groups {
+            let out = Arc::new(pm_out_snapcast::SnapcastOutput::new(&addr, g));
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            tracing::info!(group = %out.name(), output = %id, "Snapcast group");
+            let zone_name = out.name();
+            self.outputs.register(out.clone());
+            self.create_zone(&zone_name, out);
+            new.push(id);
+        }
+        new
+    }
+
     /// Run discovery again: register outputs not seen before and give each
     /// a zone. Returns the ids that are new. Blocking (mDNS browse, TCP
     /// connects, SSDP); call from `spawn_blocking`.
@@ -902,6 +938,7 @@ impl NodeState {
         new.extend(self.restore_upnp_addresses());
         new.extend(self.restore_endpoint_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
+        new.extend(self.discover_snapcast());
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;
         };

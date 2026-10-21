@@ -144,6 +144,9 @@ pub struct OutputsConfig {
     pub slimproto_port: u16,
     /// Discover Chromecast / Google Cast devices (mDNS) and offer them as outputs.
     pub cast: bool,
+    /// A snapserver (`host` or `host:port` of its JSON-RPC, port 1705 by default): every Snapcast
+    /// group becomes a zone. Empty = off.
+    pub snapcast: String,
 }
 
 impl Default for OutputsConfig {
@@ -155,6 +158,7 @@ impl Default for OutputsConfig {
             upnp: true,
             slimproto_port: 3483,
             cast: true,
+            snapcast: String::new(),
         }
     }
 }

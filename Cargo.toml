@@ -18,6 +18,7 @@ members = [
     "crates/pm-out-cast",
     "crates/pm-discovery",
     "crates/pm-remote",
+    "crates/pm-out-snapcast",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
 exclude = ["crates/pm-desktop"]
@@ -44,6 +45,7 @@ pm-out-net = { path = "crates/pm-out-net" }
 pm-out-upnp = { path = "crates/pm-out-upnp" }
 pm-out-slimproto = { path = "crates/pm-out-slimproto" }
 pm-out-cast = { path = "crates/pm-out-cast" }
+pm-out-snapcast = { path = "crates/pm-out-snapcast" }
 pm-discovery = { path = "crates/pm-discovery" }
 pm-remote = { path = "crates/pm-remote" }
 

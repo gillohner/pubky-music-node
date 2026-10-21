@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Snapcast** (`crates/pm-out-snapcast`, infra brief §3): with `[outputs] snapcast = "<host>"`, every group on that snapserver becomes a zone. Playing adds a stream to snapserver over its JSON-RPC (snapserver connects to the node and reads raw PCM in the zone's exact format, FLAC on the wire), routes the group to it, and paces the music in real time. Stopping gives the group its previous stream back. Snapcast keeps Pis and old phones in tight sync. Checked with real snapserver 0.34 and snapclient: the zone played and a pattern came out of the client bit-exact at 16 and 24 bits.
 - **Sonos** (infra brief §3).
   - A Sonos player that is a member of a Sonos group plays through its group's coordinator. Members refuse transport commands, so the whole Sonos group plays, as the Sonos app shows it.
   - A node zone made only of Sonos players groups them Sonos's own way (`x-rincon:` join, tight sync by Sonos) instead of streaming to each, and they leave the group when the zone stops.

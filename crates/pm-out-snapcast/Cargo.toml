@@ -1,0 +1,16 @@
+[package]
+name = "pm-out-snapcast"
+description = "Snapcast groups as outputs of the Pubky Music Node: tight multiroom sync on cheap players"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+pm-zones = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
