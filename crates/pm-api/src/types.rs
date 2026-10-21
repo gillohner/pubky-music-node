@@ -913,6 +913,9 @@ pub struct DiscoverItem {
     /// Services that have this item but are not connected to this node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connect: Vec<String>,
+    /// Other listings of the same song merged into this one (two Pinakes groups, a remaster).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub versions: u32,
 }
 
 /// `POST /v1/discover/describe`.
@@ -1523,4 +1526,8 @@ pub struct ListenImport {
     pub imported: usize,
     /// Listens ListenBrainz could not name by a MusicBrainz recording.
     pub skipped: usize,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

@@ -225,7 +225,41 @@ impl Library {
             conn: Mutex::new(conn),
         };
         lib.migrate()?;
+        lib.tidy_file_name_titles()?;
         Ok(lib)
+    }
+
+    /// Tracks still titled by their raw file name (scanned before
+    /// [`crate::scan::title_from_file_name`]) get the tidy title. Idempotent.
+    fn tidy_file_name_titles(&self) -> Result<usize> {
+        let conn = self.lock();
+        let rows: Vec<(i64, String, String)> = {
+            let mut st =
+                conn.prepare("SELECT t.id, t.title, f.path FROM tracks t JOIN files f ON f.track_id = t.id")?;
+            let it = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            it.collect::<std::result::Result<_, _>>()?
+        };
+        let mut n = 0;
+        for (id, title, path) in rows {
+            let stem = Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if title != stem {
+                continue;
+            }
+            let tidy = crate::scan::title_from_file_name(&stem);
+            if tidy.is_empty() || tidy == title {
+                continue;
+            }
+            conn.execute("UPDATE tracks SET title = ?2 WHERE id = ?1", params![id, tidy])?;
+            conn.execute(
+                "UPDATE tracks_fts SET title = ?2 WHERE track_id = ?1",
+                params![id, tidy],
+            )?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     fn migrate(&self) -> Result<()> {

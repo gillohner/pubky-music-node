@@ -2414,7 +2414,7 @@ mod tests {
         let (st, q) = call(&app, "GET", &format!("/v1/zones/{zid}/queue"), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(q[0]["uri"], format!("track:{id}"));
-        assert_eq!(q[0]["title"], "one");
+        assert_eq!(q[0]["title"], "One", "an untagged file is titled from its name");
 
         // The play was recorded by the zone event hook; a client can add its own.
         let mut recorded = false;
@@ -2716,7 +2716,7 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "{q}");
         let q = q.as_array().unwrap();
         assert_eq!(q.len(), 2, "{q:?}");
-        assert_eq!(q[0]["title"], "one");
+        assert_eq!(q[0]["title"], "One");
         assert_eq!(q[1]["uri"], "https://radio.example/live");
         let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
         assert_eq!(z["repeat"], "all");
@@ -5059,7 +5059,16 @@ mod tests {
         let app = router(s.clone());
         let (st, songs) = call(&app, "GET", "/v1/home/trending-songs?window=7d", None).await;
         assert_eq!(st, StatusCode::OK, "{songs}");
-        assert_eq!(songs["items"].as_array().unwrap().len(), 8);
+        // The recorded chart lists the same songs more than once (two groups, a remaster): merged
+        let items = songs["items"].as_array().unwrap();
+        assert_eq!(items.len(), 6, "{songs}");
+        assert_eq!(
+            items
+                .iter()
+                .map(|i| i["versions"].as_u64().unwrap_or(0))
+                .sum::<u64>(),
+            2
+        );
         assert!(songs["note"].is_null());
         let (_, albums) = call(&app, "GET", "/v1/home/trending-albums", None).await;
         assert!(albums["items"].as_array().unwrap().is_empty());

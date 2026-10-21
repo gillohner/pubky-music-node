@@ -90,7 +90,11 @@ async fn client_round_trip() {
     assert_eq!(tracks.len(), 1);
     let id = tracks[0].id.unwrap().0;
     assert_eq!(c.search("song", 10).await.unwrap()[0].id.unwrap().0, id);
-    assert_eq!(c.track(id).await.unwrap().title, "song");
+    assert_eq!(
+        c.track(id).await.unwrap().title,
+        "Song",
+        "titled from the file name"
+    );
 
     // Download is byte-identical to the file on the node.
     let dl = dir.path().join("dl.wav");
@@ -125,7 +129,7 @@ async fn client_round_trip() {
         "started={started} stopped_after={stopped_after}"
     );
     let q = c.queue(&zid).await.unwrap();
-    assert_eq!(q[0].title.as_deref(), Some("song"));
+    assert_eq!(q[0].title.as_deref(), Some("Song"));
     let st = c.transport(&zid, TransportAction::Stop).await.unwrap();
     assert_eq!(st.transport, Transport::Stopped);
     c.clear_queue(&zid).await.unwrap();

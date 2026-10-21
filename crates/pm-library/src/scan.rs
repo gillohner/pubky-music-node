@@ -202,6 +202,32 @@ impl<'a> Scanner<'a> {
 }
 
 /// `cover.jpg`, `Folder.png`, … next to `audio_path`, case-insensitive.
+/// A title for a file without tags (owner: "Most played shows test-fixture file names"): its
+/// name without the leading track number, with spaces for underscores, first letter capital.
+/// `14_wasted_bits` → `Wasted bits`, `03 - Untagged Song` → `Untagged Song`.
+pub fn title_from_file_name(stem: &str) -> String {
+    let spaced: String = stem.replace('_', " ");
+    let trimmed = spaced.trim();
+    // A leading track number: "03 - ", "14 ", "1. "
+    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    let rest = if (1..=3).contains(&digits) {
+        let r = trimmed[digits..].trim_start_matches([' ', '-', '.', '_']).trim();
+        if r.is_empty() {
+            trimmed
+        } else {
+            r
+        }
+    } else {
+        trimmed
+    };
+    let words = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut c = words.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
 pub fn folder_cover(audio_path: &Path) -> Option<(PathBuf, String)> {
     let dir = audio_path.parent()?;
     let entries = std::fs::read_dir(dir).ok()?;
@@ -248,7 +274,8 @@ pub fn track_from_tags(file: AudioFile, t: &TagSet) -> Track {
         .unwrap_or_else(|| {
             file.path
                 .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
+                .map(|s| title_from_file_name(&s.to_string_lossy()))
+                .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| "Untitled".into())
         });
     let artists = t
@@ -479,7 +506,14 @@ mod tests {
             duration_ms: None,
         };
         let t = track_from_tags(file, &TagSet::default());
-        assert_eq!(t.title, "03 - Untagged Song");
+        assert_eq!(t.title, "Untagged Song");
+        assert_eq!(title_from_file_name("14_wasted_bits"), "Wasted bits");
+        assert_eq!(
+            title_from_file_name("63_predictor_overflow_check_24-bit"),
+            "Predictor overflow check 24-bit"
+        );
+        assert_eq!(title_from_file_name("1999"), "1999", "a year is a title");
+        assert_eq!(title_from_file_name("01"), "01");
         assert!(t.album.is_none());
     }
 }

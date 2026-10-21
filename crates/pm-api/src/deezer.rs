@@ -361,7 +361,12 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
     let Some(isrc) = track.isrc.as_ref() else {
         return Ok(Vec::new());
     };
-    let key = format!("deezer.version.track.{}", track.id.map(|i| i.0).unwrap_or(0));
+    isrc_versions(s, &isrc.to_string()).await
+}
+
+/// Deezer's track with this ISRC (public catalogue, no account; cached per ISRC).
+pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Version>, ApiError> {
+    let key = format!("deezer.version.isrc.{isrc}");
     if let Some(v) = crate::tidal::cache_get(s, &key) {
         return Ok(v);
     }

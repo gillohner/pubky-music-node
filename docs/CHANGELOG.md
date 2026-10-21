@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **The owner's Discover findings, fixed on the node** (step 4 list).
+  - **The same song shows once.** Home's lists merge listings of one song: same MusicBrainz id or ISRC, else the same title (without "Remastered 2011", "(feat. …)", "| Music Video") and artist. A listing without an artist joins the one that has it. The row says "4 versions" and shows the plain title. Live, the 7-day chart's four Bohemian Rhapsody rows are one, and so are the two "Das Boot" rows.
+  - **No placeholder names.** A listing named "ISRC NLS161600475", or not named at all, is named by MusicBrainz, else by Deezer's public catalogue by ISRC, else by the TIDAL track it plays from (live: "Jim" by Sefa, "Mr. Brightside" by The Killers). "Untitled on …" stays only when nothing knows the song.
+  - **No raw file names as titles.** An untagged file is titled from its name without the track number and underscores (`14_wasted_bits` → "Wasted bits"). Tracks already in the library are retitled once when the node starts.
 - **The desktop app updates itself** (infra item 3). At start it checks the channel it was built for: builds of main follow edge, and tagged releases follow the latest release. When there is a newer version it asks, then installs it and restarts. This works on macOS, on Windows, and on Linux as an AppImage. Updates are signed with the project's own update key, and the app installs nothing else. Edge builds now carry `0.1.0-<run>` versions so each is newer than the last. Each release has a `latest.json` feed. Details in `docs/RELEASING.md`.
 - **ListenBrainz** (step 5.5).
   - Settings › ListenBrainz connects with the user token. It's checked with ListenBrainz, kept on the node, and never returned.

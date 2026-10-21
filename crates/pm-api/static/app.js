@@ -1086,7 +1086,7 @@
   const WINDOWS = [['24h', 'Today'], ['7d', 'This week'], ['30d', 'This month']];
   const homeKind = (it) => (it.kind === 'track' ? 'song' : it.kind);
   // A Discover item as a shared song row or tile.
-  const asRow = (it) => ({ title: itemName(it), artist: it.artist, id: idOf(it.page || it.uri), page: it.page || it.uri, uri: it.in_library ? null : it.playable, track_id: it.in_library ? it.in_library.id : null, image: it.image });
+  const asRow = (it) => ({ title: itemName(it), artist: it.artist, album: it.versions ? `${it.versions + 1} versions` : null, id: idOf(it.page || it.uri), page: it.page || it.uri, uri: it.in_library ? null : it.playable, track_id: it.in_library ? it.in_library.id : null, image: it.image });
   const asTile = (it) => ({ id: idOf(it.page || it.uri), title: itemName(it), image: it.image, year: it.artist || '' });
   const homeBody = (sec, name, full) => {
     if (sec.error) return `<p class="muted small">Pubky did not answer: ${esc(sec.error)}</p>`;

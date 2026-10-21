@@ -53,6 +53,7 @@ pub(crate) fn card_item(acc: &ServiceAccess, lib: &Library, c: &pm_pubky::pinake
         return item(acc, lib, &d);
     }
     DiscoverItem {
+        versions: 0,
         uri: c.uri.clone(),
         title: c.name.clone(),
         artist: c.artist_hint(),
@@ -107,6 +108,7 @@ fn item(acc: &ServiceAccess, lib: &Library, d: &DiscoveredItem) -> DiscoverItem 
         .ok()
         .and_then(|v| v.into_iter().next());
     let mut it = DiscoverItem {
+        versions: 0,
         uri: d.uri.to_url(),
         title: d.card.name.clone(),
         artist: d.card.artist_hint(),
@@ -601,6 +603,7 @@ pub(crate) async fn describe_uris(s: &Arc<NodeState>, uris: &[String]) -> Vec<Di
     uris.iter()
         .map(|u| {
             found.remove(u).unwrap_or_else(|| DiscoverItem {
+                versions: 0,
                 uri: u.clone(),
                 title: None,
                 artist: None,
@@ -663,6 +666,7 @@ pub(crate) async fn describe_from_provider(s: &NodeState, u: &str) -> Option<Dis
     // A track link's item is its album; the song is its one track
     let song = (l.kind == "track" && src.tracks.len() == 1).then(|| &src.tracks[0]);
     let mut it = DiscoverItem {
+        versions: 0,
         uri: u.to_string(),
         title: song
             .map(|t| t.title.clone())
@@ -751,6 +755,45 @@ pub(crate) async fn mb_recording(s: &NodeState, uri: &str) -> Option<MbRecording
         let _ = s.library.lock().expect("library poisoned").set_setting(&key, &j);
     }
     found
+}
+
+/// The recording an ISRC names in MusicBrainz (the first one), looked up like [`mb_recording`].
+pub(crate) async fn mb_recording_for_isrc(s: &NodeState, isrc: &str) -> Option<MbRecording> {
+    let isrc = pm_model::Isrc::parse(isrc).ok()?;
+    let key = format!("mb.isrc.{isrc}");
+    let now = pm_library::db::now_unix();
+    let cached = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(&key)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<(i64, Option<String>)>(&j).ok());
+    let mbid = match cached {
+        Some((at, m)) if now - at < 30 * 86_400 => m,
+        _ => {
+            let contact = s.contact();
+            if contact.is_empty() {
+                return None;
+            }
+            let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
+            cfg.base_url = s.mb_base.read().expect("mb lock").clone();
+            let mb = pm_library::musicbrainz::MusicBrainzClient::new(cfg).ok()?;
+            let m = mb
+                .recordings_by_isrc(&isrc)
+                .await
+                .ok()?
+                .into_iter()
+                .next()
+                .map(|m| m.to_string());
+            if let Ok(j) = serde_json::to_string(&(now, &m)) {
+                let _ = s.library.lock().expect("library poisoned").set_setting(&key, &j);
+            }
+            m
+        }
+    }?;
+    mb_recording(s, &format!("https://musicbrainz.org/recording/{mbid}")).await
 }
 
 /// The item's tracks on the connected services, found by ISRC (one per service).
@@ -1418,6 +1461,7 @@ pub(crate) async fn on_pubky_for(s: &NodeState, uri: &str) -> Option<OnPubky> {
 /// A row for a link nobody describes yet: its service, never the URL as a name.
 fn bare_item(u: &str) -> DiscoverItem {
     DiscoverItem {
+        versions: 0,
         uri: u.to_string(),
         title: None,
         artist: None,
@@ -1489,6 +1533,7 @@ fn detail_item(s: &NodeState, r: &pm_pubky::pinakes::ResourceDetail) -> (Discove
         });
     let kind = kind_of(&r.card);
     let mut item = DiscoverItem {
+        versions: 0,
         uri: music.map(|m| m.to_url()).unwrap_or_else(|| r.card.uri.clone()),
         title: r.card.name.clone(),
         artist: facts.artist.clone().or_else(|| r.card.artist_hint()),

@@ -293,16 +293,24 @@ async fn build(s: &Arc<NodeState>, name: &str, q: &HomeQuery) -> HomeSection {
         };
     }
     let acc = service_access(s);
-    let items: Vec<DiscoverItem> = {
+    let listed: Vec<(Option<String>, DiscoverItem)> = {
         let lib = s.library.lock().expect("library poisoned");
         page.items
             .iter()
             .filter(|c| c.is_ok())
             .filter(|c| !music_only || is_music(&kind_of_card(c)))
             .take(limit)
-            .map(|c| card_item(&acc, &lib, c))
+            .map(|c| {
+                let id = c
+                    .mbid
+                    .clone()
+                    .or_else(|| c.isrc.as_ref().map(|i| i.to_ascii_uppercase()));
+                (id, card_item(&acc, &lib, c))
+            })
             .collect()
     };
+    let mut items = merge_same(listed);
+    name_placeholders(s, &mut items).await;
     HomeSection {
         note: items.is_empty().then(|| empty_line.to_string()),
         items,
@@ -410,4 +418,221 @@ pub(crate) async fn pinakes_has_related(s: &NodeState) -> bool {
     };
     *c.lock().expect("caps lock") = Some((Instant::now(), v));
     v
+}
+
+/// A title as people compare songs: no "(Remastered 2011)", "- Live", "| Music Video".
+pub(crate) fn clean_title(t: &str) -> String {
+    let mut t = t.to_lowercase();
+    if let Some((a, _)) = t.split_once(" | ") {
+        t = a.to_string();
+    }
+    // Bracketed asides
+    let mut out = String::new();
+    let mut depth = 0;
+    for ch in t.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    let words = [
+        "remaster", "live", "version", "edit", "mix", "mono", "stereo", "video", "official", "single",
+        "radio", "demo",
+    ];
+    if let Some((a, b)) = out.split_once(" - ") {
+        if words.iter().any(|w| b.contains(w)) {
+            out = a.to_string();
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The same song listed more than once (in two Pinakes groups, as a remaster, with and without
+/// its artist) shows once, with the others counted in `versions` (owner's Discover finding).
+/// Same MusicBrainz id or ISRC, else the same cleaned title and artist; a listing without an
+/// artist joins the one with the same title that has one.
+pub(crate) fn merge_same(listed: Vec<(Option<String>, DiscoverItem)>) -> Vec<DiscoverItem> {
+    let mut out: Vec<(Option<String>, String, Option<String>, DiscoverItem)> = Vec::new();
+    for (id, it) in listed {
+        let title = it.title.as_deref().map(clean_title).unwrap_or_default();
+        let artist = it
+            .artist
+            .as_deref()
+            .map(|a| a.to_lowercase().trim().to_string())
+            .filter(|a| !a.is_empty());
+        let same = out.iter().position(|(oid, ot, oa, _)| {
+            (id.is_some() && *oid == id)
+                || (!title.is_empty()
+                    && *ot == title
+                    && match (&artist, oa) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    })
+        });
+        match same {
+            Some(k) => {
+                let kept = &mut out[k];
+                kept.3.versions += 1 + it.versions;
+                // Show the plain title ("Bohemian Rhapsody", not "… - Remastered 2011")
+                let plain = |t: &Option<String>| {
+                    t.as_deref().is_some_and(|t| {
+                        t.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ") == clean_title(t)
+                    })
+                };
+                if !plain(&kept.3.title) && plain(&it.title) {
+                    kept.3.title = it.title.clone();
+                }
+                if kept.2.is_none() && artist.is_some() {
+                    kept.2 = artist;
+                    kept.3.artist = it.artist.clone();
+                }
+                if kept.3.image.is_none() {
+                    kept.3.image = it.image.clone();
+                }
+                if kept.0.is_none() {
+                    kept.0 = id;
+                }
+            }
+            None => out.push((id, title, artist, it)),
+        }
+    }
+    out.into_iter().map(|(_, _, _, it)| it).collect()
+}
+
+/// Listings Pinakes names only by a placeholder ("ISRC NLS161600475", or nothing): MusicBrainz
+/// names them (a few per section; the answers are cached).
+async fn name_placeholders(s: &Arc<NodeState>, items: &mut [DiscoverItem]) {
+    let mut asked = 0;
+    for it in items.iter_mut() {
+        let placeholder = it
+            .title
+            .as_deref()
+            .is_none_or(|t| t.starts_with("ISRC ") && t.len() == 17);
+        if !placeholder || asked >= 5 {
+            continue;
+        }
+        let page = it.page.clone().unwrap_or_else(|| it.uri.clone());
+        let recording = match page.strip_prefix("https://musicbrainz.org/isrc/") {
+            Some(isrc) => {
+                asked += 1;
+                crate::discover::mb_recording_for_isrc(s, isrc.trim_end_matches('/')).await
+            }
+            None if page.starts_with("https://musicbrainz.org/recording/") => {
+                asked += 1;
+                crate::discover::mb_recording(s, &page).await
+            }
+            // Another link of the same song that plays here can name it (a TIDAL track)
+            None => {
+                if let Some(url) = it.plays_from.as_ref().and_then(|p| p.url.clone()) {
+                    asked += 1;
+                    if let Some(named) = crate::discover::describe_from_provider(s, &url).await {
+                        it.title = named.title;
+                        it.artist = it.artist.take().or(named.artist);
+                        it.image = it.image.take().or(named.image);
+                    }
+                }
+                continue;
+            }
+        };
+        if let Some(m) = recording {
+            it.title = Some(m.title);
+            if it.artist.is_none() {
+                it.artist = Some(m.artist).filter(|a| !a.is_empty());
+            }
+            continue;
+        }
+        // MusicBrainz does not know the ISRC: Deezer's public catalogue may, and its track names itself
+        if let Some(isrc) = page.strip_prefix("https://musicbrainz.org/isrc/") {
+            let link = crate::deezer::isrc_versions(s, isrc.trim_end_matches('/'))
+                .await
+                .ok()
+                .and_then(|v| v.into_iter().next());
+            if let Some(named) = match link {
+                Some(v) => crate::discover::describe_from_provider(s, &v.url).await,
+                None => None,
+            } {
+                it.title = named.title;
+                it.artist = it.artist.take().or(named.artist);
+                it.image = it.image.take().or(named.image);
+                continue;
+            }
+        }
+        if it.title.as_deref().is_some_and(|t| t.starts_with("ISRC ")) {
+            it.title = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn item(title: Option<&str>, artist: Option<&str>) -> DiscoverItem {
+        DiscoverItem {
+            uri: format!("https://x/{}", title.unwrap_or("")),
+            title: title.map(Into::into),
+            artist: artist.map(Into::into),
+            description: None,
+            image: None,
+            taggers: None,
+            in_library: None,
+            kind: "track".into(),
+            site: None,
+            pinakes_id: None,
+            group_size: None,
+            playable: None,
+            also_on: Vec::new(),
+            page: None,
+            plays_from: None,
+            connect: Vec::new(),
+            versions: 0,
+        }
+    }
+
+    #[test]
+    fn the_same_song_shows_once() {
+        assert_eq!(
+            clean_title("Bohemian Rhapsody - Remastered 2011"),
+            "bohemian rhapsody"
+        );
+        assert_eq!(
+            clean_title("Cut To The Feeling - Carly Rae Jepsen | Music Video"),
+            "cut to the feeling - carly rae jepsen"
+        );
+        assert_eq!(clean_title("Get Lucky (feat. Pharrell Williams)"), "get lucky");
+        assert_eq!(
+            clean_title("Love - Hate"),
+            "love - hate",
+            "a dash that is part of the title stays"
+        );
+        let merged = merge_same(vec![
+            (None, item(Some("Bohemian Rhapsody - Remastered 2011"), None)),
+            (
+                Some("b1a9".into()),
+                item(Some("Bohemian Rhapsody"), Some("Queen")),
+            ),
+            (None, item(Some("Bohemian Rhapsody"), Some("Queen"))),
+            (
+                Some("b1a9".into()),
+                item(Some("Bohemian Rhapsody (Live Aid)"), Some("Queen")),
+            ),
+            (None, item(Some("Bohemian Rhapsody"), Some("Panic! At The Disco"))),
+            (None, item(Some("Das Boot"), Some("Sefa"))),
+            (None, item(Some("Das Boot"), Some("Sefa"))),
+        ]);
+        let shown: Vec<(Option<&str>, Option<&str>, u32)> = merged
+            .iter()
+            .map(|i| (i.title.as_deref(), i.artist.as_deref(), i.versions))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (Some("Bohemian Rhapsody"), Some("Queen"), 3),
+                (Some("Bohemian Rhapsody"), Some("Panic! At The Disco"), 0),
+                (Some("Das Boot"), Some("Sefa"), 1),
+            ]
+        );
+    }
 }
