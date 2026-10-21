@@ -239,6 +239,9 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             cfg.library.watch_quiet_secs.max(1),
         ));
     }
+    if let Some(remote) = remote_config(cfg) {
+        state.configure_remote(remote).await;
+    }
     let secret_file = session_secret_path(cfg);
     if secret_file.exists() {
         let file = &secret_file;
@@ -250,15 +253,7 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
                     state.set_sync(Some(sync.clone()));
                     // Republish the node record: the address, token or version may
                     // have changed since the sign-in that first wrote it (ADR 0008).
-                    if let Err(e) = sync
-                        .publish_node(
-                            &state.name,
-                            &state.public_url,
-                            state.token.as_deref(),
-                            &state.version,
-                        )
-                        .await
-                    {
+                    if let Err(e) = sync.publish_node_for(&state).await {
                         tracing::warn!("publishing the node record failed: {e}");
                     }
                     match sync.restore_settings(&state, true).await {
@@ -284,6 +279,36 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
     }
     let _announced = announce(cfg, &state);
     pm_api::serve(state, &cfg.api.listen).await
+}
+
+/// Remote access settings from `[remote]`, or `None` when it is off or misconfigured.
+fn remote_config(cfg: &NodeConfig) -> Option<pm_api::remote::RemoteConfig> {
+    if !cfg.remote.enabled {
+        return None;
+    }
+    let listen: std::net::SocketAddr = cfg.api.listen.parse().ok()?;
+    // The tunnel talks to the API from this machine.
+    let target = if listen.ip().is_unspecified() {
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, listen.port()))
+    } else {
+        listen
+    };
+    let relays = match cfg.remote.relay.trim() {
+        "" => pm_remote::Relays::Public,
+        "none" => pm_remote::Relays::Off,
+        url => match url.parse() {
+            Ok(u) => pm_remote::Relays::Custom(u),
+            Err(e) => {
+                tracing::warn!(relay = url, "remote access off: bad [remote] relay: {e}");
+                return None;
+            }
+        },
+    };
+    Some(pm_api::remote::RemoteConfig {
+        key_path: cfg.data_dir.join("remote.key"),
+        relays,
+        target,
+    })
 }
 
 /// Announce the node on the LAN unless it only listens on loopback (or `[api] announce = false`).

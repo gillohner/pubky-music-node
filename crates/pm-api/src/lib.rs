@@ -26,6 +26,7 @@ pub mod new_releases;
 pub mod pinakes_reader;
 pub mod playlists;
 pub mod radio;
+pub mod remote;
 pub mod reviews;
 pub mod sources;
 pub mod spotify;
@@ -429,6 +430,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
     let library = s.library.lock().expect("library poisoned").stats()?;
     Ok(Json(Info {
         id: s.node_id.clone(),
+        remote: s.remote_id.read().expect("remote id poisoned").clone(),
         name: s.name.clone(),
         version: s.version.clone(),
         api: API_VERSION.into(),
@@ -1884,10 +1886,7 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
             let sync = Arc::new(sync::PubkySync::from_session(hs, session));
             let user = sync.z32().to_string();
             s.set_sync(Some(sync.clone()));
-            if let Err(e) = sync
-                .publish_node(&s.name, &s.public_url, s.token.as_deref(), &s.version)
-                .await
-            {
+            if let Err(e) = sync.publish_node_for(&s).await {
                 tracing::warn!("publishing the node record failed: {e}");
             }
             match sync.restore_settings(&s, true).await {

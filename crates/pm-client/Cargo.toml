@@ -24,6 +24,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+pm-remote = { workspace = true }
 pm-audio = { workspace = true }
 hound = { workspace = true }
 tempfile = "3"

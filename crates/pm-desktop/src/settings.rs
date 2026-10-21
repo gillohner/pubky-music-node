@@ -13,6 +13,13 @@ pub struct Settings {
     /// The node's stable id (`/v1/info`), to find it again on the LAN when its address changes.
     #[serde(default)]
     pub node_id: String,
+    /// The node's iroh key (from its record, ADR 0013): reach it from anywhere.
+    #[serde(default)]
+    pub iroh: String,
+    /// This run only: the local end of the iroh tunnel (`http://127.0.0.1:<port>`) when the node is
+    /// reached through it; empty when `node_url` answers directly.
+    #[serde(skip)]
+    pub via: String,
 }
 
 impl Settings {
@@ -22,12 +29,23 @@ impl Settings {
             token: token.trim().to_string(),
             player_address: String::new(),
             node_id: String::new(),
+            iroh: String::new(),
+            via: String::new(),
+        }
+    }
+
+    /// Where the node is reached right now: the tunnel's local end, or `node_url`.
+    pub fn base(&self) -> &str {
+        if self.via.is_empty() {
+            &self.node_url
+        } else {
+            &self.via
         }
     }
 
     /// `scheme://host:port` of the node, as the web UI's page origin.
     pub fn origin(&self) -> Option<String> {
-        let u = url::Url::parse(&self.node_url).ok()?;
+        let u = url::Url::parse(self.base()).ok()?;
         Some(u.origin().ascii_serialization())
     }
 }

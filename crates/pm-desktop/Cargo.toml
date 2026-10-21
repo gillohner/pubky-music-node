@@ -22,6 +22,7 @@ tauri-build = { version = "=2.7.1", features = [] }
 [dependencies]
 pm-pubky = { path = "../pm-pubky" }
 pm-discovery = { path = "../pm-discovery" }
+pm-remote = { path = "../pm-remote" }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-opener = "=2.7.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

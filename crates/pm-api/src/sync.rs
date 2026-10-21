@@ -59,6 +59,20 @@ impl PubkySync {
         &self.session
     }
 
+    /// Tell the user's other devices where this node is (ADR 0008), starting remote access first
+    /// when it is configured, so the record carries the node's iroh key (ADR 0013).
+    pub async fn publish_node_for(&self, s: &crate::state::NodeState) -> Result<(), SyncError> {
+        let iroh = s.ensure_remote().await;
+        self.publish_node(
+            &s.name,
+            &s.public_url,
+            s.token.as_deref(),
+            &s.version,
+            iroh.as_deref(),
+        )
+        .await
+    }
+
     /// Tell the user's other devices where this node is (ADR 0008).
     pub async fn publish_node(
         &self,
@@ -66,6 +80,7 @@ impl PubkySync {
         api_url: &str,
         token: Option<&str>,
         version: &str,
+        iroh: Option<&str>,
     ) -> Result<(), SyncError> {
         let record = pm_pubky::homeserver::NodeRecord {
             name: name.to_string(),
@@ -73,6 +88,7 @@ impl PubkySync {
             token: token.unwrap_or("").to_string(),
             version: version.to_string(),
             updated_at: now_micros(),
+            iroh: iroh.unwrap_or("").to_string(),
         };
         Ok(self
             .homeserver

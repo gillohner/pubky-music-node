@@ -72,6 +72,10 @@ pub struct NodeState {
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
     pub node_id: String,
+    /// Remote access over iroh (ADR 0013): configuration and the running tunnel.
+    pub remote: tokio::sync::Mutex<crate::remote::Remote>,
+    /// The tunnel's key once it runs, for `/v1/info`.
+    pub remote_id: std::sync::RwLock<Option<String>>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -202,6 +206,8 @@ impl NodeState {
         };
         Arc::new(Self {
             node_id,
+            remote: Default::default(),
+            remote_id: Default::default(),
             name: settings.name,
             version: settings.version,
             library,

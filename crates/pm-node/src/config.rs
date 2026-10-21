@@ -22,6 +22,28 @@ pub struct NodeConfig {
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
+    /// Remote access over iroh (ADR 0013).
+    pub remote: RemoteConfig,
+}
+
+/// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
+/// which only they can read (the private node record). Runs only while the node has a Pubky session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RemoteConfig {
+    pub enabled: bool,
+    /// Empty = n0's public relays; an `https://` URL = a self-hosted iroh-relay; `none` = direct
+    /// connections only.
+    pub relay: String,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            relay: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -91,6 +113,7 @@ impl Default for NodeConfig {
             tidal: TidalConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
+            remote: RemoteConfig::default(),
         }
     }
 }

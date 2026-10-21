@@ -33,6 +33,8 @@ struct AppState {
     settings: Arc<Mutex<Option<Settings>>>,
     path: PathBuf,
     player_port: Option<u16>,
+    /// The iroh tunnel to the node, while the node is reached through it (ADR 0013).
+    tunnel: tokio::sync::Mutex<Option<pm_remote::ClientTunnel>>,
 }
 
 impl AppState {
@@ -114,7 +116,7 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let w = app
         .get_webview_window(MAIN)
         .ok_or_else(|| "the window is gone".to_string())?;
-    let u = url::Url::parse(&format!("{}/", s.node_url)).map_err(|e| format!("Not an address: {e}"))?;
+    let u = url::Url::parse(&format!("{}/", s.base())).map_err(|e| format!("Not an address: {e}"))?;
     w.navigate(u).map_err(|e| e.to_string())
 }
 
@@ -130,8 +132,9 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     }
     state.store(Some(s.clone()));
     show_node(app, &s)?;
+    // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(desktop)]
-    {
+    if s.via.is_empty() {
         let port = state.player_port;
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -159,26 +162,55 @@ fn saved(state: State<'_, AppState>) -> Option<Saved> {
 /// Reconnect to the remembered node: check it answers, then show it.
 #[tauri::command]
 async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    let mut s = state.current().ok_or("No node yet")?;
-    let info = match node::probe(&s).await {
-        Ok(info) => info,
-        // The node may have a new address (DHCP): look for its id on the LAN.
-        Err(node::ProbeError::Unreachable(msg)) if !s.node_id.is_empty() => {
-            let found = discover(&app).await;
-            let Some(moved) = found
-                .into_iter()
-                .find(|n| n.id == s.node_id && n.url != s.node_url)
-            else {
-                return Err(msg);
-            };
-            tracing::info!(from = %s.node_url, to = %moved.url, "the node moved; following it");
-            s.node_url = moved.url;
-            node::probe(&s).await?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let s = state.current().ok_or("No node yet")?;
+    let (s, info) = reach(&app, &state, s).await?;
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// Reach the node: at its address; else, on the LAN under its id (it may have a new address); else
+/// through the iroh tunnel when its record carries a key (away from home).
+async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Settings, node::Info), String> {
+    s.via.clear();
+    let msg = match node::probe(&s).await {
+        Ok(info) => {
+            state.tunnel.lock().await.take();
+            return Ok((s, info));
+        }
+        Err(node::ProbeError::Unreachable(msg)) => msg,
+        Err(e) => return Err(e.into()),
+    };
+    if !s.node_id.is_empty() {
+        let found = discover(app).await;
+        if let Some(moved) = found
+            .into_iter()
+            .find(|n| n.id == s.node_id && n.url != s.node_url)
+        {
+            tracing::info!(from = %s.node_url, to = %moved.url, "the node moved; following it");
+            s.node_url = moved.url;
+            if let Ok(info) = node::probe(&s).await {
+                return Ok((s, info));
+            }
+        }
+    }
+    if s.iroh.is_empty() {
+        return Err(msg);
+    }
+    let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+        .await
+        .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
+    let route = tunnel
+        .connect()
+        .await
+        .map_err(|e| format!("{msg}, and the node did not answer remotely either: {e}"))?;
+    tracing::info!(?route, "reaching the node over iroh");
+    s.via = format!("http://{}", tunnel.local_addr());
+    let info = node::probe(&s).await?;
+    if let Some(old) = state.tunnel.lock().await.replace(tunnel) {
+        old.close().await;
+    }
+    Ok((s, info))
 }
 
 /// Nodes on the LAN (mDNS and SSDP, `pm-discovery`).
@@ -261,8 +293,9 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
-    let s = Settings::new(&record.api_url, &record.token);
-    let info = node::probe(&s).await?;
+    let mut s = Settings::new(&record.api_url, &record.token);
+    s.iroh = record.iroh;
+    let (s, info) = reach(&app, &state, s).await?;
     connected(&app, &state, s, &info)?;
     Ok(info.name)
 }
@@ -328,6 +361,7 @@ pub fn run() {
                 settings: shared.clone(),
                 path,
                 player_port,
+                tunnel: Default::default(),
             });
 
             let handle = app.handle().clone();

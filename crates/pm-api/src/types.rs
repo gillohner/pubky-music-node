@@ -14,6 +14,9 @@ pub struct Info {
     /// Stable node id (also announced over mDNS and SSDP).
     #[serde(default)]
     pub id: String,
+    /// The node's iroh key when remote access is on (ADR 0013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
     pub name: String,
     pub version: String,
     pub api: String,

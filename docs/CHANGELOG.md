@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Remote access over iroh** (ADR 0013, `crates/pm-remote`, `docs/CONNECTION.md`).
+  - With a Pubky session, the node runs an iroh endpoint with its own key and pipes the `pubky-music/http/1` ALPN to its API. It publishes the key in the private node record. `[remote] enabled` (default on) and `[remote] relay` (empty = n0's public relays, a URL, or `none`) control it.
+  - The app reaches the node away from home: when neither the saved address nor the LAN answers, it opens a local tunnel by key, with relay fallback, and shows the node through it. Every request still needs the token.
+  - `cargo run -p pm-remote --example tunnel` tries it by hand.
 - **Apps find nodes on the LAN** (`crates/pm-discovery`, `docs/CONNECTION.md`).
   - The node announces itself over mDNS (`_pubky-music._tcp`, `role=node`) and SSDP (`urn:schemas-pubky-music:device:Node:1`), with a UPnP description at `/upnp/node.xml`, so it also shows in Windows' Network folder. `[api] announce = false` turns this off; nothing is announced when the API listens on loopback.
   - The app's connect page lists the nodes found under "On this network".

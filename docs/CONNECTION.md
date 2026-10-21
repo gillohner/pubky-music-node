@@ -81,7 +81,22 @@ One WebSocket per controller carries every change. The REST API (`/v1/...`) carr
 ## Remote access
 
 Today a node is reached outside the LAN over HTTPS (the address it publishes on the homeserver, ADR
-0008). ADR 0013 proposes iroh: the node dialed by its own key from anywhere, through a tunnel to its HTTP API with relay fallback, found through the same private node record.
+0008), and from anywhere over **iroh** (ADR 0013, `crates/pm-remote`):
+
+- **The node.** While it has a Pubky session and `[remote] enabled` is on (the default), it runs an iroh
+  endpoint with its own key (`<data_dir>/remote.key`, mode 600).
+  - It accepts the ALPN `pubky-music/http/1` and pipes each stream to its HTTP listener on loopback.
+  - It writes the key into the private node record (`iroh`), and `/v1/info` shows it as `remote`.
+  - `[remote] relay` is empty for n0's public relays, takes an `https://` URL for a self-hosted
+    iroh-relay, or `none` for direct connections only.
+- **The app.** After a Ring sign-in or at start, it first tries the saved address, then the LAN by node
+  id. Then, when the record carried a key, it opens a tunnel: `http://127.0.0.1:<port>` on this device,
+  each connection one iroh stream.
+  - The webview shows the node through it. The web UI, the token, the event socket and its resync work
+    unchanged, and every request still needs the token.
+  - The built-in player is not registered while remote, because the node cannot reach it.
+- **Away and back.** The app picks the way at connect time: a laptop that leaves home with the app
+  open shows "Node offline" until the app reconnects. Switching paths while open is a later step.
 
 ## Tests
 

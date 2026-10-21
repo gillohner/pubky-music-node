@@ -401,6 +401,9 @@ pub struct NodeRecord {
     pub version: String,
     /// Microseconds.
     pub updated_at: i64,
+    /// The node's iroh key when remote access is on (ADR 0013): dial it from anywhere.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub iroh: String,
 }
 
 impl NodeHomeserver {

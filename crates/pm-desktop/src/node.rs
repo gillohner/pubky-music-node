@@ -13,7 +13,7 @@ fn client() -> reqwest::Result<reqwest::Client> {
 }
 
 fn api(s: &Settings, path: &str) -> String {
-    format!("{}/v1/{path}", s.node_url.trim_end_matches('/'))
+    format!("{}/v1/{path}", s.base().trim_end_matches('/'))
 }
 
 /// What the node says about itself.

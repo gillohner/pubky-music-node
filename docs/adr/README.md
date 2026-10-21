@@ -16,7 +16,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0010](0010-favourites-as-bookmarks.md) | Favourites are v1 `PubkyAppBookmark`s of canonical music URLs, private by default |
 | [0011](0011-tags-are-public.md) | Tags are public v1 `PubkyAppTag`s on canonical URLs, written only on explicit action |
 | [0012](0012-one-client-tauri-shell.md) | One client: the node's web UI in a Tauri 2 shell for desktops and Android; the egui app is retired (owner, 2026-10-21) |
-| [0013](0013-remote-access-over-iroh.md) | Remote access over iroh: the node dialed by its own key (found through the private node record), a tunnel to its HTTP API, relay fallback; proposed |
+| [0013](0013-remote-access-over-iroh.md) | Remote access over iroh: the node dialed by its own key (found through the private node record), a tunnel to its HTTP API, relay fallback |
 
 Open (handoff §11), not yet decided: live Pubky transport / relay for M5; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

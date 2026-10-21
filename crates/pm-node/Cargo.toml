@@ -16,6 +16,7 @@ alsa = ["pm-out-local/alsa"]
 
 [dependencies]
 pm-discovery = { workspace = true }
+pm-remote = { workspace = true }
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-out-local = { workspace = true }

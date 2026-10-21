@@ -1,7 +1,7 @@
 # ADR 0013: Remote access over iroh, dialed by the node's key
 
-Status: proposed (infra agent, 2026-10-21). It completes the transport half of M5 that ADR 0008 left
-open.
+Status: accepted and built, 2026-10-21 (infra agent; steps 1 and 2 of the build order below). It
+completes the transport half of M5 that ADR 0008 left open.
 
 ## Context
 
@@ -95,6 +95,17 @@ same token the LAN uses.**
   `api_url`.
 
 ## Build order
+
+Steps 1 and 2 are built (`crates/pm-remote`, `pm-api/src/remote.rs`, the app's `reach`). Tested:
+- `crates/pm-client/tests/tunnel.rs` runs the API and `/v1/events` through an in-process tunnel with
+  relays off, and checks that a wrong token is still refused.
+- By hand, on 2026-10-21, through n0's public relays from this sandbox:
+  - `cargo run -p pm-remote --example tunnel -- serve` and `-- dial <key>` connected by key alone in
+    0.2 s;
+  - the app, whose saved address pointed nowhere, reached the node over the tunnel and opened its UI
+    signed in, with the event socket live.
+- Step 3 (the owner's phone on cellular) is open.
+
 
 1. Node: the key, the endpoint, the ALPN pipe to loopback, `[remote]` config, and the `iroh` field in
    the node record. An integration test pipes `/v1/info` and `/v1/events` through an in-process

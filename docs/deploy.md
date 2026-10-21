@@ -78,6 +78,8 @@ native image on every push to catch Dockerfile drift.
 
 ## Reaching the node from outside the house
 
+**Without any of the below:** once the node is signed in with Pubky Ring, the Pubky Music app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.
+
 The node speaks plain HTTPS/WebSocket and expects a bearer token, so any private network layer
 works until the Pubky transport exists (ADR 0008):
 
