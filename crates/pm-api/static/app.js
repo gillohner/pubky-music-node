@@ -1541,7 +1541,7 @@
             : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Connect TIDAL</button><span class="muted small">Opens TIDAL's sign-in; the app must list <code>${esc(tidal.redirect_uri)}</code> as a redirect URI. Search works without signing in; playback and your collection need it. The app must also have these scopes enabled: <code>${esc(tidal.requested_scopes || '')}</code> (change them with <code>[tidal] scopes</code> in the node config).</span></div>`;
           main.innerHTML = pageHead('Sources', cur.id === 'tidal' || cur.id === 'spotify' ? 'your subscription, one account on this node · also answers in the main search' : cur.id === 'subsonic' || cur.id === 'jellyfin' ? 'your own music server · also answers in the main search' : 'streaming without an account') + tabs
             + `<p class="muted small">${esc(cur.description)}</p>` + account
-            + `<div class="toolbar"><button class="btn primary" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button><span class="muted small">Opens the one search, scoped to ${esc(cur.name)}.</span></div>`
+            + (cur.status === 'needs_config' ? '' : `<div class="toolbar"><button class="btn primary" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button><span class="muted small">Opens the one search, scoped to ${esc(cur.name)}.</span></div>`)
             + ''
           $$('[data-src]', main).forEach((b) => b.onclick = () => { state.sourceResults = null; setView('sources', { source: b.dataset.src }); });
           const ti = $('#tidalin'); if (ti) ti.onclick = async () => { try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); } };
@@ -1591,7 +1591,7 @@
               } catch (e) { box.innerHTML = `<p class="muted small">TIDAL collection: ${esc(e.message)}</p>`; }
             })();
           }
-          $('#ssearchall').onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
+          const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: cur.id, id: b.dataset.sitem }));
           break;
         }
