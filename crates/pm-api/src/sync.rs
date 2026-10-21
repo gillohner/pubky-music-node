@@ -85,6 +85,10 @@ impl PubkySync {
         &self.session
     }
 
+    pub fn homeserver(&self) -> &NodeHomeserver {
+        &self.homeserver
+    }
+
     /// Tell the user's other devices where this node is (ADR 0008), starting remote access first
     /// when it is configured, so the record carries the node's iroh key (ADR 0013).
     pub async fn publish_node_for(&self, s: &crate::state::NodeState) -> Result<(), SyncError> {

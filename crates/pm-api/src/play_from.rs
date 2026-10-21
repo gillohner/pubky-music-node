@@ -481,6 +481,11 @@ pub(crate) async fn get_order(State(s): State<Arc<NodeState>>) -> ApiResult<Play
     Ok(Json(play_order(order, &acc)))
 }
 
+/// A play order with what each service can do here.
+pub(crate) fn play_order_of(order: Vec<String>, acc: &ServiceAccess) -> PlayOrder {
+    play_order(order, acc)
+}
+
 fn play_order(order: Vec<String>, acc: &ServiceAccess) -> PlayOrder {
     let services = order
         .iter()

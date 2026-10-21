@@ -88,6 +88,10 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/playlists/{id}/play` (entries that are Internet Archive file URLs stream directly; other unresolved entries are reported as `missing`) | `{zone, replace?}` | `{queued, missing}` |
 | GET | `/v1/playlists/{id}/play-from` | | `{order: {order, services}, own_order, items: [{index, uri, title, artist, plays_from, pin, pin_unavailable, sources: [{service, name, url, label, mode, available, chosen}], reason, connect, track_id, stream_uri}]}`: where each song plays from (ADR 0015) |
 | PUT | `/v1/playlists/{id}/items/{index}/source` | `{service, uri?}`, or `{service: null}` for Auto | the playlist; pins the song to a source |
+| GET | `/v1/shared/resolve?link=` | | `{user, id?}` from a pasted `pubky://` link or key |
+| GET | `/v1/shared/{user}/playlists` | | someone's shared playlists `[{user, id, link, name, description, items, updated_at}]` (no session needed) |
+| GET | `/v1/shared/{user}/playlists/{id}` | | `{summary, play_from}`: the playlist and where each song plays from on this node |
+| POST | `/v1/shared/{user}/playlists/{id}/copy` | | a private copy on this node (pins and order kept) |
 | PUT | `/v1/playlists/{id}/visibility` | `{public: bool}` | the playlist; shared ones are published under `/pub/social/v1/posts/` on the next sync, and making it private removes the public copy |
 | PUT | `/v1/playlists/{id}/order` | `{order: [service…]}` or `{order: null}` | the playlist; its own play order, or the node's |
 | GET/PUT | `/v1/play-order` | `{order: [service…]}` | `{order, services: [{id, name, connected, note}]}`: the node's global play order (`library`, `tidal`, `spotify`) |

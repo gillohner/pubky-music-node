@@ -1404,3 +1404,38 @@ pub struct PinItemSource {
 pub struct SetVisibility {
     pub public: bool,
 }
+
+// ---- playlists other people share (shared.rs) ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedLink {
+    pub link: String,
+}
+
+/// Who a pasted link names, and which playlist if it names one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedTarget {
+    pub user: String,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPlaylistSummary {
+    /// The author's key (z32).
+    pub user: String,
+    pub id: String,
+    /// `pubky://<user>/pub/social/v1/posts/<id>`.
+    pub link: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub items: usize,
+    /// Microseconds.
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPlaylist {
+    pub summary: SharedPlaylistSummary,
+    /// Where each song plays from on this node.
+    pub play_from: PlaylistPlayFrom,
+}

@@ -36,7 +36,11 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
             pipeline: PipelineConfig::default(),
             token: None,
             subsonic_user: "pubky".into(),
-            pubky: Default::default(),
+            // Public reads without a session resolve users on the testnet too
+            pubky: pm_pubky::PmPubkyConfig {
+                network: pm_pubky::config::Network::Testnet,
+                ..Default::default()
+            },
             public_url: "http://127.0.0.1:7788".into(),
             upnp: false,
             cast: false,
@@ -596,4 +600,117 @@ async fn a_shared_playlist_is_published_and_unpublished() {
         2,
         "private versions stay (shared, then private again)"
     );
+}
+
+/// Someone else's shared playlist: another node (not signed in) lists it, opens it with where
+/// each song plays, and saves a private copy that keeps the pins and the order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_node_opens_and_copies_a_shared_playlist() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+
+    // The author shares a playlist with one pinned song and its own order
+    let a = node(dir.path(), "author");
+    let app_a = router(a.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync.clone()));
+    let (_, pl) = call(
+        &app_a,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({
+            "name": "Mixtape",
+            "uris": [
+                "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862",
+                "https://musicbrainz.org/isrc/USQX91300108"
+            ],
+            "sources": [{"service": "tidal", "uri": "https://tidal.com/track/20115557"}, null]
+        })),
+    )
+    .await;
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}/order"),
+        Some(serde_json::json!({"order": ["tidal", "library"]})),
+    )
+    .await;
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}/visibility"),
+        Some(serde_json::json!({"public": true})),
+    )
+    .await;
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+
+    // Another node, with no Pubky session at all
+    let b = node(dir.path(), "listener");
+    let app_b = router(b.clone());
+    let link = format!("pubky://{key}/pub/social/v1/posts/{id}");
+    let (st, t) = call(
+        &app_b,
+        "GET",
+        &format!(
+            "/v1/shared/resolve?link={}",
+            link.replace(':', "%3A").replace('/', "%2F")
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["id"], id.as_str());
+    let (st, list) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists"), None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    assert_eq!(list[0]["name"], "Mixtape");
+    assert_eq!(list[0]["items"], 2);
+    let (st, one) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    assert_eq!(one["play_from"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(one["play_from"]["items"][0]["pin"]["service"], "tidal");
+    assert_eq!(one["play_from"]["own_order"], true);
+    let (st, copy) = call(
+        &app_b,
+        "POST",
+        &format!("/v1/shared/{key}/playlists/{id}/copy"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{copy}");
+    assert_eq!(copy["summary"]["visibility"], "private");
+    assert_eq!(
+        copy["playlist"]["items"][0]["source"]["uri"],
+        "https://tidal.com/track/20115557"
+    );
+    assert_eq!(
+        copy["playlist"]["source_order"],
+        serde_json::json!(["tidal", "library", "spotify"])
+    );
+    // A private playlist is not readable
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{id}/visibility"),
+        Some(serde_json::json!({"public": false})),
+    )
+    .await;
+    sync.sync(&a.library).await.unwrap();
+    let (st, _) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists/{id}"), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

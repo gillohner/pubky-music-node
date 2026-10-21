@@ -32,6 +32,7 @@ pub mod radio;
 pub mod remote;
 pub mod reviews;
 pub mod search;
+pub mod shared;
 pub mod sources;
 pub mod spotify;
 pub mod state;
@@ -193,6 +194,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlists/{id}/order", put(playlists::set_order))
         .route("/playlists/{id}/visibility", put(playlists::set_visibility))
         .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
+        .route("/shared/resolve", get(shared::resolve))
+        .route("/shared/{user}/playlists", get(shared::list))
+        .route("/shared/{user}/playlists/{id}", get(shared::get))
+        .route("/shared/{user}/playlists/{id}/copy", post(shared::copy))
         .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))
         .route("/discover/charts", get(discover::charts))
@@ -272,6 +277,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/album/{id}", get(web_ui))
         .route("/artist/{id}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
+        .route("/shared/{user}", get(web_ui))
+        .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
         .route("/source/{id}", get(web_ui))
         .route("/home/{section}", get(web_ui))
@@ -3845,6 +3852,7 @@ mod tests {
             "/search?q=cro%20bad%20chick",
             "/discover",
             "/settings",
+            "/shared/zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o/0035WKVKQDHSM",
         ] {
             let resp = app
                 .clone()

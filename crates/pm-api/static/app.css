@@ -757,3 +757,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 @media (prefers-reduced-motion: reduce) { .nudge { animation: none; outline: 2px solid var(--accent); } }
 a.btn { text-decoration: none; }
 .sharelink { font-size: 12px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.eyebrow code { text-transform: none; letter-spacing: 0; }

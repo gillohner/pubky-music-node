@@ -270,6 +270,23 @@ pub fn is_music_collection(content: &PubkySocialCollectionContent) -> bool {
     has_ext || (!content.items.is_empty() && content.items.iter().all(|i| MusicUri::parse(&i.uri).is_ok()))
 }
 
+/// Someone's public playlist, read from the bytes of one version of a social post: it must
+/// pass the spec's public-root validation (with its author in scope), be a music collection,
+/// and fit the node's own playlist rules. Anything else is `None`: other people's data is
+/// hostile input.
+pub fn read_public_playlist(bytes: &[u8], id: &str, edit_id: &str, owner: &PubkyId) -> Option<Playlist> {
+    let post: PubkySocialPost = serde_json::from_slice(bytes).ok()?;
+    let ctx = pubky_social_specs::ValidationCtx { root: Root::Pub };
+    post.validate(Some(id), &ctx).ok()?;
+    post.check_references(&ctx, Some(owner)).ok()?;
+    let MusicContent::Playlist(p) = from_social(&post, id, edit_id)? else {
+        return None;
+    };
+    let p = <Playlist as crate::schemas::Validatable>::sanitize(p);
+    crate::schemas::Validatable::validate(&p, Some(id)).ok()?;
+    Some(p)
+}
+
 /// A node object read back from a v1 social post (`id` and `edit_id` from its path): a playlist
 /// from a music collection, a text review from a note that embeds a music URL. `None` for
 /// anything else, or anything that does not validate.
