@@ -137,6 +137,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      - name: design lint (classed buttons, no icon glyphs, every class styled)
+        run: node tools/design-lint.js
       - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |

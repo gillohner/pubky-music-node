@@ -4,6 +4,17 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Fix: controls that did not match the design** (owner report, STEWARD-FIX-design-lint.md). The item page's Everywhere / This version switch was grey browser-default buttons with an emoji globe, because `.scope` had no style and its buttons had no class.
+  - The switch is now the app's chip control (the same as the search scope chips), with icons from the icon set, `aria-pressed`, one tab stop and arrow keys.
+  - New `tools/design-lint.js` runs in CI (web-ui job). It fails on a `<button>` without a component class, an emoji or symbol used as an icon, or a class with no rule in `app.css`.
+  - It found and this change fixes:
+    - the album link in track rows (grey default button);
+    - the play buttons on Versions chips (`.chiplink` was only styled inside tag chips);
+    - the "Tag my whole library" row in Settings (`.row` had no rule; its input had no class);
+    - glyph icons (▶ ♪ ✓ ✕) replaced with icon-set icons (a new check icon);
+    - eleven classes with no rule (`placeholder`, `lnk`, `blurb`, `filter`, `nav-group`, …).
+  - The rating stars keep their own styled glyph.
+  - `tools/ui-item-pages.js` checks the switch. Shots: `docs/ux/shots/design-lint/`.
 - **Fix: a node with an old Pubky session can be approved again** (owner report, STEWARD-FIX-resign.md). A session approved before the node used `/pub/pubky.music/`, `social/v1` and `music/v1` made Sync fail with a raw "403 Forbidden - Session does not have read access to path", and the Pubky card hid the sign-in button once signed in.
   - `GET /v1/pubky` compares the session's granted capabilities with what the node asks for and reports `needs_resign` and the `missing` folders. A homeserver refusal sets it too.
   - The Pubky card always offers **Sign in again** (the same Pubky Ring flow; the new session replaces the old one). When the session is short, a plain notice explains why, Sign in again is the primary button, and Sync is disabled with the notice as its tooltip.

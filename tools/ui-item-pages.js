@@ -94,6 +94,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('rating: hover', fills, '| saved 3½', saved, '| cleared', cleared);
     if (fills !== 'f2,f2,f2,f1,f0' || !saved || !cleared) errors.push('half-star rating');
   } else console.log('rating: skipped (no rating row on this node)');
+  // ---- the On Pubky switch is a chip control: styled, aria-pressed, arrow keys ----
+  if (await rp.$('#ipubky [data-scope="all"]')) {
+    const styled = await rp.$eval('#ipubky [data-scope="all"]', (e) => e.classList.contains('chip') && getComputedStyle(e).borderRadius === '999px');
+    await rp.focus('#ipubky [data-scope="all"]'); await rp.keyboard.press('ArrowRight'); await sleep(300);
+    const pressed = await rp.$$eval('#ipubky [data-scope]', (els) => els.map((e) => e.getAttribute('aria-pressed')).join(','));
+    const focused = await rp.evaluate(() => document.activeElement && document.activeElement.dataset.scope);
+    console.log('On Pubky switch: chip', styled, '| after → pressed', pressed, '| focus', focused);
+    if (!styled || pressed !== 'false,true' || focused !== 'this') errors.push('On Pubky switch');
+  }
   await rp.close();
 
   // ---- route table ----

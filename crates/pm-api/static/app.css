@@ -617,3 +617,28 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .chips.win { display: inline-flex; gap: 4px; margin-left: 10px; }
 .chips.win .chip { padding: 2px 10px; font-size: 12px; }
 .chips.win .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+
+/* Classes the design lint found without a rule (tools/design-lint.js) */
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nav-group { display: flex; flex-direction: column; }
+.placeholder { background: var(--surface-2); }
+.lnk { color: inherit; cursor: pointer; text-decoration: none; background: none; border: 0; padding: 0; font: inherit; text-align: left; }
+.lnk:hover { color: var(--fg); text-decoration: underline; }
+.lnk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.srow .num { width: 24px; text-align: right; flex: none; }
+.input.filter { width: 200px; max-width: 100%; }
+.hbody { min-height: 48px; }
+.blurb { max-width: 72ch; line-height: 1.6; color: var(--fg-2); margin: 0 0 12px; }
+.btn.icon-only { padding-left: 10px; padding-right: 10px; }
+.idfile { min-width: 0; }
+.eq-row .eq-kind { text-transform: capitalize; }
+.eq-row .eq-freq, .eq-row .eq-gain, .eq-row .eq-q { font-variant-numeric: tabular-nums; }
+.eq-row .eq-on { accent-color: var(--accent); }
+.eq-row .eq-del { justify-self: end; }
+.chip .ic { width: 14px; height: 14px; flex: none; }
+.scopeswitch { gap: 6px; }
+.amark .ic { width: 16px; height: 16px; color: var(--ok); }
+.lyric-line .ic { width: 16px; height: 16px; opacity: 0.6; }
+.chiplink { display: inline-flex; align-items: center; background: none; border: 0; padding: 2px; border-radius: 999px; color: var(--fg-2); cursor: pointer; font: inherit; }
+.chiplink:hover { color: var(--accent-strong); background: var(--surface-3); }
+.chiplink:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
