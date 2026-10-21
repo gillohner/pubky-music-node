@@ -79,6 +79,54 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --check index.js
       - run: npm test
+  connection:
+    # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: cargo build -p pm-node
+      - name: a node config and a four-minute track
+        run: |
+          mkdir -p /tmp/pc/data /tmp/pc/music /tmp/pc/shots
+          python3 -c "import wave,struct,math; w=wave.open('/tmp/pc/music/tone.wav','wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b''.join(struct.pack('<h', int(3000*math.sin(2*math.pi*220*n/8000))) for n in range(8000*240))); w.close()"
+          cat > /tmp/pc/node.toml <<'TOML'
+          data_dir = "/tmp/pc/data"
+          [library]
+          folders = ["/tmp/pc/music"]
+          [api]
+          listen = "127.0.0.1:7799"
+          token = "ci-token"
+          announce = false
+          [outputs]
+          discover = false
+          upnp = false
+          cast = false
+          airplay = false
+          slimproto_port = 0
+          [remote]
+          enabled = false
+          TOML
+      - name: Playwright with Chromium
+        run: |
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: kill and restore the node under two controllers
+        run: |
+          cd /tmp/pw
+          PM_NULL_OUTPUT=realtime node $GITHUB_WORKSPACE/tools/ui-reconnect.js ci-token http://127.0.0.1:7799 /tmp/pc/shots \
+            -- $GITHUB_WORKSPACE/target/debug/pm-node --config /tmp/pc/node.toml serve
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connection-shots
+          path: /tmp/pc/shots
   web-ui:
     runs-on: ubuntu-24.04
     needs: check

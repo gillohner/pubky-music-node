@@ -105,7 +105,7 @@ Today a node is reached outside the LAN over HTTPS (the address it publishes on 
   a new `boot`.
 - `crates/pm-zones` covers the real-time null output, which `PM_NULL_OUTPUT=realtime` turns on in
   `pm-node` and `pm-endpoint` so playback takes as long as the music.
-- `tools/ui-reconnect.js` runs in a real browser: two controllers (1280 and 390) on a playing zone,
+- `tools/ui-reconnect.js` runs in a real browser, and in CI (`connection` job) on every push: two controllers (1280 and 390) on a playing zone,
   and the script kills the node and starts it again.
 
   ```sh
