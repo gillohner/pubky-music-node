@@ -10,6 +10,8 @@ license.workspace = true
 qrcode = { version = "0.14", default-features = false }
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
+pm-discovery = { workspace = true }
+uuid = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "query"] }

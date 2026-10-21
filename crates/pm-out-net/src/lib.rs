@@ -239,6 +239,10 @@ pub fn discover(timeout: Duration) -> Vec<(String, SocketAddr)> {
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                // Nodes announce on the same service type (pm-discovery).
+                if info.get_property_val_str("role") == Some("node") {
+                    continue;
+                }
                 let name = info
                     .get_property_val_str("name")
                     .map(str::to_string)

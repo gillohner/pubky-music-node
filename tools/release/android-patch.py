@@ -8,6 +8,8 @@ silently cannot connect.
 2. rustls-platform-verifier's Kotlin component (Pubky Ring sign-in needs it;
    see crates/pm-desktop/src/android.rs), at the version Cargo.lock pins.
 3. A ProGuard keep rule for it: R8 cannot see JNI use.
+4. CHANGE_WIFI_MULTICAST_STATE: the Wi-Fi multicast lock that LAN discovery
+   (mDNS) needs while it looks for nodes (src/android.rs).
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -65,4 +67,14 @@ existing = proguard.read_text() if proguard.exists() else ""
 if rule not in existing:
     proguard.write_text(existing.rstrip("\n") + "\n\n# rustls-platform-verifier (called over JNI)\n" + rule + "\n")
 
-print(f"android-patch: cleartext on, rustls-platform-verifier {version}, keep rule added")
+# 4. multicast permission
+manifest = app / "src" / "main" / "AndroidManifest.xml"
+mtext = manifest.read_text()
+perm = '<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />'
+if perm not in mtext:
+    anchor = '<uses-permission android:name="android.permission.INTERNET" />'
+    if mtext.count(anchor) != 1:
+        die(f"expected one `{anchor}` in {manifest}")
+    manifest.write_text(mtext.replace(anchor, anchor + "\n    " + perm))
+
+print(f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule added")

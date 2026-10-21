@@ -10,6 +10,9 @@ pub struct Settings {
     /// The `host:port` this machine's player was last registered under.
     #[serde(default)]
     pub player_address: String,
+    /// The node's stable id (`/v1/info`), to find it again on the LAN when its address changes.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 impl Settings {
@@ -18,6 +21,7 @@ impl Settings {
             node_url: normalize_url(node_url),
             token: token.trim().to_string(),
             player_address: String::new(),
+            node_id: String::new(),
         }
     }
 

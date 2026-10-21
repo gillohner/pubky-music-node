@@ -273,6 +273,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/spotify/callback", get(spotify::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
+                .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
                 .route("/mb/ws/2/{*path}", get(mbproxy::forward))
                 .with_state(state.clone()),
@@ -426,6 +428,7 @@ async fn web_ui() -> Response {
 async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
     let library = s.library.lock().expect("library poisoned").stats()?;
     Ok(Json(Info {
+        id: s.node_id.clone(),
         name: s.name.clone(),
         version: s.version.clone(),
         api: API_VERSION.into(),
@@ -434,6 +437,11 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         outputs: s.outputs.len(),
         scanning: s.is_scanning(),
     }))
+}
+
+async fn upnp_description(State(s): State<Arc<NodeState>>) -> Response {
+    let xml = pm_discovery::description_xml(&s.announcement(0));
+    ([(header::CONTENT_TYPE, "text/xml; charset=utf-8")], xml).into_response()
 }
 
 async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputInfo>> {

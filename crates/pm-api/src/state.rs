@@ -69,6 +69,9 @@ pub struct NodeSettings {
 
 pub struct NodeState {
     pub name: String,
+    /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
+    /// that remember a node across address changes.
+    pub node_id: String,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -153,6 +156,7 @@ pub fn profile_url(z32: &str) -> String {
 
 impl NodeState {
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
+        let node_id = node_id(&library);
         let library = Arc::new(Mutex::new(library));
         let tidal: crate::tidal::SharedEndpoints =
             Arc::new(std::sync::RwLock::new(crate::tidal::TidalEndpoints {
@@ -197,6 +201,7 @@ impl NodeState {
             Err(_) => None,
         };
         Arc::new(Self {
+            node_id,
             name: settings.name,
             version: settings.version,
             library,
@@ -972,5 +977,34 @@ fn record_play(library: &Mutex<Library>, zone: &ZoneId, uri: &str) {
     let lib = library.lock().expect("library poisoned");
     if let Err(e) = lib.record_play(pm_model::TrackId(id), Some(zone.0.as_str())) {
         tracing::warn!(error = %e, track = id, "recording play");
+    }
+}
+
+const NODE_ID_KEY: &str = "node.id";
+
+/// This node's id: read from the library, or made and saved on first start.
+fn node_id(lib: &Library) -> String {
+    if let Ok(Some(id)) = lib.get_setting(NODE_ID_KEY) {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = lib.set_setting(NODE_ID_KEY, &id) {
+        tracing::warn!(error = %e, "saving the node id");
+    }
+    id
+}
+
+impl NodeState {
+    /// What this node announces on the LAN (pm-discovery) when its API listens on `port`.
+    pub fn announcement(&self, port: u16) -> pm_discovery::NodeAd {
+        pm_discovery::NodeAd {
+            id: self.node_id.clone(),
+            name: self.name.clone(),
+            port,
+            version: self.version.clone(),
+            token_required: self.token.is_some(),
+        }
     }
 }

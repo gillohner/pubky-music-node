@@ -74,6 +74,9 @@ pub struct ApiConfig {
     /// Tailscale name, …). Published privately on the homeserver when a session
     /// exists (ADR 0008). Empty = `http://<listen>`.
     pub public_url: String,
+    /// Announce the node on the LAN (mDNS `_pubky-music._tcp` and SSDP) so apps
+    /// find it. Only when `listen` is not a loopback address.
+    pub announce: bool,
 }
 
 impl Default for NodeConfig {
@@ -141,6 +144,7 @@ impl Default for ApiConfig {
             name: "Pubky Music Node".into(),
             subsonic_user: "pubky".into(),
             public_url: String::new(),
+            announce: true,
         }
     }
 }

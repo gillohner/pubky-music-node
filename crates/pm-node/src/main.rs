@@ -282,7 +282,27 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             Err(e) => tracing::warn!(file = %file.display(), "cannot read session secret: {e}"),
         }
     }
+    let _announced = announce(cfg, &state);
     pm_api::serve(state, &cfg.api.listen).await
+}
+
+/// Announce the node on the LAN unless it only listens on loopback (or `[api] announce = false`).
+fn announce(cfg: &NodeConfig, state: &pm_api::NodeState) -> Option<pm_discovery::Advertiser> {
+    if !cfg.api.announce {
+        return None;
+    }
+    let addr: std::net::SocketAddr = match cfg.api.listen.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            tracing::info!(listen = %cfg.api.listen, "not announcing on the LAN: listen is not an IP:port");
+            return None;
+        }
+    };
+    if addr.ip().is_loopback() {
+        tracing::info!("not announcing on the LAN: the API listens on loopback only");
+        return None;
+    }
+    Some(pm_discovery::Advertiser::start(state.announcement(addr.port())))
 }
 
 fn session_secret_path(cfg: &NodeConfig) -> PathBuf {

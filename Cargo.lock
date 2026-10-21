@@ -2702,6 +2702,7 @@ dependencies = [
  "md-5",
  "notify",
  "pm-audio",
+ "pm-discovery",
  "pm-endpoint",
  "pm-library",
  "pm-model",
@@ -2728,6 +2729,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2771,6 +2773,17 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "pm-discovery"
+version = "0.1.0"
+dependencies = [
+ "if-addrs 0.15.0",
+ "mdns-sd",
+ "serde",
+ "socket2",
+ "tracing",
 ]
 
 [[package]]
@@ -2832,6 +2845,7 @@ dependencies = [
  "clap",
  "pm-api",
  "pm-audio",
+ "pm-discovery",
  "pm-library",
  "pm-model",
  "pm-out-local",

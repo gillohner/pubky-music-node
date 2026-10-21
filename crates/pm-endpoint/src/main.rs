@@ -68,6 +68,7 @@ fn advertise(name: &str, port: u16) -> anyhow::Result<mdns_sd::ServiceDaemon> {
     let host = format!("{}.local.", hostname_label());
     let instance = name.replace(['.', '\n'], " ");
     let props = [
+        ("role", "endpoint".to_string()),
         ("name", name.to_string()),
         ("version", pm_stream::PROTOCOL_VERSION.to_string()),
     ];

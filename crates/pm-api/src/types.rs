@@ -11,6 +11,9 @@ pub const API_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
+    /// Stable node id (also announced over mDNS and SSDP).
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub version: String,
     pub api: String,

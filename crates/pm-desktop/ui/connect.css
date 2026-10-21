@@ -35,4 +35,16 @@ input {
   background: var(--card); color: var(--fg); margin: 6px 0 4px;
 }
 form button { margin-top: 12px; }
+.lan { margin-top: 28px; }
+.lan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h2 { font-size: 15px; margin: 0 0 6px; }
+.small { font-size: 13px; margin: 0 0 8px; }
+button.link { width: auto; padding: 0; border: 0; background: none; color: var(--accent); font-weight: 500; font-size: 13px; }
+.lan-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.lan-list button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  border: 1px solid var(--line); background: var(--card); color: var(--fg); padding: 10px 14px;
+}
+.lan-list .addr { font-size: 12px; font-weight: 400; color: var(--muted); }
+code { font-size: 12px; }
 .err { color: var(--err); margin-top: 16px; word-break: break-word; }

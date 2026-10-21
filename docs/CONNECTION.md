@@ -7,7 +7,28 @@ connected, and catches up after an outage. Infra brief §2.
 
 - **Pubky Ring** pairs a controller with the owner's node through the homeserver (ADR 0008).
 - **By address**: the app's connect page and the web UI take a URL.
-- **On the LAN**: mDNS `_pubky-music._tcp` and SSDP (in progress, see below).
+- **On the LAN** (`crates/pm-discovery`): the app's connect page lists the nodes it finds under "On this
+  network". A node without a token connects with one click; for a node with a token, clicking fills in
+  the address and asks for the token. The web UI in a browser cannot search the LAN.
+  - A node announces itself over **mDNS** as `_pubky-music._tcp`. Its TXT records are `role=node`, `id`,
+    `name`, `version`, `api=v1` and `auth=token|none`. Endpoints use the same service type with
+    `role=endpoint`, and the node's endpoint discovery skips `role=node`.
+  - It also announces itself over **SSDP**:
+    - it answers `M-SEARCH` for `urn:schemas-pubky-music:device:Node:1`, `upnp:rootdevice`, `ssdp:all`
+      and `uuid:<id>`, and sends `NOTIFY` alive messages every 10 minutes and a byebye on shutdown;
+    - the `X-PM-ID`, `X-PM-NAME` (percent-encoded), `X-PM-VERSION` and `X-PM-AUTH` headers name it;
+    - `LOCATION` is a UPnP description at `/upnp/node.xml`, reachable without the token and naming the
+      node only. Its `presentationURL` is the web UI, so the node also shows in Windows' Network folder.
+  - The app searches both ways at once for 2.5 s and merges the answers by node id. Two protocols, because
+    networks differ: some drop mDNS, others SSDP. On Android, SSDP answers arrive as unicast; mDNS needs a
+    Wi-Fi multicast lock, which the app holds only while it searches.
+  - The node announces itself whenever `[api] listen` is not a loopback address. Turn it off with
+    `[api] announce = false`. In Docker, only host networking puts the announcement on the LAN.
+- **Following a node that moved.** `/v1/info` returns the node's stable `id` (a UUID kept in its library),
+  and the app remembers it. When the saved address stops answering, for example after the router handed
+  out a new IP, the app searches the LAN for that id, switches to the new address and saves it. Checked
+  under Xvfb: an address pointed at a dead port was followed to the node's LAN address, and the node's UI
+  opened signed in.
 
 ## Staying connected: `/v1/events`
 

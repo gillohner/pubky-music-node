@@ -119,7 +119,10 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
 }
 
 /// Connected: remember the node, show it and (on desktops) register the player.
-fn connected(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(), String> {
+fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::Info) -> Result<(), String> {
+    if !info.id.is_empty() {
+        s.node_id = info.id.clone();
+    }
     if let Some(old) = state.current() {
         if old.node_url == s.node_url {
             s.player_address = old.player_address;
@@ -156,10 +159,47 @@ fn saved(state: State<'_, AppState>) -> Option<Saved> {
 /// Reconnect to the remembered node: check it answers, then show it.
 #[tauri::command]
 async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    let s = state.current().ok_or("No node yet")?;
-    let name = node::probe(&s).await?;
-    connected(&app, &state, s)?;
-    Ok(name)
+    let mut s = state.current().ok_or("No node yet")?;
+    let info = match node::probe(&s).await {
+        Ok(info) => info,
+        // The node may have a new address (DHCP): look for its id on the LAN.
+        Err(node::ProbeError::Unreachable(msg)) if !s.node_id.is_empty() => {
+            let found = discover(&app).await;
+            let Some(moved) = found
+                .into_iter()
+                .find(|n| n.id == s.node_id && n.url != s.node_url)
+            else {
+                return Err(msg);
+            };
+            tracing::info!(from = %s.node_url, to = %moved.url, "the node moved; following it");
+            s.node_url = moved.url;
+            node::probe(&s).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    connected(&app, &state, s, &info)?;
+    Ok(info.name)
+}
+
+/// Nodes on the LAN (mDNS and SSDP, `pm-discovery`).
+async fn discover(app: &AppHandle) -> Vec<pm_discovery::FoundNode> {
+    #[cfg(target_os = "android")]
+    let lock = android::MulticastLock::acquire(app).await;
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+    let found =
+        tauri::async_runtime::spawn_blocking(|| pm_discovery::browse(std::time::Duration::from_millis(2500)))
+            .await
+            .unwrap_or_default();
+    #[cfg(target_os = "android")]
+    drop(lock);
+    found
+}
+
+/// The connect page's "On this network" list.
+#[tauri::command]
+async fn discover_nodes(app: AppHandle) -> Vec<pm_discovery::FoundNode> {
+    discover(&app).await
 }
 
 /// An address and token typed by hand.
@@ -174,9 +214,9 @@ async fn connect_manual(
         return Err("Enter the node's address".into());
     }
     let s = Settings::new(&node_url, &token);
-    let name = node::probe(&s).await?;
-    connected(&app, &state, s)?;
-    Ok(name)
+    let info = node::probe(&s).await?;
+    connected(&app, &state, s, &info)?;
+    Ok(info.name)
 }
 
 #[derive(Clone, Serialize)]
@@ -222,9 +262,9 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .map_err(|e| e.to_string())?
         .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
     let s = Settings::new(&record.api_url, &record.token);
-    let name = node::probe(&s).await?;
-    connected(&app, &state, s)?;
-    Ok(name)
+    let info = node::probe(&s).await?;
+    connected(&app, &state, s, &info)?;
+    Ok(info.name)
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
@@ -265,6 +305,7 @@ pub fn run() {
             saved,
             open_saved,
             connect_manual,
+            discover_nodes,
             ring_connect,
             open_ring,
             forget

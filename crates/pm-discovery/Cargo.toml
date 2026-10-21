@@ -1,0 +1,15 @@
+[package]
+name = "pm-discovery"
+description = "Find Pubky Music nodes on the LAN: mDNS _pubky-music._tcp and SSDP, both ways"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+if-addrs = "0.15"
+mdns-sd = { workspace = true }
+serde = { workspace = true }
+socket2 = "0.6"
+tracing = { workspace = true }

@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Apps find nodes on the LAN** (`crates/pm-discovery`, `docs/CONNECTION.md`).
+  - The node announces itself over mDNS (`_pubky-music._tcp`, `role=node`) and SSDP (`urn:schemas-pubky-music:device:Node:1`), with a UPnP description at `/upnp/node.xml`, so it also shows in Windows' Network folder. `[api] announce = false` turns this off; nothing is announced when the API listens on loopback.
+  - The app's connect page lists the nodes found under "On this network".
+  - `/v1/info` returns a stable node `id`. When the saved address stops answering, the app finds the node by that id and follows it to its new address.
+  - Endpoints now announce `role=endpoint`.
 - **The egui app (`pm-app`) is retired** (owner decision, ADR 0012): it left the workspace, CI and the release archives. The Pubky Music app (Tauri) and the web UI are the controllers; `pm-endpoint` is the headless player. The Windows and macOS archives now ship `pm-endpoint` with the system's audio output.
 - **The connection survives outages** (infra brief §2, `docs/CONNECTION.md`).
   - The node numbers every `/v1/events` message (`seq`). The snapshot carries `boot` (new on every start) and `library_rev`.

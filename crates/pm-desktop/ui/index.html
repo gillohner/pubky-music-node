@@ -28,11 +28,17 @@
         <button id="ring-open" class="secondary">Open Pubky Ring</button>
         <p class="muted">Waiting for approval…</p>
       </div>
+      <section id="lan" class="lan">
+        <div class="lan-head"><h2>On this network</h2><button id="lan-again" class="link" type="button" hidden>Search again</button></div>
+        <p id="lan-status" class="small">Looking for nodes…</p>
+        <ul id="lan-list" class="lan-list"></ul>
+      </section>
       <details id="manual-box">
         <summary>Or connect by address</summary>
         <form id="manual">
           <label>Node address<input id="url" autocomplete="url" inputmode="url" placeholder="192.168.1.10:7788" required></label>
           <label>API token<input id="tok" type="password" autocomplete="current-password"></label>
+          <p id="tok-hint" class="small" hidden>This node needs its API token (<code>[api] token</code> in its config). Or sign in with Pubky Ring above.</p>
           <button class="primary" type="submit">Connect</button>
         </form>
       </details>

@@ -16,31 +16,52 @@ fn api(s: &Settings, path: &str) -> String {
     format!("{}/v1/{path}", s.node_url.trim_end_matches('/'))
 }
 
-#[derive(Debug, Deserialize)]
-struct Info {
+/// What the node says about itself.
+#[derive(Debug, Deserialize, Default)]
+pub struct Info {
     #[serde(default)]
-    name: String,
+    pub name: String,
+    /// Stable node id (nodes before LAN discovery have none).
+    #[serde(default)]
+    pub id: String,
 }
 
-/// Check the node answers and accepts the token; returns its name.
-pub async fn probe(s: &Settings) -> Result<String, String> {
+/// Why a probe failed.
+#[derive(Debug)]
+pub enum ProbeError {
+    /// Nothing answered at that address (maybe the node moved).
+    Unreachable(String),
+    /// The node answered and said no, or something else went wrong.
+    Other(String),
+}
+
+impl From<ProbeError> for String {
+    fn from(e: ProbeError) -> String {
+        match e {
+            ProbeError::Unreachable(m) | ProbeError::Other(m) => m,
+        }
+    }
+}
+
+/// Check the node answers and accepts the token; returns its name and id.
+pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
     let resp = client()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| ProbeError::Other(e.to_string()))?
         .get(api(s, "info"))
         .bearer_auth(&s.token)
         .send()
         .await
         .map_err(|e| {
             if e.is_timeout() || e.is_connect() {
-                format!("Can't reach {}", s.node_url)
+                ProbeError::Unreachable(format!("Can't reach {}", s.node_url))
             } else {
-                format!("Can't reach {}: {e}", s.node_url)
+                ProbeError::Unreachable(format!("Can't reach {}: {e}", s.node_url))
             }
         })?;
     match resp.status().as_u16() {
-        200..=299 => Ok(resp.json::<Info>().await.map(|i| i.name).unwrap_or_default()),
-        401 | 403 => Err("The node refused the token".into()),
-        code => Err(format!("The node answered {code}")),
+        200..=299 => Ok(resp.json::<Info>().await.unwrap_or_default()),
+        401 | 403 => Err(ProbeError::Other("The node refused the token".into())),
+        code => Err(ProbeError::Other(format!("The node answered {code}"))),
     }
 }
 

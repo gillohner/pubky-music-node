@@ -21,9 +21,10 @@ tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
 pm-pubky = { path = "../pm-pubky" }
+pm-discovery = { path = "../pm-discovery" }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-opener = "=2.7.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 serde = { version = "1", features = ["derive"] }
@@ -47,6 +48,8 @@ pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
 # Versions match what pkarr's reqwest resolves, so there is one verifier.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
+# The webview hands over jni 0.21 objects (wry); used for the Wi-Fi multicast lock.
+jni021 = { package = "jni", version = "0.21" }
 rustls-platform-verifier = "0.7"
 
 [profile.release]

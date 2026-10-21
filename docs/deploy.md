@@ -43,7 +43,7 @@ Settings → Outputs → "Add renderer" with its IP (the node sends a unicast M-
 must be allowed between the networks) or its description URL; the address is remembered across restarts.
 UPnP/OpenHome renderers (Linn, Naim, …), Chromecast and endpoints are found by multicast and
 fetch audio from the node, neither of which crosses Docker's bridge network; with host networking
-no port mapping is needed and the UI is on port 7788. Set `PM_PUBLIC_URL` to
+no port mapping is needed and the UI is on port 7788, and the apps find the node under "On this network" (mDNS and SSDP). Set `PM_PUBLIC_URL` to
 `http://<nas-ip>:7788` so devices get a reachable address. The entrypoint writes `/data/node.toml`
 only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for one restart.
 
