@@ -238,8 +238,15 @@ impl Endpoint {
 /// devices with the `alsa` feature, the system's shared-mode outputs with
 /// `cpal`.
 pub fn local_outputs() -> OutputRegistry {
-    let registry = OutputRegistry::new();
+    let registry = device_outputs();
     registry.register(Arc::new(pm_zones::outputs::NullOutput::from_env()));
+    registry
+}
+
+/// This machine's audio devices only, without the null output (the app's
+/// player: a "Null output" zone per phone or laptop would only be clutter).
+pub fn device_outputs() -> OutputRegistry {
+    let registry = OutputRegistry::new();
     #[cfg(feature = "alsa")]
     for out in pm_out_local::alsa::AlsaOutput::enumerate() {
         registry.register(Arc::new(out));

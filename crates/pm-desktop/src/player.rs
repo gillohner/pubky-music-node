@@ -9,7 +9,12 @@ use crate::settings::Settings;
 /// endpoint port (another when it is taken). `None` when nothing can be
 /// bound; the UI's "This browser" zone still plays then.
 pub fn start() -> Option<u16> {
-    let outputs = pm_endpoint::local_outputs();
+    // The null output only for scripted tests (PM_NULL_OUTPUT).
+    let outputs = if std::env::var_os("PM_NULL_OUTPUT").is_some() {
+        pm_endpoint::local_outputs()
+    } else {
+        pm_endpoint::device_outputs()
+    };
     let listener = std::net::TcpListener::bind(("0.0.0.0", pm_stream::DEFAULT_PORT))
         .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))
         .map_err(|e| tracing::warn!("no player: cannot listen: {e}"))

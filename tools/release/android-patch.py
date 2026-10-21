@@ -13,6 +13,10 @@ silently cannot connect.
 5. The player's foreground service (tools/release/android/PlayerService.kt),
    its permissions and manifest entry: it keeps the phone's zone playing with
    the app in the background (src/android.rs starts it).
+6. Our own network security config, allowing cleartext: the verifier's Android
+   library (2.) brings one that allows http only to certificate-revocation
+   hosts, and a network security config overrides usesCleartextTraffic (1.),
+   so the WebView refused every http:// node (ERR_CLEARTEXT_NOT_PERMITTED).
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -119,7 +123,34 @@ if entry not in mtext:
     mtext = mtext.replace("</application>", "    " + entry + "\n    </application>")
 manifest.write_text(mtext)
 
+# 6. cleartext for every host (nodes on a LAN), replacing the verifier library's config
+res_xml = app / "src" / "main" / "res" / "xml"
+res_xml.mkdir(parents=True, exist_ok=True)
+(res_xml / "pubky_music_network.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<!-- tools/release/android-patch.py: nodes on a LAN are http://192.168.x.y:7788. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
+""")
+mtext = manifest.read_text()
+if "pubky_music_network" not in mtext:
+    tools_ns = 'xmlns:tools="http://schemas.android.com/tools"'
+    if tools_ns not in mtext:
+        root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android"'
+        if mtext.count(root) != 1:
+            die(f"expected one `{root}` in {manifest}")
+        mtext = mtext.replace(root, root + "\n    " + tools_ns)
+    anchor = 'android:usesCleartextTraffic="${usesCleartextTraffic}"'
+    if mtext.count(anchor) != 1:
+        die(f"expected one `{anchor}` in {manifest}")
+    mtext = mtext.replace(
+        anchor,
+        anchor + '\n        android:networkSecurityConfig="@xml/pubky_music_network"'
+        '\n        tools:replace="android:networkSecurityConfig"',
+    )
+    manifest.write_text(mtext)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}) added"
+    f"player service ({pkg.group(1)}), network config added"
 )

@@ -32,6 +32,16 @@ def card():
     return m.group(1)
 
 
+def playback_output(hw):
+    """The node's output id for the loopback's playback side, as `pm-node outputs` lists it."""
+    out = subprocess.run([node, "outputs"], capture_output=True, text=True, timeout=60).stdout
+    ids = [line.split("\t")[0] for line in out.splitlines() if line.strip()]
+    want = f"alsa:hw:{hw},0"
+    if want not in ids:
+        sys.exit(f"the node lists no {want} (built with --features alsa?); it lists: {', '.join(ids)}")
+    return want
+
+
 def noise(path, rate, bits, channels, seconds=4):
     rnd = random.Random(f"{rate}/{bits}")
     width = bits // 8
@@ -68,7 +78,7 @@ def first_sound(pcm, frame):
     return len(pcm)
 
 
-def check(src, hw):
+def check(src, hw, output):
     ref = work / (src.stem + ".ref.wav")
     subprocess.run([node, "play", str(src), "--to", f"wav:{ref}"], check=True, capture_output=True, timeout=120)
     (rate, bits, ch, align), want = pcm_of(ref)
@@ -77,7 +87,7 @@ def check(src, hw):
     rec = subprocess.Popen(["arecord", "-q", "-D", f"hw:{hw},1,0", "-f", fmt, "-r", str(rate), "-c", str(ch),
                             "-t", "raw", str(cap)])
     time.sleep(1)
-    play = subprocess.run([node, "play", str(src), "--to", f"alsa:hw:{hw},0"], capture_output=True, text=True,
+    play = subprocess.run([node, "play", str(src), "--to", output], capture_output=True, text=True,
                           timeout=120)
     time.sleep(1)
     rec.terminate()
@@ -101,11 +111,13 @@ def check(src, hw):
 
 
 hw = card()
+output = playback_output(hw)
+print(f"loopback card {hw}; playing to {output}")
 sources = [
     noise(work / "noise-16-44100.wav", 44100, 16, 2),
     noise(work / "noise-24-96000.wav", 96000, 24, 2),
     FIXTURES / "14_wasted_bits.flac",
 ]
 for s in sources:
-    check(s, hw)
+    check(s, hw, output)
 print("PASS: the ALSA hw: output is bit-perfect through the loopback")

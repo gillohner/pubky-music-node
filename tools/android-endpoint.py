@@ -2,7 +2,8 @@
 """The phone as a zone, on an Android emulator (CI: release.yml, android-emulator).
 
 The release APK is installed and connected by address to a node on the host
-(10.0.2.2 from the emulator). Its built-in player (AAudio through cpal)
+(10.0.2.2 from the emulator) over plain http, and must show the node's page.
+Its built-in player (AAudio through cpal)
 must become a zone that plays a track in real time, and keep playing with the
 app in the background: the foreground service (PlayerService.kt) keeps the
 process alive.
@@ -183,6 +184,15 @@ def run(node):
         adb("shell", "input", "text", "10.0.2.2:7788")
         adb("shell", "input", "keyevent", "66")
         shot("1-connecting")
+        def node_page():
+            nodes = "\n".join(ui_nodes())
+            if "Webpage not available" in nodes or "ERR_" in nodes:
+                err = re.search(r'text="(net::ERR_[A-Z_]+)"', nodes)
+                raise SystemExit(f"FAIL: the app cannot load the node's page ({err.group(1) if err else 'Webpage not available'})")
+            return "Now playing" in nodes
+
+        until("the node's page in the app", node_page, timeout=90, every=3)
+        log("the node's page is showing in the app")
         until("the player service", lambda: "player service started" in logcat(), timeout=90)
         m = until("the player's port", lambda: re.search(r"player ready port=(\d+)", logcat()), timeout=10)
         port = m.group(1)

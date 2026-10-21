@@ -105,7 +105,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - run: cargo build -p pm-node --features pm-out-local/alsa
+      - run: cargo build -p pm-node --features alsa
       - name: bit-perfect through snd-aloop
         run: |
           vng -r "$KVER" --user root -m 2G -- bash -c \
