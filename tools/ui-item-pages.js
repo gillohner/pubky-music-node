@@ -82,6 +82,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const label = (await dl.textContent('#main .back')).trim(); await dl.click('#main .back'); await sleep(1500);
   console.log('deep link back:', label, '→', new URL(dl.url()).pathname);
   if (new URL(dl.url()).pathname !== '/albums') errors.push('deep-link Back did not go to /albums');
+  // ---- half-star rating (1–10): hover previews, a click saves, the same click clears ----
+  const rp = await ctx.newPage(); await rp.goto(BASE + '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
+  if (await rp.waitForSelector('#stars', { timeout: 20000 }).then(() => true).catch(() => false)) {
+    await rp.hover('[data-rate="7"]');
+    const fills = await rp.$$eval('#stars .star', (s) => s.map((x) => x.className.replace('star ', '')).join(','));
+    await rp.click('[data-rate="7"]');
+    const saved = await rp.waitForFunction(() => (document.querySelector('#ratingval') || {}).textContent === '3½ of 5', { timeout: 10000 }).then(() => true).catch(() => false);
+    await rp.click('[data-rate="7"]');
+    const cleared = await rp.waitForFunction(() => (document.querySelector('#ratingval') || {}).textContent === '', { timeout: 10000 }).then(() => true).catch(() => false);
+    console.log('rating: hover', fills, '| saved 3½', saved, '| cleared', cleared);
+    if (fills !== 'f2,f2,f2,f1,f0' || !saved || !cleared) errors.push('half-star rating');
+  } else console.log('rating: skipped (no rating row on this node)');
+  await rp.close();
+
   // ---- route table ----
   const rt = await p.evaluate(() => window.pmRoutes && window.pmRoutes.check());
   console.log('route table:', rt ? rt.join(' | ') : 'not exposed');

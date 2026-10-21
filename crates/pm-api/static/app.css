@@ -487,8 +487,15 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* ---- reviews ---- */
 .reviewrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
 .stars { display: inline-flex; gap: 2px; }
-.star { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px; }
-.star.on, .stars:hover .star:hover, .stars .star:has(~ .star:hover) { color: var(--warn); }
+.star { position: relative; display: inline-block; width: 24px; height: 26px; font-size: 22px; line-height: 26px; color: var(--muted); }
+.star .glyph { position: absolute; inset: 0; text-align: center; pointer-events: none; }
+.star.f2 .glyph { color: var(--warn); }
+.star.f1 .glyph { background: linear-gradient(90deg, var(--warn) 50%, var(--muted) 50%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.star .half { position: absolute; top: 0; bottom: 0; width: 50%; background: none; border: 0; padding: 0; cursor: pointer; }
+.star .half.l { left: 0; border-radius: 4px 0 0 4px; }
+.star .half.r { right: 0; border-radius: 0 4px 4px 0; }
+.star .half:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ratingval { color: var(--muted); font-size: 13px; margin-right: 8px; min-width: 4.5em; }
 .notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; }
 .notes-edit { flex-basis: 100%; max-width: 560px; }
 .notes-edit textarea { resize: vertical; font: inherit; }

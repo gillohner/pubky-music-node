@@ -6,7 +6,7 @@
 //! | Node object | v1 object | Path |
 //! | :-- | :-- | :-- |
 //! | [`Playlist`] (up to 100 songs) | social `collection`, `layout: list` | `/{root}/social/v1/posts/{id}/{editId}.json` |
-//! | [`Review`] with a rating | music `review`, rating doubled to 1–10 | `/{root}/music/v1/posts/…` |
+//! | [`Review`] with a rating | music `review` (rating 1–10) | `/{root}/music/v1/posts/…` |
 //! | [`Review`] without a rating | social `note` embedding the music URL | `/{root}/social/v1/posts/…` |
 //! | [`Activity`] | music `listen` | `/priv/music/v1/posts/…` |
 //! | [`Favourite`](crate::Favourite) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
@@ -212,9 +212,8 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
 
 fn review_to_v1(r: &Review) -> V1Post {
     match r.rating {
-        // 1–5 stars on the node, 1–10 half stars on the wire
-        Some(stars) => V1Post::Music(pubky_music_specs::review(
-            stars.saturating_mul(2),
+        Some(rating) => V1Post::Music(pubky_music_specs::review(
+            rating,
             Some(r.text.clone()),
             r.target_uri.clone(),
         )),
@@ -303,8 +302,7 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
     }
 }
 
-/// A node review read back from a music `review` post. A rating on the wire (1–10) becomes stars
-/// rounded up. A review without text has no node form yet and is skipped.
+/// A node review read back from a music `review` post.
 pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
     if post.kind != MusicPostKind::Review {
         return None;
@@ -313,8 +311,8 @@ pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
     let target = MusicUri::parse(post.embed.as_deref()?).ok()?;
     Some(MusicContent::Review(Review {
         target_uri: target.to_url(),
-        rating: Some(review.rating.div_ceil(2)),
-        text: review.text?,
+        rating: Some(review.rating),
+        text: review.text.unwrap_or_default(),
         created_at: micros_of(id)?,
     }))
 }
@@ -487,7 +485,7 @@ mod tests {
         let path = v1.version_path(&id, None, Root::Pub, &owner()).unwrap();
         assert_eq!(path, format!("/pub/music/v1/posts/{id}/{id}.json"));
         let V1Post::Music(post) = &v1 else { panic!() };
-        assert_eq!(pubky_music_specs::read_review(post).unwrap().rating, 8);
+        assert_eq!(pubky_music_specs::read_review(post).unwrap().rating, 4);
         let MusicContent::Review(back) = from_music(post, &id).unwrap() else {
             panic!()
         };
@@ -507,12 +505,15 @@ mod tests {
         };
         assert_eq!(back, plain);
 
-        // An odd rating on the wire rounds up to whole stars
-        let seven = pubky_music_specs::review(7, Some("ok".into()), SONG.into());
+        // A rating alone, from another client
+        let seven = pubky_music_specs::review(7, None, SONG.into());
         let MusicContent::Review(r) = from_music(&seven, &id).unwrap() else {
             panic!()
         };
-        assert_eq!(r.rating, Some(4));
+        assert_eq!((r.rating, r.text.as_str()), (Some(7), ""));
+        crate::schemas::MusicPost::new(MusicContent::Review(r))
+            .validate(Some(&id))
+            .unwrap();
     }
 
     #[test]

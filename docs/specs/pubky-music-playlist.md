@@ -1,5 +1,10 @@
 # `pubky.music` objects as v1 `PubkyAppPost`s
 
+> **Superseded by [ADR 0014](../adr/0014-music-on-social-v1.md) (2026-10-21).** The homeserver now gets
+> pubky-social-specs v1 objects; this envelope remains only as the node's local working copy and for reading
+> old files once during the migration. Envelope version 2 makes review ratings 1–10 (half stars); a
+> version 1 review's stars are doubled when read.
+
 Status: implemented in `pm-pubky::schemas::post` (pubky-app-specs 0.8.1). This replaces the
 earlier draft of an own `PubkyMusicPlaylist` object type: until the music-specific social
 primitives are defined, every music object is a **regular v1 post** whose `content` is a JSON

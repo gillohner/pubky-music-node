@@ -654,7 +654,7 @@ async fn playlist_lifecycle() {
         &app,
         "PUT",
         "/v1/reviews",
-        Some(serde_json::json!({"track_id": tagged_id, "rating": 7})),
+        Some(serde_json::json!({"track_id": tagged_id, "rating": 11})),
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);

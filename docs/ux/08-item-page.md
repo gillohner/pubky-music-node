@@ -47,8 +47,9 @@ Sources: library, TIDAL, Deezer, Spotify (plays on a Connect device), Pubky-only
 when Deezer has it). A source that cannot do something says so in place ("Not on your services · Connect
 TIDAL"), it does not remove the section.
 
-The rating is 1–5 stars in this change. The social specs' `review` is 1–10; half stars come with step 3,
-when reviews move to that kind (the node stores 1–5 today).
+The rating is 1–10, shown as five stars in halves (7 is three and a half): hovering previews it, a click
+on a star's left or right half sets it, the same click again clears it. It is the music `review` kind's scale
+(ADR 0014); older 1–5 ratings were doubled.
 
 ## Rows and tiles
 

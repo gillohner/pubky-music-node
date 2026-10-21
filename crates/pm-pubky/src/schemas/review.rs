@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// so "one review per target" is a reader rule: the newest review of a
 /// target by an author wins.
 ///
-/// `rating` is 1–5 (stars). It is optional so a text-only review is valid.
+/// `rating` is 1–10: five stars in halves (7 is three and a half). It is optional so a text-only
+/// review is valid; text is optional when there is a rating.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     pub target_uri: String,

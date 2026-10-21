@@ -92,7 +92,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | PUT | `/v1/tags` | `{uri|track_id|album_id|artist_id, label}` | `{uri, label, tagged: true}`; label trimmed and lowercased, 1–20 chars; 422 without a canonical identity |
 | DELETE | `/v1/tags` | `?…&label=` | `{uri, label, tagged: false}` |
 | GET | `/v1/reviews` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, reviews: [{id, uri, rating?, text, created_at, updated_at, synced}]}`: my private reviews (v1 `pubky.music/review` posts) |
-| PUT | `/v1/reviews` | `{uri|track_id|album_id|artist_id, rating?: 1–5, text?}` | creates or replaces my review of that object (same post id); 400 with neither rating nor text, 422 without a canonical identity |
+| PUT | `/v1/reviews` | `{uri|track_id|album_id|artist_id, rating?: 1–10, text?}` (rating in half stars: 7 is three and a half) | creates or replaces my review of that object (same post id); 400 with neither rating nor text, 422 without a canonical identity |
 | DELETE | `/v1/reviews` | `?…` | removes it (tombstoned until the delete is pushed) |
 | POST | `/v1/playlists/from-queue` | `{zone?, uris?, name?}` | `{playlist: PlaylistDetail, skipped: [label]}`; a new private playlist from a zone's queue (or the given queue URIs: `track:<id>`, local paths, canonical URLs); entries without a canonical identity are listed in `skipped`; 422 when nothing qualifies |
 | POST | `/v1/playlists/import` | `{name, description?, tracks: [{title, artist?, album?, uri?, path?}]}` | `{id, name, parsed, imported, unresolved}`; items resolve through the library (canonical URL, exact path, file name, title + artist) to canonical URLs |

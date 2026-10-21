@@ -48,7 +48,8 @@ pub mod limits {
     pub const REVIEW_TEXT_MIN: usize = 1;
     pub const REVIEW_TEXT_MAX: usize = 2000;
     pub const REVIEW_RATING_MIN: u8 = 1;
-    pub const REVIEW_RATING_MAX: u8 = 5;
+    /// Ten half stars (envelope version 2).
+    pub const REVIEW_RATING_MAX: u8 = 10;
     pub const URI_MAX: usize = 2048;
     pub const SERVICE_NAME_MAX: usize = 50;
 }

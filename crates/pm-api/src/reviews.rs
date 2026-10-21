@@ -1,6 +1,5 @@
-//! The user's own reviews: a rating (1–5) and/or notes on an album, track or
-//! artist, stored as private v1 `pubky.music/review` posts (ADR 0006) and
-//! synced like playlists. One review per target; editing keeps the post id.
+//! The user's own reviews: a rating (1–10, half stars) and/or notes on an album, track or
+//! artist, kept by the node and synced as music `review` posts (ADR 0014). One review per target; editing keeps the post id.
 
 use crate::favourites::canonical_for;
 use crate::playlists::{now_micros, store};

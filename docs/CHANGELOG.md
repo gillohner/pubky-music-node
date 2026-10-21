@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Ratings in half stars.** Ratings are 1–10, shown as five stars with halves on every item page. Hovering previews the rating; a click on a star's left or right half sets it; the same click again clears it. `PUT /v1/reviews` takes `rating: 1–10`. The node's stored envelope moved to version 2, and older 1–5 ratings (on the node and in old homeserver files) read doubled. A review can be a rating alone, including one pulled from another client. `tools/ui-item-pages.js` checks hover, save and clear. Shots: `docs/ux/shots/ratings/`.
 - **Music data moves to pubky-social-specs v1** (steward plan step 3, ADR 0014). The node keeps its working copy and converts at the homeserver:
   - Playlists become private social `collection` posts (`layout: list`, each song's added time in `ext.music.added_at`).
   - Rated reviews become music `review` posts (stars doubled to 1–10). Text-only reviews become social notes that embed the music URL.

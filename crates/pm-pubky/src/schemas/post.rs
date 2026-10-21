@@ -1,5 +1,5 @@
 //! Music objects as v1 `PubkyAppPost`s (pubky-app-specs 0.8) whose `content`
-//! is a JSON envelope: `{"type":"pubky.music/<kind>","v":1, ...fields}`.
+//! is a JSON envelope: `{"type":"pubky.music/<kind>","v":2, ...fields}` (the node's working copy; the homeserver gets v1 objects, ADR 0014).
 //!
 //! Why a post and not an own object type: the v1 specs are what Nexus and
 //! every Pubky client already index and render, so a playlist written this
@@ -19,8 +19,9 @@ use pubky_app_specs::traits::{HasIdPath, Validatable as _};
 use pubky_app_specs::{PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind};
 use serde::{Deserialize, Serialize};
 
-/// Current envelope version.
-pub const ENVELOPE_VERSION: u32 = 1;
+/// Current envelope version. 2 (2026-10-21): review ratings are 1–10 (half stars); a version 1
+/// review's 1–5 stars are doubled when read.
+pub const ENVELOPE_VERSION: u32 = 2;
 pub const TYPE_PLAYLIST: &str = "pubky.music/playlist";
 pub const TYPE_REVIEW: &str = "pubky.music/review";
 pub const TYPE_ACTIVITY: &str = "pubky.music/activity";
@@ -80,8 +81,9 @@ struct Envelope {
     v: u32,
 }
 
+/// Every envelope ever written carries `v`; one without it predates the field.
 fn default_version() -> u32 {
-    ENVELOPE_VERSION
+    1
 }
 
 impl MusicContent {
@@ -203,7 +205,12 @@ impl MusicPost {
                 envelope.v
             )));
         }
-        let content = envelope.content.sanitize();
+        let mut content = envelope.content.sanitize();
+        if envelope.v < 2 {
+            if let MusicContent::Review(r) = &mut content {
+                r.rating = r.rating.map(|stars| stars.saturating_mul(2));
+            }
+        }
         content.validate(id)?;
         Ok(Some(Self { post, content }))
     }
@@ -271,7 +278,7 @@ mod tests {
         assert!(post.post.embed.is_none());
         let json: serde_json::Value = serde_json::from_str(&post.post.content).unwrap();
         assert_eq!(json["type"], TYPE_PLAYLIST);
-        assert_eq!(json["v"], 1);
+        assert_eq!(json["v"], ENVELOPE_VERSION);
         assert_eq!(json["name"], "Late night");
         assert_eq!(json["items"][0]["uri"], rec().to_url());
 
@@ -301,6 +308,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&post.post.content).unwrap();
         assert_eq!(v["type"], TYPE_ACTIVITY);
         assert_eq!(v["source_kind"]["kind"], "local");
+    }
+
+    #[test]
+    fn version_1_reviews_read_with_their_stars_doubled() {
+        let r = Review::new(&rec(), Some(4), "Good");
+        let id = r.create_id();
+        let mut post = MusicPost::new(MusicContent::Review(r.clone()));
+        // As a node wrote it before ratings were 1–10
+        let mut v: serde_json::Value = serde_json::from_str(&post.post.content).unwrap();
+        assert_eq!(v["v"], ENVELOPE_VERSION);
+        v["v"] = 1.into();
+        post.post.content = v.to_string();
+        let back = MusicPost::from_post(post.post.clone(), Some(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.as_review().unwrap().rating, Some(8));
+        // Version 2 keeps the value; 10 is the top
+        let ten = MusicPost::new(MusicContent::Review(Review {
+            rating: Some(10),
+            ..r.clone()
+        }));
+        let back = MusicPost::from_post(ten.post, Some(&id)).unwrap().unwrap();
+        assert_eq!(back.as_review().unwrap().rating, Some(10));
+        let eleven = MusicPost::new(MusicContent::Review(Review {
+            rating: Some(11),
+            ..r
+        }));
+        assert!(eleven.validate(Some(&id)).is_err());
     }
 
     #[test]
