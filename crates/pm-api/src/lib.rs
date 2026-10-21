@@ -25,6 +25,7 @@ pub mod identify;
 pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
+pub mod listenbrainz;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
@@ -252,6 +253,22 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .delete(jellyfin::sign_out),
         )
         .route("/sources/jellyfin/stream/{id}", get(jellyfin::stream))
+        .route(
+            "/listenbrainz",
+            get(listenbrainz::status)
+                .put(listenbrainz::connect)
+                .delete(listenbrainz::disconnect),
+        )
+        .route("/listenbrainz/import", post(listenbrainz::import_listens))
+        .route(
+            "/listenbrainz/recommendations",
+            get(listenbrainz::recommendations),
+        )
+        .route("/listenbrainz/playlists", get(listenbrainz::playlists))
+        .route(
+            "/listenbrainz/playlists/{id}/import",
+            post(listenbrainz::import_playlist),
+        )
         .route("/sources/jellyfin/cover/{id}", get(jellyfin::cover))
         .route("/sources/jellyfin/playlists", get(jellyfin::playlists))
         .route(
@@ -2788,6 +2805,191 @@ mod tests {
 
     /// Audius against a local mock: the discovery host is configured, a search
     /// yields track hits, an item has one streamable track, and it plays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listenbrainz_gets_what_zones_play_and_gives_back_history_and_picks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let down = Arc::new(AtomicBool::new(true));
+        let (g1, d1) = (got.clone(), down.clone());
+        const PL: &str = "e81452b9-3165-4f43-a8d9-f6c2c5ed7154";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token_ok = |h: &axum::http::HeaderMap| {
+            h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Token LBT")
+        };
+        let mock = Router::new()
+            .route(
+                "/1/validate-token",
+                get(move |h: axum::http::HeaderMap| async move {
+                    Json(if token_ok(&h) { serde_json::json!({"valid": true, "user_name": "owner"}) } else { serde_json::json!({"valid": false}) })
+                }),
+            )
+            .route(
+                "/1/submit-listens",
+                post(move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+                    let (g, d) = (g1.clone(), d1.clone());
+                    async move {
+                        assert!(token_ok(&h));
+                        if b["listen_type"] == "playing_now" {
+                            return StatusCode::OK;
+                        }
+                        if d.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        g.lock().unwrap().extend(b["payload"].as_array().unwrap().iter().cloned());
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/1/user/owner/listens",
+                get(|| async {
+                    Json(serde_json::json!({"payload": {"count": 2, "listens": [
+                        {"listened_at": 1792593797, "track_metadata": {"track_name": "Some Resolve", "artist_name": "X", "mbid_mapping": {"recording_mbid": "30d08f4c-d825-4ae1-b79c-44242cddd7c0"}}},
+                        {"listened_at": 1792593336, "track_metadata": {"track_name": "Congruence", "artist_name": "Y"}}]}}))
+                }),
+            )
+            .route(
+                "/1/cf/recommendation/user/owner/recording",
+                get(|| async {
+                    Json(serde_json::json!({"payload": {"mbids": [{"recording_mbid": "bd953e77-f7df-467b-b1cf-e42d3eec5968", "score": 0.6}, {"recording_mbid": "2456f690-add7-467f-9ca0-000000000000", "score": 0.5}]}}))
+                }),
+            )
+            .route(
+                "/1/user/owner/playlists/createdfor",
+                get(|| async {
+                    Json(serde_json::json!({"playlist_count": 1, "playlists": [{"playlist": {"title": "Weekly Jams for owner", "identifier": format!("https://listenbrainz.org/playlist/{PL}"), "track": []}}]}))
+                }),
+            )
+            .route(
+                "/1/playlist/{id}",
+                get(|| async {
+                    Json(serde_json::json!({"playlist": {"title": "Weekly Jams for owner", "track": [
+                        {"identifier": ["https://musicbrainz.org/recording/bd953e77-f7df-467b-b1cf-e42d3eec5968"], "title": "Sherpa"},
+                        {"identifier": ["https://example.com/x"], "title": "?"}]}}))
+                }),
+            )
+            .route(
+                "/song.flac",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.listenbrainz_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "nope"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "LBT"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            (v["user"].as_str(), v["submit"].as_bool()),
+            (Some("owner"), Some(true))
+        );
+        assert!(!v.to_string().contains("LBT"));
+
+        // A zone plays a song to its end while ListenBrainz is down: the listen waits
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+            {"uri": format!("http://127.0.0.1:{port}/song.flac"), "title": "Song", "artist": "Band", "album": "Record"}], "replace": true, "play": true}))).await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        let mut waiting = 0;
+        for _ in 0..300 {
+            let (_, v) = call(&app, "GET", "/v1/listenbrainz", None).await;
+            waiting = v["pending"].as_u64().unwrap();
+            if waiting == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(waiting, 1, "kept for later");
+        // ListenBrainz is back: the waiting listen goes
+        down.store(false, Ordering::SeqCst);
+        let (_, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"submit": true})),
+        )
+        .await;
+        assert_eq!(v["pending"], 0);
+        {
+            let got = got.lock().unwrap();
+            assert_eq!(got.len(), 1, "{got:?}");
+            let m = &got[0]["track_metadata"];
+            assert_eq!(
+                (
+                    m["track_name"].as_str(),
+                    m["artist_name"].as_str(),
+                    m["release_name"].as_str()
+                ),
+                (Some("Song"), Some("Band"), Some("Record"))
+            );
+            assert_eq!(m["additional_info"]["media_player"], "Pubky Music");
+            assert!(got[0]["listened_at"].as_i64().unwrap() > 1_700_000_000);
+        }
+
+        // History comes back by MusicBrainz recording, once
+        let (st, imp) = call(&app, "POST", "/v1/listenbrainz/import", None).await;
+        assert_eq!(st, StatusCode::OK, "{imp}");
+        assert_eq!(
+            (imp["imported"].as_u64(), imp["skipped"].as_u64()),
+            (Some(1), Some(1))
+        );
+        let (_, again) = call(&app, "POST", "/v1/listenbrainz/import", None).await;
+        assert_eq!(again["imported"], 0);
+        let (_, acts) = call(&app, "GET", "/v1/activity", None).await;
+        assert!(
+            acts.to_string().contains("30d08f4c-d825-4ae1-b79c-44242cddd7c0"),
+            "{acts}"
+        );
+
+        // Picks and the playlists made for the user
+        let (st, rec) = call(&app, "GET", "/v1/listenbrainz/recommendations", None).await;
+        assert_eq!(st, StatusCode::OK, "{rec}");
+        assert_eq!(rec.as_array().unwrap().len(), 2);
+        let (_, pls) = call(&app, "GET", "/v1/listenbrainz/playlists", None).await;
+        assert_eq!(pls[0]["id"], PL);
+        let (st, imp) = call(
+            &app,
+            "POST",
+            &format!("/v1/listenbrainz/playlists/{PL}/import"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{imp}");
+        assert_eq!(
+            (imp["imported"].as_u64(), imp["skipped"].as_u64()),
+            (Some(1), Some(1))
+        );
+
+        let (_, v) = call(&app, "DELETE", "/v1/listenbrainz", None).await;
+        assert_eq!(v["connected"], false);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn jellyfin_signs_in_once_and_keeps_only_the_token() {
         let flac = std::fs::read(concat!(

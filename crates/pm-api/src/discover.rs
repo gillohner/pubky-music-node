@@ -424,14 +424,38 @@ pub(crate) async fn play_plan(
         }
         None => match describe_from_provider(&s, &uri).await {
             Some(it) => (it, None, None, None),
-            None => {
-                return Err(ApiError::not_found(
-                    "neither Pinakes nor a connected service knows this link",
-                ))
-            }
+            // A MusicBrainz recording Pinakes has not seen: MusicBrainz names it
+            None => match mb_recording(&s, &uri).await {
+                Some(m) => {
+                    let mut it = bare_item(&uri);
+                    it.title = Some(m.title);
+                    it.artist = Some(m.artist).filter(|a| !a.is_empty());
+                    it.kind = "track".into();
+                    (it, None, None, m.length_ms.map(|l| l / 1000))
+                }
+                None => {
+                    return Err(ApiError::not_found(
+                        "neither Pinakes nor a connected service knows this link",
+                    ))
+                }
+            },
         },
     };
-    let res = resolve(&service_access(&s), &it, album_id);
+    let mut it = it;
+    let mut res = resolve(&service_access(&s), &it, album_id);
+    // Nothing plays it yet: find it on the connected services by its ISRC (MusicBrainz first)
+    if res.plays_from.is_none() && album_id.is_none() {
+        let isrc = match uri.strip_prefix("https://musicbrainz.org/isrc/") {
+            Some(i) => Some(i.trim_end_matches('/').to_ascii_uppercase()),
+            None => mb_recording(&s, &uri)
+                .await
+                .and_then(|m| m.isrcs.into_iter().next()),
+        };
+        if let Some(isrc) = isrc {
+            it.also_on.extend(isrc_versions_for(&s, &isrc, &[]).await);
+            res = resolve(&service_access(&s), &it, album_id);
+        }
+    }
     let mut plan = PlayPlan {
         uri: it.uri.clone(),
         plays_from: res.plays_from.clone(),
@@ -557,6 +581,23 @@ pub(crate) async fn describe_uris(s: &Arc<NodeState>, uris: &[String]) -> Vec<Di
         }
     }
     found.extend(fresh);
+    // MusicBrainz recordings nobody described: MusicBrainz names them (paced, so a few per call)
+    let mut named = 0;
+    for u in &uris {
+        if named >= 10 || found.get(u).is_some_and(|it| it.title.is_some()) {
+            continue;
+        }
+        if !u.starts_with("https://musicbrainz.org/recording/") {
+            continue;
+        }
+        named += 1;
+        if let Some(m) = mb_recording(s, u).await {
+            let it = found.entry(u.clone()).or_insert_with(|| bare_item(u));
+            it.title = Some(m.title);
+            it.artist = Some(m.artist).filter(|a| !a.is_empty());
+            it.kind = "track".into();
+        }
+    }
     uris.iter()
         .map(|u| {
             found.remove(u).unwrap_or_else(|| DiscoverItem {
@@ -648,6 +689,85 @@ pub(crate) async fn describe_from_provider(s: &NodeState, u: &str) -> Option<Dis
     it.plays_from = r.plays_from;
     it.connect = r.connect;
     Some(it)
+}
+
+/// What MusicBrainz says about a recording: enough to name it and to find it by ISRC.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MbRecording {
+    pub title: String,
+    pub artist: String,
+    pub isrcs: Vec<String>,
+    pub length_ms: Option<u64>,
+}
+
+/// A MusicBrainz recording link looked up in MusicBrainz (cached 30 days; a miss for a day).
+/// `None` for other links, without a contact, or when MusicBrainz does not answer.
+pub(crate) async fn mb_recording(s: &NodeState, uri: &str) -> Option<MbRecording> {
+    let raw = uri
+        .strip_prefix("https://musicbrainz.org/recording/")?
+        .trim_end_matches('/');
+    let mbid = pm_model::Mbid::parse(raw).ok()?;
+    let key = format!("mb.recording.{mbid}");
+    let now = pm_library::db::now_unix();
+    let cached = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(&key)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<(i64, Option<MbRecording>)>(&j).ok());
+    if let Some((at, r)) = cached {
+        let ttl = if r.is_some() { 30 * 86_400 } else { 86_400 };
+        if now - at < ttl {
+            return r;
+        }
+    }
+    let contact = s.contact();
+    if contact.is_empty() {
+        return None;
+    }
+    let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
+    cfg.base_url = s.mb_base.read().expect("mb lock").clone();
+    let mb = pm_library::musicbrainz::MusicBrainzClient::new(cfg).ok()?;
+    let found = match mb.recording_by_mbid(mbid).await {
+        Ok(r) => r.map(|r| MbRecording {
+            title: r.title,
+            artist: r
+                .artists
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            isrcs: r.isrcs.iter().map(|i| i.to_string()).collect(),
+            length_ms: r.length_ms,
+        }),
+        Err(e) => {
+            tracing::debug!(%mbid, "musicbrainz recording: {e}");
+            return None;
+        }
+    };
+    if let Ok(j) = serde_json::to_string(&(now, &found)) {
+        let _ = s.library.lock().expect("library poisoned").set_setting(&key, &j);
+    }
+    found
+}
+
+/// The item's tracks on the connected services, found by ISRC (one per service).
+pub(crate) async fn isrc_versions_for(s: &NodeState, isrc: &str, skip: &[&str]) -> Vec<Version> {
+    let acc = service_access(s);
+    let mut out = Vec::new();
+    if access(&acc, "tidal") == Access::Full && !skip.contains(&"tidal") {
+        if let Ok(v) = crate::tidal::isrc_versions(s, isrc).await {
+            out.extend(v.into_iter().take(1));
+        }
+    }
+    if access(&acc, "spotify") == Access::External && !skip.contains(&"spotify") {
+        if let Ok(v) = crate::spotify::isrc_versions(s, isrc).await {
+            out.extend(v.into_iter().take(1));
+        }
+    }
+    out
 }
 
 /// An album's tracklist (a release, or the first release of a release

@@ -348,39 +348,50 @@ pub(crate) async fn resolve_playlist(s: &Arc<NodeState>, p: &Playlist) -> (Vec<S
         .filter(|(it, t)| t.is_none() && it.also_on.is_empty() && it.in_library.is_none())
         .map(|(it, _)| discover::fill_from_key(s, it, None));
     futures_util::future::join_all(fills).await;
-    // Still nothing on a connected service: ask each one by the song's ISRC
-    let jobs: Vec<(usize, String, bool, bool)> = described
+    // Still nothing on a connected service: ask each one by the song's ISRC (an ISRC link, the
+    // library file's, else MusicBrainz's for a recording)
+    let jobs: Vec<(usize, String, Option<String>, Vec<String>)> = described
         .iter()
         .zip(&tracks)
         .enumerate()
+        .filter(|(_, (_, t))| t.is_none())
         .filter_map(|(k, (it, t))| {
-            let isrc = isrc_of(&it.uri, t.as_ref())?;
             let has = |svc: &str| {
                 it.also_on
                     .iter()
                     .any(|v| discover::service_link(&v.url, false).is_some_and(|l| l.service == svc))
                     || discover::service_link(&it.uri, false).is_some_and(|l| l.service == svc)
             };
-            let tidal = discover::access(&acc, "tidal") == Access::Full && !has("tidal");
-            let spotify = discover::access(&acc, "spotify") == Access::External && !has("spotify");
-            (t.is_none() && (tidal || spotify)).then_some((k, isrc, tidal, spotify))
+            let mut skip: Vec<String> = Vec::new();
+            if discover::access(&acc, "tidal") != Access::Full || has("tidal") {
+                skip.push("tidal".into());
+            }
+            if discover::access(&acc, "spotify") != Access::External || has("spotify") {
+                skip.push("spotify".into());
+            }
+            if skip.len() == 2 {
+                return None;
+            }
+            let isrc = isrc_of(&it.uri, t.as_ref());
+            (isrc.is_some() || it.uri.starts_with("https://musicbrainz.org/recording/"))
+                .then(|| (k, it.uri.clone(), isrc, skip))
         })
         .collect();
     let found: Vec<(usize, Vec<Version>)> =
-        futures_util::stream::iter(jobs.into_iter().map(|(k, isrc, tidal, spotify)| {
+        futures_util::stream::iter(jobs.into_iter().map(|(k, uri, isrc, skip)| {
             let s = s.clone();
             async move {
-                let mut v = Vec::new();
-                if tidal {
-                    if let Ok(x) = crate::tidal::isrc_versions(&s, &isrc).await {
-                        v.extend(x.into_iter().take(1));
-                    }
-                }
-                if spotify {
-                    if let Ok(x) = crate::spotify::isrc_versions(&s, &isrc).await {
-                        v.extend(x.into_iter().take(1));
-                    }
-                }
+                let isrc = match isrc {
+                    Some(i) => Some(i),
+                    None => discover::mb_recording(&s, &uri)
+                        .await
+                        .and_then(|m| m.isrcs.into_iter().next()),
+                };
+                let skip: Vec<&str> = skip.iter().map(String::as_str).collect();
+                let v = match isrc {
+                    Some(i) => discover::isrc_versions_for(&s, &i, &skip).await,
+                    None => Vec::new(),
+                };
                 (k, v)
             }
         }))

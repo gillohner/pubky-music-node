@@ -5,6 +5,14 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-21
 
 - **The desktop app updates itself** (infra item 3). At start it checks the channel it was built for: builds of main follow edge, and tagged releases follow the latest release. When there is a newer version it asks, then installs it and restarts. This works on macOS, on Windows, and on Linux as an AppImage. Updates are signed with the project's own update key, and the app installs nothing else. Edge builds now carry `0.1.0-<run>` versions so each is newer than the last. Each release has a `latest.json` feed. Details in `docs/RELEASING.md`.
+- **ListenBrainz** (step 5.5).
+  - Settings › ListenBrainz connects with the user token. It's checked with ListenBrainz, kept on the node, and never returned.
+  - **Send what I play here:** each zone reports "playing now". A song counts as a listen once it has played half its length or four minutes, or plays to its end, and each play is sent once. Listens ListenBrainz can't take wait in a queue and go with the next one.
+  - **Bring my listens here:** imports your listens into the node's history (private listen posts) by MusicBrainz recording, picking up from the last import.
+  - **Recommended for you** on Home: ListenBrainz's picks, named and with covers from its metadata. **Made for you** playlists (Weekly Jams, Weekly Exploration, …) import as Pubky playlists.
+  - API: `GET|PUT|DELETE /v1/listenbrainz`, `POST /v1/listenbrainz/import`, `GET /v1/listenbrainz/recommendations`, `GET /v1/listenbrainz/playlists`, `POST /v1/listenbrainz/playlists/{id}/import`.
+  - Test: a mock ListenBrainz covering a bad token, a zone playing while ListenBrainz is down (the listen waits, then goes), history import (once), recommendations and playlist import. Checked live: a wrong token is refused, and a public user's recommendations and playlists load.
+- **MusicBrainz recordings play even when Pinakes hasn't seen them** (ADR 0001 order). MusicBrainz names the recording and gives its ISRC, and TIDAL or Spotify find it by that ISRC. This works for Play, playlists and recommendations. Lookups are cached for 30 days and paced as MusicBrainz asks. Live: a ListenBrainz pick (Angine de Poitrine, "Sherpa") plays from TIDAL.
 - **Jellyfin (and Emby) as a source** (step 5.2).
   - Sources › Jellyfin signs in once with a user and password. The node keeps only the access token Jellyfin gives it, never the password, and signing out ends the session on the server too.
   - Search (albums and songs, also in the one search), album and song pages, covers relayed by the node.

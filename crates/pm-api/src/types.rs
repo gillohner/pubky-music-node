@@ -1496,3 +1496,31 @@ pub struct JellyfinSignIn {
     #[serde(default)]
     pub password: String,
 }
+
+// ---- ListenBrainz (listenbrainz.rs) ----
+
+/// The connection as the UI sees it: never the token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenBrainzView {
+    pub connected: bool,
+    pub user: Option<String>,
+    /// Whether plays are sent.
+    pub submit: bool,
+    /// Listens waiting to be sent.
+    pub pending: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct ListenBrainzForm {
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub submit: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenImport {
+    pub imported: usize,
+    /// Listens ListenBrainz could not name by a MusicBrainz recording.
+    pub skipped: usize,
+}

@@ -137,6 +137,8 @@ pub struct NodeState {
     pub archive_base: std::sync::RwLock<String>,
     /// Audius discovery node; empty = resolve through api.audius.co.
     pub audius_base: std::sync::RwLock<String>,
+    /// ListenBrainz API origin (tests point it at a mock).
+    pub listenbrainz_base: std::sync::RwLock<String>,
     /// TIDAL: developer credentials and the API / auth / login origins (tests point them at a mock);
     /// shared with the source factory so the audio thread can resolve `tidal:track:` URIs.
     pub tidal: crate::tidal::SharedEndpoints,
@@ -278,6 +280,7 @@ impl NodeState {
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
             archive_base: std::sync::RwLock::new("https://archive.org".into()),
             audius_base: std::sync::RwLock::new(String::new()),
+            listenbrainz_base: std::sync::RwLock::new(crate::listenbrainz::API_BASE.to_string()),
             deezer_base,
             jamendo,
             opensubsonic,
@@ -336,12 +339,21 @@ impl NodeState {
         let id = zone.id().clone();
         let library = self.library.clone();
         let zone_for_radio = zone.clone();
+        let node = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
                 match ev_rx.recv().await {
                     Ok(event) => {
                         if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
                             record_play(&library, &id, &item.uri);
+                            if let Some(n) = node.upgrade() {
+                                crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
+                            }
+                        }
+                        if let pm_zones::ZoneEvent::TrackEnded { item, .. } = &event {
+                            if let Some(n) = node.upgrade() {
+                                crate::listenbrainz::track_ended(&n, &id, item);
+                            }
                         }
                         if matches!(event, pm_zones::ZoneEvent::Stopped) {
                             continue_radio(&library, &zone_for_radio);
