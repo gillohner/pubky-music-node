@@ -393,6 +393,33 @@ pub(crate) async fn pin_source(
     Ok(Json(d))
 }
 
+/// `PUT /v1/playlists/{id}/visibility {public}`: share the playlist on Pubky (the next sync
+/// publishes it under /pub/social/v1/posts/) or make it private again (the next sync removes the
+/// public copy; the private versions stay).
+pub(crate) async fn set_visibility(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetVisibility>,
+) -> ApiResult<PlaylistDetail> {
+    let lib = s.library.lock().expect("library poisoned");
+    let (_, mut p) = load(&lib, &id)?;
+    p.touch();
+    let post = MusicPost::new(MusicContent::Playlist(p));
+    post.validate(Some(&id))
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let visibility = if body.public {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    };
+    store(&lib, &post, &id, visibility)?;
+    let (row, p) = load(&lib, &id)?;
+    let d = detail(&lib, &row, &p);
+    drop(lib);
+    s.notify_library();
+    Ok(Json(d))
+}
+
 /// `PUT /v1/playlists/{id}/order {order}`: the playlist's own play order, or `null` to follow
 /// the node's.
 pub(crate) async fn set_order(

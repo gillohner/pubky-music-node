@@ -756,3 +756,4 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 @keyframes nudge { 0% { box-shadow: 0 0 0 0 var(--accent-soft); } 40% { box-shadow: 0 0 0 6px var(--accent-soft); } 100% { box-shadow: 0 0 0 0 transparent; } }
 @media (prefers-reduced-motion: reduce) { .nudge { animation: none; outline: 2px solid var(--accent); } }
 a.btn { text-decoration: none; }
+.sharelink { font-size: 12px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

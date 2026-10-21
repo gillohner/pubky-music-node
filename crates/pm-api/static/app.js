@@ -1381,6 +1381,7 @@
         case 'playlist': {
           loading();
           const plId = state.viewArg;
+          await pubkyUser();
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
@@ -1413,7 +1414,9 @@
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (pf ? `<section class="section" id="plorder"><div class="section-head"><h3>Play from</h3><span class="muted small">${ownOrder ? 'this playlist’s own order' : 'your node’s order (Settings)'}</span></div><p class="muted small">Each song plays from the first source here that has it. A pinned song keeps its own source.</p>${orderList(pf.order)}<label class="check small" style="margin-top:10px"><input type="checkbox" id="plownorder" ${ownOrder ? '' : 'checked'}> Use my node’s order</label></section>` : '')
-            + `<section class="section"><div class="section-head"><h3>On Pubky</h3></div>${empty(d.summary.synced ? 'Saved privately on your homeserver; not shared yet.' : 'Not shared; it lives on this node.')}</section>`
+            + `<section class="section" id="plpubky"><div class="section-head"><h3>On Pubky</h3>${d.summary.visibility === 'public' ? '<span class="pill ok">shared</span>' : ''}</div>${d.summary.visibility === 'public'
+              ? `<p class="muted small">${d.summary.synced ? 'Shared: anyone with the link can open it and play it from their own services. Your pins go along as suggestions.' : 'Shared on the next sync with your homeserver.'}</p>${state.pubkyUser ? `<div class="toolbar"><code class="sharelink">${esc(`pubky://${state.pubkyUser.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`)}</code><button class="btn sm" id="plcopylink">${icon('external')} Copy link</button><button class="btn sm ghost" id="plunshare">Make private</button></div>` : `<div class="toolbar"><button class="btn sm ghost" id="plunshare">Make private</button></div>`}`
+              : `<p class="muted small">${d.summary.synced ? 'Saved privately on your homeserver.' : 'Private; it lives on this node until the next sync.'} Sharing puts a public copy on your homeserver: the songs and their order, never audio.</p><div class="toolbar"><button class="btn sm" id="plshare">${icon('upload')} Share on Pubky</button></div>`}</section>`
             + `<section class="section"><div class="section-head"><h3>Yours</h3></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : empty('No description.')}</section>`
             + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
@@ -1438,6 +1441,10 @@
               ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
           });
+          const setVis = async (pub) => { try { await api('PUT', `/playlists/${d.summary.id}/visibility`, { public: pub }); toast(pub ? 'Shared: it goes public on the next sync' : 'Private again: the public copy is removed on the next sync'); render(); } catch (e) { toast(e.message, 'error'); } };
+          const sh = $('#plshare'); if (sh) sh.onclick = () => setVis(true);
+          const us = $('#plunshare'); if (us) us.onclick = () => setVis(false);
+          const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = $('#plpubky .sharelink').textContent; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
           const ol = $('#plorderopen'); if (ol) ol.onclick = () => $('#plorder').scrollIntoView({ behavior: 'smooth', block: 'center' });
           if (pf) {

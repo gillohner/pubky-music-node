@@ -379,11 +379,16 @@ impl PubkySync {
             } else {
                 Visibility::Private
             };
-            let root = v1::root_of(public);
+            // Every version is written privately (the draft); a public playlist is also published:
+            // the same version copied under /pub/ (pubky-social-specs plan_publish)
+            let root = v1::Root::Priv;
             let legacy_path = MusicPost::path(&row.id, visibility);
             if row.deleted {
-                // The old copy first, then every version, oldest first, public before private
-                let mut paths = vec![legacy_path];
+                // The old copies first, then every version, oldest first, public before private
+                let mut paths = vec![
+                    MusicPost::path(&row.id, Visibility::Public),
+                    MusicPost::path(&row.id, Visibility::Private),
+                ];
                 paths.extend(heads.take_all(&row.id));
                 let mut failed = false;
                 for path in &paths {
@@ -439,6 +444,17 @@ impl PubkySync {
                             let _ = self.delete_quietly(&stale).await;
                         }
                         heads.record(root, ns, &row.id, &path);
+                        if let Err(e) = self
+                            .publish_or_unpublish(&post, public, &row.id, &path, ns, owner, heads)
+                            .await
+                        {
+                            let stop = is_forbidden(&e);
+                            report.errors.push(namespace_hint(e));
+                            if stop {
+                                break;
+                            }
+                            continue;
+                        }
                     }
                     Err(v1::NotV1::TooLong(_)) => {
                         let post: pubky_app_specs::PubkyAppPost =
@@ -623,6 +639,48 @@ fn is_pub(root: v1::Root) -> bool {
     root == v1::Root::Pub
 }
 
+impl PubkySync {
+    /// Publish (`public`): copy the version just written privately to its public path.
+    /// Unpublish (not `public`): remove every public version. Only social posts (playlists)
+    /// are published; the others stay private.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_or_unpublish(
+        &self,
+        post: &v1::V1Post,
+        public: bool,
+        id: &str,
+        private_path: &str,
+        ns: &'static str,
+        owner: &v1::PubkyId,
+        heads: &mut Heads,
+    ) -> Result<(), String> {
+        let v1::V1Post::Social(social) = post else {
+            return Ok(());
+        };
+        if !public {
+            for path in heads.take_in(v1::Root::Pub, ns, id) {
+                self.delete_quietly(&path)
+                    .await
+                    .map_err(|e| format!("unpublish {path}: {e}"))?;
+            }
+            return Ok(());
+        }
+        let Some((_, edit_id)) = v1::parse_version(private_path) else {
+            return Err(format!("{id}: not a version path: {private_path}"));
+        };
+        let plan = pubky_social_specs::plan_publish(id, &edit_id, social, None, owner)
+            .map_err(|e| format!("publish {id}: {e}"))?;
+        let body: serde_json::Value =
+            serde_json::from_str(&plan.rewritten_post_json).map_err(|e| format!("publish {id}: {e}"))?;
+        self.homeserver
+            .write_object(&self.session, &plan.dest_path, &body)
+            .await
+            .map_err(|e| format!("write {}: {e}", plan.dest_path))?;
+        heads.record(v1::Root::Pub, ns, id, &plan.dest_path);
+        Ok(())
+    }
+}
+
 /// The newest version of every v1 post, per root (public or not) and namespace.
 #[derive(Default)]
 struct Heads(BTreeMap<(bool, &'static str), BTreeMap<String, v1::Head>>);
@@ -652,6 +710,15 @@ impl Heads {
             }
         }
         out
+    }
+
+    /// The versions of `id` in `root` and `ns`, removed from the listing.
+    fn take_in(&mut self, root: v1::Root, ns: &'static str, id: &str) -> Vec<String> {
+        self.0
+            .get_mut(&(is_pub(root), ns))
+            .and_then(|m| m.remove(id))
+            .map(|h| h.versions)
+            .unwrap_or_default()
     }
 
     /// The versions of `id` in the other namespaces of `root`, removed from the listing.

@@ -191,6 +191,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlists/{id}/play", post(playlists::play))
         .route("/playlists/{id}/play-from", get(play_from::playlist_play_from))
         .route("/playlists/{id}/order", put(playlists::set_order))
+        .route("/playlists/{id}/visibility", put(playlists::set_visibility))
         .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
         .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))

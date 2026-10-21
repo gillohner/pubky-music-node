@@ -505,3 +505,95 @@ async fn an_old_session_asks_to_sign_in_again() {
     let (_, pk) = call(&app, "GET", "/v1/pubky", None).await;
     assert_eq!(pk["unsynced"], 0, "{pk}");
 }
+
+/// Sharing a playlist publishes the same version under /pub/social/v1/posts/ (plan_publish, no
+/// slug); making it private again removes the public copy and keeps the private versions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_playlist_is_published_and_unpublished() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "share");
+    let app = router(n.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    n.set_sync(Some(sync.clone()));
+    let (_, pl) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({
+            "name": "For everyone",
+            "uris": ["https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862"]
+        })),
+    )
+    .await;
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    let (st, d) = call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/visibility"),
+        Some(serde_json::json!({"public": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["summary"]["visibility"], "public");
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let heads = |root| {
+        let homeserver = homeserver.clone();
+        let z32 = z32.clone();
+        let sync = sync.clone();
+        async move {
+            homeserver
+                .v1_heads(&z32, root, v1::SOCIAL_NAMESPACE, Some(sync.session()))
+                .await
+                .unwrap()
+        }
+    };
+    let public = heads(v1::Root::Pub).await;
+    let private = heads(v1::Root::Priv).await;
+    assert_eq!(public.len(), 1, "{public:?}");
+    assert_eq!(public[&id].edit_id, private[&id].edit_id, "the same version");
+    assert_eq!(
+        public[&id].path,
+        format!("/pub/social/v1/posts/{id}/{}.json", public[&id].edit_id)
+    );
+    // Anyone can read it: no session
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(&z32, &public[&id].path, Visibility::Public, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["kind"], "collection");
+
+    // Private again
+    call(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{id}/visibility"),
+        Some(serde_json::json!({"public": false})),
+    )
+    .await;
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(heads(v1::Root::Pub).await.is_empty(), "the public copy is gone");
+    assert_eq!(
+        heads(v1::Root::Priv).await[&id].versions.len(),
+        2,
+        "private versions stay (shared, then private again)"
+    );
+}

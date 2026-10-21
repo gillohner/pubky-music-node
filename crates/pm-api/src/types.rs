@@ -1398,3 +1398,9 @@ pub struct PinItemSource {
     #[serde(default)]
     pub uri: Option<String>,
 }
+
+/// `PUT /v1/playlists/{id}/visibility`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetVisibility {
+    pub public: bool,
+}
