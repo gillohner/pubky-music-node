@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, include_str!("migrations/0008_genres.sql")),
     (9, include_str!("migrations/0009_lyrics.sql")),
     (10, include_str!("migrations/0010_identify.sql")),
+    (11, include_str!("migrations/0011_identify_release.sql")),
 ];
 
 pub struct Library {
@@ -1259,6 +1260,43 @@ impl Library {
         Ok(())
     }
 
+    /// Remember the release a match was disambiguated to.
+    pub fn set_identify_release(&self, track: i64, release: &Mbid) -> Result<()> {
+        self.lock().execute(
+            "UPDATE identify_state SET release_mbid = ?2 WHERE track_id = ?1",
+            params![track, release.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Tracks whose identity identification found (not their tags), with the
+    /// release when known: candidates for "write IDs into my files".
+    pub fn identified_not_tagged(&self) -> Result<Vec<(Track, Option<Mbid>)>> {
+        let tracks = self.tracks_where(
+            "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",
+            "https://musicbrainz.org/recording/".into(),
+        )?;
+        let conn = self.lock();
+        Ok(tracks
+            .into_iter()
+            .map(|t| {
+                let rel: Option<String> = t.id.and_then(|id| {
+                    conn.query_row(
+                        "SELECT release_mbid FROM identify_state WHERE track_id = ?1",
+                        params![id.0],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten()
+                });
+                let rel = rel.and_then(|r| Mbid::parse(&r).ok());
+                (t, rel)
+            })
+            .collect())
+    }
+
     /// Tracks without a canonical identity that identification has not
     /// looked at yet (with `retry`, also those it found nothing for or
     /// failed on; suggestions wait for the owner either way).
@@ -2092,7 +2130,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 10);
+        assert_eq!(lib.schema_version().unwrap(), 11);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

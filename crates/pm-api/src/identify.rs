@@ -51,6 +51,8 @@ pub struct IdentifyStatus {
     pub counts: IdentityCounts,
     /// Whether an AcoustID key is configured (fingerprint lookups).
     pub acoustid: bool,
+    /// "Write IDs into my files" (off by default).
+    pub write_ids: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -58,6 +60,115 @@ pub struct IdentifyStart {
     /// Look again at tracks a previous run found nothing for.
     #[serde(default)]
     pub retry: bool,
+}
+
+/// `PUT /v1/library/identify/settings`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentifySettings {
+    pub write_ids: bool,
+}
+
+/// `POST /v1/library/identify/write`: what was written.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WriteReport {
+    pub written: usize,
+    /// Files left as they were, with the reason (format, read-only share, …).
+    pub skipped: Vec<WriteSkip>,
+    /// Where the tag backups are.
+    pub backup_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteSkip {
+    pub track_id: i64,
+    pub path: String,
+    pub reason: String,
+}
+
+const WRITE_IDS_KEY: &str = "library.write_ids";
+
+fn write_ids_on(s: &NodeState) -> bool {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(WRITE_IDS_KEY)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "true")
+}
+
+/// Tag backups live next to the node's other data.
+fn backup_dir(s: &NodeState) -> PathBuf {
+    s.art_dir
+        .parent()
+        .map(|p| p.join("tag-backups"))
+        .unwrap_or_else(|| PathBuf::from("tag-backups"))
+}
+
+/// Write the IDs identification found into the files (all such tracks, or
+/// `only`); each file's ID tags are backed up first. Blocking.
+pub fn write_found_ids(s: &NodeState, only: Option<&[i64]>) -> Result<WriteReport, ApiError> {
+    let found = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .identified_not_tagged()?;
+    let dir = backup_dir(s);
+    let mut report = WriteReport {
+        backup_dir: dir.display().to_string(),
+        ..Default::default()
+    };
+    for (t, release) in found {
+        let id = t.id.map(|i| i.0).unwrap_or_default();
+        if only.is_some_and(|o| !o.contains(&id)) {
+            continue;
+        }
+        let Some((MusicUri::Recording { mbid }, _)) = t.canonical.clone() else {
+            continue;
+        };
+        let ids = pm_library::tagwrite::Ids {
+            recording: mbid,
+            release,
+            acoustid: t.acoustid.clone(),
+        };
+        match pm_library::tagwrite::write_ids(&t.file.path, &ids, &dir) {
+            Ok(_) => {
+                report.written += 1;
+                let _ = s.library.lock().expect("library poisoned").set_identify_state(
+                    id,
+                    "identified",
+                    Some("written into the file"),
+                );
+            }
+            Err(e) => report.skipped.push(WriteSkip {
+                track_id: id,
+                path: t.file.path.display().to_string(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+    Ok(report)
+}
+
+/// `PUT /v1/library/identify/settings {write_ids}`.
+pub(crate) async fn put_settings(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<IdentifySettings>,
+) -> ApiResult<IdentifyStatus> {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(WRITE_IDS_KEY, if body.write_ids { "true" } else { "false" })?;
+    Ok(Json(status(&s)?))
+}
+
+/// `POST /v1/library/identify/write`: write the IDs found so far into the files now.
+pub(crate) async fn write_now(State(s): State<Arc<NodeState>>) -> ApiResult<WriteReport> {
+    let st = s.clone();
+    let r = tokio::task::spawn_blocking(move || write_found_ids(&st, None))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(r))
 }
 
 /// One suggestion with the track it is for.
@@ -74,6 +185,7 @@ fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
         progress: s.identify.lock().expect("identify lock").clone(),
         counts,
         acoustid: !s.acoustid.read().expect("acoustid lock").api_key.is_empty(),
+        write_ids: write_ids_on(s),
     })
 }
 
@@ -134,6 +246,7 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
         cfg.base_url = settings.base_url.clone();
         Some(pm_library::identify::AcoustIdClient::new(cfg).map_err(ApiError::from)?)
     };
+    let mut identified_now: Vec<i64> = Vec::new();
     for (dir, tracks) in by_folder {
         let folder_len = s
             .library
@@ -164,9 +277,9 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                 Ok(results) => match decide(results, facts, folder_len, preferred.as_deref()) {
                     Decision::Identified {
                         recording,
+                        release,
                         confidence,
                         acoustid,
-                        ..
                     } => {
                         let lib = s.library.lock().expect("library poisoned");
                         lib.set_identity(
@@ -176,6 +289,10 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                             Some(&acoustid),
                         )?;
                         lib.set_identify_state(id, "identified", Some(confidence.label()))?;
+                        if let Some(r) = release {
+                            lib.set_identify_release(id, &r)?;
+                        }
+                        identified_now.push(id);
                         Outcome::Identified
                     }
                     Decision::Suggest(c) => Outcome::Suggest(c),
@@ -211,6 +328,19 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                 }
             }
         }
+    }
+    // "Write IDs into my files", when the owner turned it on.
+    if !identified_now.is_empty() && write_ids_on(s) {
+        let st = s.clone();
+        let only = identified_now.clone();
+        let r = tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&only)))
+            .await
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+        tracing::info!(
+            written = r.written,
+            skipped = r.skipped.len(),
+            "identify: IDs written into files"
+        );
     }
     Ok(())
 }
@@ -325,13 +455,20 @@ pub(crate) async fn suggestions(State(s): State<Arc<NodeState>>) -> ApiResult<Ve
 /// `POST /v1/library/suggestions/{id}/accept`: the owner confirms; the
 /// track's identity becomes that recording (`confirmed_by_user`).
 pub(crate) async fn accept(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Track> {
-    let lib = s.library.lock().expect("library poisoned");
-    let Some((track, _)) = lib.accept_suggestion(id)? else {
-        return Err(ApiError::not_found(format!("no suggestion {id}")));
+    let (track, t) = {
+        let lib = s.library.lock().expect("library poisoned");
+        let Some((track, _)) = lib.accept_suggestion(id)? else {
+            return Err(ApiError::not_found(format!("no suggestion {id}")));
+        };
+        let t = lib
+            .get_track(pm_model::TrackId(track))?
+            .ok_or_else(|| ApiError::not_found("track gone"))?;
+        (track, t)
     };
-    let t = lib
-        .get_track(pm_model::TrackId(track))?
-        .ok_or_else(|| ApiError::not_found("track gone"))?;
+    if write_ids_on(&s) {
+        let st = s.clone();
+        let _ = tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&[track]))).await;
+    }
     let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
     Ok(Json(t))
 }

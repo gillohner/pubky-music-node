@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 default = ["musicbrainz"]
-musicbrainz = ["dep:reqwest", "dep:tokio", "dep:serde_json", "dep:url"]
+musicbrainz = ["dep:reqwest", "dep:tokio", "dep:url"]
 
 [dependencies]
 pm-model = { workspace = true }
@@ -16,7 +16,7 @@ blake3 = { workspace = true }
 id3 = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 symphonia = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -25,6 +25,7 @@ reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 calamine = { version = "0.37", default-features = false }
+metaflac = "0.2"
 
 [dev-dependencies]
 hound = { workspace = true }

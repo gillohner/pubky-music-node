@@ -569,3 +569,15 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .list.queue .list-row { position: relative; }
 .qdrag-active .list.queue .list-row:not(.qdragging) { transition: transform 0.15s var(--ease); }
 .list.queue .list-row.qdragging { z-index: 5; background: var(--surface-3); box-shadow: var(--shadow); border-radius: var(--radius-sm); transition: none; }
+
+/* Identify: folder vs. MusicBrainz release, side by side. */
+.alignbox { margin: 8px 0 12px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.alignhead, .alignrow { display: grid; grid-template-columns: 28px minmax(0, 1fr) 22px minmax(0, 1fr); gap: 10px; align-items: center; padding: 5px 0; }
+.alignhead { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 4px; font-size: 13px; }
+.alignrow { border-top: 1px solid var(--line); font-size: 13px; }
+.alignrow .aside { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alignrow .amark { text-align: center; font-weight: 700; }
+.alignrow.ok .amark { color: var(--ok); }
+.alignrow.diff .amark { color: var(--warn); }
+.alignrow.none { opacity: 0.6; }
+@media (max-width: 720px) { .alignhead, .alignrow { grid-template-columns: 22px minmax(0, 1fr) 18px minmax(0, 1fr); gap: 6px; } }

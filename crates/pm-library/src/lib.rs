@@ -25,6 +25,7 @@ pub mod musicbrainz;
 pub mod posts;
 pub mod scan;
 pub mod tags;
+pub mod tagwrite;
 
 pub use canonical::{assign, Resolver};
 pub use db::{

@@ -94,15 +94,35 @@ pub(crate) async fn forward(
         .filter(|a| a.contains("xml"))
         .map(|_| "application/xml")
         .unwrap_or("application/json");
-    let resp = match s
-        .http_client()
-        .get(&url)
-        .header(header::ACCEPT, accept)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("musicbrainz: {e}")).into_response(),
+    // MusicBrainz answers 503 when the IP goes over its rate; wait as it asks
+    // (Retry-After, else two seconds) and try once more before passing it on.
+    let mut attempt = 0;
+    let resp = loop {
+        attempt += 1;
+        let r = match s
+            .http_client()
+            .get(&url)
+            .header(header::ACCEPT, accept)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("musicbrainz: {e}")).into_response(),
+        };
+        if r.status().as_u16() == 503 && attempt < 2 {
+            let wait = r
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(2)
+                .min(10);
+            tracing::debug!(%url, wait, "musicbrainz asked to slow down");
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            *p.gate.lock().await = Instant::now();
+            continue;
+        }
+        break r;
     };
     let status = resp.status().as_u16();
     let content_type = resp

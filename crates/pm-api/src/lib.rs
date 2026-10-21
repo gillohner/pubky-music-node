@@ -41,7 +41,7 @@ pub mod watch;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{middleware, Json, Router};
 use futures_util::StreamExt;
 use pm_model::TrackId;
@@ -194,6 +194,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/library/identify",
             get(identify::get_status).post(identify::start),
         )
+        .route("/library/identify/settings", put(identify::put_settings))
+        .route("/library/identify/write", post(identify::write_now))
         .route("/library/suggestions", get(identify::suggestions))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
@@ -3770,6 +3772,68 @@ mod tests {
             .find(|x| x["source"] == "tidal")
             .unwrap();
         assert_eq!(tidal["uri"], "tidal:track:534050211", "TIDAL plays: {tidal}");
+    }
+
+    /// "Write IDs into my files" is off by default; when the owner asks, a
+    /// fingerprinted FLAC gets its recording and release MBIDs in its own
+    /// tags, after a backup, and the scanner then reads them as tag IDs.
+    #[tokio::test]
+    async fn identified_ids_are_written_into_files_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("music").join("11 bohemian.flac");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-library/tests/fixtures/ietf-60-mono-audio.flac"
+            ),
+            &f,
+        )
+        .unwrap();
+        let s = state(dir.path(), None).await;
+        let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+        let rel = pm_model::Mbid::parse("1a5b6a49-4c4f-3d18-9e3d-1c4d1b0a7a3e").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let id = lib
+                .upsert_track(&untagged_track(f.clone(), "Bohemian Rhapsody", "Queen"))
+                .unwrap();
+            lib.set_identity(
+                id.0,
+                &pm_model::MusicUri::Recording { mbid },
+                pm_model::Confidence::FingerprintRelease { score: 0.97 },
+                Some("84eed5cd-5b1f-4f5c-8c92-2686d2877862"),
+            )
+            .unwrap();
+            lib.set_identify_state(id.0, "identified", Some("fingerprint+release"))
+                .unwrap();
+            lib.set_identify_release(id.0, &rel).unwrap();
+            id
+        };
+        let app = router(s.clone());
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["write_ids"], false, "off by default");
+        assert!(pm_library::probe_and_read(&f).unwrap().1.recording_mbid.is_none());
+        let (st, on) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"write_ids": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{on}");
+        assert_eq!(on["write_ids"], true);
+        let (st, r) = call(&app, "POST", "/v1/library/identify/write", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["written"], 1, "{r}");
+        let (_, tags) = pm_library::probe_and_read(&f).unwrap();
+        assert_eq!(tags.recording_mbid, Some(mbid));
+        assert_eq!(tags.release_mbid, Some(rel));
+        let backups: Vec<_> = std::fs::read_dir(r["backup_dir"].as_str().unwrap())
+            .unwrap()
+            .collect();
+        assert_eq!(backups.len(), 1, "one backup per write");
+        let _ = tid;
     }
 
     #[test]
