@@ -102,6 +102,19 @@ def shot(name):
     (out / f"{name}.png").write_bytes(png)
 
 
+def check_status_bar():
+    """The page starts below the status bar (Tauri draws edge to edge; android-patch.py pads)."""
+    win = adb("shell", "dumpsys", "window")
+    bars = [int(m.group(1)) for m in re.finditer(r"type=statusBars[^\n]*?frame=\[\d+,\d+\]\[\d+,(\d+)\]", win)]
+    menu = next((n for n in ui_nodes() if 'content-desc="Menu"' in n or 'text="Menu"' in n), None)
+    if not bars or not menu:
+        log(f"status bar check skipped (status bar frame found: {bool(bars)}, menu found: {bool(menu)})")
+        return
+    top = int(re.search(r'bounds="\[\d+,(\d+)\]', menu).group(1))
+    assert top >= max(bars), f"the status bar (to y={max(bars)}) covers the node's menu (top y={top})"
+    log(f"the node's menu (y={top}) is below the status bar (y<{max(bars)})")
+
+
 def zone_state(zid):
     return api("GET", f"/v1/zones/{zid}")
 
@@ -193,6 +206,7 @@ def run(node):
 
         until("the node's page in the app", node_page, timeout=90, every=3)
         log("the node's page is showing in the app")
+        check_status_bar()
         until("the player service", lambda: "player service started" in logcat(), timeout=90)
         m = until("the player's port", lambda: re.search(r"player ready port=(\d+)", logcat()), timeout=10)
         port = m.group(1)
