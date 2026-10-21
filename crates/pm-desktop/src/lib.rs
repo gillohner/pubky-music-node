@@ -5,14 +5,14 @@
 //! owner's homeserver, or an address and token are typed by hand. Once
 //! connected the window shows the node's own page.
 //!
-//! On desktops the app is also a player (`player`): it serves this
-//! machine's DACs to the node as a `pm-endpoint` and registers them, so they
-//! are zones like any other.
+//! The app is also a player (`player`): it serves this machine's DACs (on
+//! Android, whatever the phone plays through) to the node as a `pm-endpoint`
+//! and registers them, so they are zones like any other.
 
 #[cfg(target_os = "android")]
 mod android;
 mod node;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 mod player;
 mod settings;
 
@@ -120,7 +120,7 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
     w.navigate(u).map_err(|e| e.to_string())
 }
 
-/// Connected: remember the node, show it and (on desktops) register the player.
+/// Connected: remember the node, show it and register the player.
 fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::Info) -> Result<(), String> {
     if !info.id.is_empty() {
         s.node_id = info.id.clone();
@@ -133,9 +133,18 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     state.store(Some(s.clone()));
     show_node(app, &s)?;
     // Through the tunnel the node is far away and cannot reach this machine's player.
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
         let port = state.player_port;
+        #[cfg(target_os = "android")]
+        if port.is_some() {
+            let node = if info.name.is_empty() {
+                "your node"
+            } else {
+                info.name.as_str()
+            };
+            android::start_player_service(app, format!("This phone is a zone of {node}"));
+        }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let s = player::register(s, port).await;
@@ -326,10 +335,15 @@ pub fn run() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+    let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    #[cfg(not(target_os = "android"))]
+    let _ = tracing_subscriber::fmt().with_env_filter(filter()).try_init();
+    #[cfg(target_os = "android")]
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(filter())
+        .with_writer(android::Logcat)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let app = tauri::Builder::default()
@@ -352,9 +366,9 @@ pub fn run() {
                 .map(|n| Settings::new(&n, &std::env::var("PM_TOKEN").unwrap_or_default()))
                 .or_else(|| settings::load(&path))
                 .or_else(|| settings::legacy_path().and_then(|p| settings::load(&p)));
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             let player_port = player::start();
-            #[cfg(not(desktop))]
+            #[cfg(not(any(desktop, target_os = "android")))]
             let player_port = None;
             let shared = Arc::new(Mutex::new(initial.clone()));
             app.manage(AppState {

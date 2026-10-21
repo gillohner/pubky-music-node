@@ -1,6 +1,6 @@
 [package]
 name = "pm-desktop"
-description = "Pubky Music app: the node's web UI in a native window (desktop and Android), connected with Pubky Ring, with a built-in player on desktops"
+description = "Pubky Music app: the node's web UI in a native window (desktop and Android), connected with Pubky Ring, with a built-in player"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
@@ -35,8 +35,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
-# The built-in player (desktops only for now; an Android endpoint is a later
-# phase): bit-perfect ALSA `hw:` devices on Linux, the system output elsewhere.
+# The built-in player: bit-perfect ALSA `hw:` devices on Linux, the system
+# output elsewhere (CoreAudio, WASAPI, AAudio on Android).
 [target.'cfg(target_os = "linux")'.dependencies]
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["alsa", "cpal"] }
@@ -52,6 +52,8 @@ jni = "0.22"
 # The webview hands over jni 0.21 objects (wry); used for the Wi-Fi multicast lock.
 jni021 = { package = "jni", version = "0.21" }
 rustls-platform-verifier = "0.7"
+pm-stream = { path = "../pm-stream" }
+pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
 
 [profile.release]
 lto = "thin"

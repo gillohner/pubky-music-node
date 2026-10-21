@@ -252,8 +252,12 @@ pub fn local_outputs() -> OutputRegistry {
 }
 
 /// This machine's name, for the node's output list: `$HOSTNAME`, then
-/// `/etc/hostname`, else a generic name.
+/// `/etc/hostname` (on Android the phone's model), else a generic name.
 pub fn machine_name() -> String {
+    #[cfg(target_os = "android")]
+    if let Some(model) = android_model() {
+        return model;
+    }
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.is_empty())
@@ -264,4 +268,30 @@ pub fn machine_name() -> String {
                 .filter(|h| !h.is_empty())
         })
         .unwrap_or_else(|| "Pubky Music endpoint".into())
+}
+
+/// "Google Pixel 8", from the system properties every app may read.
+#[cfg(target_os = "android")]
+fn android_model() -> Option<String> {
+    let prop = |name: &str| {
+        std::process::Command::new("/system/bin/getprop")
+            .arg(name)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let model = prop("ro.product.model")?;
+    Some(match prop("ro.product.manufacturer") {
+        // "Google" + "Pixel 8"; Samsung models already read "SM-S911B".
+        Some(maker) if !model.to_lowercase().starts_with(&maker.to_lowercase()) => {
+            let mut m = maker.chars();
+            let maker: String = m
+                .next()
+                .map(|c| c.to_uppercase().chain(m).collect())
+                .unwrap_or_default();
+            format!("{maker} {model}")
+        }
+        _ => model,
+    })
 }

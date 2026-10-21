@@ -79,6 +79,26 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --check index.js
       - run: npm test
+  alsa-loopback:
+    # The ALSA hw: output stays bit-perfect: played through the kernel's loopback card and compared byte for byte
+    # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C).
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: alsa
+      - name: the loopback card
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils "linux-modules-extra-$(uname -r)"
+          sudo modprobe snd-aloop
+          sudo chmod a+rw /dev/snd/*
+          aplay -l
+      - run: cargo build -p pm-node --features pm-out-local/alsa
+      - run: python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

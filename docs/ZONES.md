@@ -20,8 +20,9 @@ A zone's `output` id starts with its protocol, which says what kind of device it
 | `group:` | a node group of several outputs | speakers |
 | `null` | the null output (testing) | — |
 
-"This device" is the web UI's browser zone (`browser`, local to the page). In the app on a desktop,
-it is also the built-in player's `net:` zone, named "<this computer> · <DAC>".
+"This device" is the web UI's browser zone (`browser`, local to the page). In the app it is also the
+built-in player's `net:` zone, named "<this computer> · <DAC>" on a desktop and "<phone model> ·
+Speaker or headphones" on Android (it follows Android's routing: speaker, wired, Bluetooth, USB DAC).
 
 ## The honest sync label
 
@@ -30,8 +31,8 @@ Every zone state has `sync`:
 | `sync` | Meaning | Label |
 | :-- | :-- | :-- |
 | `single` | one device | nothing |
-| `tight` | sample-accurate: the node's own endpoints and Slimproto (ADR 0009), a Snapcast group, a Sonos group, a Cast group | "In sync" |
-| `loose` | started together, may drift by a fraction of a second: mixed protocols, or AirPlay 1, DLNA and single Cast devices together | "Loosely synced" |
+| `tight` | sample-accurate: the node's own endpoints on `hw:` DACs and Slimproto (ADR 0009), a Snapcast group, a Sonos group, a Cast group | "In sync" |
+| `loose` | started together, may drift by a fraction of a second: mixed protocols; AirPlay 1, DLNA and single Cast devices together; any endpoint on a system mixer (`…/cpal:…`: a phone, a Mac, a Windows PC), whose latency the node cannot see | "Loosely synced" |
 
 ## Actions
 

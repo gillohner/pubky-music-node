@@ -178,7 +178,9 @@ impl Output for GroupOutput {
     }
 
     /// Tight only when every member is the node's own endpoint, or every member a Slimproto
-    /// player: those share a clock the group corrects against. Anything mixed is loose.
+    /// player: those share a clock the group corrects against. Anything mixed is loose. So is
+    /// an endpoint playing through its system mixer (`cpal`: a phone, a Mac, a Windows PC):
+    /// the system adds latency the group cannot see (hundreds of ms over Bluetooth).
     fn sync(&self) -> crate::SyncClass {
         let protocols: Vec<String> = self
             .members
@@ -186,7 +188,11 @@ impl Output for GroupOutput {
             .map(|m| m.id().protocol().to_string())
             .collect();
         let same = protocols.windows(2).all(|w| w[0] == w[1]);
-        if same && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim")) {
+        let system_mixer = self.members.iter().any(|m| m.id().0.contains("/cpal:"));
+        if same
+            && !system_mixer
+            && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim"))
+        {
             crate::SyncClass::Tight
         } else {
             crate::SyncClass::Loose
@@ -477,6 +483,14 @@ mod tests {
         };
         let g = |m: Vec<Arc<dyn Output>>| GroupOutput::new("g", m).unwrap().sync();
         assert_eq!(g(vec![o("net", "a"), o("net", "b")]), crate::SyncClass::Tight);
+        // A phone's (or Mac's) system output: its latency is unknown to the group.
+        assert_eq!(
+            g(vec![
+                o("net", "10.0.0.5:7790/alsa:hw:1,0"),
+                o("net", "10.0.0.9:7790/cpal:Speaker")
+            ]),
+            crate::SyncClass::Loose
+        );
         assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Tight);
         assert_eq!(g(vec![o("net", "a"), o("slim", "b")]), crate::SyncClass::Loose);
         assert_eq!(

@@ -1,4 +1,4 @@
-# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast
+# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Android phones
 
 The multiroom outputs (infra brief §3) were built against mocks and open-source receivers on a machine
 with no speakers or TVs. Paste the section for each device you have into Claude Code on a laptop on
@@ -134,4 +134,31 @@ Most AirPlay 2 devices still take AirPlay 1.
    refuse (log "the receiver refused …")? Note the model and OS version.
 6. Two AirPlay zones grouped in the node: "loosely synced" (AirPlay 1 has no shared clock);
    note the audible offset.
+```
+
+## An Android phone or tablet as a zone (the app's built-in player)
+
+Checked here on an Android 14 emulator in CI (release.yml, `android-emulator`), with the signed release APK:
+- Connected by address, the app's player became a zone "<model> · Speaker or headphones".
+- A 16/44.1 track played in real time through AAudio, and kept playing with the app in the background
+  (the foreground service; `dumpsys` shows it in the foreground).
+
+What it is: Android's shared audio path (AAudio through cpal), 44.1 or 48 kHz up to 24-bit; the node
+converts anything higher (the signal path says so). Not bit-perfect: Android's mixer runs at 48 kHz on
+nearly every phone. In a group it is "loosely synced": Android adds latency the node cannot see.
+
+```
+1. Install pubky-music-android-arm64.apk from the edge release. Connect to your node (Pubky Ring,
+   "On this network", or by address). Allow notifications when asked: a "Pubky Music" notification
+   says the phone is a zone. The node's Zones list shows "<model> · Speaker or headphones".
+2. From another controller (the web UI on a laptop), play an album to the phone's zone: it plays from
+   the phone's speaker within about a second. Pause, next and seek are heard at once.
+3. Lock the phone and leave it for five minutes: playback goes on. Then switch to another app: it
+   still goes on. Swipe the app away from recents: the zone stops and the notification goes.
+4. Plug in wired headphones, then pair Bluetooth headphones, during playback: the sound follows to
+   each (Android's routing). A USB DAC with an adapter: the same; note the rate the DAC shows.
+5. Wi-Fi: walk to the edge of coverage. Note any dropouts and whether playback recovers by itself.
+6. Battery: note the battery used over 30 minutes of playback with the screen off.
+7. If anything fails, attach `adb logcat -s pubky-music` (USB debugging on) and the phone's model
+   and Android version.
 ```

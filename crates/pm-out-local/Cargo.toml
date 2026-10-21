@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-local"
-description = "Local outputs for the Pubky Music Node: bit-perfect ALSA hw: (Linux), and a shared-mode cpal backend (CoreAudio, WASAPI) for desktops"
+description = "Local outputs for the Pubky Music Node: bit-perfect ALSA hw: (Linux), and a shared-mode cpal backend (CoreAudio, WASAPI, AAudio) for the app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,6 @@ pm-zones = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-alsa = { version = "0.9", optional = true }
-alsa-sys = { version = "0.3", optional = true }
-cpal = { version = "0.15", optional = true }
+alsa = { version = "0.11", optional = true }
+alsa-sys = { version = "0.4", optional = true }
+cpal = { version = "=0.18.2", optional = true }

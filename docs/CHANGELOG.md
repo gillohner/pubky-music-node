@@ -4,6 +4,9 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **An Android phone is a zone** (infra brief §3.6). The app's built-in player now runs on Android too: once connected over the LAN, the phone registers as an endpoint, and the node lists "<model> · Speaker or headphones". It plays through Android's audio path (AAudio), at 44.1 or 48 kHz up to 24-bit; the node converts higher rates, and the signal path shows the conversion. It follows Android's routing: speaker, wired, Bluetooth or USB DAC. A foreground service with a notification keeps it playing while the app is in the background; swiping the app away ends it. The app's log now goes to `adb logcat -s pubky-music`. CI runs the signed release APK on an Android 14 emulator after every release build: it connects, plays in real time, and keeps playing in the background.
+  - The system-audio output moved to cpal 0.18 (AAudio instead of oboe), and the ALSA `hw:` output to alsa 0.11, which cpal 0.18 needs. A new CI job plays 16/44.1 and 24/96 noise and a FLAC fixture through the kernel's ALSA loopback and checks that the bytes come out identical.
+  - A group with any endpoint on a system mixer (a phone, a Mac or a Windows PC) is "loosely synced": the system adds latency the node cannot see.
 - **Importing a TIDAL or Spotify playlist asks once** (step 4, ADR 0015). "Keep TIDAL" pins every song to its exact TIDAL (or Spotify) track. "Auto" lets each song follow your play order. Items stay canonical either way. API: `POST /v1/sources/{tidal,spotify}/playlists/{id}/import?keep_source=true`, and `POST /v1/playlists` takes `sources` (pins by position). Esc or Cancel imports nothing. Shot: `docs/ux/shots/playlist-sources/import-dialog-tidal-1280-dark.png`.
 - **Where playlist songs play from** (step 4, STEWARD-UX-BRIEF §3, ADR 0015).
   - Each song row has a source chip (Library, TIDAL, Spotify, …), or "Unavailable" with the reason.

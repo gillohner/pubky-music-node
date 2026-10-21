@@ -136,3 +136,146 @@ fn take_lock(
     env.call_method(&lock, "acquire", "()V", &[])?;
     env.new_global_ref(lock)
 }
+
+/// Start the player's foreground service (`PlayerService.kt`, added to the
+/// generated project by tools/release/android-patch.py): it keeps the phone's
+/// zone playing while the app is in the background. Must run while the app
+/// is on screen; starting it again only updates its notification.
+pub fn start_player_service(app: &tauri::AppHandle, text: String) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, _webview| {
+            match start_service(env, activity, &text) {
+                Ok(()) => tracing::info!("player service started"),
+                Err(e) => {
+                    // A Java exception stays pending until cleared.
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_describe();
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!(
+                        "no player service ({e}); the phone's zone stops when the app is in the background"
+                    )
+                }
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity to start the player service: {e}");
+    }
+}
+
+fn start_service(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    text: &str,
+) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    // The service sits next to MainActivity, in its package. Loaded through
+    // the app's class loader: JNI's FindClass may only see system classes.
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    let jtext = env.new_string(text)?;
+    env.call_static_method(
+        &cls,
+        "start",
+        "(Landroid/app/Activity;Ljava/lang/String;)V",
+        &[JValue::Object(activity), JValue::Object(&jtext)],
+    )?;
+    Ok(())
+}
+
+/// Tracing output for `adb logcat -s pubky-music` (Android drops stdout).
+pub struct Logcat;
+
+pub struct LogLine {
+    prio: std::ffi::c_int,
+    buf: Vec<u8>,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logcat {
+    type Writer = LogLine;
+
+    fn make_writer(&'a self) -> LogLine {
+        LogLine {
+            prio: 4,
+            buf: Vec::new(),
+        }
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> LogLine {
+        // android/log.h: VERBOSE 2, DEBUG 3, INFO 4, WARN 5, ERROR 6.
+        let prio = match *meta.level() {
+            tracing::Level::TRACE => 2,
+            tracing::Level::DEBUG => 3,
+            tracing::Level::INFO => 4,
+            tracing::Level::WARN => 5,
+            tracing::Level::ERROR => 6,
+        };
+        LogLine {
+            prio,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for LogLine {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_write(
+        prio: std::ffi::c_int,
+        tag: *const std::ffi::c_char,
+        text: *const std::ffi::c_char,
+    ) -> std::ffi::c_int;
+}
+
+impl Drop for LogLine {
+    fn drop(&mut self) {
+        while self.buf.last() == Some(&b'\n') {
+            self.buf.pop();
+        }
+        if self.buf.is_empty() {
+            return;
+        }
+        self.buf.retain(|&c| c != 0);
+        if let Ok(text) = std::ffi::CString::new(std::mem::take(&mut self.buf)) {
+            // SAFETY: both are NUL-terminated strings that outlive the call.
+            unsafe { __android_log_write(self.prio, c"pubky-music".as_ptr(), text.as_ptr()) };
+        }
+    }
+}

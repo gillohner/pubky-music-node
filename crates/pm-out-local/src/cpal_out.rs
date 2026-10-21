@@ -1,10 +1,15 @@
 //! Cross-platform local output through `cpal` (CoreAudio on macOS, WASAPI on
-//! Windows, ALSA elsewhere), for the native controller on desktops without
-//! an `hw:` device of ours. It runs in the operating system's shared mode:
+//! Windows, AAudio on Android, ALSA elsewhere), for the app's built-in player
+//! where there is no `hw:` device of ours. It runs in the operating system's shared mode:
 //! the OS mixer may resample to the device rate and mixes in float, so the
 //! capability ceiling is "lossless up to the device rate", never bit-perfect.
 //! Samples are handed over as 32-bit float, which is lossless for the 16- and
 //! 24-bit PCM the pipeline produces.
+//!
+//! On Android the app offers one output: the one Android routes to (the
+//! speaker, wired or Bluetooth headphones, a USB DAC), followed as the user
+//! plugs things in. Android's mixer runs at 48 kHz on nearly every phone, so
+//! the output takes 44.1 and 48 kHz and the node converts anything higher.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Samples, Volume};
@@ -21,27 +26,54 @@ const QUEUE_SECONDS: f64 = 0.5;
 
 pub struct CpalOutput {
     device_name: String,
+    /// `None`: the host's default output, followed as the system reroutes.
+    device_id: Option<cpal::DeviceId>,
     caps: OutputCaps,
 }
+
+/// Android's mixer rate on nearly every phone (`PROPERTY_OUTPUT_SAMPLE_RATE`).
+#[cfg(target_os = "android")]
+const ANDROID_RATES: [u32; 2] = [44_100, 48_000];
 
 impl CpalOutput {
     /// The system's default output device, if any.
     pub fn default_device() -> Option<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device()?;
-        Self::from_device(&device)
+        let mut out = Self::from_device(&device)?;
+        out.device_id = None;
+        Some(out)
     }
 
-    /// Every output device the host lists.
+    /// Every output device the host lists (on Android: the routed output).
     pub fn enumerate() -> Vec<Self> {
-        let host = cpal::default_host();
-        host.output_devices()
-            .map(|it| it.filter_map(|d| Self::from_device(&d)).collect())
-            .unwrap_or_default()
+        #[cfg(target_os = "android")]
+        {
+            Self::default_device().map(Self::android).into_iter().collect()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let host = cpal::default_host();
+            host.output_devices()
+                .map(|it| it.filter_map(|d| Self::from_device(&d)).collect())
+                .unwrap_or_default()
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn android(mut self) -> Self {
+        self.device_name = "Speaker or headphones".into();
+        self.caps.pcm_rates = ANDROID_RATES.to_vec();
+        self.caps.quality_ceiling = QualityCeiling::LosslessUpTo {
+            rate_hz: 48_000,
+            bits: 24,
+        };
+        self
     }
 
     fn from_device(device: &cpal::Device) -> Option<Self> {
-        let device_name = device.name().ok()?;
+        let device_name = device.to_string();
+        let device_id = device.id().ok();
         let configs: Vec<cpal::SupportedStreamConfigRange> =
             device.supported_output_configs().ok()?.collect();
         if configs.is_empty() {
@@ -52,19 +84,20 @@ impl CpalOutput {
             .filter(|r| {
                 configs
                     .iter()
-                    .any(|c| c.min_sample_rate().0 <= *r && *r <= c.max_sample_rate().0 && c.channels() >= 2)
+                    .any(|c| c.min_sample_rate() <= *r && *r <= c.max_sample_rate() && c.channels() >= 2)
             })
             .collect();
         if pcm_rates.is_empty() {
             pcm_rates = vec![device
                 .default_output_config()
-                .map(|c| c.sample_rate().0)
+                .map(|c| c.sample_rate())
                 .unwrap_or(48_000)];
         }
         let max_rate = pcm_rates.iter().copied().max().unwrap_or(48_000);
         let max_channels = configs.iter().map(|c| c.channels()).max().unwrap_or(2).min(8) as u8;
         Some(Self {
             device_name,
+            device_id,
             caps: OutputCaps {
                 pcm_rates,
                 max_pcm_bits: 24,
@@ -91,6 +124,8 @@ fn host_label() -> &'static str {
         "CoreAudio"
     } else if cfg!(target_os = "windows") {
         "WASAPI"
+    } else if cfg!(target_os = "android") {
+        "Android audio"
     } else {
         "system audio"
     }
@@ -114,7 +149,8 @@ impl Output for CpalOutput {
         if fmt.kind != SampleKind::Pcm || !self.caps.pcm_rates.contains(&fmt.rate_hz) || fmt.channels < 1 {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        CpalSink::open(&self.device_name, self.id(), fmt).map(|s| Box::new(s) as Box<dyn AudioSink>)
+        CpalSink::open(&self.device_name, self.device_id.clone(), self.id(), fmt)
+            .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
     async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
@@ -142,7 +178,12 @@ pub struct CpalSink {
 }
 
 impl CpalSink {
-    fn open(device_name: &str, id: OutputId, fmt: AudioFormat) -> Result<Self, SinkError> {
+    fn open(
+        device_name: &str,
+        device_id: Option<cpal::DeviceId>,
+        id: OutputId,
+        fmt: AudioFormat,
+    ) -> Result<Self, SinkError> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
             played: AtomicU64::new(0),
@@ -158,22 +199,22 @@ impl CpalSink {
             .name("cpal-output".into())
             .spawn(move || {
                 let host = cpal::default_host();
-                let device = host
-                    .output_devices()
-                    .ok()
-                    .and_then(|mut it| it.find(|d| d.name().map(|n| n == name).unwrap_or(false)));
+                let device = match &device_id {
+                    Some(id) => host.device_by_id(id),
+                    None => host.default_output_device(),
+                };
                 let Some(device) = device else {
                     let _ = ready_tx.send(Err(format!("output device {name} is gone")));
                     return;
                 };
                 let config = cpal::StreamConfig {
                     channels: channels as u16,
-                    sample_rate: cpal::SampleRate(fmt.rate_hz),
+                    sample_rate: fmt.rate_hz,
                     buffer_size: cpal::BufferSize::Default,
                 };
                 let s3 = s2.clone();
                 let stream = device.build_output_stream(
-                    &config,
+                    config,
                     move |out: &mut [f32], _| {
                         let mut q = s3.queue.lock().unwrap_or_else(|p| p.into_inner());
                         let have = q.len().min(out.len());
