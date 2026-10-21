@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Fix: the edge release could vanish.** Publishing deleted the old edge release first. When an upload then timed out (HTTP 408, on the first build with the updater), there was no edge at all until I republished it by hand from that run's files. Now the edge release stays up: its tag moves to the new commit, files are replaced in place with retries, the update feed and checksums go last, and files the new build lacks are removed. Versioned releases retry their uploads too.
 - **The owner's Discover findings, fixed on the node** (step 4 list).
   - **The same song shows once.** Home's lists merge listings of one song: same MusicBrainz id or ISRC, else the same title (without "Remastered 2011", "(feat. …)", "| Music Video") and artist. A listing without an artist joins the one that has it. The row says "4 versions" and shows the plain title. Live, the 7-day chart's four Bohemian Rhapsody rows are one, and so are the two "Das Boot" rows.
   - **No placeholder names.** A listing named "ISRC NLS161600475", or not named at all, is named by MusicBrainz, else by Deezer's public catalogue by ISRC, else by the TIDAL track it plays from (live: "Jim" by Sefa, "Mr. Brightside" by The Killers). "Untitled on …" stays only when nothing knows the song.

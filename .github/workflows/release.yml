@@ -415,17 +415,42 @@ jobs:
         if: needs.meta.outputs.channel == 'edge'
         env:
           GH_TOKEN: ${{ github.token }}
+        # The edge release stays up while its files are replaced: deleting it first left no edge
+        # at all when an upload timed out (HTTP 408). Its tag moves to this commit; uploads retry;
+        # the update feed and checksums go last, so the feed never names files not yet there.
         run: |
-          gh release delete edge --cleanup-tag --yes || true
-          gh release create edge dist/* --prerelease --latest=false --target "$GITHUB_SHA" \
-            --title "Edge (main @ ${GITHUB_SHA::7})" --notes-file notes.md
+          title="Edge (main @ ${GITHUB_SHA::7})"
+          if gh release view edge >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/edge" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            gh release edit edge --title "$title" --notes-file notes.md --prerelease --latest=false
+          else
+            gh release create edge --prerelease --latest=false --target "$GITHUB_SHA" --title "$title" \
+              --notes-file notes.md
+          fi
+          upload() {
+            for i in 1 2 3 4 5; do
+              gh release upload edge "$@" --clobber && return 0
+              echo "::warning::upload failed (attempt $i); trying again"; sleep $((i * 15))
+            done
+            return 1
+          }
+          upload $(ls dist/* | grep -v -e '/latest.json$' -e '/SHA256SUMS$')
+          upload dist/latest.json dist/SHA256SUMS
+          # Files an older build had and this one does not.
+          keep=$(cd dist && ls)
+          for a in $(gh release view edge --json assets -q '.assets[].name'); do
+            echo "$keep" | grep -qxF "$a" || gh release delete-asset edge "$a" --yes
+          done
       - name: versioned
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Pubky Music $GITHUB_REF_NAME" --notes-file notes.md
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Pubky Music $GITHUB_REF_NAME" --notes-file notes.md
           fi
+          for i in 1 2 3 4 5; do
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber && exit 0
+            echo "::warning::upload failed (attempt $i); trying again"; sleep $((i * 15))
+          done
+          exit 1
