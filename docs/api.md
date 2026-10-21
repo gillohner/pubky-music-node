@@ -57,7 +57,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/spotify/collection` | | saved albums and tracks as hits (ISRC/UPC, library matches) |
 | POST | `/v1/sources/spotify/collection/import` | | saved tracks (by ISRC) and albums as favourites |
 | GET | `/v1/sources/spotify/playlists` | | the user's playlists |
-| POST | `/v1/sources/spotify/playlists/{id}/import` | | a private Pubky playlist by ISRC |
+| POST | `/v1/sources/spotify/playlists/{id}/import` | `?keep_source=true` | a private Pubky playlist by ISRC; with `keep_source` each song is pinned to its Spotify track (ADR 0015) |
+| POST | `/v1/sources/tidal/playlists/{id}/import` | `?keep_source=true` | the same for TIDAL |
 | GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
 | POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |

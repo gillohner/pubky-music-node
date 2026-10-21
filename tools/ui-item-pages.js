@@ -77,11 +77,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (Math.abs(scroll1 - scrollLeft) > 40) errors.push(`scroll not restored (${scrollLeft} → ${scroll1})`);
     if (!/Results for/.test(back1)) errors.push(`artist back label is "${back1}"`);
   }
-  // ---- deep link: Back goes to the section ----
+  // ---- deep link: Back goes to the parent (album → its artist, else the section) ----
   const dl = await ctx.newPage(); await dl.goto(BASE + '/album/lib-1'); await dl.waitForSelector('#main #iabout', { timeout: 20000 }).catch(() => {});
+  const crumb = await dl.$$eval('#main .crumbs li', (e) => e.map((x) => x.textContent.trim())).catch(() => []);
   const label = (await dl.textContent('#main .back')).trim(); await dl.click('#main .back'); await sleep(1500);
-  console.log('deep link back:', label, '→', new URL(dl.url()).pathname);
-  if (new URL(dl.url()).pathname !== '/albums') errors.push('deep-link Back did not go to /albums');
+  const landed = new URL(dl.url()).pathname;
+  console.log('deep link back:', label, '→', landed, '| breadcrumb', crumb.join(' › '));
+  if (crumb.length >= 2 ? !landed.startsWith('/artist/') : landed !== '/albums') errors.push(`deep-link Back went to ${landed}`);
+  if (crumb.length >= 2 && label !== crumb[0]) errors.push(`back label "${label}" is not the parent "${crumb[0]}"`);
   // ---- half-star rating (1–10): hover previews, a click saves, the same click clears ----
   const rp = await ctx.newPage(); await rp.goto(BASE + '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
   if (await rp.waitForSelector('#stars', { timeout: 20000 }).then(() => true).catch(() => false)) {
@@ -94,6 +97,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('rating: hover', fills, '| saved 3½', saved, '| cleared', cleared);
     if (fills !== 'f2,f2,f2,f1,f0' || !saved || !cleared) errors.push('half-star rating');
   } else console.log('rating: skipped (no rating row on this node)');
+  // ---- back closes an open menu and stays on the page ----
+  if (await rp.$('#imore')) {
+    const at = rp.url();
+    await rp.click('#imore'); await rp.waitForSelector('.popover.menu:not([hidden])', { timeout: 5000 }).catch(() => {});
+    await rp.goBack(); await sleep(600);
+    const open = await rp.$('.popover.menu:not([hidden])');
+    console.log('back with a menu open: closed', !open, '| same page', rp.url() === at);
+    if (open || rp.url() !== at) errors.push('back did not just close the menu');
+  }
   // ---- the On Pubky switch is a chip control: styled, aria-pressed, arrow keys ----
   if (await rp.$('#ipubky [data-scope="all"]')) {
     const styled = await rp.$eval('#ipubky [data-scope="all"]', (e) => e.classList.contains('chip') && getComputedStyle(e).borderRadius === '999px');

@@ -198,3 +198,44 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
       - if: failure()
         run: tail -50 /tmp/pm/node.log
+
+  ui-controls:
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: cargo build -p pm-node
+      - name: start a node on the audio fixtures
+        run: |
+          mkdir -p /tmp/pm/data /tmp/pm/music
+          cp crates/pm-audio/tests/fixtures/*.flac /tmp/pm/music/
+          cat > /tmp/pm/node.toml <<'TOML'
+          data_dir = "/tmp/pm/data"
+          [library]
+          folders = ["/tmp/pm/music"]
+          [api]
+          listen = "127.0.0.1:7788"
+          token = "ci-token"
+          [outputs]
+          discover = false
+          upnp = false
+          cast = false
+          slimproto_port = 0
+          TOML
+          nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
+          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
+          sleep 5
+      - name: every visible control does something (real browser)
+        timeout-minutes: 30
+        run: |
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node $GITHUB_WORKSPACE/tools/ui-controls.js ci-token http://127.0.0.1:7788
+      - if: failure()
+        run: tail -50 /tmp/pm/node.log
