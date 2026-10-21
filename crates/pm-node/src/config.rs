@@ -220,6 +220,40 @@ impl NodeConfig {
         }
     }
 
+    /// After a restore the old node's config sits in `<data_dir>/node.restored.toml`: its service
+    /// keys (TIDAL, Spotify, Jamendo, AcoustID) and contact fill what this config leaves empty.
+    /// Returns what was taken.
+    pub fn fill_from_restored(&mut self) -> Vec<&'static str> {
+        let Ok(text) = std::fs::read_to_string(self.data_dir.join("node.restored.toml")) else {
+            return Vec::new();
+        };
+        let Ok(old) = toml::from_str::<NodeConfig>(&text) else {
+            return Vec::new();
+        };
+        let mut took = Vec::new();
+        if self.tidal.client_id.is_empty() && !old.tidal.client_id.is_empty() {
+            self.tidal = old.tidal;
+            took.push("tidal");
+        }
+        if self.spotify.client_id.is_empty() && !old.spotify.client_id.is_empty() {
+            self.spotify = old.spotify;
+            took.push("spotify");
+        }
+        if self.jamendo.client_id.is_empty() && !old.jamendo.client_id.is_empty() {
+            self.jamendo = old.jamendo;
+            took.push("jamendo");
+        }
+        if self.acoustid.api_key.is_empty() && !old.acoustid.api_key.is_empty() {
+            self.acoustid = old.acoustid;
+            took.push("acoustid");
+        }
+        if self.contact.is_empty() && !old.contact.is_empty() {
+            self.contact = old.contact;
+            took.push("contact");
+        }
+        took
+    }
+
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("library.db")
     }
@@ -240,6 +274,25 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restored_config_fills_only_empty_service_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("node.restored.toml"),
+            "contact = \"old@example.org\"\n[tidal]\nclient_id = \"old-id\"\nclient_secret = \"old-secret\"\n[spotify]\nclient_id = \"sp\"\n",
+        )
+        .unwrap();
+        let mut cfg = NodeConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        cfg.spotify.client_id = "mine".into();
+        let took = cfg.fill_from_restored();
+        assert_eq!(took, vec!["tidal", "contact"]);
+        assert_eq!(cfg.tidal.client_secret, "old-secret");
+        assert_eq!(cfg.spotify.client_id, "mine", "this node's own key wins");
+    }
 
     #[test]
     fn parses_partial_toml() {

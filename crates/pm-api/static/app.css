@@ -806,3 +806,11 @@ a.btn { text-decoration: none; }
 .setup-suggest { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .setup-suggest .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-step .lnk { color: var(--accent-strong); text-decoration: underline; }
+.setup-card > p .lnk { color: var(--accent-strong); text-decoration: underline; }
+
+/* Backup and restore (steward next-4, item 1) */
+.stack { display: flex; flex-direction: column; gap: 8px; }
+.warn-text { color: var(--warn); }
+.notice.ok-notice { border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+#backupcard .toolbar { margin-top: 8px; flex-wrap: wrap; }
+#backupcard .toolbar .input { flex: 1 1 200px; min-width: 0; }

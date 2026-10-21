@@ -70,6 +70,8 @@ pub struct NodeSettings {
 }
 
 pub struct NodeState {
+    /// The config file the node was started with (a backup carries it, encrypted).
+    config_file: Mutex<Option<PathBuf>>,
     pub name: String,
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
@@ -300,6 +302,7 @@ impl NodeState {
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
+            config_file: Mutex::new(None),
         })
     }
 
@@ -1106,6 +1109,15 @@ impl NodeState {
     /// Tell event listeners that library-side data (tracks, playlists) changed.
     pub fn notify_library(&self) {
         let _ = self.events.send(ApiEvent::LibraryChanged);
+    }
+
+    /// The config file the node runs with, when there is one.
+    pub fn config_file(&self) -> Option<PathBuf> {
+        self.config_file.lock().expect("config file lock").clone()
+    }
+
+    pub fn set_config_file(&self, path: Option<PathBuf>) {
+        *self.config_file.lock().expect("config file lock") = path;
     }
 
     pub fn is_scanning(&self) -> bool {

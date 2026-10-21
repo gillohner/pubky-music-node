@@ -45,7 +45,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT / DELETE | `/v1/zones/{id}/dsp` | PUT: `PipelineConfig` `{headroom_db?, volume_db?, max_volume_db? (volume limit; caps volume_db and every volume request), dither, dsd_mode, resample, loudness: off\|track\|album, eq: [{kind, freq_hz, gain_db, q, enabled}], convolution?: {path, gain_db, enabled}, crossfeed?: {level_db, cutoff_hz, delay_us, enabled}}` | per-output DSP, persisted; applies at the next track start; DELETE restores the default |
 | GET | `/v1/library/stats` | | `LibraryStats` |
 | GET | `/v1/library/tracks` | `?after=<id>&limit=` | `{tracks}` |
-| GET | `/v1/backup` | | a consistent SQLite snapshot of the library database (`application/vnd.sqlite3`, attachment `pubky-music-<date>.db`); `pm-node restore <file>` brings it back |
+| GET | `/v1/backup` | | a backup file without sign-ins (zip: `manifest.json`, `library.db`), attachment `pubky-music-<date>-<time>.pmbackup` |
+| POST | `/v1/backup` | header `x-backup-passphrase` | the same with the sign-ins, Pubky session, remote key and config encrypted under the passphrase (`secrets.bin`, Argon2id + AES-256-GCM) |
+| POST | `/v1/restore` | the file; `?check=true`; `?skip_secrets=true`; header `x-backup-passphrase` | `check`: `{from_node, made_at, counts, locked_signins, left_out, folders}` without changing anything. Otherwise restores while the node runs and rescans: `{expected, restored, signed_in, sign_in_again, missing_folders, rescan_started, notes}`. 400 for a wrong or missing passphrase, 422 for a file that is not a backup, 409 during a scan |
+| GET, PUT | `/v1/backup/schedule` | `{folder, every_hours?, keep?, passphrase?}` | scheduled backups to a folder on the node, the newest `keep` kept; `{folder, every_hours, keep, with_signins, last_at, last_file, last_error, files}`; an empty folder turns it off; `passphrase: ""` forgets it |
+| POST | `/v1/backup/schedule/run` | | one scheduled backup now |
 | GET | `/v1/library/tracks/{id}/lyrics` | | `{track_id, source: lrc\|tag, synced, text, lines: [{ms?, text}]}` from the file's tags or a sidecar `.lrc`; 404 when none |
 | GET | `/v1/library/tracks/{id}` | | `Track` |
 | GET | `/v1/library/search` | `?q=&limit=&sources=1` | `{tracks, albums, artists, genres, sources: [{source, items}]}`: tracks by full text (title, artist, album, genre words), albums by title, artists and genres by name; `sources` carries hits from streaming services that take part (TIDAL when configured; `sources=0` skips them), each hit flagged with `library_track_id` / `library_album_id` when the library has the same ISRC or UPC |
@@ -81,6 +85,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/library/folders` | `{path}` | adds a folder on the node (must exist), watches it and starts a scan; `{folders, scan_started}` |
 | DELETE | `/v1/library/folders` | `?path=` | forgets the folder and the tracks that lived only there; `{folders, removed_files, removed_tracks}`; 409 while a scan runs |
 | GET | `/v1/library/folders/suggest` | | where the music probably is, for a new install: `[{path, audio_files, more}]` for the usual places (the home Music folder, `/music`, drives under `/media`, `/mnt`, `/Volumes`) that hold playable files and are not in the library yet; `more`: at least that many |
+| POST | `/v1/library/folders/move` | `{from, to}` | the music under `from` now lives under `to` (a restore on another machine, a new disk): files keep their tracks, so matches, playlists, history and tags stay; a rescan follows; `{folders, moved_files, scan_started}` |
 | POST | `/v1/library/scan` | `{folders?}` | `{folders}`; 409 while a scan runs. With `[library] watch = true` (default) the node also rescans by itself after `watch_quiet_secs` without file changes |
 | GET / POST | `/v1/playlists` | POST: `{name, description?, image?, uris?, track_ids?}` | `PlaylistSummary[]` / `PlaylistDetail` |
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |

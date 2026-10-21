@@ -157,7 +157,7 @@ enum DiscoverCmd {
     },
 }
 
-async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
+async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     let db_path = cfg.db_path();
     let lib = pm_library::Library::open(&db_path)?;
@@ -291,6 +291,8 @@ async fn serve(cfg: &NodeConfig) -> anyhow::Result<()> {
             Err(e) => tracing::warn!(file = %file.display(), "cannot read session secret: {e}"),
         }
     }
+    state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
+    pm_api::backup::start_schedule(&state);
     let _announced = announce(cfg, &state);
     pm_api::serve(state, &cfg.api.listen).await
 }
@@ -428,10 +430,16 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    let cfg = NodeConfig::load_or_default(cli.config.as_deref())?;
+    let mut cfg = NodeConfig::load_or_default(cli.config.as_deref())?;
+    let took = cfg.fill_from_restored();
+    if !took.is_empty() {
+        tracing::info!(?took, "service keys from the restored config");
+    }
+    let cfg = cfg;
+    let config_file = cli.config.clone();
     match cli.cmd {
         Cmd::Config => print!("{}", toml::to_string_pretty(&cfg)?),
-        Cmd::Serve => serve(&cfg).await?,
+        Cmd::Serve => serve(&cfg, config_file).await?,
         Cmd::Outputs => {
             let registry = outputs::discover_all(&cfg.outputs);
             for o in registry.list() {

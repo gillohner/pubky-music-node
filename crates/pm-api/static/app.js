@@ -1300,7 +1300,7 @@
       : `${suggestions.length ? `<div class="setup-suggest">${suggestions.map((f) => `<button class="btn sm" data-addfolder="${esc(f.path)}">${icon('plus')} ${esc(f.path)} <span class="muted">${f.more ? 'over ' : ''}${n(f.audio_files)} audio files</span></button>`).join('')}</div>` : ''}
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from Internet Archive, Audius or Jamendo</a>, no account needed.</p>`;
-    box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of 4 done</span>${has.music ? '<button class="link" id="setuphide">Hide</button>' : ''}</div><ol class="setup-steps">`
+    box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of 4 done</span>${has.music ? '<button class="link" id="setuphide">Hide</button>' : ''}</div>${has.music ? '' : '<p class="muted small">Moving from another node? <a class="lnk" href="/settings" id="setuprestore">Restore it from a backup</a> instead.</p>'}<ol class="setup-steps">`
       + step('music', 1, 'Add your music', has.music ? `${n(info.library.tracks)} tracks${info.library.albums ? ` · ${n(info.library.albums)} albums` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
       + step('played', 2, 'Play something', has.music ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : 'Once your music is in.', has.music ? '<button class="btn sm primary" id="setupplay">' + icon('play') + ' Shuffle my music</button>' : '')
       + step('contact', 3, 'See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>')
@@ -1324,6 +1324,7 @@
       const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
       $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') save(); };
     }
+    const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); state.focusRestore = true; setView('settings'); };
     const si = $('#setupsignin'); if (si) si.onclick = () => { state.autoResign = true; setView('settings'); };
     const hide = $('#setuphide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } state.setupShown = false; box.innerHTML = ''; };
   };
@@ -2064,7 +2065,11 @@
               <div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
             <div class="cards">
               <div class="card"><h3>Node</h3><dl class="kv"><dt>Name</dt><dd>${esc(info.name)}</dd><dt>Version</dt><dd>${esc(info.version)}</dd><dt>Library</dt><dd>${info.library.tracks} tracks · ${info.library.albums} albums · ${info.library.artists} artists</dd><dt>Files</dt><dd>${info.library.files}${info.library.missing_files ? ` · <span style="color:var(--warn)">${info.library.missing_files} missing</span>` : ''}</dd></dl>
-                <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><a class="btn" href="/v1/backup${tokenQ()}" download title="A snapshot of the library database: playlists, favourites, tags, history, settings. Restore with pm-node restore">${icon('download')} Download backup</a><button class="btn ghost" id="logout">Change token</button></div></div>
+                <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><button class="btn" id="tobackup">${icon('download')} Backup and restore</button><button class="btn ghost" id="logout">Change token</button></div></div>
+              <div class="card" id="backupcard"><h3>Backup and restore</h3><p class="muted small">One file with everything needed to rebuild this node: matches and corrections, playlists, favourites, tags, play history, queues and settings. Never your music files.</p>
+                <form id="bkform" class="stack"><label class="small" for="bkpass">Passphrase for your sign-ins (TIDAL, Spotify, ListenBrainz, Pubky…)</label><input class="input" id="bkpass" type="password" autocomplete="new-password" placeholder="Leave empty to leave sign-ins out"><input class="input" id="bkpass2" type="password" autocomplete="new-password" placeholder="The same passphrase again" aria-label="Repeat the passphrase" hidden><p class="muted small">Without it you can restore everything else and sign in to those services again. There is no way to open the sign-ins without it.</p><div class="actions"><button class="btn primary" id="bkdown" type="submit">${icon('download')} Download a backup</button></div></form>
+                <h3 style="margin-top:18px">Every day, to a folder</h3><div id="bksched"><div class="skeleton" style="height:60px"></div></div>
+                <h3 style="margin-top:18px">Restore</h3><p class="muted small">Replaces this node's library and settings with the backup's. Your music files are not touched.</p><label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div></div>
               <div class="card" id="idcard"><h3>Identify library</h3><p class="muted small">Gives every file a MusicBrainz identity so Pinakes, tags and playlists know it: IDs in the tags first, then an audio fingerprint (AcoustID), with the folder as the album. Unsure matches wait for you.</p><div id="idbox" class="muted small">Loading…</div></div>
               <div class="card" id="loccard"><h3>Concerts near you</h3><p class="muted small">Your city, for Home's concerts. It is looked up once on OpenStreetMap and stays on this node.</p><div class="toolbar"><input class="input" id="loccity" placeholder="City" style="width:220px"><button class="btn primary" id="locsave">Save</button><button class="btn ghost" id="locclear">Clear</button><span class="muted small" id="loccur"></span></div></div>
               <div class="card"><h3>Upstream contact</h3><p class="muted small">An email or URL sent in the node's User-Agent. Pinakes (Discover, On Pubky), MusicBrainz and Wikipedia ask for one.</p><div class="toolbar"><input class="input" id="contact" placeholder="you@example.org or https://your.site" value="${esc(ns.contact)}" style="width:280px"><button class="btn primary" id="contactsave">Save</button><span class="pill ${ns.discovery ? 'ok' : 'warn'}">${ns.discovery ? 'Discover on' : 'Discover off'}</span></div>
@@ -2177,6 +2182,68 @@
             $$('[data-lbpl]', box).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/listenbrainz/playlists/${b.dataset.lbpl}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs`); } catch (er) { toast(er.message, 'error'); } b.disabled = false; });
           };
           loadLb();
+          // ---- backup and restore (steward next-4, item 1)
+          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          const authH = () => (state.token ? { authorization: 'Bearer ' + state.token } : {});
+          const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
+          $('#bkpass').oninput = () => { $('#bkpass2').hidden = !$('#bkpass').value; };
+          $('#bkform').onsubmit = async (e) => {
+            e.preventDefault();
+            const p = $('#bkpass').value; if (p && p !== $('#bkpass2').value) { toast('The two passphrases differ', 'error'); return; }
+            const b = $('#bkdown'); b.disabled = true;
+            try {
+              const res = await fetch('/v1/backup', { method: 'POST', headers: { ...authH(), ...(p ? { 'x-backup-passphrase': p } : {}) } });
+              if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+              const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || 'pubky-music.pmbackup';
+              saveBlob(await res.blob(), name); toast(p ? 'Backup saved, sign-ins locked with your passphrase' : 'Backup saved (without sign-ins)');
+            } catch (er) { toast(er.message, 'error'); }
+            b.disabled = false;
+          };
+          const when = (t) => (t ? new Date(t * 1000).toLocaleString() : 'never');
+          const nOf = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+          const countsLine = (c) => `${nOf(c.tracks, 'track', 'tracks')} (${c.identified} identified) · ${nOf(c.playlists, 'playlist', 'playlists')} · ${nOf(c.favourites, 'favourite', 'favourites')} · ${nOf(c.tags, 'tag', 'tags')} · ${nOf(c.plays, 'play', 'plays')}`;
+          const loadSched = async () => {
+            const box = $('#bksched'); if (!box) return;
+            let sc; try { sc = await api('GET', '/backup/schedule'); } catch (er) { box.innerHTML = `<p class="muted small">${esc(er.message)}</p>`; return; }
+            box.innerHTML = `<p class="muted small">A folder on the node, best on another disk or a NAS. The newest backups are kept, older ones removed.</p>
+              <div class="toolbar"><input class="input" id="bkfolder" placeholder="/path/to/backups" value="${esc(sc.folder)}" aria-label="Backup folder on the node"></div>
+              <div class="toolbar"><label class="small">Every <select class="input" id="bkevery" aria-label="How often">${[[24, 'day'], [168, 'week']].map(([h, l]) => `<option value="${h}" ${sc.every_hours === h ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label class="small">Keep <input class="input" id="bkkeep" type="number" min="1" max="365" value="${sc.keep}" style="width:80px" aria-label="How many to keep"></label></div>
+              <div class="toolbar"><input class="input" id="bkspass" type="password" autocomplete="new-password" placeholder="${sc.with_signins ? 'Passphrase saved: type a new one to change it' : 'Passphrase for sign-ins (optional)'}" aria-label="Passphrase for scheduled backups"></div>
+              <div class="actions"><button class="btn" id="bksave">Save</button>${sc.folder ? '<button class="btn ghost" id="bknow">Back up now</button><button class="btn ghost" id="bkoff">Turn off</button>' : ''}</div>
+              ${sc.folder ? `<p class="small ${sc.last_error ? 'warn-text' : 'muted'}" role="status">${sc.last_error ? `The last backup failed: ${esc(sc.last_error)}` : `Last backup: ${esc(when(sc.last_at))}${sc.last_file ? ` · ${esc(sc.last_file)}` : ''}`} · ${sc.files.length} in the folder · ${sc.with_signins ? 'with sign-ins' : 'without sign-ins'}</p>` : '<p class="muted small">Off.</p>'}`;
+            const put = async (body, msg) => { try { await api('PUT', '/backup/schedule', body); toast(msg); loadSched(); } catch (er) { toast(er.message, 'error'); } };
+            $('#bksave').onclick = () => { const f = $('#bkfolder').value.trim(); if (!f) { toast('Type the folder on the node', 'error'); return; } const pp = $('#bkspass').value; put({ folder: f, every_hours: Number($('#bkevery').value), keep: Number($('#bkkeep').value) || 7, ...(pp ? { passphrase: pp } : {}) }, 'Backups scheduled'); };
+            const now = $('#bknow'); if (now) now.onclick = async () => { now.disabled = true; try { const r = await api('POST', '/backup/schedule/run'); toast(`Backup written: ${r.last_file}`); loadSched(); } catch (er) { toast(er.message, 'error'); now.disabled = false; } };
+            const off = $('#bkoff'); if (off) off.onclick = () => put({ folder: '', passphrase: '' }, 'Scheduled backups off');
+          };
+          loadSched();
+          $('#rsfile').onchange = async () => {
+            const f = $('#rsfile').files[0]; const out = $('#rsout'); if (!f) return;
+            const bytes = await f.arrayBuffer();
+            out.innerHTML = '<div class="skeleton" style="height:60px"></div>';
+            let info; try { const res = await fetch('/v1/restore?check=true', { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...authH() }, body: bytes }); info = await res.json(); if (!res.ok) throw new Error(info.error || res.status); } catch (er) { out.innerHTML = `<div class="notice warn">${esc(er.message)}</div>`; return; }
+            const c = info.counts;
+            out.innerHTML = `<div class="notice" style="margin-top:10px"><p><b>${esc(f.name)}</b>: from “${esc(info.from_node)}”, ${esc(when(info.made_at))}.</p><p class="small">${countsLine(c)}</p>
+              ${info.locked_signins ? '<label class="small" for="rspass">Its sign-ins are locked with a passphrase</label><input class="input" id="rspass" type="password" autocomplete="current-password" placeholder="Passphrase"><label class="check small"><input type="checkbox" id="rsskip"> Restore without the sign-ins</label>' : (info.left_out.length ? `<p class="small muted">Not in this backup: ${esc(info.left_out.join(', '))}. Sign in to those again afterwards.</p>` : '')}
+              <div class="actions"><button class="btn primary" id="rsgo">Restore this backup</button></div></div><div id="rsreport"></div>`;
+            $('#rsgo').onclick = async () => {
+              const b = $('#rsgo');
+              if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Replace this node’s library?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Restore this backup'; } }, 4000); return; }
+              b.disabled = true; b.textContent = 'Restoring…';
+              const pass = $('#rspass') ? $('#rspass').value : ''; const skip = $('#rsskip') && $('#rsskip').checked;
+              try {
+                const res = await fetch(`/v1/restore${skip ? '?skip_secrets=true' : ''}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...authH(), ...(pass ? { 'x-backup-passphrase': pass } : {}) }, body: bytes });
+                const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
+                const rc = r.restored;
+                $('#rsreport').innerHTML = `<div class="notice ok-notice" role="status" style="margin-top:10px"><p><b>Restored.</b> ${countsLine(rc)}.${r.rescan_started ? ' Checking your music folders now; unchanged files keep their matches.' : ''}</p>
+                  ${r.signed_in.length ? `<p class="small">Signed in again: ${esc(r.signed_in.join(', '))}.</p>` : ''}${r.sign_in_again.length ? `<p class="small">Sign in again: ${esc(r.sign_in_again.join(', '))}.</p>` : ''}${r.notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
+                  ${r.missing_folders.map((m, k) => `<div class="toolbar" style="margin-top:8px"><span class="small">Not on this computer: <code>${esc(m)}</code>. Where is that music now?</span><input class="input" data-mvto="${k}" placeholder="/path/to/the/music" aria-label="New place of ${esc(m)}"><button class="btn sm" data-mv="${k}">Use this folder</button></div>`).join('')}</div>`;
+                $$('[data-mv]', out).forEach((mb) => mb.onclick = async () => { const k = Number(mb.dataset.mv); const to = $(`[data-mvto="${k}"]`, out).value.trim(); if (!to) return; try { const m = await api('POST', '/library/folders/move', { from: r.missing_folders[k], to }); toast(`${m.moved_files} files found in their new place`); mb.closest('.toolbar').remove(); } catch (er) { toast(er.message, 'error'); } });
+                b.textContent = 'Restored'; state.pubkyUser = undefined; state.albums = null; homeCache.clear(); toast('Backup restored');
+              } catch (er) { toast(er.message, 'error'); b.disabled = false; b.textContent = 'Restore this backup'; delete b.dataset.armed; }
+            };
+          };
+          if (state.focusRestore) { state.focusRestore = false; $('#backupcard').scrollIntoView({ block: 'start' }); $('#rsfile').focus(); }
           const loadOrder = async () => { const box = $('#gorder'); if (!box) return; try { const o = await api('GET', '/play-order'); box.innerHTML = orderList(o); bindOrderList(box, o.order, async (order) => { try { await api('PUT', '/play-order', { order }); state.plPf = null; loadOrder(); } catch (e) { toast(e.message, 'error'); } }); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; } };
           loadOrder();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };

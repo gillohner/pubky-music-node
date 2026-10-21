@@ -14,6 +14,7 @@ pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod audius;
+pub mod backup;
 pub mod deezer;
 pub mod discover;
 pub mod events;
@@ -146,7 +147,17 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks/{id}/lyrics", get(lyrics))
         .route("/library/tracks/{id}/versions", get(track_versions))
         .route("/library/albums/{id}/versions", get(album_versions))
-        .route("/backup", get(backup))
+        .route("/backup", get(backup::get_backup).post(backup::post_backup))
+        .route(
+            "/restore",
+            post(backup::post_restore).layer(axum::extract::DefaultBodyLimit::max(4 << 30)),
+        )
+        .route(
+            "/backup/schedule",
+            get(backup::get_schedule).put(backup::put_schedule),
+        )
+        .route("/backup/schedule/run", post(backup::run_schedule))
+        .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
         .route("/library/artists", get(artists))
@@ -1351,44 +1362,6 @@ async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
     Ok(Json(t))
 }
 
-/// A consistent snapshot of the library database as a download
-/// (`pm-node restore <file>` brings it back).
-async fn backup(State(s): State<Arc<NodeState>>) -> Result<axum::response::Response, ApiError> {
-    let tmp = std::env::temp_dir().join(format!(
-        "pubky-music-backup-{}-{}.db",
-        std::process::id(),
-        pm_library::db::now_unix()
-    ));
-    let bytes = {
-        let lib = s.library.lock().expect("library poisoned");
-        lib.backup_to(&tmp)?;
-        let bytes = std::fs::read(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        bytes.map_err(|e| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("reading the backup snapshot: {e}"),
-            )
-        })?
-    };
-    let date = time::OffsetDateTime::now_utc().date();
-    let name = format!("pubky-music-{date}.db");
-    Ok((
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/vnd.sqlite3".to_string(),
-            ),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{name}\""),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
 /// Add Pinakes's links after the direct lookups, skipping pages already
 /// listed (same URL) and services the node already answered for.
 fn merge_versions(out: &mut Vec<Version>, extra: Vec<Version>) {
@@ -1905,6 +1878,7 @@ async fn add_folder(
         scan_started,
         removed_files: 0,
         removed_tracks: 0,
+        moved_files: 0,
     }))
 }
 
@@ -1928,6 +1902,52 @@ async fn remove_folder(
         scan_started: false,
         removed_files,
         removed_tracks,
+        moved_files: 0,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FolderMove {
+    from: String,
+    to: String,
+}
+
+/// `POST /v1/library/folders/move {from, to}`: the music under `from` now lives under `to` (a
+/// restore on another machine, a new disk). Tracks keep their matches, playlists and history;
+/// a rescan follows.
+async fn move_folder(
+    State(s): State<Arc<NodeState>>,
+    Json(m): Json<FolderMove>,
+) -> ApiResult<FoldersChanged> {
+    let to = tokio::fs::canonicalize(m.to.trim())
+        .await
+        .map_err(|e| ApiError::bad_request(format!("{}: {e}", m.to.trim())))?;
+    if !to.is_dir() {
+        return Err(ApiError::bad_request(format!("{} is not a folder", to.display())));
+    }
+    if !s.begin_scan() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "a scan is running; try again when it is done",
+        ));
+    }
+    let moved = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .move_folder(std::path::Path::new(m.from.trim()), &to);
+    s.end_scan();
+    let moved = moved?;
+    s.unwatch(std::path::Path::new(m.from.trim()));
+    s.watch_more(&to);
+    let scan_started = matches!(s.start_scan(vec![to]), Ok(true));
+    s.notify_library();
+    Ok(Json(FoldersChanged {
+        folders: folder_list(&s)?,
+        scan_started,
+        removed_files: 0,
+        removed_tracks: 0,
+        moved_files: moved,
     }))
 }
 
@@ -3749,7 +3769,7 @@ mod tests {
     /// Library radio: with the flag on, a zone that runs out of queue gets
     /// similar tracks appended and keeps playing.
     #[tokio::test]
-    async fn backup_downloads_a_sqlite_snapshot() {
+    async fn backup_downloads_a_backup_file() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
         let app = router(s.clone());
@@ -3770,9 +3790,11 @@ mod tests {
             .to_string();
         assert!(disposition.contains("pubky-music-"), "{disposition}");
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert!(body.starts_with(b"SQLite format 3\0"));
+        // A backup file (zip): its library is a plain SQLite database
+        let parsed = crate::backup::parse(&body).unwrap();
+        assert!(parsed.database.starts_with(b"SQLite format 3\0"));
         let copy = dir.path().join("copy.db");
-        std::fs::write(&copy, &body).unwrap();
+        std::fs::write(&copy, &parsed.database).unwrap();
         assert!(pm_library::Library::open(&copy).is_ok());
     }
 

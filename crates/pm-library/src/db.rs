@@ -43,6 +43,20 @@ pub struct LibraryStats {
 }
 
 /// The scanner's view of a stored file.
+/// Counts of what a backup holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackupCounts {
+    pub tracks: u64,
+    /// Tracks with a canonical identity (tagged, fingerprinted or confirmed).
+    pub identified: u64,
+    pub albums: u64,
+    pub playlists: u64,
+    pub favourites: u64,
+    pub tags: u64,
+    pub plays: u64,
+    pub folders: u64,
+}
+
 /// An artist as the browse views list them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistSummary {
@@ -813,6 +827,109 @@ impl Library {
         let conn = self.lock();
         conn.execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
         Ok(())
+    }
+
+    /// Rewrite the database file in place and fold the write-ahead log into it: afterwards the
+    /// file alone holds everything, and rows deleted before (sign-ins taken out of a backup copy)
+    /// are gone from it, not just marked free.
+    pub fn vacuum_into_place(&self) -> Result<()> {
+        self.lock()
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// What a backup carries, counted (shown before a restore and compared after it).
+    pub fn backup_counts(&self) -> Result<BackupCounts> {
+        let conn = self.lock();
+        let n = |sql: &str| -> Result<u64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
+        Ok(BackupCounts {
+            tracks: n("SELECT COUNT(*) FROM tracks")?,
+            identified: n("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL")?,
+            albums: n("SELECT COUNT(*) FROM albums")?,
+            playlists: n(
+                "SELECT COUNT(*) FROM music_posts WHERE kind = 'pubky.music/playlist' AND deleted = 0",
+            )?,
+            favourites: n("SELECT COUNT(*) FROM favourites WHERE deleted = 0")?,
+            tags: n("SELECT COUNT(*) FROM tags WHERE deleted = 0")?,
+            plays: n("SELECT COUNT(*) FROM plays")?,
+            folders: n("SELECT COUNT(*) FROM folders")?,
+        })
+    }
+
+    /// Replace the whole database with the one at `path` while the node runs (SQLite's backup
+    /// API copies it into this connection), then bring it up to this version's schema. Check the
+    /// file first by opening it with [`Library::open`]: a broken one must never get this far.
+    pub fn restore_from(&self, path: &Path) -> Result<()> {
+        {
+            let mut conn = self.lock();
+            conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
+        }
+        self.migrate()?;
+        self.tidy_file_name_titles()?;
+        Ok(())
+    }
+
+    /// Music that moved (a new disk, another machine): every file under `from` now lives under
+    /// `to`. Tracks keep their ids, so matches, playlists, history and tags stay with them.
+    /// Returns the number of files moved.
+    pub fn move_folder(&self, from: &Path, to: &Path) -> Result<u64> {
+        let from = from.to_string_lossy().trim_end_matches('/').to_string();
+        let to = to.to_string_lossy().trim_end_matches('/').to_string();
+        let mut conn = self.lock();
+        let tx = conn.savepoint()?;
+        let n = tx.execute(
+            "UPDATE files SET path = ?2 || substr(path, length(?1) + 1)
+             WHERE path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/'",
+            params![from, to],
+        )?;
+        tx.execute(
+            "UPDATE album_art SET file = ?2 || substr(file, length(?1) + 1)
+             WHERE source = 'folder' AND substr(file, 1, length(?1) + 1) = ?1 || '/'",
+            params![from, to],
+        )?;
+        tx.execute("DELETE FROM folders WHERE path = ?1", params![from])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO folders(path, enabled) VALUES (?1, 1)",
+            params![to],
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Forget covers whose image file is gone (a restore on another machine: the extracted
+    /// covers live in the node's data folder, which a backup leaves out). Returns how many.
+    pub fn drop_missing_art(&self) -> Result<u64> {
+        let conn = self.lock();
+        let rows: Vec<(i64, String)> = conn
+            .prepare("SELECT album_id, file FROM album_art")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut n = 0;
+        for (id, file) in rows {
+            if !Path::new(&file).exists() {
+                conn.execute("DELETE FROM album_art WHERE album_id = ?1", params![id])?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Albums without a cover, each with one of its files that is present.
+    pub fn albums_without_art(&self) -> Result<Vec<(i64, PathBuf)>> {
+        let conn = self.lock();
+        let v = conn
+            .prepare(
+                "SELECT al.id, MIN(f.path) FROM albums al
+                 JOIN tracks t ON t.album_id = al.id
+                 JOIN files f ON f.track_id = t.id AND f.missing = 0
+                 LEFT JOIN album_art aa ON aa.album_id = al.id
+                 WHERE aa.album_id IS NULL GROUP BY al.id",
+            )?
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, PathBuf::from(r.get::<_, String>(1)?)))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(v)
     }
 
     // ----- lyrics -----------------------------------------------------------

@@ -4,6 +4,17 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Backup and restore** (steward next-4, item 1). Settings → Backup and restore:
+  - **One file with everything needed to rebuild the node, never the audio:** matches and corrections, playlists, favourites, tags, play history, queues and settings. With a passphrase the owner picks, the sign-ins (TIDAL, Spotify, Jamendo, ListenBrainz, Subsonic and Jellyfin servers), the Pubky session, the remote-access key and the config file are in it too, encrypted (Argon2id, AES-256-GCM). Without one they are left out and named.
+  - **Every day or week to a folder,** keeping the newest N. The schedule's passphrase stays on the node and never goes into a backup.
+  - **Restore on a new node,** offered by Home's Get started card:
+    - It checks the file first and shows what it holds.
+    - It restores while the node runs, puts the sign-ins back, reconnects Pubky, re-reads covers and rescans. Unchanged files keep their matches.
+    - Folders it cannot find are listed: type the music's new place and every track keeps its match, playlists and history (`POST /v1/library/folders/move`).
+    - A wrong passphrase or a damaged file changes nothing.
+  - **The old download leaked sign-ins:** "Download backup" and `pm-node backup` used to copy the database with service tokens in plain text. Sign-ins are now taken out (and the copy vacuumed, so nothing of them is left in free pages).
+  - The old config's service keys fill what a restored node's own config leaves empty (`node.restored.toml`, from the next start).
+  - **CI:** `tests/backup_restore.rs` backs up a seeded node and restores it into an empty one. It compares matches, corrections, playlists, favourites, tags, plays, queue, contact, location and sign-ins, plus the session and remote key files. It also checks a rescan keeps the matches, a wrong passphrase changes nothing, a backup without a passphrase has no sign-ins, and moved music keeps its matches.
 - **First run from zero** (steward next-3, item 2). A new install (no folders, no contact, no Pubky identity) walked as a new user would, until music plays. Fixed:
   - **Home was a dead end:** nine sections each said "Set the upstream contact in Settings", and nothing said how to add music. Home now opens with **Get started**:
     1. Add your music: the folders that hold music are suggested (the Music folder, `/music`, drives under `/media`, `/mnt` and `/Volumes`, with how many audio files each holds), or type a path. The card counts the files as they are read.

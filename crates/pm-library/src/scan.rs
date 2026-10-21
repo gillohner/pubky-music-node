@@ -90,6 +90,24 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
+    /// Give every album without a cover one again, from one of its files (after a restore on
+    /// another machine, where the extracted covers were not carried over). Returns how many.
+    pub fn fill_missing_art(&self) -> Result<u64> {
+        if self.art_dir.is_none() {
+            return Ok(0);
+        }
+        let mut n = 0;
+        for (album_id, path) in self.lib.albums_without_art()? {
+            let Ok((_, tagset)) = tags::probe_and_read(&path) else {
+                continue;
+            };
+            if self.cover_for(&path, album_id, &tagset).is_ok() && self.lib.album_art(album_id)?.is_some() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     pub fn scan(&self, root: &Path) -> Result<ScanReport> {
         let root = root.canonicalize().map_err(|e| LibraryError::Io {
             path: root.to_path_buf(),

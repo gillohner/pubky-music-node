@@ -20,6 +20,18 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
     let lib = open(cfg)?;
     lib.backup_to(file)
         .with_context(|| format!("writing backup {}", file.display()))?;
+    {
+        // Sign-ins never go into a plain database copy (Settings › Backup locks them with a
+        // passphrase instead)
+        let copy = Library::open(file)?;
+        for (key, _) in pm_api::backup::SECRET_SETTINGS {
+            copy.delete_setting(key)?;
+        }
+        copy.vacuum_into_place()?;
+    }
+    for ext in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{ext}", file.display()));
+    }
     let s = lib.stats()?;
     let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -42,7 +54,18 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     // replaces a working library.
     let staged = db.with_extension("db.restoring");
     let _ = std::fs::remove_file(&staged);
-    std::fs::copy(file, &staged).with_context(|| format!("reading {}", file.display()))?;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    if bytes.starts_with(b"PK") {
+        // A backup file from Settings: its library only here (restore it in the web app to
+        // put the sign-ins back too)
+        let parsed = pm_api::backup::parse(&bytes)?;
+        std::fs::write(&staged, &parsed.database)?;
+        if parsed.manifest.secrets.is_some() || !parsed.manifest.left_out.is_empty() {
+            println!("note: sign-ins are restored only from Settings › Backup in the web app");
+        }
+    } else {
+        std::fs::write(&staged, &bytes)?;
+    }
     let stats = {
         let lib =
             Library::open(&staged).with_context(|| format!("{} is not a library backup", file.display()))?;

@@ -439,6 +439,9 @@ pub struct FoldersChanged {
     pub removed_files: u64,
     #[serde(default)]
     pub removed_tracks: u64,
+    /// Files whose folder moved (`POST /v1/library/folders/move`).
+    #[serde(default)]
+    pub moved_files: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

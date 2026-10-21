@@ -145,12 +145,30 @@ only in it.
 
 ## Backups
 
-Everything the node knows that is not in your music files lives in one SQLite file,
-`<data_dir>/library.db`: playlists, reviews and listening activity (also on your homeserver once
-synced), favourites, tags, play history, saved radio stations, settings, the art and lyrics index.
-`pm-node -c node.toml backup <file>` writes a consistent snapshot while the node runs (SQLite
-`VACUUM INTO`), the web UI's Settings page offers the same file as *Download backup*, and
-`GET /v1/backup` serves it for a cron job. To go back: stop the node, `pm-node -c node.toml
-restore <file>` (the previous database is kept as `library.db.bak`), start the node and let it
-rescan. Covers extracted from files are in `<data_dir>/art` and come back on a scan; the Pubky
-session secret is a separate file named by `session_secret_file`.
+Settings → **Backup and restore** makes one file (`pubky-music-<date>-<time>.pmbackup`) with
+everything needed to rebuild the node, never the audio:
+
+- the library database: matches and corrections, playlists, reviews, favourites, tags, play
+  history, queues, saved radio stations, settings, the lyrics index;
+- with a passphrase the owner picks: the sign-ins (TIDAL, Spotify, Jamendo, ListenBrainz, your
+  Subsonic and Jellyfin servers), the Pubky session, the remote-access key and the node's config
+  file, encrypted (Argon2id, AES-256-GCM). Without a passphrase they are left out, and a restore
+  lists which services to sign in to again. Nothing opens them without the passphrase.
+
+**Every day or week, to a folder:** the same card writes backups to a folder on the node (another
+disk or a NAS) and keeps the newest N. A passphrase saved there stays on this node and is never
+put in a backup. `GET /v1/backup` serves a backup without sign-ins for a cron job.
+
+**Restore** on a new node: Home's Get started card links to it, or Settings → Backup and restore →
+Choose a backup file. The node checks the file and shows what it holds first, then swaps the
+library in while it runs, puts the sign-ins back, reconnects Pubky and rescans. Unchanged files
+are skipped, so every match stays. If the music lives somewhere else now, the restore lists the
+folders it cannot find. Type each folder's new place and the tracks keep their matches, playlists
+and history (`POST /v1/library/folders/move`). Covers taken from the files are read again. The old
+config file is kept as `<data_dir>/node.restored.toml`; from the next start its service keys fill
+whatever this node's own config leaves empty.
+
+From the command line: `pm-node -c node.toml backup <file>` writes a database snapshot (without
+sign-ins) while the node runs. `pm-node -c node.toml restore <file>`, with the node stopped, takes
+that snapshot or a `.pmbackup` file (its library only; the previous database is kept as
+`library.db.bak`).

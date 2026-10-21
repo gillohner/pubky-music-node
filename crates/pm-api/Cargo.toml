@@ -36,6 +36,10 @@ md-5 = "0.10"
 hex = "0.4"
 sha2 = "0.10"
 base64 = "0.22"
+# Backups: the file is a zip; the secrets in it are encrypted with a passphrase
+zip = { version = "2", default-features = false, features = ["deflate"] }
+argon2 = "0.5"
+aes-gcm = "0.10"
 rand = "0.8"
 time = { workspace = true }
 url = { workspace = true }
