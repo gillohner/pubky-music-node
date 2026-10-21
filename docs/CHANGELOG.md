@@ -4,6 +4,15 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Accessibility and small screens** (steward next-2, item 2). A new browser audit, `tools/ui-a11y.js` (in CI, `ui-controls` job), covers Home, search, an album, a song, Albums, Tracks, Playlists, the queue and Settings at 1280 and 375 px, in light and dark. It checks names on every control, alt text on every image, a visible focus ring along the Tab path, that rows open with Enter, that typing never reaches the player, that toasts are announced, WCAG AA text contrast, no sideways scroll at 375 px, and player buttons at least 40 px and on screen. It found, and this change fixes:
+  - **On phones the player's play, previous and next buttons and the seek bar were below the screen** (the page reserved one 88 px row for a player that wraps to two). The player row now takes the height it needs.
+  - Player controls at thumb size on phones (44 px): previous, next, the zone button and the quality badge.
+  - Clickable list rows (playlists and other lists) are reachable by keyboard and open with Enter or Space. Space there doesn't toggle the player.
+  - The search box shows a focus ring.
+  - Light theme: the green and amber text colours and code text now meet AA contrast.
+  - The Subsonic jukebox zone selector has a label.
+  - Already right and now checked: the keyboard shortcuts ignore typing, toasts are a live region, and the copy progress card is a status.
+  - Shots: `docs/ux/shots/a11y/`.
 - **Move from Roon** (steward next-2, item 1). Settings › Move from Roon takes Roon's exports (Tracks, Albums, and each playlist: select all, ⋯ › Export › Excel, or CSV).
   - **Check** reports per file: how many rows matched this library (by file path, file name, then title and artist; albums by title and album artist), the Roon tags it found, and every row not moved with the reason ("not in this library", or "in the library, but without a MusicBrainz id or ISRC yet: identify it, then import again").
   - **Import** then applies what was chosen: Roon favourites into Favourites (on), playlist exports into playlists (on), and Roon tags as public tags on Pubky (off unless chosen; "late night" becomes "late-night").

@@ -51,8 +51,8 @@
   --accent-strong: #5442d1;
   --accent-soft: rgba(107, 89, 230, 0.12);
   --on-accent: #ffffff;
-  --ok: #1d8a4b;
-  --warn: #9a6512;
+  --ok: #157040;
+  --warn: #7a4f0c;
   --bad: #c93838;
   --info: #2468c4;
   --q-bit: #5442d1;
@@ -79,8 +79,8 @@
   --accent-strong: #5442d1;
   --accent-soft: rgba(107, 89, 230, 0.12);
   --on-accent: #ffffff;
-  --ok: #1d8a4b;
-  --warn: #9a6512;
+  --ok: #157040;
+  --warn: #7a4f0c;
   --bad: #c93838;
   --info: #2468c4;
   --q-bit: #5442d1;
@@ -111,7 +111,7 @@ h3 { font-size: 16px; line-height: 1.3; }
 p { margin: 0; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--surface-3); padding: 2px 6px; border-radius: 5px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--surface-3); color: var(--fg-2); padding: 2px 6px; border-radius: 5px; }
 ::selection { background: var(--accent-soft); }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -187,7 +187,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 0 12px; height: 38px;
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
-.search:focus-within { border-color: var(--accent); background: var(--surface); }
+.search:focus-within { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
 .search .ic { color: var(--muted); width: 18px; height: 18px; }
 .search input { flex: 1; min-width: 0; background: none; border: 0; color: var(--fg); font: inherit; outline: none; }
 .search input::placeholder { color: var(--muted); }
@@ -487,7 +487,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .shell.expanded .node-status { justify-content: flex-start; }
 }
 @media (max-width: 720px) {
-  .shell { grid-template-columns: 1fr; grid-template-areas: "content" "player"; }
+  /* The player wraps to two rows on phones: its row takes the height it needs (a fixed row hid
+     play, previous, next and the seek bar below the screen) */
+  .shell { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "content" "player"; }
   .sidebar { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 50; transform: translateX(-100%); transition: transform 0.2s var(--ease); --sidebar: 260px; }
   .sidebar.open { transform: none; box-shadow: var(--shadow); }
   .sidebar .brand-name, .sidebar .nav-label, .sidebar .nav-item span, .sidebar .node-text { display: initial; }
@@ -777,3 +779,9 @@ a.btn { text-decoration: none; }
 .roonfile { border-top: 1px solid var(--line); padding: 10px 0 4px; }
 .roonfile .name { font-weight: 600; overflow-wrap: anywhere; }
 .misses { padding-left: 18px; max-height: 240px; overflow: auto; }
+/* Thumb-sized player controls on phones (at least 44 px, WCAG target size) */
+@media (max-width: 720px) {
+  .player #prev, .player #next { width: 44px; height: 44px; }
+  .player .zone-btn { min-height: 44px; }
+  .player .quality { min-height: 44px; min-width: 44px; padding: 0 12px; justify-content: center; }
+}

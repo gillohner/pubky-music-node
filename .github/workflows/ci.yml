@@ -251,5 +251,8 @@ jobs:
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-controls.js ci-token http://127.0.0.1:7788
+      - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
+        timeout-minutes: 15
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788
       - if: failure()
         run: tail -50 /tmp/pm/node.log
