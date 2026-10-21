@@ -1,0 +1,4 @@
+SYNTHETIC test fixture in the shape of a Roon albums export
+Album,Album Artist,Year,Genres,Tags,Favorite,Date Added,Tracks
+Lists,Tester,2020,Disco,classics,Yes,2021-03-01,2
+A Missing Album,Somebody,1990,,,Yes,2021-03-01,10

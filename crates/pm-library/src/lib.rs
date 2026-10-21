@@ -23,6 +23,7 @@ pub mod lyrics;
 #[cfg(feature = "musicbrainz")]
 pub mod musicbrainz;
 pub mod posts;
+pub mod roon;
 pub mod scan;
 pub mod tags;
 pub mod tagwrite;

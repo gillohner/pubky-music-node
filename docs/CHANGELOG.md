@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Move from Roon** (steward next-2, item 1). Settings › Move from Roon takes Roon's exports (Tracks, Albums, and each playlist: select all, ⋯ › Export › Excel, or CSV).
+  - **Check** reports per file: how many rows matched this library (by file path, file name, then title and artist; albums by title and album artist), the Roon tags it found, and every row not moved with the reason ("not in this library", or "in the library, but without a MusicBrainz id or ISRC yet: identify it, then import again").
+  - **Import** then applies what was chosen: Roon favourites into Favourites (on), playlist exports into playlists (on), and Roon tags as public tags on Pubky (off unless chosen; "late night" becomes "late-night").
+  - Columns are found by name in any order, after Roon's title row. Which export it is (tracks, albums or playlist) comes from its columns.
+  - API: `POST /v1/import/roon?file=&dry_run=&favourites=&playlist=&tags=` with the file as the body.
+  - Tests use **synthetic** fixtures in Roon's shape (`crates/pm-api/tests/fixtures/roon/`, made by `tools/make-roon-fixtures.py`). The column names still need checking against a real export, which the owner can put in `~/roon-export/`. Live pairing with a Roon Core (roon-bridge) waits until we know there is one.
 - **The UI says which outside part is down.**
   - Under the node status in the sidebar, a quiet amber line appears only when something the node uses isn't answering: "Pinakes (Home, links, tags) not answering", "Your homeserver: sign in again", "TIDAL not answering" and so on.
   - A click lists every part (answering, with its time, or why not), plus "Check again". The library keeps playing either way.

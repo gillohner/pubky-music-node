@@ -1416,3 +1416,142 @@ async fn another_subsonic_server_is_a_source() {
     let (st, _) = call(&app, "GET", "/v1/sources/subsonic/search?q=x", None).await;
     assert_eq!(st, StatusCode::PRECONDITION_FAILED);
 }
+
+async fn upload(app: &axum::Router, uri: &str, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(bytes))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Moving from Roon with its exports (SYNTHETIC fixtures in Roon's shape, tests/fixtures/roon/):
+/// a dry run reports, the import applies what was chosen, and every miss says why.
+#[tokio::test]
+async fn roon_exports_move_over_with_a_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("tagged.wav"), "Tagged", Some(MB));
+    write_wav(&music.join("untagged.wav"), "Untagged", None);
+    let s = NodeState::new(
+        settings_for(dir.path(), "roon", Some(music.clone()), None),
+        Library::open(&dir.path().join("roon.sqlite")).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let fx = |n: &str| {
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/roon")
+                .join(n),
+        )
+        .unwrap()
+    };
+
+    // Tracks: a dry run changes nothing
+    let (st, r) = upload(
+        &app,
+        "/v1/import/roon?file=SYNTHETIC-roon-tracks.xlsx",
+        fx("SYNTHETIC-roon-tracks.xlsx"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "tracks");
+    assert_eq!(
+        (r["rows"].as_u64(), r["matched"].as_u64(), r["unmatched"].as_u64()),
+        (Some(3), Some(2), Some(1)),
+        "{r}"
+    );
+    assert_eq!(
+        r["not_identified"], 1,
+        "the untagged favourite needs an identity first: {r}"
+    );
+    assert_eq!(r["favourites"], 1);
+    assert_eq!(r["dry_run"], true);
+    assert_eq!(r["tags_found"][0], serde_json::json!(["late night", 2]));
+    let reasons: Vec<&str> = r["misses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["reason"].as_str().unwrap())
+        .collect();
+    assert!(
+        reasons.iter().any(|x| x.starts_with("not in this library")),
+        "{reasons:?}"
+    );
+    assert!(reasons.iter().any(|x| x.contains("identify it")), "{reasons:?}");
+    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    assert!(!favs.to_string().contains(MB), "nothing written by a dry run");
+
+    // Then for real, with the tags made public on purpose
+    let (st, r) = upload(
+        &app,
+        "/v1/import/roon?file=SYNTHETIC-roon-tracks.xlsx&dry_run=false&tags=true",
+        fx("SYNTHETIC-roon-tracks.xlsx"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        (r["favourites"].as_u64(), r["tags_added"].as_u64()),
+        (Some(1), Some(2)),
+        "{r}"
+    );
+    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    assert!(favs.to_string().contains(MB), "{favs}");
+    let (_, tags) = call(&app, "GET", "/v1/tags", None).await;
+    assert!(
+        tags.to_string().contains("classics") && tags.to_string().contains("late-night"),
+        "{tags}"
+    );
+
+    // Albums
+    let (st, r) = upload(
+        &app,
+        "/v1/import/roon?file=SYNTHETIC-roon-albums.csv",
+        fx("SYNTHETIC-roon-albums.csv"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "albums");
+    assert_eq!(
+        (r["matched"].as_u64(), r["unmatched"].as_u64()),
+        (Some(1), Some(1)),
+        "{r}"
+    );
+
+    // A playlist
+    let (st, r) = upload(
+        &app,
+        "/v1/import/roon?file=SYNTHETIC-roon-playlist.xlsx&dry_run=false",
+        fx("SYNTHETIC-roon-playlist.xlsx"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "playlist");
+    assert_eq!(r["name"], "Late night");
+    assert_eq!(
+        (r["matched"].as_u64(), r["unmatched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(r["playlist"]["imported"], 1, "{r}");
+
+    // Not an export
+    let (st, _) = upload(&app, "/v1/import/roon?file=x.csv", b"Foo,Bar\n1,2\n".to_vec()).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+}

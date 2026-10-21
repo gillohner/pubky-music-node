@@ -770,3 +770,10 @@ a.btn { text-decoration: none; }
 .jobbar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s var(--ease); }
 .jobcur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .joberr { color: var(--bad); }
+/* Move from Roon */
+#roonmove input[type=file] { margin: 8px 0; max-width: 100%; }
+#roonmove .check { display: block; margin: 4px 0; }
+.steps { padding-left: 18px; margin: 4px 0 8px; }
+.roonfile { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+.roonfile .name { font-weight: 600; overflow-wrap: anywhere; }
+.misses { padding-left: 18px; max-height: 240px; overflow: auto; }

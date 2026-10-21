@@ -36,6 +36,7 @@ pub mod playlists;
 pub mod radio;
 pub mod remote;
 pub mod reviews;
+pub mod roon_import;
 pub mod search;
 pub mod shared;
 pub mod sources;
@@ -171,6 +172,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
+        .route("/import/roon", post(roon_import::import))
         .route("/activity", get(activity::list).post(activity::record))
         .route(
             "/favourites",

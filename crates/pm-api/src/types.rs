@@ -1581,3 +1581,53 @@ pub struct HealthPart {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
 }
+
+// ---- moving from Roon (roon_import.rs) ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RoonImportQuery {
+    /// The export's file name (format and playlist name).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Only report (default true).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    /// Roon favourites into Favourites (default true).
+    #[serde(default)]
+    pub favourites: Option<bool>,
+    /// Roon tags as public tags on Pubky (default false: they become public).
+    #[serde(default)]
+    pub tags: Option<bool>,
+    /// A playlist export becomes a playlist (default true).
+    #[serde(default)]
+    pub playlist: Option<bool>,
+}
+
+/// One row that did not come over, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoonMiss {
+    pub what: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RoonImportReport {
+    pub kind: pm_library::roon::RoonKind,
+    pub name: Option<String>,
+    pub rows: usize,
+    pub matched: usize,
+    pub unmatched: usize,
+    /// Matched, but without the canonical identity a favourite, tag or playlist item needs.
+    pub not_identified: usize,
+    /// Favourites added (or that would be, in a dry run).
+    pub favourites: usize,
+    pub tags_added: usize,
+    /// Roon tags Pubky cannot hold (too long, odd characters).
+    pub tags_skipped: usize,
+    /// Every Roon tag in the export, with how many rows carry it.
+    pub tags_found: Vec<(String, usize)>,
+    pub misses: Vec<RoonMiss>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlist: Option<ImportedPlaylist>,
+    pub dry_run: bool,
+}

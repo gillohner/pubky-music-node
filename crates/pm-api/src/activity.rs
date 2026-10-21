@@ -157,6 +157,16 @@ pub(crate) async fn import_playlist_file(
     import_described(&s, name, None, tracks).map(Json)
 }
 
+/// A playlist from described tracks (the Roon import uses it too).
+pub(crate) fn import_tracks(
+    s: &Arc<NodeState>,
+    name: String,
+    description: Option<String>,
+    tracks: Vec<DescribedTrack>,
+) -> Result<ImportedPlaylist, ApiError> {
+    import_described(s, name, description, tracks)
+}
+
 fn import_described(
     s: &Arc<NodeState>,
     name: String,

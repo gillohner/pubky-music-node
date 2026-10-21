@@ -221,7 +221,7 @@ pub fn parse_m3u(text: &str, base: Option<&Path>) -> ImportedList {
 }
 
 /// Split one CSV record; handles quotes and doubled quotes.
-fn split_record(line: &str, delim: char) -> Vec<String> {
+pub(crate) fn split_record(line: &str, delim: char) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
@@ -263,7 +263,7 @@ fn find_columns(header: &[String]) -> Option<Columns> {
     })
 }
 
-fn parse_duration(s: &str, is_ms: bool) -> Option<u64> {
+pub(crate) fn parse_duration(s: &str, is_ms: bool) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
