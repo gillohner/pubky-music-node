@@ -1,6 +1,6 @@
 # ADR 0006: Social objects are v1 `PubkyAppPost`s in a private folder
 
-Status: accepted (2026-10-20).
+Status: accepted (2026-10-20). Superseded by [ADR 0014](0014-music-on-social-v1.md).
 
 ## Context
 

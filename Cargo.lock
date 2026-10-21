@@ -4286,6 +4286,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "pubky-music-specs"
+version = "0.1.0"
+dependencies = [
+ "pubky-social-specs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pubky-social-specs"
+version = "1.0.0-alpha.5"
+source = "git+https://github.com/pubky/pubky-social-specs?rev=acde362939dabb79a3b08de250bcbc70da4e827d#acde362939dabb79a3b08de250bcbc70da4e827d"
+dependencies = [
+ "base32",
+ "base64 0.22.1",
+ "blake3",
+ "js-sys",
+ "mime",
+ "pubky 0.10.0",
+ "serde",
+ "serde_json",
+ "url",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "pubky-timestamp"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

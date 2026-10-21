@@ -1,0 +1,13 @@
+[package]
+name = "pubky-music-specs"
+description = "Music kinds on the pubky-social-specs v1 post envelope: reviews, listens and the ext.music hints on playlists"
+# Its own version: the crate has no node code in it and can move to its own repository.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pubky-social-specs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

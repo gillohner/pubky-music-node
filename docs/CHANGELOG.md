@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **`pubky-music-specs`** (new crate, steward plan step 3, ADR 0014): music kinds on the pubky-social-specs v1 post envelope, under `/{pub,priv}/music/v1/posts/`. A `review` is a rating from 1 to 10 with optional text; a `listen` is a private play record (`played_at`, `duration_ms`, `source`). Both embed the music URL. Also readers and writers for the `ext.music` hints on playlists (`source` on an item, `source_order` on the collection) that drop anything malformed. Nothing in the node uses it yet; the migration comes next. ADR 0014 supersedes ADR 0006.
 - Zones say how closely their speakers stay together (`sync`: `single`, `tight` or `loose`). Groups of the node's own endpoints or of Slimproto players, Snapcast groups, Sonos groups and Cast groups are tight; mixed protocols are loose. `docs/ZONES.md` maps zone kinds, labels and actions for the Zones view.
 - **AirPlay** (`crates/pm-out-airplay`, infra brief §3.4): AirPlay 1 (RAOP) receivers found over mDNS (`_raop._tcp`) become zones, unless `[outputs] airplay = false`.
   - The node sends unencrypted Apple Lossless (verbatim frames), 44.1 kHz 16-bit, over RTP. It answers the receiver's timing requests, sends sync packets, resends lost packets, and sets volume and title/artist/album as text.

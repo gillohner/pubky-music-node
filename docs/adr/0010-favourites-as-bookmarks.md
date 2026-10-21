@@ -1,6 +1,6 @@
 # ADR 0010: Favourites are v1 bookmarks of canonical music URLs
 
-Status: accepted, 2026-10-20
+Status: accepted, 2026-10-20 Superseded by [ADR 0014](0014-music-on-social-v1.md) for the bookmark path.
 
 ## Context
 
