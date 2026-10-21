@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-21
 
+- **Cast plays like a Cast sender should** (infra brief §3; `docs/DEVICE-TEST-PROMPT.md` lists what to check on real devices).
+  - While a zone plays, a session keeps the link to the device. It answers and sends heartbeats, so STOP and volume still reach the TV after the first seconds.
+  - After the connection drops, the session rejoins the same Cast session, or launches and loads again.
+  - When another sender takes the TV, the session steps aside and never stops YouTube.
+  - When the receiver reports a media error, the session loads the stream again.
+  - The TV shows the track's title, artist, album and cover: from the library for library tracks, through a keyed `/v1/art/{album}` URL, and the source's own art for streams.
+  - Cast groups are labelled "(Cast group)", and discovery prefers IPv4.
+  - Outputs get a `now_playing` hook (`pm_zones::TrackMeta`) for the TV and DLNA work that follows.
 - Fixed: **Cast devices and UPnP/DLNA renderers could not play from a node with an API token.** They were handed the stream URL without credentials, and the node answered 401. Each pull stream now has its own key in its URL (`?k=`, derived from a secret kept in the library, so URLs survive restarts). The key opens that stream only. Slimproto players also get keys instead of the API token, and `GET /v1/outputs/pull/{name}/url` gives the URL for manual use. Checked with gmediarender, a real DLNA renderer, on a token-protected node: it fetches and plays the zone.
 - **Remote access over iroh** (ADR 0013, `crates/pm-remote`, `docs/CONNECTION.md`).
   - With a Pubky session, the node runs an iroh endpoint with its own key and pipes the `pubky-music/http/1` ALPN to its API. It publishes the key in the private node record. `[remote] enabled` (default on) and `[remote] relay` (empty = n0's public relays, a URL, or `none`) control it.

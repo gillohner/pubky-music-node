@@ -1,15 +1,21 @@
 //! A Cast device as an `Output`: open launches the receiver app and loads
-//! the pull stream; the sink is the pull sink; close stops the app.
+//! the pull stream with the track's metadata and art; a [`Session`] keeps the
+//! link alive while it plays; the sink is the pull sink; close stops the app.
+//!
+//! Metadata changes at each LOAD, which is each time the zone opens the
+//! output (a new format run). Inside a gapless run the stream continues and
+//! the screen keeps the first track's details: reloading would break the gap.
 
-use crate::link::{block_on, connect_tls, CastLink};
-use crate::{CastError, Device};
+use crate::link::{block_on, connect_tls};
+use crate::session::{Media, Session, PING_EVERY};
+use crate::{CastError, Device, Meta};
 use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind};
 use pm_zones::outputs::PullOutput;
-use pm_zones::{AudioSink, BufferLevel, Output, OutputId, SinkError};
+use pm_zones::{AudioSink, BufferLevel, Output, OutputId, QueueItem, SinkError};
 use std::sync::{Arc, Mutex};
 
-type TlsLink = CastLink<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+pub use pm_zones::Describe;
 
 pub struct CastOutput {
     device: Device,
@@ -17,7 +23,10 @@ pub struct CastOutput {
     stream_url: String,
     caps: OutputCaps,
     /// The live session while a sink is open.
-    link: Arc<Mutex<Option<TlsLink>>>,
+    session: Arc<Mutex<Option<Session>>>,
+    describe: Option<Describe>,
+    /// The track about to play or playing (`Output::now_playing`).
+    meta: Mutex<Option<Meta>>,
 }
 
 impl CastOutput {
@@ -42,8 +51,25 @@ impl CastOutput {
             pull,
             stream_url,
             caps,
-            link: Arc::new(Mutex::new(None)),
+            session: Arc::new(Mutex::new(None)),
+            describe: None,
+            meta: Mutex::new(None),
         }
+    }
+
+    /// Show artist, album and art from the node's library, not only the queue item's fields.
+    pub fn with_describe(mut self, describe: Describe) -> Self {
+        self.describe = Some(describe);
+        self
+    }
+
+    /// What the current session has seen (resumes, takeover), if one is open.
+    pub fn session_status(&self) -> Option<crate::session::SessionStatus> {
+        self.session
+            .lock()
+            .expect("session")
+            .as_ref()
+            .map(Session::status)
     }
 
     pub fn device(&self) -> &Device {
@@ -66,10 +92,21 @@ impl Output for CastOutput {
     }
 
     fn name(&self) -> String {
+        if self.device.is_group() {
+            return format!("{} (Cast group)", self.device.friendly_name);
+        }
         match &self.device.model {
             Some(m) => format!("{} ({m})", self.device.friendly_name),
             None => self.device.friendly_name.clone(),
         }
+    }
+
+    fn now_playing(&self, item: Option<&QueueItem>) {
+        let meta = item.map(|it| match &self.describe {
+            Some(d) => d(it),
+            None => Meta::from_item(it),
+        });
+        *self.meta.lock().expect("meta") = meta;
     }
 
     fn caps(&self) -> &OutputCaps {
@@ -82,20 +119,27 @@ impl Output for CastOutput {
         }
         let inner = self.pull.open(fmt).await?;
         let addr = self.device.addr;
-        let url = self.stream_url.clone();
-        let name = self.device.friendly_name.clone();
-        let link = block_on(async move {
+        let media = Media {
+            url: self.stream_url.clone(),
+            content_type: "audio/wav".into(),
+            meta: self.meta.lock().expect("meta").clone().unwrap_or_default(),
+        };
+        // A sink left open (a format change) hands over to the new one.
+        let old = self.session.lock().expect("session").take();
+        let session = block_on(async move {
+            if let Some(old) = old {
+                old.stop().await;
+            }
             let mut link = connect_tls(addr).await?;
             link.launch().await?;
-            link.load(&url, "audio/wav", &format!("Pubky Music → {name}"))
-                .await?;
-            Ok::<_, CastError>(link)
+            link.load(&media.url, &media.content_type, &media.meta).await?;
+            Ok::<_, CastError>(Session::spawn(link, media, PING_EVERY, move || connect_tls(addr)))
         })
         .map_err(cast_err)?;
-        *self.link.lock().expect("link") = Some(link);
+        *self.session.lock().expect("session") = Some(session);
         Ok(Box::new(CastSink {
             inner,
-            link: self.link.clone(),
+            session: self.session.clone(),
         }))
     }
 
@@ -108,9 +152,13 @@ impl Output for CastOutput {
                 return Err(SinkError::Device("cast volume needs an absolute level".into()));
             }
         };
+        if let Some(s) = self.session.lock().expect("session").as_ref() {
+            s.set_volume(level, muted);
+            return Ok(());
+        }
         let addr = self.device.addr;
         block_on(async move {
-            // Volume is a receiver-level command: a short connection suffices.
+            // Not playing: volume is a receiver-level command, a short connection suffices.
             let mut link = connect_tls(addr).await?;
             link.set_volume(level, muted).await
         })
@@ -120,7 +168,7 @@ impl Output for CastOutput {
 
 struct CastSink {
     inner: Box<dyn AudioSink>,
-    link: Arc<Mutex<Option<TlsLink>>>,
+    session: Arc<Mutex<Option<Session>>>,
 }
 
 impl AudioSink for CastSink {
@@ -146,12 +194,8 @@ impl AudioSink for CastSink {
 
 impl Drop for CastSink {
     fn drop(&mut self) {
-        if let Some(mut link) = self.link.lock().expect("link").take() {
-            block_on(async move {
-                if let Err(e) = link.stop().await {
-                    tracing::debug!("cast stop: {e}");
-                }
-            });
+        if let Some(session) = self.session.lock().expect("session").take() {
+            block_on(session.stop());
         }
     }
 }

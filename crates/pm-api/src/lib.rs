@@ -286,6 +286,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
                 .route("/v1/outputs/pull/{name}/stream.wav", get(pull_stream))
+                // Album covers for TV screens, with that cover's key.
+                .route("/v1/art/{id}", get(keyed_cover))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
                 .route("/mb/ws/2/{*path}", get(mbproxy::forward))
                 .with_state(state.clone()),
@@ -1713,6 +1715,18 @@ async fn scan(State(s): State<Arc<NodeState>>, Json(body): Json<ScanRequest>) ->
         Ok(false) => Err(ApiError::new(StatusCode::CONFLICT, "a scan is already running")),
         Err(e) => Err(ApiError::bad_request(e)),
     }
+}
+
+/// `GET /v1/art/{album_id}?k=`: the cover for a renderer's screen (`NodeState::art_url`).
+async fn keyed_cover(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    if q.get("k") != Some(&s.stream_key(&format!("art:{id}"))) {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong key"));
+    }
+    album_cover(State(s), Path(id)).await
 }
 
 /// The album's cover image (extracted at scan time or found in the folder).

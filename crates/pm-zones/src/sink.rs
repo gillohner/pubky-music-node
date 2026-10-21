@@ -129,6 +129,32 @@ pub trait AudioSink: Send {
     }
 }
 
+/// What a renderer with a screen shows for a track (Cast, DLNA TVs, Sonos).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackMeta {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Cover art the device can fetch itself (an `http(s)` URL, no API token).
+    pub image: Option<String>,
+}
+
+impl TrackMeta {
+    /// The queue item's own fields (art only when it is a URL).
+    pub fn from_item(item: &crate::QueueItem) -> Self {
+        Self {
+            title: item.title.clone(),
+            artist: item.artist.clone(),
+            album: item.album.clone(),
+            image: item.image.clone().filter(|u| u.starts_with("http")),
+        }
+    }
+}
+
+/// Turns a queue item into what a renderer shows; the node fills artist, album and art from its
+/// library.
+pub type Describe = Arc<dyn Fn(&crate::QueueItem) -> TrackMeta + Send + Sync>;
+
 /// One place audio can go (handoff §6.4).
 #[async_trait]
 pub trait Output: Send + Sync {
@@ -163,6 +189,10 @@ pub trait Output: Send + Sync {
     fn clock(&self) -> Option<Arc<dyn ClockSource>> {
         None
     }
+
+    /// The track about to play (before its sink opens, when one opens) or `None` when the zone
+    /// stops. Outputs that show metadata (a TV, a Cast screen) keep it; the default ignores it.
+    fn now_playing(&self, _item: Option<&crate::QueueItem>) {}
 }
 
 /// Reject a block the sink cannot take: wrong format or still float.

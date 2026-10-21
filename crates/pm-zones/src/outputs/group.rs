@@ -177,6 +177,12 @@ impl Output for GroupOutput {
         &self.caps
     }
 
+    fn now_playing(&self, item: Option<&crate::QueueItem>) {
+        for m in &self.members {
+            m.now_playing(item);
+        }
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));

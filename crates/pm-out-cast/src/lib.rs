@@ -14,6 +14,7 @@
 pub mod link;
 pub mod output;
 pub mod proto;
+pub mod session;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -48,6 +49,35 @@ pub struct Device {
     pub addr: SocketAddr,
 }
 
+impl Device {
+    /// A Cast group made in the Google Home app: one target that plays on all its speakers in sync
+    /// (the group's leader distributes the audio). It has its own id and port.
+    pub fn is_group(&self) -> bool {
+        self.model.as_deref() == Some("Google Cast Group")
+    }
+}
+
+/// What the TV or speaker shows while it plays.
+pub use pm_zones::TrackMeta as Meta;
+
+/// `MusicTrackMediaMetadata` (metadataType 3) for the default media receiver.
+pub fn meta_json(meta: &Meta, fallback_title: &str) -> serde_json::Value {
+    let mut m = serde_json::json!({
+        "metadataType": 3,
+        "title": meta.title.clone().unwrap_or_else(|| fallback_title.to_string()),
+    });
+    if let Some(a) = &meta.artist {
+        m["artist"] = a.clone().into();
+    }
+    if let Some(a) = &meta.album {
+        m["albumName"] = a.clone().into();
+    }
+    if let Some(i) = &meta.image {
+        m["images"] = serde_json::json!([{ "url": i }]);
+    }
+    m
+}
+
 /// mDNS browse for Cast devices within `timeout`.
 pub fn discover(timeout: Duration) -> Vec<Device> {
     let Ok(daemon) = mdns_sd::ServiceDaemon::new() else {
@@ -61,7 +91,15 @@ pub fn discover(timeout: Duration) -> Vec<Device> {
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
-                let Some(ip) = info.get_addresses().iter().next().map(|a| a.to_ip_addr()) else {
+                // IPv4 first: a link-local IPv6 address needs a scope a socket address may lack.
+                let addrs: Vec<std::net::IpAddr> =
+                    info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
+                let Some(ip) = addrs
+                    .iter()
+                    .find(|a| a.is_ipv4())
+                    .or_else(|| addrs.first())
+                    .copied()
+                else {
                     continue;
                 };
                 let id = info

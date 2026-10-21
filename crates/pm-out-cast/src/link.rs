@@ -64,7 +64,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         }
     }
 
-    async fn send(
+    pub(crate) async fn send(
         &mut self,
         destination: &str,
         namespace: &str,
@@ -81,7 +81,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         Ok(id)
     }
 
-    async fn recv(&mut self) -> Result<CastMessage, CastError> {
+    pub(crate) async fn recv(&mut self) -> Result<CastMessage, CastError> {
         let mut len = [0u8; 4];
         self.stream.read_exact(&mut len).await?;
         let len = u32::from_be_bytes(len) as usize;
@@ -168,8 +168,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         Ok(())
     }
 
-    /// LOAD a live stream URL with autoplay.
-    pub async fn load(&mut self, url: &str, content_type: &str, title: &str) -> Result<(), CastError> {
+    /// On a fresh link: CONNECT to the device and, if it still runs `session_id`, join it (CONNECT
+    /// to its transport). `Ok(false)` when the session is gone.
+    pub async fn rejoin(&mut self, session_id: Option<&str>) -> Result<bool, CastError> {
+        self.send(RECEIVER_0, NS_CONNECTION, json!({"type": "CONNECT"}))
+            .await?;
+        self.send(RECEIVER_0, NS_RECEIVER, json!({"type": "GET_STATUS"}))
+            .await?;
+        let v = self
+            .wait_for("RECEIVER_STATUS", "RECEIVER_STATUS after GET_STATUS")
+            .await?;
+        let Some(sid) = session_id else {
+            return Ok(false);
+        };
+        let apps = v
+            .pointer("/status/applications")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let Some(app) = apps
+            .iter()
+            .find(|a| a.get("sessionId").and_then(Value::as_str) == Some(sid))
+        else {
+            return Ok(false);
+        };
+        let transport = app
+            .get("transportId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CastError::Protocol("no transportId".into()))?
+            .to_string();
+        self.send(&transport, NS_CONNECTION, json!({"type": "CONNECT"}))
+            .await?;
+        self.session_id = Some(sid.to_string());
+        self.transport_id = Some(transport);
+        Ok(true)
+    }
+
+    /// LOAD a live stream URL with autoplay, showing `meta` on the device.
+    pub async fn load(&mut self, url: &str, content_type: &str, meta: &crate::Meta) -> Result<(), CastError> {
         let transport = self
             .transport_id
             .clone()
@@ -185,7 +221,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
                     "contentId": url,
                     "contentType": content_type,
                     "streamType": "LIVE",
-                    "metadata": {"metadataType": 3, "title": title, "artist": "Pubky Music"}
+                    "metadata": crate::meta_json(meta, "Pubky Music")
                 }
             }),
         )
@@ -314,6 +350,13 @@ pub async fn connect_tls(
     Ok(CastLink::new(tls))
 }
 
+impl<S> CastLink<S> {
+    /// The byte stream and the next request id, for a session that takes the link over.
+    pub(crate) fn into_parts(self) -> (S, u64) {
+        (self.stream, self.request_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,7 +428,7 @@ mod tests {
         link.load(
             "http://node:7788/v1/outputs/pull/cast-x/stream.wav",
             "audio/wav",
-            "Pubky Music",
+            &crate::Meta::default(),
         )
         .await
         .unwrap();

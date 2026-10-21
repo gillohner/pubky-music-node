@@ -347,6 +347,7 @@ impl Engine {
         }
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
+            self.output.now_playing(None);
             self.emit(ZoneEvent::Stopped);
         }
         self.dirty = true;
@@ -415,6 +416,7 @@ impl Engine {
     ) -> bool {
         let fmt = proc.output_format();
         let gapless = self.sink.as_ref().is_some_and(|s| s.format() == fmt) && self.current.is_some();
+        self.output.now_playing(Some(&item));
         if !self.ensure_sink(fmt, true) {
             return false;
         }
@@ -574,6 +576,7 @@ impl Engine {
         self.queue.lock().expect("queue poisoned").set_current(None);
         self.transport = Transport::Stopped;
         self.dirty = true;
+        self.output.now_playing(None);
         self.emit(ZoneEvent::Stopped);
     }
 

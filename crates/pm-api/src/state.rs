@@ -520,6 +520,56 @@ impl NodeState {
         format!("/v1/outputs/pull/{name}/stream.wav?k={}", self.stream_key(name))
     }
 
+    /// What a TV or speaker shows for a queue item: the item's own fields, filled from the library
+    /// for library tracks, with cover art the device can fetch (a keyed node URL, or the source's
+    /// own image).
+    pub fn describe_for_renderers(self: &Arc<Self>) -> pm_zones::Describe {
+        let state = Arc::downgrade(self);
+        Arc::new(move |item: &pm_zones::QueueItem| {
+            let mut meta = pm_zones::TrackMeta::from_item(item);
+            let Some(s) = state.upgrade() else { return meta };
+            let id = item
+                .uri
+                .strip_prefix(crate::sources::TRACK_SCHEME)
+                .and_then(|n| n.parse::<i64>().ok());
+            if let Some(id) = id {
+                let track = s
+                    .library
+                    .lock()
+                    .ok()
+                    .and_then(|l| l.get_track(pm_model::TrackId(id)).ok().flatten());
+                if let Some(t) = track {
+                    meta.title = meta.title.or(Some(t.title.clone()));
+                    if meta.artist.is_none() && !t.artists.is_empty() {
+                        meta.artist = Some(
+                            t.artists
+                                .iter()
+                                .map(|a| a.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        );
+                    }
+                    if let Some(album) = &t.album {
+                        meta.album = meta.album.or(Some(album.title.clone()));
+                        if meta.image.is_none() {
+                            meta.image = album.id.map(|aid| s.art_url(aid));
+                        }
+                    }
+                }
+            }
+            meta
+        })
+    }
+
+    /// An album cover URL a renderer can fetch without the API token.
+    pub fn art_url(&self, album_id: i64) -> String {
+        format!(
+            "{}/v1/art/{album_id}?k={}",
+            self.public_url.trim_end_matches('/'),
+            self.stream_key(&format!("art:{album_id}"))
+        )
+    }
+
     /// The key that opens one pull stream (and nothing else).
     pub fn stream_key(&self, name: &str) -> String {
         let h = blake3::keyed_hash(&self.stream_secret, name.as_bytes());
@@ -808,11 +858,10 @@ impl NodeState {
                     .collect::<String>()
             );
             let pull = self.pull_output(&name);
-            let out = Arc::new(pm_out_cast::CastOutput::new(
-                d.clone(),
-                pull,
-                self.pull_url(&name),
-            ));
+            let out = Arc::new(
+                pm_out_cast::CastOutput::new(d.clone(), pull, self.pull_url(&name))
+                    .with_describe(self.describe_for_renderers()),
+            );
             let id = out.id();
             if self.outputs.get(&id).is_some() {
                 continue;

@@ -221,6 +221,12 @@ async fn renderers_open_pull_streams_with_the_stream_key_only() {
         get(format!("/v1/outputs/pull/nope/stream.wav?k={nope}")).await,
         StatusCode::NOT_FOUND
     );
+    // Covers for TV screens: their own key per album.
+    let art = s.art_url(7);
+    assert!(art.starts_with("http://192.168.1.2:7788/v1/art/7?k="), "{art}");
+    let path = art.trim_start_matches("http://192.168.1.2:7788").to_string();
+    assert_eq!(get(path).await, StatusCode::NOT_FOUND); // right key, no such album
+    assert_eq!(get(format!("/v1/art/7?k={key}")).await, StatusCode::UNAUTHORIZED);
     // Keys survive a restart: they come from a secret kept in the library.
     drop(app);
     let again = NodeState::new(
