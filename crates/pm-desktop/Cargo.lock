@@ -4876,6 +4876,7 @@ version = "0.1.0"
 dependencies = [
  "base32",
  "blake3",
+ "bytes",
  "futures-util",
  "pm-model",
  "pubky 0.16.2",
