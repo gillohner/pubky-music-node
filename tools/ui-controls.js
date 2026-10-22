@@ -15,6 +15,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
 
 (async () => {
   const views = ['/', '/favourites', '/albums', '/artists', '/genres', '/tracks', '/playlists', '/radio', '/sources', '/queue', '/zones', '/settings', ...['playback', 'accounts', 'discover', 'backup', 'import', 'appearance', 'about'].map((t) => '/settings/' + t), '/search?q=queen'];
+  try { views.push(...['library', ...(await api('/sources')).map((x) => x.id)].map((id) => '/sources/' + id)); } catch { /* no sources */ }
   try { const pls = await api('/playlists'); const pl = pls.find((p) => p.items > 0); if (pl) views.push('/playlist/' + pl.id); } catch { /* none */ }
   try { const al = await api('/library/albums'); if (al[0]) views.push('/album/lib-' + al[0].id); } catch { /* none */ }
   views.push('/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');

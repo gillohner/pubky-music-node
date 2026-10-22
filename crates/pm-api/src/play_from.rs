@@ -511,6 +511,9 @@ fn play_order(order: Vec<String>, acc: &ServiceAccess) -> PlayOrder {
         .map(|id| {
             let (connected, note) = match id.as_str() {
                 "library" => (true, None),
+                other if discover::turned_off(acc, other) => {
+                    (false, Some("turned off on Sources".to_string()))
+                }
                 other => match discover::access(acc, other) {
                     Access::Full => (true, None),
                     Access::External => (true, Some("plays on a Spotify Connect device".to_string())),

@@ -183,6 +183,19 @@ pub struct NodeState {
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
     scanning: Mutex<bool>,
+    /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
+    sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
+}
+
+/// Library setting: JSON list of the source ids switched off.
+pub const SOURCES_OFF_KEY: &str = "sources.off";
+
+fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
+    lib.get_setting(SOURCES_OFF_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
 }
 
 /// Library setting: JSON list of renderer addresses added by hand.
@@ -196,6 +209,35 @@ pub fn profile_url(z32: &str) -> String {
 }
 
 impl NodeState {
+    /// Whether a source is switched on. Off means hidden everywhere: search, Home, item pages,
+    /// play-from order, menus. Its sign-in and settings stay. `library` is always on.
+    pub fn source_enabled(&self, id: &str) -> bool {
+        !self.sources_off.read().expect("sources_off lock").contains(id)
+    }
+
+    /// Switch a source on or off (persisted).
+    pub fn set_source_enabled(&self, id: &str, on: bool) -> Result<(), pm_library::LibraryError> {
+        let mut off = self.sources_off.write().expect("sources_off lock");
+        if on {
+            off.remove(id);
+        } else {
+            off.insert(id.to_string());
+        }
+        let mut list: Vec<&String> = off.iter().collect();
+        list.sort();
+        let json = serde_json::to_string(&list).expect("list serializes");
+        self.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(SOURCES_OFF_KEY, &json)
+    }
+
+    /// Read the switched-off sources again (after a restore replaced the settings).
+    pub fn reload_sources_off(&self) {
+        let fresh = load_sources_off(&self.library.lock().expect("library poisoned"));
+        *self.sources_off.write().expect("sources_off lock") = fresh;
+    }
+
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
         let node_id = node_id(&library);
         let stream_secret = stream_secret(&library);
@@ -240,6 +282,8 @@ impl NodeState {
             audiobookshelf.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
+        let sources_off =
+            std::sync::RwLock::new(load_sources_off(&library.lock().expect("library poisoned")));
         // A contact saved through the API wins over an unset config value.
         let mut pubky = settings.pubky;
         if pubky.validate_contact().is_err() {
@@ -297,6 +341,7 @@ impl NodeState {
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             upload_jobs: Default::default(),
             events,
+            sources_off,
             sync: Mutex::new(None),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),

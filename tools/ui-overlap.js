@@ -6,7 +6,7 @@
 //   * two neighbours overlap (siblings in the same row or column; badges and overlays placed on
 //     purpose with position absolute/fixed are left out).
 // Screens: Home, the library pages, an album, a song, an artist, search, playlists, queue, zones,
-// sources, radio, favourites, every Settings tab, the now-playing overlay and a dialog.
+// sources, radio, favourites, every Settings tab, every Sources tab, the now-playing overlay and a dialog.
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
 //   node tools/ui-overlap.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -57,7 +57,9 @@ const inspect = () => {
   const albums = (await api('/library/albums?limit=1')) || []; const artists = (await api('/library/artists')) || []; const tracks = ((await api('/library/tracks?limit=1')) || { tracks: [] }).tracks;
   const screens = [['Home', '/'], ['Albums', '/albums'], ['Artists', '/artists'], ['Tracks', '/tracks'], ['Genres', '/genres'], ['Playlists', '/playlists'], ['Favourites', '/favourites'], ['Queue', '/queue'], ['Zones', '/zones'], ['Sources', '/sources'], ['Radio', '/radio'], ['Search', '/search?q=love&in=library'],
     ...(albums[0] ? [['Album', `/album/lib-${albums[0].id}`]] : []), ...(artists[0] ? [['Artist', `/artist/lib-${artists[0].id}`]] : []), ...(tracks[0] ? [['Song', `/song/lib-${tracks[0].id}`]] : []),
-    ['Settings', '/settings'], ...SETTINGS.map((t) => [`Settings › ${t}`, `/settings/${t}`])];
+    ['Settings', '/settings'], ...SETTINGS.map((t) => [`Settings › ${t}`, `/settings/${t}`]),
+    // Every Sources tab (STEWARD-UX-SOURCES.md)
+    ...['library', ...((await api('/sources')) || []).map((x) => x.id)].map((id) => [`Sources › ${id}`, `/sources/${id}`])];
   const browser = await chromium.launch();
   const problems = [];
   for (const scheme of ['dark', 'light']) {

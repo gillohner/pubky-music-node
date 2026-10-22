@@ -835,7 +835,7 @@
     if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
     if (v === 'shared' && arg && arg.user) return `/shared/${arg.user}${arg.id ? '/' + arg.id : ''}`;
     if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
-    if (v === 'sources' && arg && arg.source) return `/source/${encodeURIComponent(arg.source)}`;
+    if (v === 'sources' && arg && arg.source) return `/sources/${encodeURIComponent(arg.source)}`;
     if (v === 'source-item' || v === 'source-artist') return null;
     if (v === 'discover-item' && arg && arg.uri) return `/${itemSeg(arg.kind)}/${idOf(arg.uri)}`;
     if (v === 'search') return arg && arg.q ? `/search?q=${encodeURIComponent(arg.q)}${arg.in && arg.in !== 'everywhere' ? `&in=${encodeURIComponent(arg.in)}` : ''}` : '/search';
@@ -847,6 +847,9 @@
     // #settings/<tab> (a link from anywhere) and /settings/<tab> open that tab
     const h = /^#settings(?:\/([a-z]+))?$/.exec(location.hash || '');
     if (h) return { v: 'settings', arg: h[1] || null };
+    // #sources/<service> likewise opens that source's tab
+    const hs = /^#sources(?:\/([a-z0-9-]+))?$/.exec(location.hash || '');
+    if (hs) return hs[1] ? { v: 'sources', arg: { source: hs[1] } } : { v: 'sources' };
     const p = location.pathname.replace(/\/+$/, '') || '/';
     const st = p.match(/^\/settings\/([a-z]+)$/);
     if (st && SETTINGS_TABS.some(([k]) => k === st[1])) return { v: 'settings', arg: st[1] };
@@ -857,7 +860,7 @@
     m = p.match(/^\/(?:tag|discover\/tag)\/([^/]+)$/);
     if (m) return { v: 'tag', arg: m[1].split(',').map(decodeURIComponent).join(',') };
     if (p === '/discover' || p.startsWith('/discover/')) return { v: 'home' };
-    m = p.match(/^\/(playlist|genre|source)\/([^/]+)$/);
+    m = p.match(/^\/(playlist|genre|sources?)\/([^/]+)$/);
     if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
     m = p.match(/^\/shared\/([a-z0-9]{52})(?:\/([0-9A-Z]{13}))?$/);
     if (m) return { v: 'shared', arg: m[2] ? { user: m[1], id: m[2] } : { user: m[1] } };
@@ -1324,6 +1327,21 @@
   const itemName = (it) => it.title || `Untitled on ${it.site || 'another service'}`;
   // Describe music URLs that are not in the library (favourites, playlists, history).
   const describe = async (uris) => { if (!uris.length) return []; try { return await api('POST', '/discover/describe', { uris }); } catch { return uris.map((u) => ({ uri: u, page: u, title: null, site: null, also_on: [], kind: 'other' })); } };
+  // A source's state for its tab's dot: connected, not set up, an error, or switched off.
+  const srcState = (x) => {
+    if (!x.enabled) return { cls: 'off', label: 'Turned off', long: 'Turned off.' };
+    const st = String(x.status || '');
+    if (st === 'ready') return { cls: 'ok', label: 'Connected', long: 'Ready.' };
+    if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
+    if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
+    return { cls: 'bad', label: 'Problem', long: st };
+  };
+  // Sources switched off disappear from the sidebar and search scopes too.
+  const applySourcesOff = () => {
+    const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
+    $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
+    if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
+  };
   const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
@@ -1439,8 +1457,8 @@
   const renderSearchBody = (run) => {
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
     const scope = run.scope;
-    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
-    const services = (state.sources || []).filter((x) => !/^not configured/.test(x.status) && x.status !== 'needs_config');
+    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
+    const services = (state.sources || []).filter((x) => x.enabled !== false && !/^not configured/.test(x.status) && x.status !== 'needs_config');
     const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
@@ -2055,46 +2073,102 @@
           break;
         }
         case 'sources': {
-          if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch (e) { state.sources = []; } }
+          // One tab per service with its on/off switch, laid out like Settings (STEWARD-UX-SOURCES.md).
+          // Off hides a source everywhere; its tab stays (dimmed) so it can be switched on again.
+          try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
+          if (state.view !== 'sources') return;
           const srcs = state.sources;
-          if (!state.sourceId || !srcs.some((x) => x.id === state.sourceId)) state.sourceId = srcs[0] ? srcs[0].id : 'archive';
-          if (state.viewArg && state.viewArg.source && srcs.some((x) => x.id === state.viewArg.source)) state.sourceId = state.viewArg.source;
-          const cur = srcs.find((x) => x.id === state.sourceId) || { id: state.sourceId, name: state.sourceId, description: '' };
-          const wanted = state.viewArg && state.viewArg.q;
-          if (wanted && (!state.sourceResults || state.sourceResults.q !== wanted || state.sourceResults.source !== cur.id)) {
-            loading();
-            try { const r = await api('GET', `/sources/${encodeURIComponent(cur.id)}/search?limit=40&q=` + encodeURIComponent(wanted)); state.sourceResults = { source: cur.id, q: wanted, items: r.items }; } catch (e) { toast(e.message, 'error'); state.sourceResults = { source: cur.id, q: wanted, items: [] }; }
-            if (state.view !== 'sources') return;
-          }
-          const results = state.sourceResults && state.sourceResults.source === cur.id ? state.sourceResults : { q: '', items: [] };
-          const tabs = `<div class="chips tabs">${srcs.map((x) => `<button class="chip ${x.id === cur.id ? 'on' : ''}" data-src="${esc(x.id)}">${esc(x.name)}</button>`).join('')}</div>`;
-          let tidal = null; if (cur.id === 'tidal') { try { tidal = await api('GET', '/sources/tidal/status'); } catch { tidal = null; } if (state.view !== 'sources') return; }
-          let sub = null; let subPls = []; if (cur.id === 'subsonic') { try { sub = await api('GET', '/sources/subsonic/server'); if (sub.connected) subPls = await api('GET', '/sources/subsonic/playlists').catch(() => []); } catch { sub = null; } if (state.view !== 'sources') return; }
-          const subAccount = cur.id !== 'subsonic' ? '' : sub && sub.connected
+          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+          const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
+          const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
+          const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
+          if (active) state.sourceId = active;
+          const cur = active === 'library' ? { id: 'library', name: 'Your library', description: '', status: 'ready', enabled: true } : srcs.find((x) => x.id === active) || null;
+          const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+          const row = (label, h, ctl, cls = '') => `<div class="set-row ${cls}"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+          const block = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${help(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
+          const group = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
+          const mark = (x) => `<span class="src-mark" style="background:hsl(${hue(x.id)} 45% 34%)" aria-hidden="true">${esc((x.name || x.id).replace(/^Your /, '').slice(0, 1).toUpperCase())}</span>`;
+          const srcSwitch = (x, where) => `<input type="checkbox" class="switch" role="switch" data-src-on="${esc(x.id)}" ${x.enabled ? 'checked' : ''} aria-label="${esc(x.name)}${where}">`;
+          const tabRow = (x) => { const st = srcState(x); return `<div class="src-tabrow ${x.enabled ? '' : 'off'}"><button class="set-tab ${active === x.id ? 'on' : ''}" id="srctab-${esc(x.id)}" ${active === x.id ? 'aria-current="page"' : ''} data-srctab="${esc(x.id)}">${mark(x)}<span class="src-tname">${esc(x.name)}</span><span class="src-dot ${st.cls}" title="${esc(st.label)}"></span><span class="sr-only">${esc(st.label)}</span>${icon('chevron', 'ic chev')}</button>${x.id === 'library' ? '<span class="src-noswitch" aria-hidden="true"></span>' : srcSwitch(x, ' on')}</div>`; };
+          const lib = { id: 'library', name: 'Your library', status: 'ready', enabled: true };
+          const on = srcs.filter((x) => x.enabled); const off = srcs.filter((x) => !x.enabled);
+          const nav = `<nav class="set-nav src-nav" aria-label="Sources">${[lib, ...on].map(tabRow).join('')}${off.length ? (off.length > 2 ? `<details class="src-offgroup" ${off.some((x) => x.id === active) ? 'open' : ''}><summary>Turned off · ${off.length}</summary>${off.map(tabRow).join('')}</details>` : off.map(tabRow).join('')) : ''}</nav>`;
+          const panelHead = (x) => `${phone ? `<button class="btn ghost set-back" data-src-back>${icon('back')} Sources</button>` : ''}<h2 class="set-title">${esc(x.name)}</h2>${x.description ? `<p class="muted small src-desc">${esc(x.description)}</p>` : ''}`;
+          let tidal = null; if (active === 'tidal') { try { tidal = await api('GET', '/sources/tidal/status'); } catch { tidal = null; } if (state.view !== 'sources') return; }
+          let sub = null; let subPls = []; if (active === 'subsonic') { try { sub = await api('GET', '/sources/subsonic/server'); if (sub.connected) subPls = await api('GET', '/sources/subsonic/playlists').catch(() => []); } catch { sub = null; } if (state.view !== 'sources') return; }
+          const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
             ? `<div class="toolbar"><span class="pill ok account">Connected · ${esc(sub.name || 'your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.user || '')}@${esc(sub.url || '')}</span><button class="btn ghost" id="subforget">Forget this server</button></div>`
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
             : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
-          let jf = null; let jfPls = []; if (cur.id === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
-          const jfAccount = cur.id !== 'jellyfin' ? '' : jf && jf.connected
+          let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
+          const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
             ? `<div class="toolbar"><span class="pill ok account">Signed in · ${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · ${esc(jf.user || '')}</span><button class="btn ghost" id="jfout">Sign out</button></div>`
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
             : `<form class="card subform" id="jfform"><h3>Sign in to your Jellyfin</h3><p class="muted small">Also works with Emby. The password is used once to sign in; the node keeps only the access token Jellyfin gives it.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
-          let jam = null; if (cur.id === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
-          const jamAccount = cur.id !== 'jamendo' ? '' : !jam || !jam.configured ? `<div class="notice">Jamendo needs a free developer app (devportal.jamendo.com): <code>[jamendo] client_id</code> and <code>client_secret</code> in the node config, or the <code>PM_JAMENDO_*</code> variables.</div>`
+          let jam = null; if (active === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
+          const jamAccount = active !== 'jamendo' ? '' : !jam || !jam.configured ? `<div class="notice">Jamendo needs a free developer app (devportal.jamendo.com): <code>[jamendo] client_id</code> and <code>client_secret</code> in the node config, or the <code>PM_JAMENDO_*</code> variables.</div>`
             : jam.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${jam.name ? ' · ' + esc(jam.name) : ''}</span><button class="btn" id="jamimport">${icon('heart')} Add my Jamendo likes to Favourites</button><button class="btn ghost" id="jamout">Sign out</button></div>`
             : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>`;
-          let spot = null; if (cur.id === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
-          const spotAccount = cur.id !== 'spotify' ? '' : !spot || !spot.configured ? `<div class="notice">Spotify needs a developer app's client id and secret in the node config (<code>[spotify]</code>) or the <code>PM_SPOTIFY_*</code> variables in Docker.</div>`
+          let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
+          const spotAccount = active !== 'spotify' ? '' : !spot || !spot.configured ? `<div class="notice">Spotify needs a developer app's client id and secret in the node config (<code>[spotify]</code>) or the <code>PM_SPOTIFY_*</code> variables in Docker.</div>`
             : spot.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${spot.display_name ? ' · ' + esc(spot.display_name) : spot.user_id ? ' · ' + esc(spot.user_id) : ''}${spot.country ? ' · ' + esc(spot.country) : ''}${spot.product ? ' · ' + esc(spot.product) : ''}</span><button class="btn ghost" id="spotout">Sign out</button></div><p class="muted small">Spotify hands out no audio (DRM): tracks play on your Spotify devices (Premium), chosen under “Play on Spotify”. Your library and playlists import by ISRC.</p>`
             : `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify's sign-in; the app must list <code>${esc(spot.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>`;
-          const account = cur.id === 'spotify' ? spotAccount : cur.id === 'jamendo' ? jamAccount : cur.id === 'subsonic' ? subAccount : cur.id === 'jellyfin' ? jfAccount : cur.id !== 'tidal' ? '' : !tidal || !tidal.configured ? `<div class="notice">TIDAL needs the developer app's client id and secret in the node config (<code>[tidal]</code>) or the <code>PM_TIDAL_*</code> variables in Docker.</div>`
+          const account = active === 'spotify' ? spotAccount : active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : active !== 'tidal' ? '' : !tidal || !tidal.configured ? `<div class="notice">TIDAL needs the developer app's client id and secret in the node config (<code>[tidal]</code>) or the <code>PM_TIDAL_*</code> variables in Docker.</div>`
             : tidal.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${tidal.user_id ? ' · user ' + esc(tidal.user_id) : ''}${tidal.country ? ' · ' + esc(tidal.country) : ''}${tidal.access_tier ? ' · ' + esc(tidal.access_tier) : ''}</span>${tidal.playback_limit ? `<span class="pill warn" title="TIDAL's answer to the last stream manifest">previews only · ${esc(tidal.playback_limit)}</span>` : ''}<button class="btn ghost" id="tidalout">Sign out</button></div>${tidal.playback_limit ? `<p class="muted small">TIDAL serves 30-second previews to apps on the ${esc(tidal.access_tier || 'THIRD_PARTY')} developer tier. Full tracks need a higher access tier granted by TIDAL for this app; search, albums and the collection and playlist imports are unaffected.</p>` : ''}`
             : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Connect TIDAL</button><span class="muted small">Opens TIDAL's sign-in; the app must list <code>${esc(tidal.redirect_uri)}</code> as a redirect URI. Search works without signing in; playback and your collection need it. The app must also have these scopes enabled: <code>${esc(tidal.requested_scopes || '')}</code> (change them with <code>[tidal] scopes</code> in the node config).</span></div>`;
-          main.innerHTML = pageHead('Sources', cur.id === 'tidal' || cur.id === 'spotify' ? 'your subscription, one account on this node · also answers in the main search' : cur.id === 'subsonic' || cur.id === 'jellyfin' ? 'your own music server · also answers in the main search' : cur.status === 'needs_config' ? 'not set up on this node yet' : 'free to stream, no account needed') + tabs
-            + `<p class="muted small">${esc(cur.description)}</p>` + account
-            + (cur.status === 'needs_config' ? '' : `<div class="toolbar"><button class="btn primary" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button><span class="muted small">Opens the one search, scoped to ${esc(cur.name)}.</span></div>`)
-            + ''
-          $$('[data-src]', main).forEach((b) => b.onclick = () => { state.sourceResults = null; setView('sources', { source: b.dataset.src }); });
+
+          const body = !cur ? '' : cur.id === 'library'
+            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library</button>')
+              + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Playback</button>'))
+            : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
+                + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
+              + (account ? group('Account', block('', '', account)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && !/^not configured/.test(cur.status) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
+              + '<div id="srcmine"></div>';
+          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
+          $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
+          $$('[data-src-back]', main).forEach((b) => b.onclick = () => goBack('sources'));
+          // TIDAL › Full tracks (unofficial): opt-in, warned, its own device sign-in (STEWARD-TIDAL-FULL.md)
+          const tf = $('#tidalfull');
+          const fillTidalFull = async () => {
+            if (!tf || !tf.isConnected) return;
+            let u; try { u = await api('GET', '/sources/tidal/unofficial'); } catch (e) { tf.innerHTML = ''; return; }
+            if (!tf.isConnected) return;
+            clearTimeout(state.tidalFullPoll);
+            const broke = u.health && !u.health.ok;
+            const rows = [row('Full tracks (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="tfon" ${u.enabled ? 'checked' : ''} aria-label="Full tracks (unofficial)">`)];
+            if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
+            if (u.enabled || u.signed_in || u.client_from) {
+              rows.push(u.client_from
+                ? row('Device client', u.client_from === 'config' ? 'Set in the node config.' : 'Set here. TIDAL can stop accepting a client at any time; then enter another one.', `<button class="btn ghost sm" id="tfclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget</button>' : ''}`)
+                : '');
+              rows.push(`<form class="set-row set-block" id="tfclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Device client</div>${help('The sign-in needs a TIDAL device client id and secret that you are allowed to use. The node keeps them like a sign-in.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Client secret" autocomplete="off" aria-label="Device client secret"><button class="btn" type="submit">Save</button></div></div></form>`);
+              if (u.signed_in) rows.push(row('Signed in', `TIDAL account${u.user ? ' ' + esc(u.user) : ''}, through the device sign-in.`, '<button class="btn ghost sm" id="tfout">Sign out</button>'));
+              else if (u.pending) rows.push(block('Sign in', 'On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.', `<div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(u.pending.uri)}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`));
+              else if (u.client_from) rows.push(row('Sign in', 'With a code you enter at link.tidal.com; no password goes through this node.', '<button class="btn primary" id="tfin">Sign in with a code</button>'));
+              rows.push(row('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
+              if (u.health && u.health.ok && u.signed_in) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+            }
+            tf.innerHTML = group('Full tracks', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } fillTidalFull(); };
+            $('#tfon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Full tracks are on' : 'Full tracks are off: TIDAL plays previews');
+            const tr = $('#tfretry'); if (tr) tr.onclick = () => put({ enabled: true }, 'Trying full tracks again');
+            const tq = $('#tfq'); if (tq) tq.onchange = () => put({ quality: tq.value }, 'Quality saved');
+            const cf = $('#tfclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); const f = new FormData(cf); put({ client_id: f.get('id'), client_secret: f.get('secret') }, 'Device client saved'); };
+            const cc = $('#tfclientchange'); if (cc) cc.onclick = () => { cf.hidden = false; cf.querySelector('input').focus(); };
+            const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = () => put({ client_id: '' }, 'Device client forgotten');
+            const ti2 = $('#tfin'); if (ti2) ti2.onclick = async () => { ti2.disabled = true; try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } fillTidalFull(); };
+            const tout = $('#tfout'); if (tout) tout.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); } catch (e) { toast(e.message, 'error'); } fillTidalFull(); };
+            if (u.pending) state.tidalFullPoll = setTimeout(async () => { const was = u.signed_in; await fillTidalFull(); if (!was && tf.querySelector('#tfout')) toast('TIDAL full tracks signed in'); }, 3000);
+          };
+          fillTidalFull();
+          $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
+          $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
+            const id = sw.dataset.srcOn; const want = sw.checked;
+            try { await api('PUT', `/sources/${encodeURIComponent(id)}/enabled`, { enabled: want }); applySourcesOff(); homeCache.clear(); toast(`${srcName(id)} ${want ? 'is on' : 'is off: hidden everywhere until you switch it on'}`); render(); } catch (e) { sw.checked = !want; toast(e.message, 'error'); }
+          });
           const ti = $('#tidalin'); if (ti) ti.onclick = async () => { try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); } };
           const sf = $('#subform'); if (sf) sf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(sf); const b = $('#subconnect'); b.disabled = true; try { const v = await api('PUT', '/sources/subsonic/server', { url: f.get('url'), user: f.get('user'), password: f.get('password') }); state.sources = null; toast(`Connected to ${v.name || 'your server'}`); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
           const jff = $('#jfform'); if (jff) jff.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(jff); const b = $('#jfin'); b.disabled = true; try { const v = await api('PUT', '/sources/jellyfin/server', { url: f.get('url'), user: f.get('user'), password: f.get('password') || '' }); state.sources = null; toast(`Signed in to ${v.server_name || 'Jellyfin'}`); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
@@ -2108,12 +2182,12 @@
           const to = $('#tidalout'); if (to) to.onclick = async () => { try { await api('DELETE', '/sources/tidal/session'); toast('TIDAL signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           const si = $('#spotin'); if (si) si.onclick = async () => { try { const r = await api('GET', '/sources/spotify/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } };
           const so = $('#spotout'); if (so) so.onclick = async () => { try { await api('DELETE', '/sources/spotify/session'); toast('Spotify signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
-          if (spot && spot.signed_in && !results.q) {
-            const box = document.createElement('div'); box.innerHTML = '<p class="muted small">Loading your Spotify library…</p>'; main.appendChild(box);
+          if (spot && spot.signed_in && cur.enabled) {
+            const box = document.createElement('div'); box.innerHTML = '<p class="muted small">Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
                 const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch(() => [])]);
-                if (state.view !== 'sources' || state.sourceId !== 'spotify') return;
+                if (state.view !== 'sources' || state.sourceId !== 'spotify' || !box.isConnected) return;
                 const albums = col.items.filter((h) => h.kind === 'album'); const tracks = col.items.filter((h) => h.kind === 'track');
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}${h.library_track_id || h.library_album_id ? ' <span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><button class="icon-btn" data-splay="${esc(h.id)}" title="Play on Spotify">${icon('play')}</button></div>`;
                 box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
@@ -2126,13 +2200,13 @@
               } catch (e) { box.innerHTML = `<p class="muted small">Spotify library: ${esc(e.message)}</p>`; }
             })();
           }
-          if (tidal && tidal.signed_in && !results.q) {
+          if (tidal && tidal.signed_in && cur.enabled) {
             // Your collection and playlists, with imports into the node's favourites and Pubky playlists.
-            const box = document.createElement('div'); box.id = 'tidalmine'; box.innerHTML = '<p class="muted small">Loading your TIDAL collection…</p>'; main.appendChild(box);
+            const box = document.createElement('div'); box.id = 'tidalmine'; box.innerHTML = '<p class="muted small">Loading your TIDAL collection…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
                 const [col, pls] = await Promise.all([api('GET', '/sources/tidal/collection'), api('GET', '/sources/tidal/playlists')]);
-                if (state.view !== 'sources' || state.sourceId !== 'tidal') return;
+                if (state.view !== 'sources' || state.sourceId !== 'tidal' || !box.isConnected) return;
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind)}</span></div>`;
                 box.innerHTML = `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.tracks.length, 'tracks')} · ${countOf(col.albums.length, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.slice(0, 20).map(hit).join('')}${col.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>
                   <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`;
@@ -2143,7 +2217,6 @@
             })();
           }
           const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); search.select(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
-          $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: cur.id, id: b.dataset.sitem }));
           break;
         }
         case 'source-artist': {
@@ -2835,6 +2908,7 @@
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}`);
       watchScan(state.info);
       loadFavourites().catch(() => {});
+      api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);

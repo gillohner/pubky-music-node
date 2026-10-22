@@ -93,6 +93,8 @@ pub(crate) async fn page(
         }
     }
     let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
+    // Sources switched off on Sources are not offered anywhere on the page
+    pg.versions.retain(|v| s.source_enabled(&v.source));
     split_sources(&mut pg, &order);
     if kind == "song" {
         decide_play(&s, &mut pg).await;
