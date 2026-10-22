@@ -27,8 +27,8 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 
 pub mod audiobookshelf;
 pub mod backup;
-pub mod dash;
 pub mod bundled;
+pub mod dash;
 pub mod deezer;
 pub mod discover;
 pub mod events;

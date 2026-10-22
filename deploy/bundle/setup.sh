@@ -28,6 +28,7 @@ put PM_PUBLIC_URL "${IP:+http://$IP:7788}"
 put MUSIC_DIR "${MUSIC_DIR:-./music}"
 put HOMESERVER_DOMAIN ""
 put PM_TAG "edge"
+put CLOUDFLARE_TUNNEL_TOKEN ""
 
 echo "Wrote $ENV (passwords generated, not shown). LAN address: ${IP:-unknown, set PUBLIC_IP}."
 echo "Music folder: $(sed -n 's/^MUSIC_DIR=//p' "$ENV"). Edit $ENV to change it, then: docker compose up -d"
