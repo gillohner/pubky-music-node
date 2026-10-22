@@ -33,7 +33,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 blake3 = { workspace = true }
-quick-xml = "0.42"
+quick-xml = "0.42" # podcast feeds, DASH manifests (TIDAL full tracks)
 md-5 = "0.10"
 hex = "0.4"
 sha2 = "0.10"
@@ -42,8 +42,6 @@ base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
-# DASH manifests (TIDAL full tracks)
-quick-xml = "0.42"
 rand = "0.8"
 time = { workspace = true }
 url = { workspace = true }
