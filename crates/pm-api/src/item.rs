@@ -90,13 +90,20 @@ pub(crate) async fn page(
             }
         }
     }
-    // A service's track page: its album from the service itself when nothing else knew it
+    let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
+    split_sources(&mut pg, &order);
+    // A song's album when nothing else knew it: from the page's own service, then from the same
+    // recording on another service (Deezer answers without a sign-in)
     if kind == "song" && pg.albums.is_empty() {
-        if let Some((svc, n)) = pg
-            .id
-            .split_once('-')
-            .filter(|(svc, _)| matches!(*svc, "tidal" | "deezer" | "spotify"))
-        {
+        let mut tries: Vec<String> = vec![pg.id.clone()];
+        tries.extend(pg.also_on.iter().filter_map(|v| v.page.clone()));
+        for pid in tries {
+            let Some((svc, n)) = pid
+                .split_once('-')
+                .filter(|(svc, _)| matches!(*svc, "tidal" | "deezer" | "spotify"))
+            else {
+                continue;
+            };
             let fut = async {
                 match svc {
                     "deezer" => crate::deezer::track_album(&s, n).await,
@@ -124,11 +131,10 @@ pub(crate) async fn page(
                     image,
                     page: url,
                 });
+                break;
             }
         }
     }
-    let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
-    split_sources(&mut pg, &order);
     if kind == "song" {
         pg.versions = other_recordings(&s, &pg);
     }
