@@ -345,14 +345,25 @@ pub fn track_from_tags(file: AudioFile, t: &TagSet) -> Track {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| "Untitled".into())
         });
-    let artists = t
-        .artists
+    // "Sefa, Dr. Peacock" names two artists; a file whose MusicBrainz ids say one artist stays
+    // whole (crate::credits)
+    let names: Vec<String> = if t.artist_mbids.len() == 1 && t.artists.len() == 1 {
+        t.artists.clone()
+    } else {
+        crate::credits::split_all(&t.artists)
+    };
+    let ids_line_up = names.len() == t.artist_mbids.len() || names.len() == t.artists.len();
+    let artists = names
         .iter()
         .enumerate()
         .map(|(i, name)| Artist {
             id: None,
             name: name.clone(),
-            mbid: t.artist_mbids.get(i).copied(),
+            mbid: if ids_line_up {
+                t.artist_mbids.get(i).copied()
+            } else {
+                None
+            },
         })
         .collect();
     let album = t.album.as_ref().map(|title| Album {

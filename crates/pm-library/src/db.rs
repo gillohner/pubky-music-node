@@ -244,7 +244,83 @@ impl Library {
         };
         lib.migrate()?;
         lib.tidy_file_name_titles()?;
+        lib.split_artist_credits()?;
         Ok(lib)
+    }
+
+    /// Artists named by a whole credit ("Sefa, Dr. Peacock", scanned before
+    /// [`crate::credits`]) become the artists it names; their tracks keep their order of artists.
+    /// Artists with a MusicBrainz id are left alone. Idempotent. Returns how many were split.
+    fn split_artist_credits(&self) -> Result<usize> {
+        let conn = self.lock();
+        let rows: Vec<(i64, String)> = conn
+            .prepare("SELECT id, name FROM artists WHERE mbid IS NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut split = 0;
+        for (artist_id, name) in rows {
+            let parts = crate::credits::split_credit(&name);
+            if parts.len() < 2 {
+                continue;
+            }
+            split += 1;
+            let tracks: Vec<i64> = conn
+                .prepare("SELECT DISTINCT track_id FROM track_artists WHERE artist_id = ?1")?
+                .query_map(params![artist_id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for track in tracks {
+                // The track's artists in order, the credit replaced by its parts
+                let current: Vec<i64> = conn
+                    .prepare("SELECT artist_id FROM track_artists WHERE track_id = ?1 ORDER BY position")?
+                    .query_map(params![track], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?;
+                let mut next: Vec<i64> = Vec::new();
+                for a in current {
+                    if a == artist_id {
+                        for p in &parts {
+                            let id = upsert_artist(
+                                &conn,
+                                &Artist {
+                                    id: None,
+                                    name: p.clone(),
+                                    mbid: None,
+                                },
+                            )?;
+                            if !next.contains(&id) {
+                                next.push(id);
+                            }
+                        }
+                    } else if !next.contains(&a) {
+                        next.push(a);
+                    }
+                }
+                conn.execute("DELETE FROM track_artists WHERE track_id = ?1", params![track])?;
+                for (pos, a) in next.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO track_artists(track_id, artist_id, position) VALUES (?1, ?2, ?3)",
+                        params![track, a, pos as i64],
+                    )?;
+                }
+                let names: Vec<String> = next
+                    .iter()
+                    .map(|a| {
+                        conn.query_row("SELECT name FROM artists WHERE id = ?1", params![a], |r| r.get(0))
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                conn.execute(
+                    "UPDATE tracks_fts SET artist = ?2 WHERE rowid = ?1",
+                    params![track, names.join(" ")],
+                )?;
+            }
+            conn.execute(
+                "DELETE FROM artists WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM track_artists WHERE artist_id = ?1)",
+                params![artist_id],
+            )?;
+        }
+        if split > 0 {
+            tracing::info!(split, "artist credits split into their artists");
+        }
+        Ok(split)
     }
 
     /// Tracks still titled by their raw file name (scanned before
@@ -2352,6 +2428,37 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, Some(id));
         lib.commit_batch().unwrap(); // nothing open: nothing to do
+    }
+
+    /// A library scanned before credits were split: "Sefa, Dr. Peacock" becomes two artists,
+    /// "Dr. Peacock" is shared with the track that named him alone, and nothing is left behind.
+    #[test]
+    fn old_credits_split_into_artists() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/a.flac", "Flowing River");
+        a.artists = vec![Artist {
+            id: None,
+            name: "Sefa, Dr. Peacock".into(),
+            mbid: None,
+        }];
+        let mut b = sample_track("/m/b.flac", "Solo");
+        b.artists = vec![Artist {
+            id: None,
+            name: "Dr. Peacock".into(),
+            mbid: None,
+        }];
+        let ta = lib.upsert_track(&a).unwrap();
+        lib.upsert_track(&b).unwrap();
+        assert_eq!(lib.split_artist_credits().unwrap(), 1);
+        let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["Dr. Peacock", "Sefa"]);
+        let t = lib.get_track(ta).unwrap().unwrap();
+        assert_eq!(
+            t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Sefa", "Dr. Peacock"]
+        );
+        assert_eq!(lib.split_artist_credits().unwrap(), 0, "once is enough");
+        assert_eq!(lib.search_tracks("peacock", 10).unwrap().len(), 2);
     }
 
     #[test]

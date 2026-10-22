@@ -14,6 +14,7 @@
 //! `spawn_blocking`.
 
 pub mod canonical;
+pub mod credits;
 pub mod db;
 pub mod dsd;
 pub mod error;

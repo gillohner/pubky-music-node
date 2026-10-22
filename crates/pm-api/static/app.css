@@ -895,3 +895,11 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 @media (max-width: 720px) { .set-list .set-item { flex-wrap: wrap; } .set-list .set-item .caps { flex-basis: 100%; text-align: left; } }
 .set-help .spin { display: inline-block; vertical-align: -1px; margin-right: 4px; }
 .reading .spin { display: inline-block; vertical-align: -1px; margin-right: 6px; }
+
+/* Player bar: the cover opens Now playing; Now playing's Pubky row */
+.np-artbtn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 6px; }
+.np-artbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.np-pubky { margin: 14px 0 6px; display: flex; flex-direction: column; gap: 10px; }
+.np-pubky-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.np-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.np-tags .taginput { width: 160px; }

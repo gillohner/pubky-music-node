@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Artists are split** (owner: "here all artists are wrong and not separated"). A credit like "Sefa, Dr. Peacock", "Sefa & Cyclon" or "Dr. Peacock feat. MC Lenny" now names separate artists, so the Artists page shows Sefa, Dr. Peacock, Cyclon and MC Lenny once each, with all their songs.
+  - Joiners: `,` `&` `feat.` `ft.` `featuring` ` x ` ` vs ` `/` `;`.
+  - Kept whole: an artist MusicBrainz identifies as one, and a short list of well-known acts with such names (Simon & Garfunkel, Earth, Wind & Fire, Tyler, The Creator…).
+  - Existing libraries are fixed once at startup (a rescan skips unchanged files); an artist with a MusicBrainz id is left alone.
+- **The player bar links** (owner): the cover opens Now playing. The title opens the song's page, each artist their own page, and the album its page. Before, those clicks also opened Now playing on top.
+- **Now playing has the Pubky features:** the same links, a heart, your tags on this song (add one right there), and a button to the song's page (versions, reviews, On Pubky).
 - **A cold TIDAL artist page answers within 2.5 s** (it took up to 83 s on the dev node, waiting out TIDAL's rate limits one request after another). The service's songs and albums get 2.5 s. Past that the page shows its header, "about" and versions with a "Getting the songs and albums from TIDAL…" line. The fetch goes on in the background, fills the cache, and the page asks again every 3 s. An artist's albums and top tracks are fetched together. TIDAL rate limits now show in the log.
 - **Syncs stop reading other apps' tags; pages don't wait on extras; copies leave room** (STEWARD-FIX-pubky-signin-speed.md, STEWARD-FIX-artist-page-speed.md).
   - **Every sync used to reread the old `pubky.app/tags/` folder,** one tag at a time. That folder also holds other apps' tags, about 450 for the owner, and the tag reader then read it again. Tags now move out of it once per node, 8 at a time, and later syncs skip it. Real account, empty library: **first sync 125 s → 9 s**. This also ends the stream of homeserver lookups in the log.

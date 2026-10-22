@@ -455,6 +455,29 @@
   const LABEL = { bit_perfect: 'Bit-perfect', enhanced: 'Enhanced', lossless: 'Lossless', lossy: 'Lossy' };
   const headline = (p) => p.stages.reduce((w, s) => (ORDER[s.quality] > ORDER[w] ? s.quality : w), 'bit_perfect');
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
+  // The artists a credit names ("Sefa, Dr. Peacock" → two links), like the node splits them
+  const creditNames = (credit) => String(credit || '').split(/\s*(?:,|;|\/| & | feat\.? | ft\.? | featuring | x | vs\.? )\s*/i).map((x) => x.trim()).filter(Boolean);
+  // Title, artists and album of what plays, each a link to its page (player bar and Now Playing)
+  const npLinksHtml = (it, live) => {
+    const songPage = npPageId(it.uri);
+    const title = !live && songPage ? `<button class="lnk" data-np-song="${esc(songPage)}" title="Open this song's page">${esc(it.title || it.uri)}</button>` : esc(live || it.title || it.uri);
+    const artistsHtml = live ? esc([it.title, it.album].filter(Boolean).join(' · ')) : [creditNames(it.artist).map((a) => `<button class="lnk" data-np-artist="${esc(a)}" title="Open ${esc(a)}">${esc(a)}</button>`).join(', '), it.album ? (albumIdOf(it) ? `<button class="lnk" data-np-album="${albumIdOf(it)}" title="Open the album">${esc(it.album)}</button>` : esc(it.album)) : ''].filter(Boolean).join(' · ');
+    return { title, artistsHtml };
+  };
+  const bindNpLinks = (root, it, after) => {
+    const go = (fn) => (e) => { e.stopPropagation(); if (after) after(); fn(); };
+    $$('[data-np-song]', root).forEach((b) => b.onclick = go(() => setView('item', { kind: 'song', id: b.dataset.npSong })));
+    $$('[data-np-album]', root).forEach((b) => b.onclick = go(() => setView('item', { kind: 'album', id: 'lib-' + b.dataset.npAlbum })));
+    $$('[data-np-artist]', root).forEach((b) => b.onclick = go(async () => {
+      const name = b.dataset.npArtist;
+      // A library song: that artist's page in the library; else search for the name
+      const tid = it.track_id ?? (/^track:(\d+)$/.exec(it.uri || '') || [])[1];
+      if (tid != null) {
+        try { const t = await api('GET', `/library/tracks/${tid}`); const a = (t.artists || []).find((x) => x.name.toLowerCase() === name.toLowerCase()); if (a && a.id != null) return setView('item', { kind: 'artist', id: 'lib-' + a.id }); } catch { /* search instead */ }
+      }
+      search.value = name; startSearch(name, 'everywhere'); setView('search', { q: name, in: 'everywhere' });
+    }));
+  };
   // The song playing now stands out in every track list on screen
   const markPlaying = () => {
     const z = currentZone(); const np = z && z.now_playing; const m = np && /^track:(\d+)$/.exec(np.item.uri || '');
@@ -476,10 +499,9 @@
     }
     const it = np.item;
     const live = np.stream_title;
-    const songPage = npPageId(it.uri);
-    $('#np').innerHTML = `<div class="np-art">${itemArt(it, 'sm')}</div><div class="np-text"><div class="np-title">${!live && songPage ? `<button class="lnk" data-np-song="${esc(songPage)}" title="Open this song">${esc(it.title || it.uri)}</button>` : esc(live || it.title || it.uri)}</div><div class="np-sub">${live ? esc([it.title, it.album].filter(Boolean).join(' · ')) : [it.artist ? `<button class="lnk" data-np-artist="${esc(it.artist)}" title="Find this artist">${esc(it.artist)}</button>` : '', it.album ? esc(it.album) : ''].filter(Boolean).join(' · ')}</div></div>`;
-    $$('[data-np-song]', $('#np')).forEach((b) => b.onclick = () => setView('item', { kind: 'song', id: b.dataset.npSong }));
-    $$('[data-np-artist]', $('#np')).forEach((b) => b.onclick = () => { const q = b.dataset.npArtist.split(/,| & | feat\. /)[0].trim(); search.value = q; startSearch(q, 'everywhere'); setView('search', { q, in: 'everywhere' }); });
+    const links = npLinksHtml(it, live);
+    $('#np').innerHTML = `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm')}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
+    bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
@@ -491,6 +513,24 @@
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   $('#quality').onclick = () => toggleNowPlaying(true);
 
+  // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
+  const fillNpPubky = async (it) => {
+    const box = $('#nppubky'); if (!box) return;
+    const tid = it.track_id ?? (/^track:(\d+)$/.exec(it.uri || '') || [])[1];
+    const songPage = npPageId(it.uri);
+    let t = null; if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } }
+    const pageUri = songPage && !/^lib-/.test(songPage) ? uriOf('song', songPage) : null;
+    const target = t && trackHasId(t) ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
+    let tags = []; if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
+    if (!$('#nppubky')) return;
+    const fav = t ? isFav(t) : pageUri ? state.favUris.has(pageUri) : false;
+    box.innerHTML = `<div class="np-pubky-row">${target || t ? `<button class="btn ${fav ? 'primary' : 'ghost'}" id="npfav" aria-pressed="${fav}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'In favourites' : 'Add to favourites'}</button>` : ''}${songPage ? `<button class="btn ghost" id="nppage">${icon('compass')} Song page: versions, reviews, On Pubky</button>` : ''}</div>`
+      + (target ? `<div class="np-tags"><span class="eyebrow">Your tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button></span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>` : (t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>' : ''));
+    const fb = $('#npfav'); if (fb) fb.onclick = async () => { try { const tt = t && !trackHasId(t) ? await whichSong(t) : t; if (t && !tt) return; await setFavourite(tt ? { track_id: tt.id } : target, !fav); fillNpPubky(it); } catch (e) { toast(e.message, 'error'); } };
+    const pb = $('#nppage'); if (pb) pb.onclick = () => { toggleNowPlaying(); setView('item', { kind: 'song', id: songPage }); };
+    $$('[data-np-tag]', box).forEach((b) => b.onclick = () => { toggleNowPlaying(); setView('tag', b.dataset.npTag); });
+    const ta = $('#nptagadd'); if (ta) ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
+  };
   // ---- Now Playing overlay -------------------------------------------------
   const overlay = $('#nowplaying');
   const toggleNowPlaying = (force) => {
@@ -519,8 +559,9 @@
           <div class="np-big">${itemArt(it)}</div>
           <div class="np-meta">
             <div class="eyebrow">${esc(np.stream_title ? 'Live · ' + (it.title || '') : it.album ? 'From ' + it.album : 'Track')}</div>
-            <h1>${esc(np.stream_title || it.title || it.uri)}</h1>
-            <div class="artist">${esc(np.stream_title ? (it.artist || '') : (it.artist || ''))}</div>
+            <h1>${np.stream_title ? esc(np.stream_title) : npLinksHtml(it, null).title}</h1>
+            <div class="artist">${np.stream_title ? esc(it.artist || '') : npLinksHtml(it, null).artistsHtml}</div>
+            ${np.stream_title ? '' : '<div class="np-pubky" id="nppubky" aria-live="polite"></div>'}
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="path">
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
@@ -535,6 +576,8 @@
     s.addEventListener('input', () => { s.dataset.dragging = '1'; setFill(s); $('#nppos').textContent = fmt((s.value / 1000) * (np.duration_ms || 0)); });
     s.addEventListener('change', () => { delete s.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((s.value / 1000) * (np.duration_ms || 0)) }); });
     $('#npclose').onclick = () => toggleNowPlaying();
+    bindNpLinks(overlay, it, () => toggleNowPlaying());
+    fillNpPubky(it);
     $('#npq').onclick = () => { toggleNowPlaying(); setView('queue'); };
     const npd = $('#npdsp'); if (npd) npd.onclick = () => { toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     const nps = $('#npsleep'); if (nps) nps.onclick = () => showMenu(nps, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]);
