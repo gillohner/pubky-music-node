@@ -222,7 +222,10 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
     let Some((svc, n)) = pg.id.split_once('-').map(|(a, b)| (a.to_string(), b.to_string())) else {
         return;
     };
-    if !matches!(svc.as_str(), "tidal" | "deezer" | "spotify" | "jamendo") {
+    if !matches!(
+        svc.as_str(),
+        "tidal" | "deezer" | "spotify" | "jamendo" | "youtube"
+    ) {
         return;
     }
     let acc = crate::discover::service_access(s);
@@ -245,6 +248,8 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
             _ => Err("TIDAL isn't connected on this node".into()),
         },
         "jamendo" => Ok((crate::jamendo::track_uri(&n), "full")),
+        // YouTube's own player, in This browser only (official mode)
+        "youtube" => Ok((format!("{}{n}", crate::youtube::VIDEO_URI_PREFIX), "browser")),
         _ => Err(match a {
             Access::External => "Spotify plays only on a Spotify Connect device".into(),
             _ => "Spotify sends no audio to other apps".into(),
@@ -261,13 +266,19 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
     let fallback = pg.plays_from.clone().filter(|p| p.service != svc);
     let fallback_full = fallback.as_ref().is_some_and(|p| p.mode == "full");
     match own {
-        Ok((uri, mode)) if !(prefer_full && mode == "preview" && fallback_full) => {
+        // A source that plays everywhere wins over YouTube, which plays only in This browser
+        Ok((uri, mode))
+            if !(prefer_full && mode == "preview" && fallback_full)
+                && !(mode == "browser" && fallback.is_some()) =>
+        {
             pg.plays_from = Some(PlaysFrom {
                 service: svc.clone(),
                 kind: "track".into(),
                 id: format!("track:{n}"),
                 label: if mode == "preview" {
                     format!("{} · 30 s preview", crate::discover::service_title(&svc))
+                } else if mode == "browser" {
+                    format!("{} · in this browser", crate::discover::service_title(&svc))
                 } else {
                     crate::discover::service_title(&svc)
                 },
@@ -282,6 +293,7 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
         own => {
             pg.plays_note = Some(match own {
                 Err(why) => why,
+                Ok((_, "browser")) => "YouTube plays only in This browser, so another source plays it".into(),
                 Ok(_) => "you prefer full tracks from another source".into(),
             });
             // The song row plays what the eyebrow says
