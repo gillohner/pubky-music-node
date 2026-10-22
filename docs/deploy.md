@@ -167,6 +167,21 @@ works until the Pubky transport exists (ADR 0008):
 - **Pubky**: a signed-in node publishes its address privately on your homeserver; the app's
   "Find my node via Pubky" reads it, so a moved or re-addressed node is found again without typing.
 
+## Streaming services: what you set up
+
+Nothing for most services. A release build carries the project's own TIDAL, Jamendo and AcoustID apps (public ids only;
+no secrets ship), and the TIDAL sign-in goes through the project's static return page, so it works on a LAN address.
+Open Sources › TIDAL › Connect TIDAL.
+
+- **Spotify:** Spotify allows no shared app, so you make your own free one once. Sources › Spotify walks you through
+  it and takes only the client ID.
+- **TIDAL full tracks (unofficial):** off by default. The node has no built-in device client; you enter a TIDAL device
+  client id and secret you are allowed to use under Sources › TIDAL › Full tracks.
+- **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
+  always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps; add your
+  own as above.
+
 ## Phones and desktops without the native app
 
 The web UI ships a web app manifest: on a phone, "Add to Home Screen" installs it as a standalone

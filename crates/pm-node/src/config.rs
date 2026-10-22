@@ -16,7 +16,8 @@ pub struct NodeConfig {
     pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
     pub outputs: OutputsConfig,
-    /// TIDAL developer app credentials (developer.tidal.com); empty = TIDAL off.
+    /// TIDAL developer app (developer.tidal.com); empty = the project's built-in app (sign-in with
+    /// PKCE through the return page, no secret).
     pub tidal: TidalConfig,
     /// Qobuz (unofficial): an app ID and secret the owner may use; Sources › Qobuz can set them.
     pub qobuz: QobuzConfig,
@@ -25,10 +26,12 @@ pub struct NodeConfig {
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
-    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = Jamendo off.
+    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
+    /// Sign-ins with the project's built-in apps.
+    pub auth: AuthConfig,
     /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
     /// BubbleUPnP can play to it). No token, like any renderer.
     pub renderer: RendererConfig,
@@ -79,6 +82,15 @@ impl Default for RendererConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+/// Sign-ins with the project's built-in apps return through one static page that forwards the
+/// browser to this node (STEWARD-SHARED-APPS.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// The return page; empty = the project's (`pm_api::project_apps::RETURN_PAGE`).
+    pub return_page: String,
 }
 
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
@@ -232,6 +244,7 @@ impl Default for NodeConfig {
             remote: RemoteConfig::default(),
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

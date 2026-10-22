@@ -53,6 +53,7 @@ pub mod play_from;
 pub mod playlists;
 pub mod plex;
 pub mod podcasts;
+pub mod project_apps;
 pub mod qobuz;
 pub mod radio;
 pub mod radio_sources;
@@ -416,6 +417,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/sources/spotify/login", get(spotify::login))
         .route("/sources/spotify/status", get(spotify::status))
+        .route("/sources/spotify/app", put(spotify::set_app))
         .route("/sources/spotify/session", delete(spotify::logout))
         .route("/sources/spotify/collection", get(spotify::collection))
         .route(
@@ -6574,6 +6576,12 @@ mod tests {
     async fn the_tidal_redirect_follows_the_request_host() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // The node's own app, with its secret: the sign-in comes straight back
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            scopes: String::new(),
+        };
         let app = router(s);
         let req = Request::builder()
             .uri("/v1/sources/tidal/status")
@@ -6780,6 +6788,208 @@ mod tests {
         )
         .await;
         assert!(v.get("jukebox_zone").is_none());
+    }
+
+    /// Shared apps (STEWARD-SHARED-APPS.md): an app without its secret on the node (the project's
+    /// TIDAL app, a Spotify app from the guided setup) signs in with PKCE through the return page,
+    /// and no secret ever reaches the token endpoint.
+    #[tokio::test]
+    async fn apps_without_a_secret_sign_in_through_the_return_page() {
+        use base64::Engine;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let token = {
+            let bodies = bodies.clone();
+            move |headers: axum::http::HeaderMap, body: String| {
+                let bodies = bodies.clone();
+                async move {
+                    bodies.lock().unwrap().push(body.clone());
+                    if headers.contains_key("authorization") || body.contains("client_secret") {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({"error": "invalid_client"})),
+                        );
+                    }
+                    if body.contains("grant_type=client_credentials") {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({"error": "invalid_client"})),
+                        );
+                    }
+                    assert!(
+                        body.contains("code_verifier=") && body.contains("code=the-code"),
+                        "{body}"
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(
+                            serde_json::json!({"access_token": "user-token", "refresh_token": "r1", "expires_in": 3600, "user_id": 4242, "scope": "x"}),
+                        ),
+                    )
+                }
+            }
+        };
+        let mock = Router::new()
+            .route("/v1/oauth2/token", post(token.clone()))
+            .route("/api/token", post(token))
+            .route("/users/{id}", get(|| async { Json(serde_json::json!({"data": {"id": "4242", "type": "users", "attributes": {"country": "CH"}}})) }))
+            .route("/me", get(|| async { Json(serde_json::json!({"id": "listener", "display_name": "Listener", "country": "CH", "product": "premium"})) }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let page = "https://return.example/callback";
+        s.set_return_page(page);
+        {
+            let mut ep = s.tidal.write().unwrap();
+            (ep.api_base, ep.auth_base, ep.login_base) = (base.clone(), base.clone(), base.clone());
+            ep.creds = tidal::TidalCredentials {
+                client_id: "project-app".into(),
+                client_secret: String::new(),
+                scopes: String::new(),
+            };
+        }
+        {
+            let mut ep = s.spotify.write().unwrap();
+            (ep.api_base, ep.accounts_base) = (base.clone(), base.clone());
+        }
+        let app = router(s.clone());
+        // The login URL names the return page, and state carries the nonce and the node's callback
+        let sign_in = |path: &'static str, callback: &'static str| {
+            let app = app.clone();
+            async move {
+                let (st, l) = call(&app, "GET", path, None).await;
+                assert_eq!(st, StatusCode::OK, "{l}");
+                let url = url::Url::parse(l["url"].as_str().unwrap()).unwrap();
+                let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+                assert_eq!(q["redirect_uri"], page);
+                assert_eq!(q["code_challenge_method"], "S256");
+                let (_, enc) = q["state"].split_once('.').expect("state = nonce.callback");
+                let back = String::from_utf8(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(enc)
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(back.ends_with(callback), "{back}");
+                // The return page forwards every parameter unchanged to that callback
+                let req = Request::builder()
+                    .uri(format!(
+                        "{callback}?code=the-code&state={}",
+                        url::form_urlencoded::byte_serialize(q["state"].as_bytes()).collect::<String>()
+                    ))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                resp.headers()
+                    .get("location")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+
+        // TIDAL with the project's app: no catalogue before sign-in (client credentials need the secret)
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/search?q=x", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        let (_, stv) = call(&app, "GET", "/v1/sources/tidal/status", None).await;
+        assert_eq!(
+            stv["redirect_uri"], page,
+            "the redirect to register is the return page"
+        );
+        assert_eq!(
+            sign_in("/v1/sources/tidal/login", "/tidal/callback").await,
+            "/?tidal=signed_in"
+        );
+        let (_, stv) = call(&app, "GET", "/v1/sources/tidal/status", None).await;
+        assert_eq!(stv["signed_in"], true, "{stv}");
+        assert_eq!(stv["public_client"]["outcome"], "accepted", "{stv}");
+        // A state whose nonce the node never issued is refused
+        let req = Request::builder()
+            .uri("/tidal/callback?code=the-code&state=forged.aHR0cDovL3g")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("error"));
+
+        // Spotify: the guided setup takes only a client id
+        let (_, sp) = call(&app, "GET", "/v1/sources/spotify/status", None).await;
+        assert_eq!(sp["configured"], false);
+        assert_eq!(sp["redirect_uri"], page);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/app",
+            Some(serde_json::json!({"client_id": "not-an-id"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let id = "0123456789abcdef0123456789ABCDEF";
+        let (st, sp) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/app",
+            Some(serde_json::json!({"client_id": id})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{sp}");
+        assert_eq!(sp["app_from"], "settings");
+        assert_eq!(sp["client_id"], id.to_ascii_lowercase());
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let row = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "spotify")
+            .unwrap()
+            .clone();
+        assert_eq!(row["status"], "needs sign-in");
+        assert_eq!(
+            sign_in("/v1/sources/spotify/login", "/spotify/callback").await,
+            "/?spotify=ok"
+        );
+        let (_, sp) = call(&app, "GET", "/v1/sources/spotify/status", None).await;
+        assert_eq!(sp["signed_in"], true, "{sp}");
+        assert_eq!(sp["display_name"], "Listener");
+        assert!(bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.contains("authorization_code"))
+            .all(|b| b.contains("client_id=") && !b.contains("client_secret")));
+        // Forgetting the app signs out of it
+        let (_, sp) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/app",
+            Some(serde_json::json!({"client_id": ""})),
+        )
+        .await;
+        assert_eq!(
+            (sp["configured"].clone(), sp["signed_in"].clone()),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+        // An app in the node config can't be replaced from the page
+        s.spotify.write().unwrap().creds = spotify::SpotifyCredentials {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+        };
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/app",
+            Some(serde_json::json!({"client_id": id})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
     }
 
     /// Qobuz (unofficial-only): the owner's app and sign-in, search, an album, a signed stream
