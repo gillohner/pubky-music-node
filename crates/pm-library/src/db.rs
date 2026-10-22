@@ -576,6 +576,11 @@ impl Library {
         self.tracks_where("t.canonical_uri = ?1", uri.to_url())
     }
 
+    /// Tracks whose tags carry this ISRC (whatever their canonical identity).
+    pub fn tracks_by_isrc(&self, isrc: &str) -> Result<Vec<Track>> {
+        self.tracks_where("t.isrc = ?1", isrc.to_ascii_uppercase())
+    }
+
     pub fn tracks_by_mbid(&self, mbid: Mbid) -> Result<Vec<Track>> {
         self.tracks_where("t.recording_mbid = ?1", mbid.to_string())
     }

@@ -1153,6 +1153,17 @@ async fn relationship_ids(
     Ok(ids)
 }
 
+/// A TIDAL track's ISRC (needs the node's TIDAL app).
+pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) || !endpoints(s).creds.configured() {
+        return None;
+    }
+    let v = get_json(s, &format!("/tracks/{id}"), &[("countryCode", country(s))])
+        .await
+        .ok()?;
+    v["data"]["attributes"]["isrc"].as_str().map(str::to_string)
+}
+
 /// The canonical identity of a TIDAL track: its ISRC, else the TIDAL link.
 pub(crate) fn canonical_track(track: &Value) -> Option<pm_model::MusicUri> {
     let id = track["id"].as_str()?;
@@ -1575,6 +1586,7 @@ pub(crate) async fn album_versions(s: &NodeState, album: &pm_model::Album) -> Re
                 .filter_map(|al| {
                     let id = al["id"].as_str()?;
                     Some(Version {
+                        page: None,
                         source: SOURCE_ID.into(),
                         id: format!("album:{id}"),
                         label: format!("TIDAL · {}", format_label(al).trim_end_matches(" (TIDAL)")),
@@ -1622,6 +1634,7 @@ pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Versi
                 .filter_map(|t| {
                     let id = t["id"].as_str()?;
                     Some(Version {
+                        page: None,
                         source: SOURCE_ID.into(),
                         id: format!("track:{id}"),
                         label: format!("TIDAL · {}", format_label(t).trim_end_matches(" (TIDAL)")),

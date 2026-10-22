@@ -85,6 +85,7 @@ pub(crate) fn also_on_rows(links: &[pm_pubky::pinakes::AlsoOn]) -> Vec<Version> 
         .map(|a| {
             let site = a.site.clone().unwrap_or_else(|| "link".into());
             Version {
+                page: None,
                 source: site_slug(&site),
                 id: a.id.clone().unwrap_or_default(),
                 label: if a.is_tagged() {
@@ -966,14 +967,48 @@ pub(crate) fn page_id(url: &str) -> String {
             return format!("isrc-{}", i.to_ascii_uppercase());
         }
     }
+    if let Some((svc, id)) = service_page(url) {
+        return format!("{svc}-{id}");
+    }
     format!(
         "u-{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(url)
     )
 }
 
-/// The link a page id names (`mb-`, `isrc-`, `u-`); `kind` picks the
-/// MusicBrainz entity for `mb-`.
+/// A streaming service's own page of one song, album or artist, as `(service, id)`:
+/// `https://tidal.com/browse/track/1` → `("tidal", "1")`. Those pages get readable ids
+/// (`/song/tidal-1`); the kind comes from the page (song → track).
+fn service_page(url: &str) -> Option<(&'static str, String)> {
+    let u = url::Url::parse(url).ok()?;
+    if u.query().is_some() || u.fragment().is_some() {
+        return None;
+    }
+    let svc = match u.host_str()? {
+        "tidal.com" | "listen.tidal.com" | "www.tidal.com" => "tidal",
+        "www.deezer.com" | "deezer.com" => "deezer",
+        "open.spotify.com" => "spotify",
+        _ => return None,
+    };
+    let segs: Vec<&str> = u.path_segments()?.filter(|x| !x.is_empty()).collect();
+    // Optional `browse/` (TIDAL) or a language (`en/`, Deezer) before `<kind>/<id>`
+    let (kind, id) = match segs.as_slice() {
+        [k, id] => (*k, *id),
+        [_, k, id] => (*k, *id),
+        _ => return None,
+    };
+    if !matches!(kind, "track" | "album" | "artist") {
+        return None;
+    }
+    let ok = match svc {
+        "spotify" => id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric()),
+        _ => !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()),
+    };
+    ok.then(|| (svc, id.to_string()))
+}
+
+/// The link a page id names (`mb-`, `isrc-`, `tidal-`, `deezer-`, `spotify-`, `u-`); `kind`
+/// picks the MusicBrainz entity for `mb-` and the service's kind for the others.
 pub(crate) fn url_of_page(kind: &str, id: &str) -> Option<String> {
     use base64::Engine;
     if let Some(m) = id.strip_prefix("mb-") {
@@ -988,6 +1023,22 @@ pub(crate) fn url_of_page(kind: &str, id: &str) -> Option<String> {
     if let Some(i) = id.strip_prefix("isrc-") {
         pm_model::Isrc::parse(i).ok()?;
         return Some(format!("https://musicbrainz.org/isrc/{i}"));
+    }
+    let skind = match kind {
+        "artist" => "artist",
+        "album" => "album",
+        _ => "track",
+    };
+    for (svc, base) in [
+        ("tidal-", "https://tidal.com"),
+        ("deezer-", "https://www.deezer.com"),
+        ("spotify-", "https://open.spotify.com"),
+    ] {
+        if let Some(n) = id.strip_prefix(svc) {
+            let url = format!("{base}/{skind}/{n}");
+            // Only ids that map back to themselves (no paths or odd characters)
+            return (page_id(&url) == id).then_some(url);
+        }
     }
     let b = id.strip_prefix("u-")?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()?;
@@ -1713,6 +1764,7 @@ pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) 
         }
         let site = card.site.clone().unwrap_or_else(|| "link".into());
         out.push(Version {
+            page: None,
             source: site_slug(&site),
             id: card.id.clone(),
             label: format!("{site} · tagged on Pubky"),
@@ -1727,6 +1779,7 @@ pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) 
             }
             let site = a.site.clone().unwrap_or_else(|| "link".into());
             out.push(Version {
+                page: None,
                 source: site_slug(&site),
                 id: a.id.clone().unwrap_or_default(),
                 label: if a.is_tagged() {
@@ -1829,4 +1882,32 @@ pub(crate) async fn friends(
     let acc = service_access(&s);
     let lib = s.library.lock().expect("library poisoned");
     Ok(Json(page(&acc, &lib, Vec::new(), &p.items)))
+}
+
+#[cfg(test)]
+mod page_id_tests {
+    use super::*;
+
+    #[test]
+    fn service_pages_get_readable_ids() {
+        assert_eq!(page_id("https://tidal.com/browse/track/12345"), "tidal-12345");
+        assert_eq!(page_id("https://tidal.com/track/12345"), "tidal-12345");
+        assert_eq!(page_id("https://www.deezer.com/en/track/987"), "deezer-987");
+        assert_eq!(
+            page_id("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"),
+            "spotify-4uLU6hMCjMI75M1A2tKUQC"
+        );
+        assert_eq!(
+            url_of_page("song", "tidal-12345").as_deref(),
+            Some("https://tidal.com/track/12345")
+        );
+        assert_eq!(
+            url_of_page("album", "deezer-55").as_deref(),
+            Some("https://www.deezer.com/album/55")
+        );
+        assert_eq!(url_of_page("song", "tidal-1/../x"), None);
+        // Anything else keeps the base64 id
+        assert!(page_id("https://tidal.com/track/1?x=1").starts_with("u-"));
+        assert!(page_id("https://example.org/track/1").starts_with("u-"));
+    }
 }

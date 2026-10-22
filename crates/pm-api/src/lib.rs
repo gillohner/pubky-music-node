@@ -1805,8 +1805,19 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         discovery: s.discovery().is_some(),
         jukebox_zone,
         copy_rate: files::copy_rate(s),
+        dev_outputs: std::env::var("PM_DEV_OUTPUTS").is_ok_and(|v| v == "1")
+            || s.library
+                .lock()
+                .expect("library poisoned")
+                .get_setting(DEV_OUTPUTS_KEY)
+                .ok()
+                .flatten()
+                .is_some_and(|v| v == "1"),
     }
 }
+
+/// Show developer outputs (the Null output) in the zone lists (STEWARD-UX-INSTANCES item 5).
+const DEV_OUTPUTS_KEY: &str = "ui.dev_outputs";
 
 async fn node_settings(State(s): State<Arc<NodeState>>) -> ApiResult<NodeSettingsView> {
     Ok(Json(settings_view(&s)))
@@ -1860,6 +1871,12 @@ async fn update_node_settings(
             .lock()
             .expect("library poisoned")
             .set_setting(subsonic::JUKEBOX_ZONE_KEY, &z)?;
+    }
+    if let Some(d) = req.dev_outputs {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(DEV_OUTPUTS_KEY, if d { "1" } else { "0" })?;
     }
     if let Some(r) = req.copy_rate {
         s.library
@@ -4958,6 +4975,13 @@ mod tests {
             let t = lib.get_track(tid).unwrap().unwrap();
             (t.album.unwrap().id.unwrap(), tid)
         };
+        // Another recording of the same song (a live take) in the library
+        let live = {
+            let lib = s.library.lock().unwrap();
+            let tr = untagged_track(dir.path().join("02.flac"), "Death on Two Legs (Live)", "Queen");
+            lib.upsert_track(&tr).unwrap()
+        };
+        assert_eq!(id, "deezer-1999", "a service page has a readable id");
         let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
         assert_eq!(st, StatusCode::OK, "{al}");
         assert_eq!(al["songs"][0]["track_id"], tid.0);
@@ -4977,6 +5001,18 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{so}");
         assert_eq!(so["target"]["track_id"], tid.0);
+        // It is the library instance's page, opened from the generic id
+        assert_eq!(so["id"], format!("lib-{}", tid.0));
+        assert_eq!(so["opened_as"], "mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69");
+        // Versions are other recordings only; the page itself and MusicBrainz are not "also on"
+        let versions = so["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "{so}");
+        assert_eq!(versions[0]["page"], format!("lib-{}", live.0));
+        assert!(so["also_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["source"] != "musicbrainz" && v["page"] != so["id"]));
         assert_eq!(so["album"]["id"], format!("lib-{aid}"));
         assert!(
             so["about"]

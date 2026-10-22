@@ -13,7 +13,9 @@ use axum::Json;
 use pm_model::{MusicUri, Track, TrackId};
 use std::sync::Arc;
 
-/// `GET /v1/item/{kind}/{id}`.
+/// `GET /v1/item/{kind}/{id}`. A page is one instance (the library file, the TIDAL track…);
+/// the same recording elsewhere is `also_on`, other recordings are `versions`
+/// (STEWARD-UX-INSTANCES items 1 and 2).
 pub(crate) async fn page(
     State(s): State<Arc<NodeState>>,
     Path((kind, id)): Path<(String, String)>,
@@ -21,34 +23,285 @@ pub(crate) async fn page(
     if !matches!(kind.as_str(), "song" | "album" | "artist") {
         return Err(ApiError::bad_request("kind is song, album or artist"));
     }
+    let mut pg = raw_page(&s, &kind, &id).await?;
+    // A generic id (`isrc-…`, `mb-…`) opens the best instance by the play-from order
+    if kind == "song" && (id.starts_with("isrc-") || id.starts_with("mb-")) {
+        if let Some((pid, url)) = best_instance(&s, &pg) {
+            let mut inst = if let Some(n) = pid.strip_prefix("lib-").and_then(|n| n.parse().ok()) {
+                library_song(&s, n).await?
+            } else {
+                external(&s, &kind, &pid, &url).await
+            };
+            if inst.id != pg.id {
+                // Keep what the generic page knew (its sources and its About facts)
+                let mut known = std::mem::take(&mut pg.versions);
+                known.append(&mut inst.versions);
+                inst.versions = known;
+                for f in pg.about.drain(..) {
+                    if !inst.about.iter().any(|x| x.label == f.label) {
+                        inst.about.push(f);
+                    }
+                }
+                if inst.on_pubky.is_none() {
+                    inst.on_pubky = pg.on_pubky.take();
+                }
+                pg = inst;
+            }
+        }
+        if pg.song_uri.is_none() {
+            pg.song_uri = url_of_page(&kind, &id);
+        }
+        pg.opened_as = Some(id.clone());
+    }
+    // A service's own track page: its ISRC ties it to the song, so the library copy and the
+    // other services are "also on", not other versions
+    if kind == "song" && pg.song_uri.is_none() {
+        if let Some((svc, n)) = id
+            .split_once('-')
+            .filter(|(svc, _)| matches!(*svc, "tidal" | "deezer" | "spotify"))
+        {
+            let isrc = tokio::time::timeout(std::time::Duration::from_secs(2), service_isrc(&s, svc, n))
+                .await
+                .ok()
+                .flatten();
+            if let Some(isrc) = isrc {
+                let generic = format!("isrc-{isrc}");
+                pg.song_uri = url_of_page("song", &generic);
+                if let Ok(g) = raw_page(&s, &kind, &generic).await {
+                    if let Some(n) = g.id.strip_prefix("lib-") {
+                        pg.versions.push(Version {
+                            page: None,
+                            source: "library".into(),
+                            id: n.into(),
+                            label: g
+                                .plays_from
+                                .as_ref()
+                                .map(|p| p.label.clone())
+                                .unwrap_or_else(|| "Your library".into()),
+                            url: String::new(),
+                            uri: Some(format!("track:{n}")),
+                        });
+                    }
+                    pg.versions.extend(g.versions);
+                    if pg.on_pubky.is_none() {
+                        pg.on_pubky = g.on_pubky;
+                    }
+                }
+            }
+        }
+    }
+    let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
+    split_sources(&mut pg, &order);
+    if kind == "song" {
+        pg.versions = other_recordings(&s, &pg);
+    }
+    Ok(Json(pg))
+}
+
+async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str) -> Result<ItemPage, ApiError> {
     if let Some(n) = id.strip_prefix("lib-") {
         let n: i64 = n
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
-        let pg = match kind.as_str() {
-            "song" => library_song(&s, n, None).await,
-            "album" => library_album(&s, n).await,
-            _ => library_artist(&s, n).await,
-        }?;
-        return Ok(Json(pg));
+        return match kind {
+            "song" => library_song(s, n).await,
+            "album" => library_album(s, n).await,
+            _ => library_artist(s, n).await,
+        };
     }
-    let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
+    let url = url_of_page(kind, id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
     // A song the library owns (by its canonical identity) is the library's page.
     if kind == "song" {
         if let Ok(u) = MusicUri::parse(&url) {
-            let owned = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .tracks_by_canonical(&u)
-                .ok()
-                .and_then(|v| v.into_iter().next());
+            let owned = {
+                let lib = s.library.lock().expect("library poisoned");
+                lib.tracks_by_canonical(&u)
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .or_else(|| match &u {
+                        MusicUri::Isrc { isrc } => {
+                            lib.tracks_by_isrc(&isrc.to_string()).ok()?.into_iter().next()
+                        }
+                        _ => None,
+                    })
+            };
             if let Some(t) = owned.and_then(|t| t.id) {
-                return library_song(&s, t.0, Some(id)).await.map(Json);
+                return library_song(s, t.0).await;
             }
         }
     }
-    Ok(Json(external(&s, &kind, &id, &url).await))
+    Ok(external(s, kind, id, &url).await)
+}
+
+/// The ISRC of a service's track (kept once known: it does not change).
+async fn service_isrc(s: &NodeState, svc: &str, id: &str) -> Option<String> {
+    let key = format!("isrc.of.{svc}.{id}");
+    if let Some(v) = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(&key)
+        .ok()
+        .flatten()
+    {
+        return (!v.is_empty()).then_some(v);
+    }
+    let found = match svc {
+        "deezer" => crate::deezer::track_isrc(s, id).await,
+        "tidal" => crate::tidal::track_isrc(s, id).await,
+        "spotify" => crate::spotify::track_isrc(s, id).await,
+        _ => None,
+    }
+    .and_then(|i| pm_model::Isrc::parse(&i).ok())
+    .map(|i| i.to_string());
+    if let Some(i) = &found {
+        let _ = s.library.lock().expect("library poisoned").set_setting(&key, i);
+    }
+    found
+}
+
+/// A version's own page id on a page of `kind`.
+fn page_of(kind: &str, v: &Version) -> Option<String> {
+    if v.source == "library" {
+        if let Some(n) = v.uri.as_deref().and_then(|u| u.strip_prefix("track:")) {
+            return (kind == "song").then(|| format!("lib-{n}"));
+        }
+        return (kind != "song" && !v.id.is_empty()).then(|| format!("lib-{}", v.id));
+    }
+    v.url.starts_with("http").then(|| page_id(&v.url))
+}
+
+/// MusicBrainz describes a recording; it plays nothing (it shows under About instead).
+fn is_metadata(v: &Version) -> bool {
+    v.source == "musicbrainz" || v.url.contains("://musicbrainz.org/")
+}
+
+/// One entry per source: a service once, the library once per file, other links once per URL.
+fn source_key(v: &Version) -> String {
+    match v.source.as_str() {
+        "library" => format!("library:{}", v.uri.as_deref().unwrap_or(&v.id)),
+        "tidal" | "deezer" | "spotify" => v.source.clone(),
+        _ => v.url.trim_end_matches('/').to_string(),
+    }
+}
+
+/// Where a generic song page should open: the first source in the play-from order that has the
+/// song and can play it here (the library, or a connected service), else none (stay generic).
+fn best_instance(s: &NodeState, pg: &ItemPage) -> Option<(String, String)> {
+    let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
+    let acc = crate::discover::service_access(s);
+    let usable = |svc: &str| {
+        svc == "library"
+            || matches!(
+                crate::discover::access(&acc, svc),
+                crate::discover::Access::Full | crate::discover::Access::External
+            )
+    };
+    let mut here: Vec<(usize, String, String)> = pg
+        .versions
+        .iter()
+        .filter(|v| !is_metadata(v) && usable(&v.source))
+        .filter_map(|v| {
+            let pos = order.iter().position(|o| *o == v.source)?;
+            Some((pos, page_of(&pg.kind, v)?, v.url.clone()))
+        })
+        .collect();
+    // The library page itself counts when the page is the library's
+    if pg.id.starts_with("lib-") {
+        here.push((
+            order.iter().position(|o| o == "library").unwrap_or(0),
+            pg.id.clone(),
+            String::new(),
+        ));
+    }
+    here.sort_by_key(|(p, _, _)| *p);
+    here.into_iter().next().map(|(_, id, url)| (id, url))
+}
+
+/// Turn the page's list of sources into `also_on`: the same recording elsewhere, one per source,
+/// in the play-from order, each with its own page; never this page itself or MusicBrainz.
+fn split_sources(pg: &mut ItemPage, order: &[String]) {
+    let mut all = std::mem::take(&mut pg.versions);
+    for v in &mut all {
+        v.page = page_of(&pg.kind, v);
+    }
+    let mut seen = std::collections::HashSet::new();
+    // This page's own source first, so a second entry of it is not listed as elsewhere
+    if let Some(me) = all.iter().find(|v| v.page.as_deref() == Some(pg.id.as_str())) {
+        seen.insert(source_key(me));
+    }
+    let mut also: Vec<Version> = all
+        .into_iter()
+        .filter(|v| !is_metadata(v) && v.page.as_deref() != Some(pg.id.as_str()))
+        .filter(|v| seen.insert(source_key(v)))
+        .collect();
+    also.sort_by_key(|v| order.iter().position(|o| *o == v.source).unwrap_or(usize::MAX));
+    pg.open_on = also
+        .iter()
+        .filter(|v| v.url.starts_with("http"))
+        .cloned()
+        .collect();
+    pg.also_on = also;
+}
+
+/// Other recordings of a song in the library: the same title and artist, another recording
+/// (a live take, a remaster, another release's edit).
+fn other_recordings(s: &NodeState, pg: &ItemPage) -> Vec<Version> {
+    let (Some(title), Some(artist)) = (pg.title.as_deref(), pg.artist.as_ref()) else {
+        return Vec::new();
+    };
+    let norm = |x: &str| {
+        x.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
+    let (t0, a0) = (norm(title), norm(&artist.name));
+    if t0.is_empty() {
+        return Vec::new();
+    }
+    let same_here: std::collections::HashSet<String> = pg
+        .also_on
+        .iter()
+        .filter_map(|v| v.uri.clone())
+        .chain(pg.id.strip_prefix("lib-").map(|n| format!("track:{n}")))
+        .collect();
+    let lib = s.library.lock().expect("library poisoned");
+    let Ok(hits) = lib.search_tracks(title, 50) else {
+        return Vec::new();
+    };
+    let mine = pg.uri.clone();
+    hits.into_iter()
+        .filter(|t| norm(&t.title) == t0 || norm(&t.title).starts_with(&t0))
+        .filter(|t| {
+            t.artists.iter().any(|a| norm(&a.name) == a0)
+                || a0.contains(&norm(
+                    &t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+                ))
+        })
+        .filter(|t| {
+            let uri = format!("track:{}", t.id.map(|i| i.0).unwrap_or_default());
+            !same_here.contains(&uri)
+                && (mine.is_none() || t.canonical.as_ref().map(|(u, _)| u.to_url()) != mine)
+        })
+        .filter_map(|t| {
+            let n = t.id?.0;
+            let album = t.album.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+            Some(Version {
+                page: Some(format!("lib-{n}")),
+                source: "library".into(),
+                id: n.to_string(),
+                label: if album.is_empty() {
+                    format!("{} · {}", t.title, t.file.format)
+                } else {
+                    format!("{} · {album} · {}", t.title, t.file.format)
+                },
+                url: String::new(),
+                uri: Some(format!("track:{n}")),
+            })
+        })
+        .take(12)
+        .collect()
 }
 
 /// What an item page shows after its main part (related items, an artist's concerts), asked
@@ -74,7 +327,7 @@ pub(crate) async fn page_extras(
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
         match kind.as_str() {
-            "song" => library_song(&s, n, None).await,
+            "song" => library_song(&s, n).await,
             "album" => library_album(&s, n).await,
             _ => library_artist(&s, n).await,
         }?
@@ -224,7 +477,7 @@ fn open_on(versions: &[Version]) -> Vec<Version> {
         .collect()
 }
 
-async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<ItemPage, ApiError> {
+async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
     let t = s
         .library
         .lock()
@@ -233,6 +486,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<
         .ok_or_else(|| ApiError::not_found(format!("no track {n}")))?;
     let row = library_row(&t);
     let mut versions = vec![Version {
+        page: None,
         source: "library".into(),
         id: n.to_string(),
         label: format!("Your library · {}", t.file.format),
@@ -291,7 +545,8 @@ async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<
         .collect();
     Ok(ItemPage {
         kind: "song".into(),
-        id: id.unwrap_or_else(|| row.id.clone().unwrap_or_default()),
+        id: format!("lib-{n}"),
+        song_uri: canonical.clone(),
         uri: canonical,
         target: serde_json::json!({ "track_id": n }),
         title: Some(t.title.clone()),
@@ -322,6 +577,9 @@ async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<
         albums,
         open_on: open_on(&versions),
         versions,
+        also_on: Vec::new(),
+        opened_as: None,
+        link: None,
         on_pubky,
         about,
         blurb: None,
@@ -341,6 +599,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
     };
     let songs: Vec<ItemTrack> = tracks.iter().map(library_row).collect();
     let mut versions = vec![Version {
+        page: None,
         source: "library".into(),
         id: n.to_string(),
         label: format!(
@@ -427,6 +686,10 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         albums: Vec::new(),
         open_on: open_on(&versions),
         versions,
+        also_on: Vec::new(),
+        opened_as: None,
+        song_uri: None,
+        link: None,
         on_pubky,
         about,
         blurb: None,
@@ -518,6 +781,10 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
             })
             .collect(),
         versions: Vec::new(),
+        also_on: Vec::new(),
+        opened_as: None,
+        song_uri: None,
+        link: None,
         open_on: Vec::new(),
         on_pubky,
         about,
@@ -535,6 +802,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
     if let Some(t) = &it.in_library {
         if let Some(tid) = t.id {
             versions.push(Version {
+                page: None,
                 source: "library".into(),
                 id: tid.0.to_string(),
                 label: format!("Your library · {}", t.file.format),
@@ -545,6 +813,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
     }
     if let (Some(a), None) = (ext.album_id, &it.in_library) {
         versions.push(Version {
+            page: None,
             source: "library".into(),
             id: a.to_string(),
             label: "Your library".into(),
@@ -555,6 +824,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
     if let Some(p) = &it.page {
         if p.starts_with("http") && !it.also_on.iter().any(|v| v.url == *p) {
             versions.push(Version {
+                page: None,
                 source: it
                     .site
                     .clone()
@@ -579,6 +849,26 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         None => None,
     };
     let mut about = Vec::new();
+    // The item itself on every source (what tags "on the song" attach to)
+    let song_uri = ext.card.as_ref().and_then(|r| {
+        let entity = match kind {
+            "artist" => "artist",
+            "album" => "release-group",
+            _ => "recording",
+        };
+        r.mbid()
+            .filter(|_| kind != "album")
+            .map(|m| format!("https://musicbrainz.org/{entity}/{m}"))
+            .or_else(|| {
+                (kind == "song")
+                    .then(|| {
+                        r.isrcs()
+                            .first()
+                            .map(|i| format!("https://musicbrainz.org/isrc/{i}"))
+                    })
+                    .flatten()
+            })
+    });
     if let Some(r) = &ext.card {
         let f = r.facts();
         let entity = match kind {
@@ -657,6 +947,16 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         albums: c.albums,
         open_on: open_on(&versions),
         versions,
+        also_on: Vec::new(),
+        opened_as: None,
+        song_uri: song_uri.or_else(|| it.uri.contains("://musicbrainz.org/").then(|| it.uri.clone())),
+        link: Some(
+            it.page
+                .clone()
+                .filter(|p| p.starts_with("http"))
+                .unwrap_or_else(|| url.to_string()),
+        )
+        .filter(|l| !l.contains("://musicbrainz.org/")),
         on_pubky,
         about,
         blurb: it.description.clone().filter(|d| !d.is_empty() && kind != "song"),
@@ -726,6 +1026,7 @@ pub(crate) async fn candidates(
                 continue;
             }
             out.push(Version {
+                page: None,
                 source: r.source.clone(),
                 id: h.id.clone(),
                 label: format!(
@@ -770,4 +1071,71 @@ pub(crate) async fn confirm_match(
         let _ = lib.delete_setting(&format!("item.contents.{}", body.uri));
     }
     Ok(Json(v))
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    fn v(source: &str, label: &str, url: &str, uri: Option<&str>) -> Version {
+        Version {
+            page: None,
+            source: source.into(),
+            id: String::new(),
+            label: label.into(),
+            url: url.into(),
+            uri: uri.map(str::to_string),
+        }
+    }
+
+    /// The owner's "Trip to Serbia" page listed TIDAL twice and MusicBrainz as a version.
+    #[test]
+    fn one_entry_per_source_and_never_the_page_itself() {
+        let mut pg = ItemPage {
+            kind: "song".into(),
+            id: "lib-7".into(),
+            source: "Your library".into(),
+            section: "tracks".into(),
+            target: serde_json::json!({}),
+            versions: vec![
+                v("library", "Your library · FLAC", "", Some("track:7")),
+                v(
+                    "tidal",
+                    "TIDAL · FLAC 16/44.1",
+                    "https://tidal.com/browse/track/111",
+                    Some("tidal:track:111"),
+                ),
+                v(
+                    "tidal",
+                    "TIDAL · FLAC 16/44.1",
+                    "https://tidal.com/browse/track/222",
+                    Some("tidal:track:222"),
+                ),
+                v(
+                    "deezer",
+                    "Deezer · Trip to Serbia",
+                    "https://www.deezer.com/track/9",
+                    Some("deezer:track:9"),
+                ),
+                v(
+                    "musicbrainz",
+                    "MusicBrainz · tagged on Pubky",
+                    "https://musicbrainz.org/recording/x",
+                    None,
+                ),
+            ],
+            ..Default::default()
+        };
+        split_sources(&mut pg, &["deezer".into(), "library".into(), "tidal".into()]);
+        let got: Vec<(&str, Option<&str>)> = pg
+            .also_on
+            .iter()
+            .map(|v| (v.source.as_str(), v.page.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("deezer", Some("deezer-9")), ("tidal", Some("tidal-111"))]
+        );
+        assert_eq!(pg.open_on.len(), 2);
+    }
 }

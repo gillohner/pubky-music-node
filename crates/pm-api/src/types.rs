@@ -214,6 +214,9 @@ pub struct Version {
     /// Queue URI when the version is a single track.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
+    /// This instance's own item page id (`lib-1`, `tidal-1`, `u-…`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +434,10 @@ pub struct NodeSettingsView {
     /// How fast copies to the homeserver go, in bytes per second; 0 = as fast as the line allows.
     #[serde(default)]
     pub copy_rate: u64,
+    /// Show developer outputs (the Null output) in the zone lists; off unless switched on in
+    /// About this node or `PM_DEV_OUTPUTS=1`.
+    #[serde(default)]
+    pub dev_outputs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -443,6 +450,8 @@ pub struct NodeSettingsUpdate {
     /// Bytes per second for copies to the homeserver; 0 = full speed.
     #[serde(default)]
     pub copy_rate: Option<u64>,
+    #[serde(default)]
+    pub dev_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,8 +1055,25 @@ pub struct ItemPage {
     pub total_ms: u64,
     #[serde(default)]
     pub albums: Vec<ItemAlbum>,
+    /// Other recordings (a live take, a remaster, a radio edit), each with its own page.
     #[serde(default)]
     pub versions: Vec<Version>,
+    /// The same recording on other sources, one per source, each with its own page (this page
+    /// is one of them: the library file, the TIDAL track…).
+    #[serde(default)]
+    pub also_on: Vec<Version>,
+    /// The generic id the page was opened with (`isrc-…`, `mb-…`) when it shows the best
+    /// instance by the play-from order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_as: Option<String>,
+    /// The song (album, artist) itself, on every source: its MusicBrainz or ISRC link. Tags
+    /// "on the song" attach here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_uri: Option<String>,
+    /// This instance's own link (the TIDAL track, the Deezer album…); none for a library file.
+    /// Tags "on this source only" attach here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_pubky: Option<OnPubky>,
     #[serde(default)]

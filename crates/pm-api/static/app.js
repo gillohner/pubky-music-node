@@ -306,7 +306,10 @@
     };
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
-  const zoneList = () => [browserState(), ...Object.values(state.zones)];
+  // The Null output is for developers: hidden unless switched on in About this node (it stays
+  // listed while it is the zone in use)
+  const devOutput = (id) => /^null/.test(String(id || ''));
+  const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => state.devOutputs || !devOutput(z.output) || z.id === state.zone)];
   // The browser's queue survives a reload (library tracks only; radio streams are not kept).
   let lastSavedQueue = '';
   setInterval(() => { try { const j = JSON.stringify(state.browserQueue.filter((it) => !it.stream)); if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); } } catch { /* storage unavailable */ } }, 2000);
@@ -726,6 +729,39 @@
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
   // Settings, one topic per tab (STEWARD-UX-SETTINGS.md)
+  // Side tabs: a vertical tab list beside one panel per tab (Settings; Sources reuses it). On a
+  // phone the list is a page of its own and each tab a page with Back. `tabs`: [[key, label, icon,
+  // extra html after the label (a status dot, a switch)?]]; `ids`: panel ids that differ from
+  // `<prefix>-<key>`. The view's address is `/<view>/<key>` (add the view to the router).
+  //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
+  //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
+  const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+    const known = (k) => tabs.some(([x]) => x === k);
+    const asked = known(state.viewArg) ? state.viewArg : null;
+    const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
+    const name = (k) => (tabs.find(([x]) => x === k) || [k, k])[1];
+    const pid = (k) => ids[k] || `${prefix}-${k}`;
+    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${tabs.map(([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`).join('')}</nav>`;
+    const panel = (k, html) => `<section class="set-panel" id="${pid(k)}" data-panel="${k}" role="tabpanel" aria-labelledby="${prefix}tab-${k}" ${active === k ? '' : 'hidden'}>${phone ? `<button class="btn ghost set-back" data-tabs-back>${icon('back')} ${esc(title)}</button>` : ''}<h2 class="set-title">${esc(name(k))}</h2>${html}</section>`;
+    const page = (panels) => (phone && active ? '' : pageHead(title)) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav()}<div class="set-body-wrap">${panels}</div></div>`;
+    // On a computer a tab switches in place (the address follows); on a phone it is its own page
+    const wire = (main, onShow) => {
+      const show = (k) => {
+        if (phone) { setView(view, k); return; }
+        state.viewArg = k;
+        $$('.set-panel', main).forEach((pnl) => { pnl.hidden = pnl.dataset.panel !== k; });
+        $$('.set-tab', main).forEach((t) => { const on = t.dataset.stab === k; t.classList.toggle('on', on); t.setAttribute('aria-selected', String(on)); });
+        try { history.replaceState({ ...(history.state || {}), arg: k }, '', `/${view}/${k}`); } catch { /* sandboxed */ }
+        if (onShow) onShow(k);
+      };
+      $$('[data-stab]', main).forEach((t) => t.onclick = () => show(t.dataset.stab));
+      $('.set-nav', main).onkeydown = (e) => { if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return; e.preventDefault(); const all = $$('.set-tab', main); const i = all.indexOf(document.activeElement); const n = all[(i + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]; n.focus(); if (!phone) show(n.dataset.stab); };
+      $$('[data-tabs-back]', main).forEach((b) => b.onclick = () => goBack(view));
+      return show;
+    };
+    return { phone, active, name, nav, panel, page, wire };
+  };
   const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify'];
@@ -734,10 +770,14 @@
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
   // A page id is the canonical identity in short form: mb-<mbid>, isrc-<ISRC>, else u-<base64url of the link>.
-  const idOf = (uri) => { let m = uri.match(/^https:\/\/musicbrainz\.org\/(recording|artist|release-group)\/([0-9a-f-]{36})$/); if (m) return 'mb-' + m[2]; m = uri.match(/^https:\/\/musicbrainz\.org\/isrc\/([A-Za-z0-9]{12})$/); if (m) return 'isrc-' + m[1].toUpperCase(); return 'u-' + b64u(uri); };
+  const idOf = (uri) => { let m = uri.match(/^https:\/\/musicbrainz\.org\/(recording|artist|release-group)\/([0-9a-f-]{36})$/); if (m) return 'mb-' + m[2]; m = uri.match(/^https:\/\/musicbrainz\.org\/isrc\/([A-Za-z0-9]{12})$/); if (m) return 'isrc-' + m[1].toUpperCase(); m = svcPage(uri); if (m) return m; return 'u-' + b64u(uri); };
+  // A service's own song/album/artist page has a readable id (/song/tidal-1), as on the node
+  const SVC_HOSTS = { 'tidal.com': 'tidal', 'listen.tidal.com': 'tidal', 'www.tidal.com': 'tidal', 'www.deezer.com': 'deezer', 'deezer.com': 'deezer', 'open.spotify.com': 'spotify' };
+  const SVC_BASES = { tidal: 'https://tidal.com', deezer: 'https://www.deezer.com', spotify: 'https://open.spotify.com' };
+  const svcPage = (uri) => { let u; try { u = new URL(uri); } catch { return null; } if (u.search || u.hash) return null; const svc = SVC_HOSTS[u.host]; if (!svc) return null; const p = u.pathname.split('/').filter(Boolean); const [k, id] = p.length === 2 ? p : p.length === 3 ? p.slice(1) : []; if (!['track', 'album', 'artist'].includes(k)) return null; if (svc === 'spotify' ? !/^[A-Za-z0-9]{22}$/.test(id) : !/^[0-9]{1,20}$/.test(id)) return null; return `${svc}-${id}`; };
   // The song page for a queue item: a library track, or a service track by its page.
   const npPageId = (uri) => { if (!uri) return null; let m = uri.match(/^track:(\d+)$/); if (m) return 'lib-' + m[1]; m = uri.match(/^(tidal|deezer|jamendo):track:([A-Za-z0-9]+)$/); if (m) return idOf({ tidal: `https://tidal.com/track/${m[2]}`, deezer: `https://www.deezer.com/track/${m[2]}`, jamendo: `https://www.jamendo.com/track/${m[2]}` }[m[1]]); if (/^https?:\/\//.test(uri)) return idOf(uri); return null; };
-  const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } return null; };
+  const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } const sm = /^(tidal|deezer|spotify)-([A-Za-z0-9]+)$/.exec(id); if (sm) return `${SVC_BASES[sm[1]]}/${seg === 'artist' ? 'artist' : seg === 'album' ? 'album' : 'track'}/${sm[2]}`; return null; };
   const pathFor = (v, arg) => {
     if (v === 'item' && arg && arg.kind && arg.id) return `/${arg.kind}/${arg.id}`;
     if (v === 'home-section' && arg && arg.section) return `/home/${arg.section}${arg.window && arg.window !== '7d' ? `?window=${arg.window}` : ''}`;
@@ -1039,6 +1079,21 @@
     const add = $('#tagadd'); if (!add) return;
     add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
+    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+  };
+  // An item page's own tags: on the song (every source) or only on this source's link; each
+  // shows its scope and can move to the other one.
+  const scopedTagRow = (songTags, linkTags, linkName, kind) => {
+    const chip = (t, scope) => `<span class="chip tag ${scope === 'link' ? 'tag-link' : ''}" title="${scope === 'link' ? `Only on this ${esc(linkName)} link` : `On the ${kind}, whatever source plays it`}">${scope === 'link' ? svcBadge(String(linkName).toLowerCase()) : ''}<button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button>${linkName ? `<button class="chipx" data-tag-move="${scope}:${esc(t.label)}" title="${scope === 'link' ? `Put it on the ${kind} instead` : `Keep it on this ${esc(linkName)} link only`}" aria-label="Move #${esc(t.label)}">${icon(scope === 'link' ? 'compass' : 'disc')}</button>` : ''}<button class="chipx" data-tag-del="${scope}:${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`;
+    return `<div class="tagrow"><span class="eyebrow" title="Public on Pubky">Tags</span>${songTags.map((t) => chip(t, 'song')).join('')}${linkTags.map((t) => chip(t, 'link')).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20">${linkName ? `<select class="input sm" id="tagscope" aria-label="Where the tag goes"><option value="song">on the ${kind}</option><option value="link">on this ${esc(linkName)} link only</option></select>` : ''}</div>${linkName ? `<p class="muted small">A tag on the ${kind} shows wherever it plays from; a tag on this ${esc(linkName)} link stays on that link.</p>` : ''}`;
+  };
+  const bindScopedTags = (songRef, linkRef) => {
+    const add = $('#tagadd'); if (!add) return;
+    const refOf = (scope) => (scope === 'link' && linkRef ? linkRef : songRef);
+    const del = (ref, label) => api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label }).toString());
+    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; const sc = $('#tagscope') ? $('#tagscope').value : 'song'; try { await api('PUT', '/tags', { ...refOf(sc), label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
+    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagDel.split(':'); try { await del(refOf(sc), l.join(':')); render(); } catch (er) { toast(er.message, 'error'); } });
+    $$('[data-tag-move]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagMove.split(':'); const label = l.join(':'); try { await api('PUT', '/tags', { ...refOf(sc === 'link' ? 'song' : 'link'), label }); await del(refOf(sc), label); toast(sc === 'link' ? `#${label} is on the song now` : `#${label} is on this link only now`); render(); } catch (er) { toast(er.message, 'error'); } });
     $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
   };
   // Ratings are 1–10: five stars in halves (7 shows three and a half).
@@ -2082,15 +2137,23 @@
           catch (e) { main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           // The node leaves empty lists out of its answer.
-          for (const k of ['songs', 'albums', 'versions', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
+          for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
+          // A generic link (isrc-, mb-) opened the best instance: the address names that instance
+          if (pg.opened_as && pg.id && pg.id !== id) { try { history.replaceState({ ...(history.state || {}) }, '', `/${itemSeg(kind)}/${pg.id}`); } catch { /* sandboxed */ } }
           state.itemTitle = pg.title || `Untitled on ${pg.source}`; state.itemSection = pg.section;
           $$('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.view === pg.section));
           const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
           const songs = pg.songs || [];
           const target = pg.target;
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
-          const [myTags, myReview] = await Promise.all([
-            api('GET', `/tags?${qs}`).then((r) => r.tags).catch(() => null),
+          // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3)
+          const songRef = target.track_id != null || target.album_id != null || target.artist_id != null ? target : pg.song_uri ? { uri: pg.song_uri } : target;
+          const linkRef = pg.link && pg.link !== songRef.uri ? { uri: pg.link } : null;
+          const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
+          const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
+          const [myTags, linkTags, myReview] = await Promise.all([
+            api('GET', `/tags?${refQs(songRef)}`).then((r) => r.tags).catch(() => null),
+            linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
             api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
@@ -2103,6 +2166,10 @@
           const empty = (t) => `<p class="muted small">${t}</p>`;
           const songsTitle = kind === 'artist' ? 'Top songs' : kind === 'song' ? 'Song' : 'Songs';
           const songsInfo = songs.length ? `${songs.length} song${songs.length === 1 ? '' : 's'}${pg.total_ms ? ' · ' + mins(pg.total_ms) : ''}` : '';
+          const instName = (v) => (v.source === 'library' ? 'Your library' : SERVICE_NAMES[v.source] || String(v.label || v.source).split(' · ')[0]);
+          // "Also on": the same recording elsewhere, each a link to its own page, with play and the service's site
+          const alsoLine = `<div class="alsoon" id="ialso">${pg.also_on.length ? `<span class="muted small">Also on</span>${pg.also_on.map((v, k) => `<span class="also">${svcBadge(v.source === 'library' ? 'library' : v.source)}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`).join('')}` : `<span class="muted small">Only on ${esc(hereName)} so far</span>`}<button class="btn sm ghost" id="ifind" title="Search your connected services for the same ${kind}">Find on other services</button></div>`
+            + (pg.opened_as && pg.also_on.length ? `<p class="muted small opened-as">Showing ${esc(hereName)}: first in your Play from order.</p>` : '') + '<div id="ifindbox"></div>';
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
           const parent = kind === 'song' && pg.album && pg.album.id ? { kind: 'album', ...pg.album } : kind !== 'artist' && pg.artist && pg.artist.id ? { kind: 'artist', ...pg.artist } : null;
@@ -2111,15 +2178,15 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" onerror="this.remove()"></div>` : `<div class="art placeholder" style="background:hsl(${hue(state.itemTitle)} 35% 28%);border-radius:${kind === 'artist' ? '50%' : '12px'}"></div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>
+            + `<div class="hero">${pg.image ? `<div class="art"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" onerror="this.remove()"></div>` : `<div class="art placeholder" style="background:hsl(${hue(state.itemTitle)} 35% 28%);border-radius:${kind === 'artist' ? '50%' : '12px'}"></div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button></div>
               <div class="playsfrom">${playsChip({ plays_from: pf, connect: pg.connect }, true) || ''}</div></div></div>`
             + `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album' }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`
             + (kind === 'artist' || kind === 'song' ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
-            + `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">your library and every service that has it</span>${kind !== 'song' || pg.versions.length <= 2 ? `<button class="btn sm ghost" id="ifind" title="Search your connected services for the same ${kind}">Find on other services</button>` : ''}</div><div id="ifindbox"></div>${pg.versions.length ? `<div class="chips">${pg.versions.map(versionChip).join('')}</div>` : empty(pg.connect.length ? 'Only on ' + esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(', ')) + ' so far.' : `Only on ${esc(pg.source)} so far.`)}</section>`
-            + `<section class="section" id="ipubky"><div class="section-head"><h3>On Pubky</h3><span class="chips scopeswitch" role="group" aria-label="Whose tags"><button class="chip scope on" data-scope="all" aria-pressed="true" title="Tags on every version of this">${icon('compass')} Everywhere</button><button class="chip scope" data-scope="this" aria-pressed="false" tabindex="-1" title="Tags on this exact link">${icon('disc')} This version</button></span></div><div id="ipubkybody">${pg.on_pubky && pg.on_pubky.tags.length ? `<p class="muted small">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : empty('No one has tagged this on Pubky yet.')}</div></section>`
-            + `<section class="section" id="iyours"><div class="section-head"><h3>Yours</h3></div>${resignNotice()}${myTags ? tagRow(myTags, target) : empty('Tags need an identity for this item first.')}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
+            + `<section class="section" id="ipubky"><div class="section-head"><h3>On Pubky</h3>${linkRef ? `<span class="chips scopeswitch" role="group" aria-label="Whose tags"><button class="chip scope on" data-scope="all" aria-pressed="true" title="Tags on the ${kind}, whatever source">${icon('compass')} The ${kind}</button><button class="chip scope" data-scope="this" aria-pressed="false" tabindex="-1" title="Tags on this ${esc(pg.source)} link only">${icon('disc')} This ${esc(pg.source)} link</button></span>` : ''}</div><div id="ipubkybody">${pg.on_pubky && pg.on_pubky.tags.length ? `<p class="muted small">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this.</p><div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : empty('No one has tagged this on Pubky yet.')}</div></section>`
+            + `<section class="section" id="iyours"><div class="section-head"><h3>Yours</h3></div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind) : empty('Tags need an identity for this item first.')}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -2134,7 +2201,7 @@
             if (pg.related.length) bindHome($('#irelated'), { items: pg.related, tags: [] });
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; window.open(c.page || c.uri, '_blank', 'noopener'); });
           }).catch(() => { /* extras are a bonus */ });
-          if (myTags) bindTagRow(target);
+          if (myTags) bindScopedTags(songRef, linkRef);
           if (myReview !== undefined) bindReviewRow(target, myReview);
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
@@ -2150,7 +2217,11 @@
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri });
-          $$('[data-vplay]', main).forEach((b) => b.onclick = async () => { const v = pg.versions[Number(b.dataset.vplay)]; if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); });
+          const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
+          $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
+          $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
+          $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
+          $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#ipubky')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           // "Find on other services": the same title on the connected services, "possibly the same", which the owner confirms.
           const fb = $('#ifind'); if (fb) fb.onclick = async () => {
@@ -2167,9 +2238,9 @@
           scopes.forEach((b, k) => b.onkeydown = (e) => { const d = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0; if (!d) return; e.preventDefault(); const nb = scopes[(k + d + scopes.length) % scopes.length]; nb.focus(); nb.click(); });
           scopes.forEach((b) => b.onclick = async () => {
             scopes.forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-pressed', String(on)); x.tabIndex = on ? 0 : -1; });
-            const body = $('#ipubkybody'); const link = b.dataset.scope === 'this' ? (pg.open_on[0] && pg.open_on[0].url) : pg.uri;
+            const body = $('#ipubkybody'); const link = b.dataset.scope === 'this' ? pg.link : (pg.song_uri || pg.uri);
             if (!link) { body.innerHTML = empty('This version has no public link.'); return; }
-            try { const v = await api('GET', `/discover/uri?uri=${encodeURIComponent(link)}`); body.innerHTML = v && v.tags && v.tags.length ? `<p class="muted small">${v.taggers} ${v.taggers === 1 ? 'person' : 'people'} · ${esc(link)}</p><div class="chips">${v.tags.map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : empty(`No one has tagged ${b.dataset.scope === 'this' ? 'this version' : 'this'} on Pubky yet.`); } catch { body.innerHTML = empty('Pubky did not answer.'); }
+            try { const v = await api('GET', `/discover/uri?uri=${encodeURIComponent(link)}`); body.innerHTML = v && v.tags && v.tags.length ? `<p class="muted small">${v.taggers} ${v.taggers === 1 ? 'person' : 'people'} · ${esc(link)}</p><div class="chips">${v.tags.map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : empty(`No one has tagged ${b.dataset.scope === 'this' ? `this ${esc(pg.source)} link` : `this ${kind}`} on Pubky yet.`); } catch { body.innerHTML = empty('Pubky did not answer.'); }
           });
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
           break;
@@ -2301,16 +2372,14 @@
           if (state.view !== 'settings') return;
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
-          const asked = SETTINGS_TABS.some(([k]) => k === state.viewArg) ? state.viewArg : null;
-          const active = asked || (phone ? null : (state.settingsTab || 'library'));
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS, prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          const { phone, active } = tabs;
           if (active) state.settingsTab = active;
-          const tabName = (k) => (SETTINGS_TABS.find(([x]) => x === k) || [k, k])[1];
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
           const row = (label, h, ctl, cls = '') => `<div class="set-row ${cls}"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
           const block = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${help(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
           const group = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
-          const panel = (k, html, id = '') => `<section class="set-panel" id="${id || 'set-' + k}" data-panel="${k}" role="tabpanel" aria-labelledby="stab-${k}" ${active === k ? '' : 'hidden'}>${phone ? `<button class="btn ghost set-back" data-settings-back>${icon('back')} Settings</button>` : ''}<h2 class="set-title">${esc(tabName(k))}</h2>${html}</section>`;
+          const panel = (k, html) => tabs.panel(k, html);
           const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
           const library = group('Music folders',
             (folders.length ? folders.map(([fp, present]) => row(`<code class="path">${esc(fp)}</code>`, present ? '' : 'Not found on this computer', `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`)).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
@@ -2318,7 +2387,9 @@
             + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
             + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
             + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then how it sounds (AcoustID), with the folder as the album. Unsure matches wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
-          const outList = outs.length ? `<div class="set-list">${outs.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
+          state.devOutputs = !!ns.dev_outputs;
+          const shownOuts = outs.filter((o) => state.devOutputs || !devOutput(o.id));
+          const outList = shownOuts.length ? `<div class="set-list">${shownOuts.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
           const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
           const playback = group('Play from', block('Where songs play from', 'The first source here that has a song plays it. A playlist can have its own order; a pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>'))
             + group('Speakers and outputs', block('', 'What this node can play to, found on your network.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
@@ -2345,21 +2416,10 @@
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
+            + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
-          main.innerHTML = (phone && active ? '' : pageHead('Settings')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">
-            <nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="Settings">${SETTINGS_TABS.map(([k, l, ic]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="stab-${k}" aria-selected="${active === k}" aria-controls="${k === 'backup' ? 'backupcard' : k === 'import' ? 'roonmove' : 'set-' + k}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${icon('chevron', 'ic chev')}</button>`).join('')}</nav>
-            <div class="set-body-wrap">${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('discover', discover)}${panel('backup', backup, 'backupcard')}${panel('import', importTab, 'roonmove')}${panel('appearance', appearance)}${panel('about', about)}</div></div>`;
-          // Tabs: on a computer they switch in place (the address follows); on a phone a tab is its own page
-          const showTab = (k) => {
-            if (phone) { setView('settings', k); return; }
-            state.settingsTab = k; state.viewArg = k;
-            $$('.set-panel', main).forEach((pnl) => { pnl.hidden = pnl.dataset.panel !== k; });
-            $$('.set-tab', main).forEach((t) => { const on = t.dataset.stab === k; t.classList.toggle('on', on); t.setAttribute('aria-selected', String(on)); });
-            try { history.replaceState({ ...(history.state || {}), arg: k }, '', `/settings/${k}`); } catch { /* sandboxed */ }
-          };
-          $$('[data-stab]', main).forEach((t) => t.onclick = () => showTab(t.dataset.stab));
-          $('.set-nav', main).onkeydown = (e) => { if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return; e.preventDefault(); const tabs = $$('.set-tab', main); const i = tabs.indexOf(document.activeElement); const n = tabs[(i + (e.key === 'ArrowDown' ? 1 : tabs.length - 1)) % tabs.length]; n.focus(); if (!phone) showTab(n.dataset.stab); };
-          $$('[data-settings-back]', main).forEach((b) => b.onclick = () => goBack('settings'));
+          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           // Fix my files' tags: the list first, then the write
           const loadFixes = async () => {
@@ -2374,6 +2434,7 @@
             $('#fixgo').onclick = async () => { const b = $('#fixgo'); b.disabled = true; b.textContent = 'Writing…'; try { const w = await api('POST', '/library/tag-fixes', {}); toast(`${countOf(w.written, 'files')} fixed${w.skipped.length ? `; ${w.skipped.length} left as they were` : ''}. Backups: ${w.backup_dir}`); loadFixes(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
           };
           const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
+          const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
           const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
           // The first sync after a sign-in runs in the background: follow it here
           if (pk && pk.sync && pk.sync.running) { clearTimeout(state.syncPoll); state.syncPoll = setTimeout(() => { if (state.view === 'settings' && state.settingsTab === 'accounts') render(); }, 2000); }
@@ -2649,7 +2710,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); findJob();
+    setConn('ok', nodeLabel()); checkHealth(); findJob(); api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {

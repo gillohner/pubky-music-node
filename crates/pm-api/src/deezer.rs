@@ -333,6 +333,7 @@ fn version(kind: &str, v: &Value) -> Option<Version> {
         label.push_str(" (explicit)");
     }
     Some(Version {
+        page: None,
         source: SOURCE_ID.into(),
         id: format!("{kind}:{id}"),
         label,
@@ -369,6 +370,15 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
 }
 
 /// Deezer's track with this ISRC (public catalogue, no account; cached per ISRC).
+/// A Deezer track's ISRC.
+pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v = get_json(s, &format!("/track/{id}"), &[]).await.ok()?;
+    v["isrc"].as_str().map(str::to_string)
+}
+
 pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Version>, ApiError> {
     let key = format!("deezer.version.isrc.{isrc}");
     if let Some(v) = crate::tidal::cache_get(s, &key) {

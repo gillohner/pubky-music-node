@@ -917,3 +917,13 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .np-tags .taginput { width: 160px; }
 .fixlist .set-item .sub { white-space: normal; }
 .set-warn { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; color: var(--warn); }
+/* Item pages: one instance per page, the same recording elsewhere one click away */
+.alsoon { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 10px; min-width: 0; }
+.alsoon .also { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; min-width: 0; }
+.alsoon .also .chiplink { display: inline-flex; align-items: center; padding: 2px; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 6px; }
+.alsoon .also .chiplink:hover { color: var(--accent-strong); background: var(--surface-2); }
+.alsoon .also .ic { width: 14px; height: 14px; }
+.opened-as { margin: 6px 0 0; }
+.chip.tag.tag-link { border-style: dashed; padding-left: 6px; }
+.chip.tag .chipx .ic { width: 12px; height: 12px; vertical-align: -1px; }
+.tagrow select.input { width: auto; padding: 4px 8px; font-size: 12px; height: auto; }

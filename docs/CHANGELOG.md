@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Song pages are one source each, with the others one click away** (owner: "page is always streamer specific but has linking to the rest"; STEWARD-UX-INSTANCES items 1–3 and 5).
+  - **A page is one instance:** the library file (`/song/lib-5`) or the service's track (`/song/deezer-105304346`, `/song/tidal-…`, `/song/spotify-…`, readable instead of base64). Its Play plays that instance.
+  - A generic link (`/song/isrc-…`, `/song/mb-…`) opens the first source in your Play from order that has the song, and the address follows.
+  - **"Also on"** under the title: the same recording on your other sources, one each, linked to its own page, with play and the service's site. A service's track page finds its ISRC (kept on the node) to tie it to your library copy.
+  - **Versions** lists only other recordings now (a live take, a remaster) from your library. Before, it repeated the same song once per source, TIDAL twice on the owner's "Trip to Serbia". MusicBrainz stays under About.
+  - **Tags:** on a service's page, a new tag goes on the song (every source) or on this source's link only. Each of your tags shows which, and one tap moves it. On Pubky shows tags on the song or on this link.
+  - **The Null output** is hidden from the zone lists unless About this node › Developer outputs is on (or `PM_DEV_OUTPUTS=1`).
+  - Settings' side tabs are now one helper (`sideTabs`) that the Sources page can reuse.
 - **"Bring files here" works on a big homeserver** (owner: "does not work"; STEWARD-FIX-mirror.md). It downloaded every file inside one request: 1 GB took minutes with no progress, and the NAS's proxy gave up first.
   - **A background job** like Copy library: the button first says how much ("44 files (1.0 GB) to bring, 3 already here"), then the node downloads at the copy speed, file by file, straight to disk. A small chip in the player bar shows files and progress; tapping it shows the details with Cancel. A job the node was running when it stopped carries on after a restart. The big floating copy card is gone: copies use the same chip.
   - **Nothing it already has:** homeserver files are matched to the library by content hash (the name's prefix is the file's BLAKE3), so a node that copied its library up downloads nothing. Hashes are kept in the library (`file_hashes`); the copy job stores them as it goes.

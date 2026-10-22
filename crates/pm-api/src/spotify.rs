@@ -282,6 +282,13 @@ fn need_user(s: &NodeState) -> Result<UserSession, ApiError> {
     })
 }
 
+/// A Spotify track's ISRC (needs the node's Spotify app).
+pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
+    let t = valid_id(id).ok()?;
+    let v = get_json(s, &format!("/tracks/{t}"), &[]).await.ok()?;
+    v["external_ids"]["isrc"].as_str().map(str::to_string)
+}
+
 async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
     let token = bearer(s).await?;
     let url = if path.starts_with("http") {
@@ -908,6 +915,7 @@ pub(crate) async fn import_playlist(
 fn version(kind: &str, v: &Value) -> Option<Version> {
     let id = v["id"].as_str()?;
     Some(Version {
+        page: None,
         source: SOURCE_ID.into(),
         id: format!("{kind}:{id}"),
         label: format!("Spotify · {}", v["name"].as_str().unwrap_or("")),
