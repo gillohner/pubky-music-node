@@ -314,7 +314,70 @@
   });
 
   // ---- zones & playback ----------------------------------------------------
-  const audio = $('#browser');
+  // The browser zone plays through one of two engines: the <audio> element, or YouTube's
+  // official player (IFrame Player API) for YouTube links. `audio` stands for whichever is in use,
+  // so the player bar, transport, media keys and repeat drive both the same way.
+  const audioEl = $('#browser');
+  const ytOf = (u) => { const m = /^youtube:video:([A-Za-z0-9_-]{11})$/.exec(u || '') || /^(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/.exec(u || ''); return m ? m[1] : null; };
+  const yt = (() => {
+    const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
+    let player = null; let ready = null; let vid = null; let st = -1; let vol = 1; let tick = null;
+    const api = () => (ready || (ready = new Promise((res, rej) => {
+      if (window.YT && window.YT.Player) return res();
+      const prev = window.onYouTubeIframeAPIReady; window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
+      const sc = document.createElement('script'); sc.src = 'https://www.youtube.com/iframe_api'; sc.async = true;
+      sc.onerror = () => { ready = null; sc.remove(); rej(new Error('YouTube\u2019s player did not load (offline, or blocked on this network)')); };
+      document.head.appendChild(sc);
+    })));
+    const has = (f) => player && typeof player[f] === 'function';
+    return {
+      addEventListener: (t, f) => ev.addEventListener(t, f),
+      get paused() { return st !== 1 && st !== 3; },
+      get ended() { return st === 0; },
+      get currentTime() { return has('getCurrentTime') ? player.getCurrentTime() || 0 : 0; },
+      set currentTime(v) { if (has('seekTo')) player.seekTo(v, true); },
+      get duration() { return has('getDuration') ? player.getDuration() || NaN : NaN; },
+      get volume() { return vol; },
+      set volume(v) { vol = v; if (has('setVolume')) player.setVolume(Math.round(v * 100)); },
+      get src() { return vid ? `https://www.youtube.com/watch?v=${vid}` : ''; },
+      set src(_) { /* chosen through open() */ },
+      async open(id) {
+        await api();
+        vid = id; st = -1;
+        if (!player) {
+          await new Promise((res) => {
+            player = new window.YT.Player('ytframe', { videoId: id, width: '100%', height: '100%', playerVars: { autoplay: 1, playsinline: 1, rel: 0, origin: location.origin }, events: {
+              onReady: () => { player.setVolume(Math.round(vol * 100)); player.playVideo(); res(); },
+              onStateChange: (e) => { st = e.data; if (st === 1) fire('play'); else if (st === 2) fire('pause'); else if (st === 0) fire('ended'); },
+              onError: (e) => fire('yterror', e.data),
+            } });
+          });
+        } else player.loadVideoById(id);
+        clearInterval(tick); tick = setInterval(() => { if (st === 1) fire('timeupdate'); }, 500);
+      },
+      play() { if (has('playVideo')) player.playVideo(); return Promise.resolve(); },
+      pause() { if (has('pauseVideo')) player.pauseVideo(); },
+      stop() { clearInterval(tick); if (has('stopVideo')) player.stopVideo(); vid = null; st = -1; },
+    };
+  })();
+  const audio = new Proxy({}, {
+    get: (_, k) => {
+      if (k === 'addEventListener') return (t, f, o) => { audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); };
+      const e = state.ytOn ? yt : audioEl; const v = e[k];
+      return typeof v === 'function' ? v.bind(e) : v;
+    },
+    set: (_, k, v) => { if (k === 'volume') { audioEl.volume = v; yt.volume = v; } else (state.ytOn ? yt : audioEl)[k] = v; return true; },
+  });
+  // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
+  const ytPanel = (it) => { const p = $('#ytpanel'); if (!p) return; if (it) { $('#yttitle').textContent = it.title || 'YouTube'; p.hidden = false; } else p.hidden = true; };
+  $('#ytmin').onclick = () => { const p = $('#ytpanel'); const small = !p.classList.contains('small'); p.classList.toggle('small', small); $('#ytmin').setAttribute('aria-expanded', String(!small)); $('#ytmin').title = small ? 'Show the video' : 'Make the video smaller'; };
+  // A YouTube item that can't be embedded (the uploader turned it off, removed, private): say so and go on
+  yt.addEventListener('yterror', (e) => {
+    const it = state.browserQueue[state.browserIndex];
+    const why = { 2: 'the link is not a valid video', 5: 'this browser cannot play it', 100: 'the video is gone or private', 101: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
+    toast(`\u201c${(it && it.title) || 'This video'}\u201d can't play here: ${why}.`, 'error');
+    if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
+  });
   const isBrowser = () => state.zone === BROWSER;
   const browserState = () => {
     const it = state.browserQueue[state.browserIndex];
@@ -336,10 +399,20 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { const m = /^(tidal|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
+    // YouTube's player lives in this page: it can't send audio to the node's zones
+    if (!isBrowser() && qitems.some((q) => ytOf(q.uri))) {
+      const rest = qitems.filter((q) => !ytOf(q.uri));
+      if (!rest.length) {
+        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: 'YouTube plays only in This browser' }, { label: 'Play in This browser', icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
+        return;
+      }
+      toast(`${countOf(qitems.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
+      qitems = rest;
+    }
     if (isBrowser()) {
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (replace) { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
@@ -368,8 +441,17 @@
     const it = state.browserQueue[i];
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
-    if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; }
+    if (!it) { audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } state.browserIndex = -1; renderBar(); return; }
     state.browserIndex = i;
+    const yid = ytOf(it.uri);
+    if (yid) {
+      if (audioEl.getAttribute('src')) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); }
+      state.ytOn = true; ytPanel(it);
+      yt.open(yid).catch((e) => toast(e.message, 'error'));
+      mediaSessionUpdate(it); renderBar(); if (state.view === 'queue') render();
+      return;
+    }
+    if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
@@ -412,6 +494,7 @@
   });
   // A stream that breaks off mid-song (a dropped connection) picks up where it was, once
   audio.addEventListener('error', () => {
+    if (state.ytOn) return;
     const i = state.browserIndex; const at = audio.currentTime;
     if (i < 0 || !audio.src || !(at > 0)) return;
     state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
@@ -419,6 +502,8 @@
     state.midRetry.n++;
     const src = audio.src; setTimeout(() => { if (state.browserIndex !== i) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
+  // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
+  window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());
@@ -1333,6 +1418,7 @@
     const st = String(x.status || '');
     if (st === 'ready') return { cls: 'ok', label: 'Connected', long: 'Ready.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
+    if (st === 'browser') return { cls: 'ok', label: 'Ready', long: 'Plays in This browser, in YouTube\u2019s own player.' };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
     return { cls: 'bad', label: 'Problem', long: st };
   };
@@ -1458,7 +1544,7 @@
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
-    const services = (state.sources || []).filter((x) => x.enabled !== false && !/^not configured/.test(x.status) && x.status !== 'needs_config');
+    const services = (state.sources || []).filter((x) => x.enabled !== false && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
@@ -2124,7 +2210,7 @@
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && !/^not configured/.test(cur.status) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
@@ -2327,9 +2413,9 @@
           // "Also on": the same recording elsewhere, each a link to its own page, with play and the service's site
           // The source row: this page's own source first and highlighted, then the same recording elsewhere
           const ownPill = `<span class="also here" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<strong>${esc(ownName)}</strong><span class="muted small">this page</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
-          const alsoLine = `<div class="alsoon" id="ialso">${isGlobal ? '' : ownPill}${pg.also_on.length ? `<span class="muted small">${isGlobal ? 'On' : 'Also on'}</span>${pg.also_on.map((v, k) => `<span class="also">${svcBadge(v.source === 'library' ? 'library' : v.source)}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`).join('')}` : ''}</div>`
+          const alsoLine = `<div class="alsoon" id="ialso">${isGlobal ? '' : ownPill}${pg.also_on.length ? `<span class="muted small">${isGlobal ? 'On' : 'Also on'}</span>${pg.also_on.map((v, k) => `<span class="also">${svcBadge(v.source === 'library' ? 'library' : v.source)}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`).join('')}` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
-          const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
+          const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
           const parent = kind === 'song' && pg.album && pg.album.id ? { kind: 'album', ...pg.album } : kind !== 'artist' && pg.artist && pg.artist.id ? { kind: 'artist', ...pg.artist } : null;
           const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id ? ['album', pg.album] : null].filter(Boolean);
@@ -2379,7 +2465,7 @@
           const matchRef = { ...(pg.uri && !String(pg.id || id).startsWith('lib-') ? { uri: pg.uri } : {}), ...(pg.uri && String(pg.id || id).startsWith('lib-') && kind === 'song' ? { uri: pg.uri } : {}), kind, id: pg.id || id };
           const extra = [{ label: 'Link another source…', icon: 'plus', run: () => linkSourceDialog(pg, kind, id, matchRef) }, ...(manual.length ? [{ label: 'Wrong match…', icon: 'close', run: () => showMenu($('#imore'), [{ title: 'Unlink a source you linked' }, ...manual.map((v) => ({ label: `Unlink ${instName(v)}`, icon: 'close', run: async () => { try { await api('DELETE', '/item/matches', { ...matchRef, url: v.url }); toast(`Unlinked ${instName(v)}`); render(); } catch (er) { toast(er.message, 'error'); } } }))]) }] : [])];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
-          const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
+          const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
