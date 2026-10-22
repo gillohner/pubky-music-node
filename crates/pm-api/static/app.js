@@ -403,8 +403,9 @@
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
-    // YouTube's player lives in this page: it can't send audio to the node's zones
-    if (!isBrowser() && qitems.some((q) => ytOf(q.uri))) {
+    // YouTube's player lives in this page: it can't send audio to the node's zones (unless yt-dlp is on)
+    const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
+    if (!isBrowser() && !ytZones && qitems.some((q) => ytOf(q.uri))) {
       const rest = qitems.filter((q) => !ytOf(q.uri));
       if (!rest.length) {
         showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: 'YouTube plays only in This browser' }, { label: 'Play in This browser', icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
@@ -1418,8 +1419,7 @@
     const st = String(x.status || '');
     if (st === 'ready' || st === 'signed in') return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : 'Ready.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
-    if (st === 'browser') return { cls: 'ok', label: 'Ready', long: 'Plays in This browser, in YouTube\u2019s own player.' };
-    if (st === 'browser + search') return { cls: 'ok', label: 'Ready', long: 'Plays in This browser, in YouTube\u2019s own player. Search uses your YouTube Data API key.' };
+    if (/^browser\b/.test(st)) return { cls: 'ok', label: 'Ready', long: `Plays in This browser, in YouTube\u2019s own player${/zones/.test(st) ? ', and on the speakers through yt-dlp' : ''}.${/search/.test(st) ? ' Search uses your YouTube Data API key.' : ''}` };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
     if (/^ready\b/.test(st)) return { cls: 'ok', label: 'Ready', long: st.charAt(0).toUpperCase() + st.slice(1) + '.' };
     // Only a real failure is red; any other note is shown as it is
@@ -2220,6 +2220,7 @@
               + (account ? group('Account', block('', '', account)) : '')
               + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
+              + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2258,6 +2259,28 @@
             if (u.pending) state.tidalFullPoll = setTimeout(async () => { const was = u.signed_in; await fillTidalFull(); if (!was && tf.querySelector('#tfout')) toast('TIDAL full tracks signed in'); }, 3000);
           };
           fillTidalFull();
+          // YouTube › On your speakers (unofficial): yt-dlp as an external program (STEWARD-DUAL-MODE.md)
+          const yz = $('#ytzones');
+          const fillYtZones = async () => {
+            if (!yz || !yz.isConnected) return;
+            let u; try { u = await api('GET', '/sources/youtube/unofficial'); } catch (e) { yz.innerHTML = ''; return; }
+            if (!yz.isConnected) return;
+            const y = u.ytdlp;
+            const rows = [row('On your speakers (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
+            if (u.enabled || y) {
+              rows.push(y
+                ? row('yt-dlp', `${esc(y.version ? 'Version ' + y.version : 'Found')}: ${y.from === 'downloaded' ? 'downloaded by this node' : y.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(y.path)}</code>).`, y.from === 'downloaded' ? '<button class="btn ghost sm" id="yzupdate">Update</button><button class="btn ghost sm" id="yzremove">Remove</button>' : '')
+                : row('yt-dlp', u.can_download ? 'Needed to play YouTube on your speakers. The node downloads it from yt-dlp’s official GitHub releases and checks it against the release’s checksums.' : 'Needed to play YouTube on your speakers. Install yt-dlp on this machine, then reload this page.', u.can_download ? '<button class="btn primary sm" id="yzget">Download yt-dlp</button>' : ''));
+              if (u.health) rows.push(row('Health', esc(u.health.ok ? `Working: ${u.health.detail}.` : `Last try: ${u.health.detail}`), `<span class="pill ${u.health.ok ? 'ok' : 'bad'}">${u.health.ok ? 'OK' : 'Problem'}</span>`));
+            }
+            yz.innerHTML = group('On your speakers', rows.join(''));
+            $('#yzon').onchange = async (e) => { try { await api('PUT', '/sources/youtube/unofficial', { enabled: e.target.checked }); toast(e.target.checked ? 'YouTube can play on your speakers' : 'YouTube plays only in This browser'); } catch (er) { toast(er.message, 'error'); } render(); };
+            const get = async (b, msg) => { b.disabled = true; b.textContent = 'Downloading…'; try { await api('POST', '/sources/youtube/unofficial/ytdlp'); toast(msg); } catch (er) { toast(er.message, 'error'); } render(); };
+            const yg = $('#yzget'); if (yg) yg.onclick = () => get(yg, 'yt-dlp downloaded');
+            const yu = $('#yzupdate'); if (yu) yu.onclick = () => get(yu, 'yt-dlp updated');
+            const yr = $('#yzremove'); if (yr) yr.onclick = async () => { try { await api('DELETE', '/sources/youtube/unofficial/ytdlp'); toast('yt-dlp removed'); } catch (er) { toast(er.message, 'error'); } render(); };
+          };
+          fillYtZones();
           const ytf = $('#ytkey'); if (ytf) ytf.onsubmit = async (e) => { e.preventDefault(); const b = ytf.querySelector('button'); b.disabled = true; try { await api('PUT', '/sources/youtube/key', { key: String(new FormData(ytf).get('key') || '').trim() }); toast('YouTube search is on'); state.sources = null; } catch (er) { toast(er.message, 'error'); } render(); };
           const ytg = $('#ytkeyforget'); if (ytg) ytg.onclick = async () => { try { await api('PUT', '/sources/youtube/key', { key: '' }); toast('YouTube key forgotten'); state.sources = null; } catch (er) { toast(er.message, 'error'); } render(); };
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));

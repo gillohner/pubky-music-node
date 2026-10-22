@@ -198,7 +198,11 @@ impl StreamingService for YouTube {
             id: SOURCE_ID.into(),
             name: "YouTube".into(),
             description: "YouTube and YouTube Music play in This browser, in YouTube's own player; its ads and terms apply. Search with your own YouTube Data API key".into(),
-            status: if api_key(s).is_some() { "browser + search" } else { "browser" }.into(),
+            status: format!(
+                "browser{}{}",
+                if api_key(s).is_some() { " + search" } else { "" },
+                if crate::ytdlp::zones_on(s) { " + zones" } else { "" }
+            ),
         }
     }
 

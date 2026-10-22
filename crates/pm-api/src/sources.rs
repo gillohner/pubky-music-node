@@ -518,7 +518,11 @@ pub fn is_http_uri(uri: &str) -> bool {
 
 impl SourceFactory for NodeSources {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
-        if item.uri.starts_with(crate::youtube::VIDEO_URI_PREFIX) {
+        if let Some(id) = item.uri.strip_prefix(crate::youtube::VIDEO_URI_PREFIX) {
+            // Through yt-dlp when the owner switched that on (unofficial); else This browser only
+            if self.library.lock().is_ok_and(|l| crate::ytdlp::zones_on_lib(&l)) {
+                return crate::ytdlp::open_blocking(&self.library, id);
+            }
             return Err(SourceError::Open {
                 uri: item.uri.clone(),
                 reason: crate::youtube::ZONE_REFUSAL.into(),

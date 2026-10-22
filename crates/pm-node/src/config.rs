@@ -27,6 +27,9 @@ pub struct NodeConfig {
     pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
+    /// YouTube on the zones (unofficial): the yt-dlp to run; empty = one the node downloaded, or
+    /// yt-dlp on the PATH. `PM_YTDLP` overrides.
+    pub youtube: YoutubeConfig,
     /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
     /// BubbleUPnP can play to it). No token, like any renderer.
     pub renderer: RendererConfig,
@@ -77,6 +80,12 @@ impl Default for RendererConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct YoutubeConfig {
+    pub ytdlp: String,
 }
 
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
@@ -208,6 +217,7 @@ impl Default for NodeConfig {
             acoustid: AcoustIdConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
+            youtube: YoutubeConfig::default(),
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
         }
