@@ -187,22 +187,48 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
             session_secret_path: Some(session_secret_path(cfg)),
-            tidal: pm_api::tidal::TidalCredentials {
-                client_id: cfg.tidal.client_id.clone(),
-                client_secret: cfg.tidal.client_secret.clone(),
-                scopes: cfg.tidal.scopes.clone(),
+            // An empty config falls back to the project's built-in apps (ids only, no secrets)
+            tidal: if cfg.tidal.client_id.trim().is_empty() {
+                pm_api::tidal::TidalCredentials {
+                    client_id: pm_api::project_apps::tidal_client_id().unwrap_or_default().to_string(),
+                    client_secret: String::new(),
+                    scopes: cfg.tidal.scopes.clone(),
+                }
+            } else {
+                pm_api::tidal::TidalCredentials {
+                    client_id: cfg.tidal.client_id.clone(),
+                    client_secret: cfg.tidal.client_secret.clone(),
+                    scopes: cfg.tidal.scopes.clone(),
+                }
             },
             spotify: pm_api::spotify::SpotifyCredentials {
                 client_id: cfg.spotify.client_id.clone(),
                 client_secret: cfg.spotify.client_secret.clone(),
             },
-            acoustid_key: std::env::var("PM_ACOUSTID_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty())
-                .unwrap_or_else(|| cfg.acoustid.api_key.clone()),
-            jamendo: pm_api::jamendo::JamendoCredentials {
-                client_id: env_or("PM_JAMENDO_CLIENT_ID", &cfg.jamendo.client_id),
-                client_secret: env_or("PM_JAMENDO_CLIENT_SECRET", &cfg.jamendo.client_secret),
+            acoustid_key: {
+                let own = std::env::var("PM_ACOUSTID_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+                    .unwrap_or_else(|| cfg.acoustid.api_key.clone());
+                if own.trim().is_empty() {
+                    pm_api::project_apps::acoustid_key().unwrap_or_default().to_string()
+                } else {
+                    own
+                }
+            },
+            jamendo: {
+                let id = env_or("PM_JAMENDO_CLIENT_ID", &cfg.jamendo.client_id);
+                if id.trim().is_empty() {
+                    pm_api::jamendo::JamendoCredentials {
+                        client_id: pm_api::project_apps::jamendo_client_id().unwrap_or_default().to_string(),
+                        client_secret: String::new(),
+                    }
+                } else {
+                    pm_api::jamendo::JamendoCredentials {
+                        client_id: id,
+                        client_secret: env_or("PM_JAMENDO_CLIENT_SECRET", &cfg.jamendo.client_secret),
+                    }
+                }
             },
         },
         lib,
@@ -292,6 +318,21 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         }
     }
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
+    state.set_return_page(&cfg.auth.return_page);
+    // Tests point TIDAL at a mock (tools/ui-tidal-login.js); never needed in use
+    {
+        let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let mut t = state.tidal.write().expect("tidal endpoints");
+        if let Some(v) = var("PM_TIDAL_AUTH_BASE") {
+            t.auth_base = v;
+        }
+        if let Some(v) = var("PM_TIDAL_LOGIN_BASE") {
+            t.login_base = v;
+        }
+        if let Some(v) = var("PM_TIDAL_API_BASE") {
+            t.api_base = v;
+        }
+    }
     pm_api::backup::start_schedule(&state);
     let _announced = announce(cfg, &state);
     pm_api::serve(state, &cfg.api.listen).await

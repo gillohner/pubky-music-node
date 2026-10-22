@@ -45,6 +45,7 @@ pub mod opensubsonic;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
+pub mod project_apps;
 pub mod radio;
 pub mod remote;
 pub mod reviews;

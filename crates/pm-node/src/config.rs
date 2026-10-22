@@ -16,17 +16,29 @@ pub struct NodeConfig {
     pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
     pub outputs: OutputsConfig,
-    /// TIDAL developer app credentials (developer.tidal.com); empty = TIDAL off.
+    /// TIDAL developer app (developer.tidal.com); empty = the project's built-in app (sign-in with
+    /// PKCE through the return page, no secret).
     pub tidal: TidalConfig,
     /// Spotify developer app (developer.spotify.com); optional.
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
-    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = Jamendo off.
+    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
+    /// Sign-ins with the project's built-in apps.
+    pub auth: AuthConfig,
+}
+
+/// Sign-ins with the project's built-in apps return through one static page that forwards the
+/// browser to this node (STEWARD-SHARED-APPS.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// The return page; empty = the project's (`pm_api::project_apps::RETURN_PAGE`).
+    pub return_page: String,
 }
 
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
@@ -141,6 +153,7 @@ impl Default for NodeConfig {
             acoustid: AcoustIdConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

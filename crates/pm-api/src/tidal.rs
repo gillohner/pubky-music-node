@@ -39,8 +39,21 @@ pub struct TidalCredentials {
 }
 
 impl TidalCredentials {
+    /// An app to sign in with: the node's own, or the project's built-in one (no secret needed:
+    /// PKCE).
     pub fn configured(&self) -> bool {
-        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+        !self.client_id.trim().is_empty()
+    }
+
+    /// The app's secret is on this node (the owner's own app): catalogue reads without a signed-in
+    /// user (client credentials) need it.
+    pub fn has_secret(&self) -> bool {
+        !self.client_secret.trim().is_empty()
+    }
+
+    /// The project's built-in app: its sign-in returns through the static return page.
+    pub fn is_project_app(&self) -> bool {
+        crate::project_apps::tidal_client_id().is_some_and(|id| id == self.client_id.trim())
     }
 
     pub fn scopes(&self) -> String {
@@ -120,6 +133,10 @@ pub struct TidalStatus {
     /// (e.g. `FULL_REQUIRES_HIGHER_ACCESS_TIER`): previews only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback_limit: Option<String>,
+    /// The last sign-in's test of a code exchange without the client secret:
+    /// `{outcome: accepted|refused, detail, at}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_client: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,7 +228,7 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
     if !c.configured() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "TIDAL is not configured: add [tidal] client_id and client_secret to the node config",
+            "TIDAL is not set up on this node",
         ));
     }
     // Built before any await: the serializer is not Send.
@@ -222,15 +239,14 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
         }
         ser.finish()
     };
-    let resp = s
+    let mut req = s
         .http_client()
         .post(format!("{}/v1/oauth2/token", auth_base(s)))
-        .basic_auth(&c.client_id, Some(&c.client_secret))
-        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(upstream)?;
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if c.has_secret() {
+        req = req.basic_auth(&c.client_id, Some(&c.client_secret));
+    }
+    let resp = req.body(body).send().await.map_err(upstream)?;
     let status = resp.status();
     let v: Value = resp.json().await.map_err(upstream)?;
     if !status.is_success() {
@@ -245,11 +261,51 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
     Ok(v)
 }
 
+/// What TIDAL answered to a code exchange without the client secret (a public client with PKCE),
+/// kept in the settings: the test that decides whether the project's app can be shared without
+/// shipping its secret (STEWARD-SHARED-APPS.md).
+pub const PUBLIC_CLIENT_KEY: &str = "tidal.public_client_probe";
+
+/// The same token call as a public client: the client id in the form, no secret anywhere.
+/// `Err((status, TIDAL's answer))` when refused.
+async fn token_request_public(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, (u16, String)> {
+    let body: String = {
+        let mut ser = url::form_urlencoded::Serializer::new(String::new());
+        for (k, v) in form {
+            ser.append_pair(k, v);
+        }
+        ser.finish()
+    };
+    let resp = s
+        .http_client()
+        .post(format!("{}/v1/oauth2/token", auth_base(s)))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| (0, e.to_string()))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        serde_json::from_str(&text).map_err(|e| (status.as_u16(), e.to_string()))
+    } else {
+        Err((status.as_u16(), text.chars().take(400).collect()))
+    }
+}
+
 async fn app_token(s: &NodeState) -> Result<String, ApiError> {
     if let Some((t, exp)) = app_token_cache().lock().expect("app token").clone() {
         if exp - now_unix() > 60 {
             return Ok(t);
         }
+    }
+    if !creds(s).has_secret() {
+        // TIDAL refuses client credentials without the secret ("Invalid client credentials"),
+        // and the project's secret never ships: the catalogue opens once you sign in
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "Sign in to TIDAL on this node to search and play it",
+        ));
     }
     let v = token_request(s, &[("grant_type", "client_credentials")]).await?;
     let token = v["access_token"]
@@ -362,15 +418,26 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         return Ok(None);
     };
     let c = creds(s);
-    let v = token_request(
-        s,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("client_id", &c.client_id),
-        ],
-    )
-    .await?;
+    let form = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh.as_str()),
+        ("client_id", c.client_id.as_str()),
+    ];
+    // A public client first (what TIDAL answers is recorded), the secret only when refused
+    let v = match token_request_public(s, &form).await {
+        Ok(v) => {
+            record_refresh_probe(s, "accepted", "a refresh worked without the client secret");
+            v
+        }
+        Err((status, answer)) if c.has_secret() => {
+            record_refresh_probe(s, "refused", &format!("{status}: {answer}"));
+            token_request(s, &form).await?
+        }
+        Err((status, answer)) => {
+            record_refresh_probe(s, "refused", &format!("{status}: {answer}"));
+            return Err(upstream(format!("TIDAL refused to renew the sign-in ({status}): {answer}")));
+        }
+    };
     let fresh = session_from(&v, Some(&u))?;
     store_user(s, Some(&fresh))?;
     Ok(Some(fresh.access_token))
@@ -593,12 +660,14 @@ impl StreamingService for Tidal {
     }
 
     fn unified(&self, s: &NodeState) -> bool {
-        creds(s).configured()
+        // Without the app's secret, TIDAL's catalogue answers a signed-in user only
+        let c = creds(s);
+        c.configured() && (c.has_secret() || load_user(s).is_some())
     }
 
     fn info(&self, s: &NodeState) -> SourceInfo {
         let status = if !creds(s).configured() {
-            "not configured: add [tidal] client_id and client_secret to the node config".to_string()
+            "not set up on this node".to_string()
         } else if load_user(s).is_some() {
             "ready".to_string()
         } else {
@@ -937,19 +1006,27 @@ pub(crate) async fn login(
     if !c.configured() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "TIDAL is not configured: add [tidal] client_id and client_secret to the node config",
+            "TIDAL is not set up on this node",
         ));
     }
     use sha2::Digest;
     let verifier = random_urlsafe(48);
     let challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let state = random_urlsafe(24);
-    let redirect = redirect_uri(&s, &headers);
+    let nonce = random_urlsafe(24);
+    let callback = redirect_uri(&s, &headers);
+    // The project's app returns through the static page, which forwards to the callback named in
+    // `state`; the node's own app comes straight back. The verifier never leaves the node.
+    let (redirect, state) = if c.is_project_app() {
+        let page = s.return_page();
+        (page, crate::project_apps::return_state(&nonce, &callback))
+    } else {
+        (callback, nonce.clone())
+    };
     pending()
         .lock()
         .expect("pending")
-        .insert(state.clone(), (verifier, redirect.clone()));
+        .insert(nonce, (verifier, redirect.clone()));
     let mut url = url::Url::parse(&format!("{}/authorize", login_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -986,6 +1063,29 @@ pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<Ca
     }
 }
 
+/// The same test for a refresh (a token renewal) without the secret.
+pub const REFRESH_PROBE_KEY: &str = "tidal.public_refresh_probe";
+
+fn record_refresh_probe(s: &NodeState, outcome: &str, detail: &str) {
+    let v = serde_json::json!({ "outcome": outcome, "detail": detail, "at": now_unix() });
+    let _ = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(REFRESH_PROBE_KEY, &v.to_string());
+    tracing::info!(outcome, detail, "TIDAL public-client refresh test");
+}
+
+fn record_public_probe(s: &NodeState, outcome: &str, detail: &str) {
+    let v = serde_json::json!({ "outcome": outcome, "detail": detail, "at": now_unix() });
+    let _ = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(PUBLIC_CLIENT_KEY, &v.to_string());
+    tracing::info!(outcome, detail, "TIDAL public-client test");
+}
+
 async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     if let Some(err) = q.error {
         return Err(ApiError::bad_request(format!(
@@ -999,20 +1099,32 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (verifier, redirect) = pending()
         .lock()
         .expect("pending")
-        .remove(&state)
+        .remove(crate::project_apps::state_nonce(&state))
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
     let c = creds(s);
-    let v = token_request(
-        s,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", &redirect),
-            ("client_id", &c.client_id),
-            ("code_verifier", &verifier),
-        ],
-    )
-    .await?;
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("redirect_uri", redirect.as_str()),
+        ("client_id", c.client_id.as_str()),
+        ("code_verifier", verifier.as_str()),
+    ];
+    // First as a public client (PKCE, no secret); what TIDAL answers is recorded. Refused, the
+    // same code goes again with the secret when this node has one.
+    let v = match token_request_public(s, &form).await {
+        Ok(v) => {
+            record_public_probe(s, "accepted", "the code exchange worked without the client secret");
+            v
+        }
+        Err((status, answer)) => {
+            tracing::warn!(status, %answer, "TIDAL refused the code exchange without the client secret");
+            record_public_probe(s, "refused", &format!("{status}: {answer}"));
+            if !c.has_secret() {
+                return Err(upstream(format!("TIDAL refused the sign-in ({status}): {answer}")));
+            }
+            token_request(s, &form).await?
+        }
+    };
     let mut session = session_from(&v, None)?;
     if let Some(uid) = session.user_id.clone() {
         // Country decides catalogue availability; best effort.
@@ -1036,6 +1148,17 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
 
 pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> TidalStatus {
     let u = load_user(s);
+    // Read the settings first, one lock at a time (two locks in one expression deadlock)
+    let (playback_limit, public_client) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (
+            lib.get_setting(PLAYBACK_LIMIT_KEY).ok().flatten(),
+            lib.get_setting(PUBLIC_CLIENT_KEY)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str(&v).ok()),
+        )
+    };
     TidalStatus {
         configured: creds(s).configured(),
         signed_in: u.is_some(),
@@ -1046,13 +1169,8 @@ pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> Tid
         redirect_uri: redirect_uri(s, headers),
         requested_scopes: creds(s).scopes(),
         access_tier: u.as_ref().and_then(|u| u.access_tier.clone()),
-        playback_limit: s
-            .library
-            .lock()
-            .expect("library poisoned")
-            .get_setting(PLAYBACK_LIMIT_KEY)
-            .ok()
-            .flatten(),
+        playback_limit,
+        public_client,
     }
 }
 

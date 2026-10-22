@@ -72,6 +72,8 @@ pub struct NodeSettings {
 pub struct NodeState {
     /// The config file the node was started with (a backup carries it, encrypted).
     config_file: Mutex<Option<PathBuf>>,
+    /// The static sign-in return page for the project's apps (`[auth] return_page`).
+    return_page: std::sync::RwLock<String>,
     /// What the last scan did (shown when it ends, and in Settings).
     pub last_scan: Mutex<Option<crate::types::LastScan>>,
     pub name: String,
@@ -305,6 +307,7 @@ impl NodeState {
             http: Mutex::new(None),
             scanning: Mutex::new(false),
             config_file: Mutex::new(None),
+            return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
         })
     }
@@ -1131,6 +1134,17 @@ impl NodeState {
     /// Tell event listeners that library-side data (tracks, playlists) changed.
     pub fn notify_library(&self) {
         let _ = self.events.send(ApiEvent::LibraryChanged);
+    }
+
+    /// Where the project's apps send a sign-in back to (a static page that forwards to this node).
+    pub fn return_page(&self) -> String {
+        self.return_page.read().expect("return page lock").clone()
+    }
+
+    pub fn set_return_page(&self, url: &str) {
+        if !url.trim().is_empty() {
+            *self.return_page.write().expect("return page lock") = url.trim().to_string();
+        }
     }
 
     /// The config file the node runs with, when there is one.
