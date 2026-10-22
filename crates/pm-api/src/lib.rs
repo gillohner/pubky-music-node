@@ -53,6 +53,7 @@ pub mod play_from;
 pub mod playlists;
 pub mod plex;
 pub mod podcasts;
+pub mod project_apps;
 pub mod radio;
 pub mod radio_sources;
 pub mod remote;
