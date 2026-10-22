@@ -197,7 +197,7 @@ async fn playlist_lifecycle() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
-    assert!(err["error"].as_str().unwrap().contains("canonical identity"));
+    assert!(err["error"].as_str().unwrap().contains("not matched to a song"));
     // Bad URIs are rejected; `music:` especially.
     let (st, _) = call(
         &app,

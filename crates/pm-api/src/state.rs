@@ -72,6 +72,8 @@ pub struct NodeSettings {
 pub struct NodeState {
     /// The config file the node was started with (a backup carries it, encrypted).
     config_file: Mutex<Option<PathBuf>>,
+    /// What the last scan did (shown when it ends, and in Settings).
+    pub last_scan: Mutex<Option<crate::types::LastScan>>,
     pub name: String,
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
@@ -303,6 +305,7 @@ impl NodeState {
             http: Mutex::new(None),
             scanning: Mutex::new(false),
             config_file: Mutex::new(None),
+            last_scan: Mutex::new(None),
         })
     }
 
@@ -428,6 +431,7 @@ impl NodeState {
         }
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
+            let mut summary = crate::types::LastScan::default();
             let result = (|| -> Result<(), pm_library::LibraryError> {
                 let lib = pm_library::Library::open(&state.db_path)?;
                 let scanner = pm_library::Scanner::new(&lib).with_art_dir(&state.art_dir);
@@ -435,9 +439,25 @@ impl NodeState {
                     lib.add_folder(root)?;
                     match scanner.scan(root) {
                         Ok(r) => {
-                            tracing::info!(root = %root.display(), added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "scan done")
+                            tracing::info!(root = %root.display(), added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "scan done");
+                            summary.added += r.files_added;
+                            summary.updated += r.files_updated;
+                            summary.removed += r.files_removed;
+                            summary.error_count += r.errors.len();
+                            for (p, why) in r.errors {
+                                tracing::warn!(path = %p.display(), "not read: {why}");
+                                if summary.errors.len() < 20 {
+                                    summary.errors.push((p.to_string_lossy().into_owned(), why));
+                                }
+                            }
                         }
-                        Err(e) => tracing::warn!(root = %root.display(), "scan failed: {e}"),
+                        Err(e) => {
+                            tracing::warn!(root = %root.display(), "scan failed: {e}");
+                            summary.error_count += 1;
+                            summary
+                                .errors
+                                .push((root.to_string_lossy().into_owned(), e.to_string()));
+                        }
                     }
                 }
                 Ok(())
@@ -445,6 +465,8 @@ impl NodeState {
             if let Err(e) = result {
                 tracing::error!("scan: {e}");
             }
+            summary.finished_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            *state.last_scan.lock().expect("last scan lock") = Some(summary);
             state.end_scan();
         });
         Ok(true)

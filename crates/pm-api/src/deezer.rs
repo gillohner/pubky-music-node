@@ -13,6 +13,9 @@ use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
 pub const SOURCE_ID: &str = "deezer";
+/// Deezer plays previews of this length without a partner agreement.
+const PREVIEW_SECS: u64 = 30;
+
 /// Queue URI of a Deezer track: resolved to its preview when played.
 pub const TRACK_URI_PREFIX: &str = "deezer:track:";
 pub const DEFAULT_BASE: &str = "https://api.deezer.com";
@@ -139,7 +142,8 @@ fn hit(kind: &str, v: &Value) -> Option<SourceHit> {
         },
         image: cover(v),
         kind: kind.into(),
-        duration_ms: v["duration"].as_u64().map(|d| d * 1000),
+        // What plays: a 30 s preview, not the song's full length (fresh-eyes review)
+        duration_ms: v["duration"].as_u64().map(|d| d.min(PREVIEW_SECS) * 1000),
         library_artist_id: None,
         isrc: v["isrc"].as_str().map(str::to_string),
         upc: v["upc"].as_str().map(str::to_string),
@@ -155,7 +159,7 @@ fn track(v: &Value, n: u32, artist: Option<&str>) -> Option<SourceTrack> {
     Some(SourceTrack {
         title: v["title"].as_str()?.to_string(),
         track_no: v["track_position"].as_u64().map(|p| p as u32).or(Some(n)),
-        duration_ms: v["duration"].as_u64().map(|d| d * 1000),
+        duration_ms: v["duration"].as_u64().map(|d| d.min(PREVIEW_SECS) * 1000),
         format: "MP3 preview (30 s)".into(),
         url: track_uri(&id),
         artist: v["artist"]["name"].as_str().or(artist).map(str::to_string),
@@ -450,7 +454,7 @@ mod tests {
         assert_eq!(h.id, "track:138547415");
         assert_eq!(h.uri.as_deref(), Some("deezer:track:138547415"));
         assert_eq!(h.isrc.as_deref(), Some("GBAYE9200070"));
-        assert_eq!(h.duration_ms, Some(238_000));
+        assert_eq!(h.duration_ms, Some(30_000), "what plays: the preview");
         assert_eq!(h.image.as_deref(), Some("http://img/x.jpg"));
         let a: Value = serde_json::json!({"id": 1, "name": "Radiohead", "nb_fan": 7, "picture_big": "p"});
         let h = hit("artist", &a).unwrap();

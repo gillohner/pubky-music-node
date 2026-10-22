@@ -26,6 +26,22 @@ pub struct Info {
     /// A library scan is running right now.
     #[serde(default)]
     pub scanning: bool,
+    /// What the last scan did, and the files it could not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan: Option<LastScan>,
+}
+
+/// The last library scan, for "your library is up to date" and the files it skipped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LastScan {
+    pub finished_at: i64,
+    pub added: u64,
+    pub updated: u64,
+    pub removed: u64,
+    /// Every file it could not read, counted.
+    pub error_count: usize,
+    /// The first ones, `[path, why]`.
+    pub errors: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

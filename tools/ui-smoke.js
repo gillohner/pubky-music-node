@@ -124,7 +124,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const asksContact = !!w.document.querySelector('#h-setup #setupcontact');
   if (!asksContact && (!hsecs.includes('Trending songs') || !hsecs.includes('Tags people use for music'))) errors.push('home sections incomplete');
   if (w.document.querySelector('.nav-item[data-view="discover"]')) errors.push('the Discover sidebar entry is still there');
-  // Identify library: a card in Settings; an unidentified row's mark opens the review view.
+  // Identify library: a card in Settings; an unidentified row's mark asks "Which song is this?".
   w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(1500);
   const idbox = w.document.querySelector('#idbox');
   console.log('identify card:', idbox ? idbox.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) : null);
@@ -132,10 +132,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(900);
   const mark = w.document.querySelector('.track .idmark');
   if (mark) {
-    mark.click(); await sleep(900);
-    const idh = (w.document.querySelector('#main h2') || {}).textContent || '';
-    console.log('identify view:', idh);
-    if (!/Confirm matches/.test(idh)) errors.push('identify review view missing');
+    mark.click(); await sleep(2500);
+    const dlg = w.document.querySelector('dialog.dialog[open]');
+    console.log('which song:', dlg ? dlg.textContent.replace(/\s+/g, ' ').slice(0, 80) : null);
+    if (!dlg || !/Which song is this/.test(dlg.textContent)) errors.push('the ? mark does not ask which song it is');
+    const cancel = dlg && dlg.querySelector('[data-ci="-1"]'); if (cancel) { cancel.click(); await sleep(300); }
   }
   // An item page from Home: the shared ⋯ menu, a real path, Back returns Home.
   w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);

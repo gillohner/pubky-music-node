@@ -28,7 +28,7 @@ pub(crate) fn canonical_for(lib: &Library, r: &FavouriteRef) -> Result<MusicUri,
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
-                    "“{}” has no canonical identity (MusicBrainz id or ISRC) yet",
+                    "“{}” is not matched to a song yet: press the ? next to it and pick which song it is",
                     t.title
                 ),
             )

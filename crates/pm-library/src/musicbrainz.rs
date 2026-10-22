@@ -219,6 +219,39 @@ impl MusicBrainzClient {
         Ok(v.map(|v| parse_search(&v)).unwrap_or_default())
     }
 
+    /// Like [`Self::search_recording`] but with what MusicBrainz says about each hit (title,
+    /// artist, a release, length), for the owner to choose from. When nothing has a length within
+    /// 2 s of `duration_ms` (a clipped, live or differently mastered file) it searches again
+    /// without the length, so there is still something to choose from.
+    pub async fn search_recording_hits(
+        &self,
+        artist: &str,
+        title: &str,
+        duration_ms: Option<u64>,
+    ) -> Result<Vec<RecordingHit>> {
+        let base = if artist.trim().is_empty() {
+            format!("recording:\"{}\"", lucene_escape(title))
+        } else {
+            format!(
+                "recording:\"{}\" AND artist:\"{}\"",
+                lucene_escape(title),
+                lucene_escape(artist)
+            )
+        };
+        if let Some(d) = duration_ms {
+            let q = format!("{base} AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000);
+            let v = self.get("recording", &[("query", &q), ("limit", "10")]).await?;
+            let hits = v.map(|v| parse_search_hits(&v)).unwrap_or_default();
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+        let v = self
+            .get("recording", &[("query", &base), ("limit", "10")])
+            .await?;
+        Ok(v.map(|v| parse_search_hits(&v)).unwrap_or_default())
+    }
+
     /// Resolve a service link or ISRC URI to a canonical recording URI.
     pub async fn canonicalize(&self, uri: &MusicUri) -> Result<Option<MusicUri>> {
         match uri {
@@ -357,6 +390,59 @@ pub fn parse_search(v: &Value) -> Vec<(Mbid, u32)> {
                         mbid_at(r, "id")?,
                         r.get("score").and_then(Value::as_u64).unwrap_or(0) as u32,
                     ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A recording search hit with what MusicBrainz says about it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingHit {
+    pub mbid: Mbid,
+    pub score: u32,
+    pub title: String,
+    pub artist: String,
+    /// The first release it is on, when MusicBrainz lists one.
+    pub release: Option<String>,
+    pub release_mbid: Option<Mbid>,
+    pub length_ms: Option<u64>,
+}
+
+pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
+    v.get("recordings")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    let artist = r
+                        .get("artist-credit")
+                        .and_then(Value::as_array)
+                        .map(|c| {
+                            c.iter()
+                                .map(|x| {
+                                    format!(
+                                        "{}{}",
+                                        str_at(x, "name").unwrap_or_default(),
+                                        str_at(x, "joinphrase").unwrap_or_default()
+                                    )
+                                })
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default();
+                    let release = r
+                        .get("releases")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.first());
+                    Some(RecordingHit {
+                        mbid: mbid_at(r, "id")?,
+                        score: r.get("score").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        title: str_at(r, "title").unwrap_or_default().to_string(),
+                        artist,
+                        release: release.and_then(|x| str_at(x, "title")).map(str::to_string),
+                        release_mbid: release.and_then(|x| mbid_at(x, "id")),
+                        length_ms: r.get("length").and_then(Value::as_u64),
+                    })
                 })
                 .collect()
         })

@@ -123,7 +123,9 @@ pub fn probe_and_read(path: &Path) -> Result<(FileProbe, TagSet)> {
     let ext = extension(path).ok_or_else(|| LibraryError::Unsupported(path.to_path_buf()))?;
     match ext.as_str() {
         "dsf" | "dff" => probe_dsd(path),
-        "flac" | "m4a" | "alac" | "wav" | "wave" | "aif" | "aiff" => probe_symphonia(path, &ext),
+        "flac" | "m4a" | "alac" | "wav" | "wave" | "aif" | "aiff" | "mp3" | "ogg" | "oga" => {
+            probe_symphonia(path, &ext)
+        }
         _ => Err(LibraryError::Unsupported(path.to_path_buf())),
     }
 }
@@ -229,8 +231,8 @@ fn probe_symphonia(path: &Path, ext: &str) -> Result<(FileProbe, TagSet)> {
         }
     }
 
-    // WAV/AIFF: the ID3v2 chunk is authoritative for identifiers.
-    if matches!(container.as_str(), "wav" | "aiff") {
+    // WAV/AIFF/MP3: the ID3v2 tag is authoritative for identifiers.
+    if matches!(container.as_str(), "wav" | "aiff" | "mp3") {
         match id3::Tag::read_from_path(path) {
             Ok(t) => tags.merge_from(from_id3(&t)),
             Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => {}
@@ -732,7 +734,7 @@ mod tests {
     #[test]
     fn unsupported_extension() {
         assert!(matches!(
-            probe_and_read(Path::new("/x/y.mp3")),
+            probe_and_read(Path::new("/x/y.wma")),
             Err(LibraryError::Unsupported(_))
         ));
         assert!(is_supported(Path::new("a.FLAC")));

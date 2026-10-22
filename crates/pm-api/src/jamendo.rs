@@ -240,8 +240,12 @@ impl StreamingService for Jamendo {
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "Jamendo".into(),
-            description: "Independent Creative Commons music, full length and lossless; no account needed"
-                .into(),
+            description: if configured(s) {
+                "Independent Creative Commons music, full length and lossless; no account needed"
+            } else {
+                "Independent Creative Commons music, full length and lossless. No account needed, but whoever runs this node has to add a free Jamendo app key first"
+            }
+            .into(),
             status: if configured(s) { "ready" } else { "needs_config" }.into(),
         }
     }

@@ -406,7 +406,11 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
     }
     about.push(fact(
         "In your library",
-        format!("{} albums · {} songs", a.albums, a.tracks),
+        format!(
+            "{} · {}",
+            crate::plural(a.albums, "album"),
+            crate::plural(a.tracks, "song")
+        ),
     ));
     if let Some(i) = &info {
         for (label, u) in [

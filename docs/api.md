@@ -10,7 +10,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | Method | Path | Body / query | Returns |
 | :-- | :-- | :-- | :-- |
 | GET / PUT | `/v1/node/settings` (`jukebox_zone` picks the zone Subsonic jukebox calls drive; empty clears it) | PUT: `{contact}` | `{contact, discovery}`; the contact (email or URL, never a code-host link) is saved in the library and turns Pinakes/Nexus discovery on without a restart; 400 when invalid |
-| GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning` |
+| GET | `/v1/info` | | name, version, library stats, zone/output counts, `scanning`, `last_scan` (`{finished_at, added, updated, removed, error_count, errors: [path, why][]}`, the first 20 files it could not read) |
 | GET | `/v1/outputs` | | `OutputInfo[]` (id, name, caps) |
 | GET | `/v1/outputs/discovery` | | `{upnp: [{from, location, server?, friendly_name?, renderer, output}], cast: [{id, friendly_name, addr}], public_url, local_address?, notes, upnp_enabled, cast_enabled, saved_addresses}`: a 3 s network scan (`?quick=1` skips the scan and only reports configuration) with plain-language findings (no multicast answers, unusable public URL, devices that are not renderers) |
 | GET | `/mb/ws/2/{path}?…` | | no token: a MusicBrainz `/ws/2` caching proxy (one upstream request per second, answers cached a week, the node's contact in the User-Agent); for Pinakes's `[also_on.sources.musicbrainz] base_url = "https://<node>/mb/ws/2"`; 412 until the node has a contact |
@@ -133,6 +133,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/identify` | | `{progress: {running, total, done, identified, suggested, unknown, errors, last_error?}, counts: {total, identified, suggested, unknown, unchecked}, acoustid}` |
 | POST | `/v1/library/identify` | `{retry?}` | start the identify job (fingerprint → AcoustID → folder as release → suggestions); resumes, `retry` looks again at "not found" tracks |
 | GET | `/v1/library/suggestions` | | open suggestions with their track: `{id, track_id, recording_mbid, release_mbid?, title?, artist?, release_title?, score, source: fingerprint\|search, track}` |
+| GET | `/v1/library/tracks/{id}/candidates` | | "Which song is this?": searches MusicBrainz by the track's tags now (with, then without its length) and lists its suggestions with MusicBrainz's title, artist and release, one per release; `{track, suggestions, needs_contact}`; pick one with the accept call below |
 | POST | `/v1/library/suggestions/{id}/accept` | | the owner confirms: the track's identity becomes that recording (`confirmed_by_user`) |
 | DELETE | `/v1/library/suggestions/{id}` | | not this one |
 | PUT | `/v1/library/identify/settings` | `{write_ids}` | "Write IDs into my files" on or off (off by default) |

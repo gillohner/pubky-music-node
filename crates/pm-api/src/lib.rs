@@ -14,6 +14,16 @@ pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod audius;
+
+/// "1 album", "2 albums".
+pub(crate) fn plural(n: u64, one: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {one}s")
+    }
+}
+
 pub mod backup;
 pub mod deezer;
 pub mod discover;
@@ -240,6 +250,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/identify/settings", put(identify::put_settings))
         .route("/library/identify/write", post(identify::write_now))
         .route("/library/suggestions", get(identify::suggestions))
+        .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
         .route("/discover/uri", get(discover::on_pubky))
@@ -553,6 +564,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         zones: s.zones.list().len(),
         outputs: s.outputs.len(),
         scanning: s.is_scanning(),
+        last_scan: s.last_scan.lock().expect("last scan lock").clone(),
     }))
 }
 
@@ -3662,7 +3674,7 @@ mod tests {
         assert_eq!(kinds, ["artist", "album", "track"]);
         assert_eq!(r["items"][2]["uri"], "deezer:track:138547415");
         assert_eq!(r["items"][2]["isrc"], "GBAYE9200070");
-        assert_eq!(r["items"][2]["duration_ms"], 238_000);
+        assert_eq!(r["items"][2]["duration_ms"], 30_000, "the preview length");
         assert_eq!(r["items"][1]["upc"], "724381230321");
         let (st, it) = call(&app, "GET", "/v1/sources/deezer/items/album:12047952", None).await;
         assert_eq!(st, StatusCode::OK, "{it}");

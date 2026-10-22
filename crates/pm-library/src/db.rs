@@ -1521,7 +1521,9 @@ impl Library {
                 "INSERT INTO identify_suggestions(track_id, recording_mbid, release_mbid, title, artist, release_title, score, source, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(track_id, recording_mbid) DO UPDATE SET score = MAX(score, excluded.score),
-                   release_mbid = COALESCE(excluded.release_mbid, release_mbid)",
+                   release_mbid = COALESCE(excluded.release_mbid, release_mbid),
+                   title = COALESCE(excluded.title, title), artist = COALESCE(excluded.artist, artist),
+                   release_title = COALESCE(excluded.release_title, release_title)",
                 params![
                     track,
                     c.recording.to_string(),
@@ -1539,6 +1541,15 @@ impl Library {
     }
 
     /// Open suggestions, grouped by track (best first within a track).
+    /// One track's open suggestions, best first.
+    pub fn suggestions_for(&self, track: i64) -> Result<Vec<SuggestionRow>> {
+        Ok(self
+            .suggestions()?
+            .into_iter()
+            .filter(|r| r.track_id == track)
+            .collect())
+    }
+
     pub fn suggestions(&self) -> Result<Vec<SuggestionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(

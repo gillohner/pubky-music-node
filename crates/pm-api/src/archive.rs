@@ -43,7 +43,10 @@ impl StreamingService for InternetArchive {
     }
 
     async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError> {
-        let query = format!("({}) AND mediatype:(audio)", lucene(term));
+        // Ranked by how well it matches (title, then artist), not by downloads: "grateful dead"
+        // found a popular radio series first (fresh-eyes review)
+        let t = lucene(term);
+        let query = format!("(title:({t})^4 OR creator:({t})^3 OR ({t})) AND mediatype:(audio)");
         let url = format!("{}/advancedsearch.php", base(s));
         let resp = s
             .http_client()
@@ -55,7 +58,6 @@ impl StreamingService for InternetArchive {
                 ("fl[]", "creator"),
                 ("fl[]", "year"),
                 ("fl[]", "downloads"),
-                ("sort[]", "downloads desc"),
                 ("rows", &limit.to_string()),
                 ("page", "1"),
                 ("output", "json"),

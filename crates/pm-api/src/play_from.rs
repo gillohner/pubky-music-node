@@ -259,7 +259,9 @@ fn resolve_item(
             .filter(|c| c.mode == "none")
             .map(|c| c.service.clone())
             .collect();
-        v.dedup();
+        // Each service once ("TIDAL or Spotify", not "TIDAL or Spotify or TIDAL or Spotify")
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|x| seen.insert(x.clone()));
         v
     };
     let reason = c.is_none().then(|| {

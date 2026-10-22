@@ -35,6 +35,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const icon = (name, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const fmt = (ms) => {
+    if (ms === Infinity) return 'Live'; // a radio stream has no length
     const s = Math.floor((ms || 0) / 1000);
     const m = Math.floor(s / 60);
     const h = Math.floor(m / 60);
@@ -56,9 +57,26 @@
     return `${Math.floor(s / 86400)} d ago`;
   };
   const fmtFormat = (f) => !f ? '' : f.kind === 'dsd' ? `DSD${Math.round(f.rate_hz / 44100)}` : `${f.bits}/${(f.rate_hz / 1000).toFixed(1).replace('.0', '')}k`;
+  // A lossy file shows its codec, not the PCM it decodes to ("MP3", not "24/44.1k")
+  const LOSSY = { mp3: 'MP3', aac: 'AAC', vorbis: 'Vorbis', opus: 'Opus' };
+  const fileFormat = (file) => (!file ? '' : LOSSY[file.container] || fmtFormat(file.format));
+  // "1 track", "2 tracks" (n may be a formatted number)
+  const countOf = (n, many) => `${n} ${String(n).replace(/[^0-9]/g, '') === '1' ? many.replace(/s$/, '') : many}`;
+  // Which service a page link belongs to ("Open on Audius", not "Open on")
+  const SERVICE_HOSTS = { 'audius.co': 'audius', 'archive.org': 'archive', 'deezer.com': 'deezer', 'tidal.com': 'tidal', 'listen.tidal.com': 'tidal', 'open.spotify.com': 'spotify', 'jamendo.com': 'jamendo', 'musicbrainz.org': 'musicbrainz' };
+  const serviceOfUrl = (u) => { try { return SERVICE_HOSTS[new URL(u).hostname.replace(/^www\./, '')] || ''; } catch { return ''; } };
   const artists = (t) => (t.artists || []).map((a) => a.name).join(', ');
   const hue = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
-  const initials = (s) => (s || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  // Two letters for an artwork placeholder: the first word and the next real word ("I'm in Love…"
+  // gives "IL", not "II", which reads as a pause button)
+  const initials = (s) => {
+    const w = (s || '?').trim().split(/\s+/).filter((x) => /[\p{L}\p{N}]/u.test(x));
+    if (!w.length) return '?';
+    const second = w.slice(1).find((x) => x.replace(/[^\p{L}\p{N}]/gu, '').length > 2) || w[1];
+    const letter = (x) => (x.match(/[\p{L}\p{N}]/u) || [''])[0];
+    const out = (letter(w[0]) + (second ? letter(second) : '')).toUpperCase();
+    return out === 'II' ? w[0].slice(0, 2).toUpperCase() : out;
+  };
   const tokenQ = () => (state.token ? '?token=' + encodeURIComponent(state.token) : '');
   const art = (albumId, title, cls = '') => {
     const h = hue(title);
@@ -76,7 +94,7 @@
     t.textContent = msg;
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
-    toast.h = setTimeout(() => t.classList.remove('show'), 3800);
+    toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : 3800);
   };
   const setFill = (el) => { const min = +el.min || 0; const max = +el.max || 1; el.style.setProperty('--fill', `${((el.value - min) / (max - min)) * 100}%`); };
 
@@ -105,11 +123,11 @@
     d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
-    const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) d.close(); d.remove(); if (fromBack !== true) popTransient(); resolve(v); };
+    const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(v); };
     transients.push(tr); pushTransient();
     $$('[data-ci]', d).forEach((b) => b.onclick = () => done(Number(b.dataset.ci) < 0 ? null : choices[Number(b.dataset.ci)].value));
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    d.showModal(); const first = $('.choice', d); if (first) first.focus();
+    if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
   // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
   const importPlaylist = async (b, service, id) => {
@@ -121,7 +139,7 @@
     ] });
     if (!how) return;
     b.disabled = true;
-    try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
+    try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
     catch (e) { toast(e.message, 'error'); }
     b.disabled = false;
   };
@@ -219,7 +237,7 @@
   let lastSavedQueue = '';
   setInterval(() => { try { const j = JSON.stringify(state.browserQueue.filter((it) => !it.stream)); if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); } } catch { /* storage unavailable */ } }, 2000);
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); $('#zonename').textContent = z ? z.name : 'Zone'; };
+  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
   const streamUrlFor = (uri) => { const m = /^(tidal|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
@@ -228,10 +246,10 @@
     if (isBrowser()) {
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (replace) { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
-      if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${bitems.length} tracks added`);
+      if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'tracks')} added`);
       return;
     }
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${qitems.length} tracks added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   const spotifyPlay = async (uris, anchor) => {
@@ -251,10 +269,16 @@
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i) => {
     const it = state.browserQueue[i];
+    // The end of the queue: the last song stays on the bar, stopped, ready to play again
+    if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
     if (!it) { audio.pause(); state.browserIndex = -1; renderBar(); return; }
     state.browserIndex = i;
+    if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
-    audio.play().catch((e) => toast('Browser playback: ' + e.message, 'error'));
+    audio.play().catch((e) => {
+      if (e.name === 'AbortError') return;
+      toast(e.name === 'NotSupportedError' ? `“${it.title || 'This song'}” can't play here: its source sent no audio this browser can play. Try another version on the song's page.` : `Playback: ${e.message}`, 'error');
+    });
     if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
     mediaSessionUpdate(it);
     renderBar();
@@ -290,13 +314,13 @@
       if (replace) { state.browserQueue = items; browserPlay(0); }
       else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...items);
       else state.browserQueue.push(...items);
-      if (!replace) toast(items.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${items.length} tracks added`);
+      if (!replace) toast(items.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(items.length, 'tracks')} added`);
       if (state.view === 'queue') render();
       return;
     }
     try {
       await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
-      if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${tracks.length} tracks added`);
+      if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
     } catch (e) { toast(e.message, 'error'); }
   };
@@ -425,7 +449,14 @@
   const LABEL = { bit_perfect: 'Bit-perfect', enhanced: 'Enhanced', lossless: 'Lossless', lossy: 'Lossy' };
   const headline = (p) => p.stages.reduce((w, s) => (ORDER[s.quality] > ORDER[w] ? s.quality : w), 'bit_perfect');
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
+  // The song playing now stands out in every track list on screen
+  const markPlaying = () => {
+    const z = currentZone(); const np = z && z.now_playing; const m = np && /^track:(\d+)$/.exec(np.item.uri || '');
+    const id = m ? m[1] : null;
+    $$('#main .track[data-tid]').forEach((r) => r.classList.toggle('cur', r.dataset.tid === id));
+  };
   const renderBar = () => {
+    markPlaying();
     const z = currentZone(); const np = z && z.now_playing;
     const playing = z && z.transport === 'playing';
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
@@ -447,7 +478,7 @@
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
     q.className = 'quality ' + (h ? 'q-' + h : '');
-    $('.qtext', q).textContent = h ? LABEL[h] : 'Browser decode';
+    $('.qtext', q).textContent = h ? LABEL[h] : 'In this browser'; q.setAttribute('aria-label', `Sound quality: ${h ? LABEL[h] : 'played by this browser'}. Show how the sound gets to you`);
     q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
   };
   $('#np').onclick = () => toggleNowPlaying();
@@ -486,7 +517,7 @@
             <div class="artist">${esc(np.stream_title ? (it.artist || '') : (it.artist || ''))}</div>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="path">
-              <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Browser decode'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
+              <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
               ${np.signal_path ? np.signal_path.stages.map((s) => `<div class="path-row"><span class="pd" style="background:${colour[s.quality]}"></span><span class="pn">${esc(s.name)}</span><span class="pf">${esc(fmtFormat(s.in_format))} → ${esc(fmtFormat(s.out_format))}</span>${s.note ? `<span class="pnote">${esc(s.note)}</span>` : ''}</div>`).join('') : `<div class="path-row"><span class="pd" style="background:var(--muted)"></span><span class="pn">browser</span><span class="pf">the original file, decoded by this browser</span></div>`}
             </div>
             <div class="lyrics" id="nplyrics" hidden></div>
@@ -674,6 +705,7 @@
   { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast('TIDAL signed in'); setView('sources', { source: 'tidal' }); } else toast('TIDAL sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
+  if (window.matchMedia && matchMedia('(max-width: 600px)').matches) search.placeholder = 'Search music';
   let searchTimer = null;
   // ---- one search, scoped, streamed per source (STEWARD-UX-HOME.md "Search") ----
   const searchRuns = new Map(); // `${q}|${scope}` → { q, scope, sources, answers, startedAt, firstAt, doneAt, ctrl }
@@ -748,6 +780,11 @@
   const isFav = (t) => { const c = t.canonical; const uri = Array.isArray(c) ? c[0] : c; const url = uri && typeof uri === 'object' ? canonicalUrl(uri) : null; return url ? state.favUris.has(url) : false; };
   const canonicalUrl = (u) => {
     if (!u) return null;
+    // The node's shape: { kind: 'recording', mbid } (fresh-eyes review: every library track
+    // looked unidentified because only the older shape below was read)
+    if (typeof u.kind === 'string' && u.mbid) return `https://musicbrainz.org/${u.kind.replace('_', '-')}/${u.mbid}`;
+    if (u.isrc && typeof u.isrc === 'string') return 'https://musicbrainz.org/isrc/' + u.isrc;
+    if (typeof u.url === 'string' && /^https?:/.test(u.url)) return u.url;
     if (u.recording) return 'https://musicbrainz.org/recording/' + (u.recording.mbid || u.recording);
     if (u.release) return 'https://musicbrainz.org/release/' + (u.release.mbid || u.release);
     if (u.release_group) return 'https://musicbrainz.org/release-group/' + (u.release_group.mbid || u.release_group);
@@ -759,6 +796,39 @@
   // A library track's page id: its canonical identity when known, else lib-<id>.
   const trackPageId = (t) => { const c = Array.isArray(t.canonical) ? t.canonical[0] : t.canonical; const u = canonicalUrl(c); return u ? idOf(u) : 'lib-' + t.id; };
   const trackHasId = (t) => !!canonicalUrl(Array.isArray(t.canonical) ? t.canonical[0] : t.canonical);
+  // Playlists and hearts name a song the way other apps understand (its MusicBrainz entry), so a
+  // file nobody has matched yet asks "Which song is this?" first (fresh-eyes review: adding your
+  // own songs to a playlist failed with "no canonical identity"). Resolves to the tracks, now
+  // identified, or null when the owner stops.
+  const whichSong = async (t) => {
+    const who = artists(t);
+    toast(`Looking up “${t.title}” on MusicBrainz…`);
+    let c; try { c = await api('GET', `/library/tracks/${t.id}/candidates`); } catch (e) { toast(e.message, 'error'); return null; }
+    const about = `“${t.title}”${who ? ` by ${who}` : ''}`;
+    if (c.needs_contact) {
+      const go = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website (Get started on Home).`, choices: [{ label: 'Open Get started', value: 'home', primary: true }] });
+      if (go) setView('home');
+      return null;
+    }
+    if (!c.suggestions.length) {
+      await choiceDialog({ title: 'Which song is this?', text: `MusicBrainz has nothing that matches ${about}${who ? '' : ' (the file has no artist)'}, so it can't go into playlists or favourites yet. You can still play it and queue it. Giving the file its proper title and artist tags usually fixes this.`, choices: [{ label: 'OK', value: 'ok', primary: true }] });
+      return null;
+    }
+    const mins = (ms) => (ms ? fmt(ms) : '');
+    const pick = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
+    if (pick == null) return null;
+    try { const done = await api('POST', `/library/suggestions/${pick}/accept`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
+  };
+  const ensureIdentified = async (tracks) => {
+    const out = [];
+    for (const t of tracks) {
+      if (!t || trackHasId(t)) { out.push(t); continue; }
+      const done = await whichSong(t);
+      if (!done) return null;
+      out.push(done);
+    }
+    return out;
+  };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
     const z = currentZone(); const np = z && z.now_playing;
@@ -766,14 +836,14 @@
       const i = start + k;
       const cur = np && np.item.uri === 'track:' + t.id;
       const fav = isFav(t); const can = trackHasId(t);
-      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}">
+      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}">
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title">${can ? '' : `<button class="idmark" data-act="identify" title="Not identified yet: identify it so tags, playlists and Pubky can name it">?</button>`}<a class="lnk" data-act="song">${esc(t.title)}</a></div><div class="by">${t.artists && t.artists[0] && t.artists[0].id != null ? `<a class="lnk" data-act="tartist">${esc(artists(t))}</a>` : esc(artists(t))}</div></div>
+        <div class="main-col"><div class="title">${can ? '' : `<button class="idmark" data-act="identify" title="Which song is this? Not matched to MusicBrainz yet, so playlists and favourites can't name it. Click to pick">?</button>`}<a class="lnk" data-act="song">${esc(t.title)}</a></div><div class="by">${t.artists && t.artists[0] && t.artists[0].id != null ? `<a class="lnk" data-act="tartist">${esc(artists(t))}</a>` : esc(artists(t))}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
-        <div><span class="fmt">${esc(fmtFormat(t.file && t.file.format))}</span></div>
+        <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
         <div class="row-actions">
-          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" ${can ? '' : 'disabled'} title="${can ? (fav ? 'Remove from favourites' : 'Add to favourites') : 'No MusicBrainz id or ISRC yet'}">${icon(fav ? 'heart-fill' : 'heart')}</button>
+          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue">${icon('plus')}</button>
           <button class="icon-btn" data-act="more" title="More">${icon('more')}</button>
@@ -784,13 +854,19 @@
   };
   const bindTrackRows = (container, lists) => {
     container.addEventListener('click', async (e) => {
-      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      const btn = e.target.closest('[data-act]');
+      // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
+      if (!btn) {
+        const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
+        if (row && list && !e.target.closest('a, button, input') && window.matchMedia && matchMedia('(hover: none)').matches) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        return;
+      }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
       const tracks = lists[list ? list.dataset.list : 'tr'] || [];
       const i = Number(row ? row.dataset.i : -1);
       const act = btn.dataset.act;
       if (act === 'album') { setView('album', Number(btn.dataset.album)); return; }
-      if (act === 'identify') { setView('identify'); return; }
+      if (act === 'identify') { const t = tracks[i]; if (!t) return; const done = await whichSong(t); if (done) { tracks[i] = done; btn.remove(); toast(`Identified: ${done.title}`); } return; }
       if (act === 'song' || act === 'tartist') {
         const t0 = (lists[list ? list.dataset.list : 'tr'] || [])[Number(btn.closest('.track').dataset.i)]; if (!t0) return;
         if (act === 'song') setView('item', { kind: 'song', id: trackPageId(t0) }); else setView('item', { kind: 'artist', id: 'lib-' + t0.artists[0].id });
@@ -803,6 +879,7 @@
       else if (act === 'more') trackMenu(btn, [tracks[i]]);
       else if (act === 'fav') {
         const on = btn.classList.contains('on');
+        if (!on && !trackHasId(tracks[i])) { const t = await whichSong(tracks[i]); if (!t) return; tracks[i] = t; const mark = row && $('.idmark', row); if (mark) mark.remove(); }
         try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
         catch (er) { toast(er.message, 'error'); }
       }
@@ -856,7 +933,8 @@
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
   };
   const addToPlaylist = async (playlistId, tracks, uris) => {
-    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast(n === 1 ? 'Added to playlist' : `${n} tracks added to playlist`); }
+    if (!uris) { tracks = await ensureIdentified(tracks); if (!tracks) return; }
+    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast(n === 1 ? 'Added to playlist' : `${countOf(n, 'tracks')} added to playlist`); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
@@ -872,7 +950,7 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single && trackHasId(single) ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { const t = trackHasId(single) ? single : await whichSong(single); if (!t) return; await setFavourite({ track_id: t.id }, !isFav(t)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     const seeds = tracks.filter((t) => t && trackHasId(t));
     let versionItems = [];
@@ -893,10 +971,10 @@
       ...radioItem,
       ...versionItems,
       ...nav,
-      ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${tracks.length} songs to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
+      ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
-      { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
+      { label: 'New playlist…', icon: 'plus', run: async () => { tracks = await ensureIdentified(tracks); if (!tracks) return; const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
     ];
     showMenu(anchor, items);
   };
@@ -937,7 +1015,7 @@
   // "New releases from your artists": release groups MusicBrainz lists for tagged artists.
   const newReleasesSection = (nr) => {
     if (!nr || !nr.artists_total) return '';
-    const sub = nr.refreshing ? `checking ${nr.artists_checked} of ${nr.artists_total} artists…` : `${nr.artists_checked} of ${nr.artists_total} tagged artists checked`;
+    const sub = nr.refreshing ? `checking ${nr.artists_checked} of ${countOf(nr.artists_total, 'artists')}…` : `${nr.artists_checked} of ${nr.artists_total} tagged artists checked`;
     const rows = nr.items.slice(0, 12).map((r) => `<div class="list-row"><div class="grow"><div class="name">${esc(r.title)} <span class="muted small">${esc(r.kind)}</span></div><div class="sub">${esc(r.artist)} · ${esc(r.first_release_date)}</div></div>${r.in_library ? `<button class="btn ghost small" data-album="${r.in_library.id}">In library</button>` : `<a class="btn ghost small" href="${esc(r.url)}" target="_blank" rel="noopener">MusicBrainz</a>`}</div>`).join('');
     return `<section class="section"><div class="section-head"><h3>New releases from your artists</h3><span class="muted small">${sub}</span>${nr.refreshing ? '' : `<button class="link" id="nrrefresh">Refresh</button>`}</div>${rows ? `<div class="list">${rows}</div>` : `<p class="muted">Nothing from the last year yet${nr.artists_checked < nr.artists_total ? ' (still checking)' : ''}.</p>`}</section>`;
   };
@@ -981,7 +1059,7 @@
   const itemName = (it) => it.title || `Untitled on ${it.site || 'another service'}`;
   // Describe music URLs that are not in the library (favourites, playlists, history).
   const describe = async (uris) => { if (!uris.length) return []; try { return await api('POST', '/discover/describe', { uris }); } catch { return uris.map((u) => ({ uri: u, page: u, title: null, site: null, also_on: [], kind: 'other' })); } };
-  const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -1050,10 +1128,10 @@
       ...state.playlists.slice(0, 6).map((pl) => ({ label: `Add to “${pl.name}”`, icon: 'playlist', run: () => addTo(pl) })),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
       ...(o.albumId ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
-      ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0]}`, icon: 'external', run: () => window.open(v.url, '_blank', 'noopener') })),
+      ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => window.open(v.url, '_blank', 'noopener') })),
       ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
-      ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${trackIds.length} songs to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
+      ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
     ]);
   };
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
@@ -1065,7 +1143,7 @@
     $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: songs[Number(a.dataset.sartist)].artist_id }); });
     $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = songs[Number(a.dataset.sartistq)].artist; runSearch(); });
     $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: songs[Number(a.dataset.salbum)].album_id }); });
-    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null }); });
+    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
   const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" onerror="this.remove()">` : ''}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div></button>`).join('')}</div>`;
@@ -1161,7 +1239,7 @@
     $$('[data-tileplay]', el).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = tiles[Number(b.dataset.tileplay)]; discoverPlay(it, null, b); });
     $$('[data-hopen]', el).forEach((r) => r.onclick = () => { const it = events[Number(r.dataset.hopen)]; window.open(it.page || it.uri, '_blank', 'noopener'); });
     $$('[data-tag-open]', el).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagOpen));
-    $$('[data-home-signin]', el).forEach((b) => b.onclick = () => setView('settings'));
+    $$('[data-home-signin]', el).forEach((b) => b.onclick = () => { state.autoResign = true; setView('settings'); });
     const cs = $('[data-city-save]', el); if (cs) cs.onclick = async () => { const city = $('[data-city]', el).value.trim(); if (!city) return; try { const l = await api('PUT', '/home/location', { city }); toast(`Concerts near ${l.label}`); render(); } catch (e) { toast(e.message, 'error'); } };
   };
   const homeCache = new Map(); // section|window → { at, sec }
@@ -1174,7 +1252,7 @@
     if (!sec.error && !sec.needs) homeCache.set(key, { at: Date.now(), sec });
     return sec;
   };
-  const mins = (ms) => { const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
+  const mins = (ms) => { if (ms && ms < 60000) return `${Math.round(ms / 1000)} s`; const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
   const discoverPlay = async (it, v, anchor) => {
     if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], true);
     let plan;
@@ -1291,17 +1369,18 @@
     state.setupShown = !(done === 4 || (has.music && setupHidden()));
     if (!state.setupShown) { box.innerHTML = ''; return; }
     let suggestions = [];
+    if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch { state.sources = []; } }
     if (!has.music && !info.scanning) suggestions = await api('GET', '/library/folders/suggest').catch(() => []);
     if (state.view !== 'home' || !box.isConnected) return;
     const n = (x) => Number(x).toLocaleString();
     const step = (k, no, title, sub, body = '') => `<li class="setup-step ${has[k] ? 'done' : ''}"><span class="stepmark" aria-hidden="true">${has[k] ? icon('check') : no}</span><div class="grow"><div class="name">${title}${has[k] ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${has[k] ? '' : body}</div></li>`;
     const musicBody = info.scanning
-      ? `<p class="small" role="status">Reading your files… ${n(info.library.tracks)} tracks so far.</p>`
+      ? `<p class="small" role="status">Reading your files… ${countOf(n(info.library.tracks), 'tracks')} so far.</p>`
       : `${suggestions.length ? `<div class="setup-suggest">${suggestions.map((f) => `<button class="btn sm" data-addfolder="${esc(f.path)}">${icon('plus')} ${esc(f.path)} <span class="muted">${f.more ? 'over ' : ''}${n(f.audio_files)} audio files</span></button>`).join('')}</div>` : ''}
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
-        <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from Internet Archive, Audius or Jamendo</a>, no account needed.</p>`;
+        <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
     box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of 4 done</span>${has.music ? '<button class="link" id="setuphide">Hide</button>' : ''}</div>${has.music ? '' : '<p class="muted small">Moving from another node? <a class="lnk" href="/settings" id="setuprestore">Restore it from a backup</a> instead.</p>'}<ol class="setup-steps">`
-      + step('music', 1, 'Add your music', has.music ? `${n(info.library.tracks)} tracks${info.library.albums ? ` · ${n(info.library.albums)} albums` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
+      + step('music', 1, 'Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
       + step('played', 2, 'Play something', has.music ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : 'Once your music is in.', has.music ? '<button class="btn sm primary" id="setupplay">' + icon('play') + ' Shuffle my music</button>' : '')
       + step('contact', 3, 'See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>')
       + step('pubky', 4, 'Keep your playlists on Pubky (optional)', has.pubky ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>')
@@ -1408,8 +1487,8 @@
           const f = await loadFavourites();
           if (state.view !== 'favourites') return;
           const none = !f.albums.length && !f.tracks.length && !f.artists.length && !f.other.length;
-          main.innerHTML = pageHead('Favourites', `${f.albums.length} albums · ${f.tracks.length} tracks · ${f.artists.length} artists`, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play tracks</button>` : '')
-            + (none ? emptyState('heart', 'Nothing hearted yet', 'Press the heart on a track, album or artist. Hearts are v1 Pubky bookmarks kept in your private homeserver folder.') : '')
+          main.innerHTML = pageHead('Favourites', `${countOf(f.albums.length, 'albums')} · ${countOf(f.tracks.length, 'tracks')} · ${countOf(f.artists.length, 'artists')}`, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play tracks</button>` : '')
+            + (none ? emptyState('heart', 'Nothing hearted yet', 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
@@ -1477,7 +1556,7 @@
             const fileAt = (disc, pos) => groups.find((g) => (g.track.track_no === pos) && ((g.track.disc_no || 1) === disc));
             const matches = [];
             const rows = tracks.map((t) => { const g = fileAt(t.disc, t.pos); const o = g && g.options.find((x) => x.recording_mbid === t.rec); if (o) matches.push(o.id); const dur = g && g.track.duration_ms && t.len ? Math.abs(g.track.duration_ms - t.len) <= 3000 : null; return `<div class="alignrow ${o ? 'ok' : g ? 'diff' : 'none'}"><span class="muted small">${t.disc > 1 ? t.disc + '.' : ''}${t.pos}</span><div class="aside">${g ? `${esc(g.track.title)} <span class="muted small">${fmt(g.track.duration_ms)}</span>` : '<span class="muted small">no file at this position</span>'}</div><span class="amark">${o ? icon('check') : g ? '≠' : ''}</span><div class="aside">${esc(t.title)} <span class="muted small">${t.len ? fmt(t.len) : ''}${dur === false ? ' · length differs' : ''}</span></div></div>`; }).join('');
-            box.innerHTML = `<div class="alignhead"><span></span><b>Your folder</b><span></span><b>${esc(r.title)} <span class="muted small">${esc((r['artist-credit'] || []).map((a) => a.name).join(', '))} · ${esc(r.date || '')} · ${tracks.length} tracks</span></b></div>${rows}<div class="actions" style="margin-top:10px">${matches.length ? `<button class="btn primary sm" data-acceptall="${matches.join(',')}">Accept all ${matches.length} matching</button>` : ''}<a class="btn ghost sm" href="https://musicbrainz.org/release/${esc(rel)}" target="_blank" rel="noopener">On MusicBrainz ${icon('external')}</a></div>`;
+            box.innerHTML = `<div class="alignhead"><span></span><b>Your folder</b><span></span><b>${esc(r.title)} <span class="muted small">${esc((r['artist-credit'] || []).map((a) => a.name).join(', '))} · ${esc(r.date || '')} · ${countOf(tracks.length, 'tracks')}</span></b></div>${rows}<div class="actions" style="margin-top:10px">${matches.length ? `<button class="btn primary sm" data-acceptall="${matches.join(',')}">Accept all ${matches.length} matching</button>` : ''}<a class="btn ghost sm" href="https://musicbrainz.org/release/${esc(rel)}" target="_blank" rel="noopener">On MusicBrainz ${icon('external')}</a></div>`;
             const all = $('[data-acceptall]', box); if (all) all.onclick = async () => { all.disabled = true; let ok = 0; for (const id of all.dataset.acceptall.split(',')) { try { await api('POST', `/library/suggestions/${id}/accept`); ok++; } catch { /* next */ } } toast(`${ok} file${ok === 1 ? '' : 's'} identified`); render(); };
           });
           $$('[data-accept]', main).forEach((b) => b.onclick = async () => { try { await api('POST', `/library/suggestions/${b.dataset.accept}/accept`); toast('Identified'); render(); } catch (e) { toast(e.message, 'error'); } });
@@ -1495,7 +1574,7 @@
         case 'genre': {
           const d = await api('GET', `/library/genres/${state.viewArg}`);
           if (state.view !== 'genre') return;
-          main.innerHTML = backBtn('genres', 'Genres') + `<div class="page-head"><div><div class="eyebrow">Genre</div><h1>${esc(d.genre.name)}</h1><div class="muted">${d.genre.albums} albums · ${d.genre.tracks} tracks</div></div><div class="actions"><button class="btn primary" id="gplay">${icon('play')} Play all</button></div></div>`
+          main.innerHTML = backBtn('genres', 'Genres') + `<div class="page-head"><div><div class="eyebrow">Genre</div><h1>${esc(d.genre.name)}</h1><div class="muted">${countOf(d.genre.albums, 'albums')} · ${countOf(d.genre.tracks, 'tracks')}</div></div><div class="actions"><button class="btn primary" id="gplay">${icon('play')} Play all</button></div></div>`
             + (d.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(d.albums)}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(d.tracks, { key: 'genre' })}</section>`;
           lists.genre = d.tracks;
@@ -1548,7 +1627,7 @@
             const sh = $('#shuffle');
             if (sh) sh.onclick = async () => {
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true);
-              sh.disabled = true; toast(`Loading ${total} tracks…`);
+              sh.disabled = true; toast(`Loading ${countOf(total, 'tracks')}…`);
               try { playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true); } catch (e) { toast(e.message, 'error'); }
               sh.disabled = false;
             };
@@ -1730,7 +1809,7 @@
           const account = cur.id === 'spotify' ? spotAccount : cur.id === 'jamendo' ? jamAccount : cur.id === 'subsonic' ? subAccount : cur.id === 'jellyfin' ? jfAccount : cur.id !== 'tidal' ? '' : !tidal || !tidal.configured ? `<div class="notice">TIDAL needs the developer app's client id and secret in the node config (<code>[tidal]</code>) or the <code>PM_TIDAL_*</code> variables in Docker.</div>`
             : tidal.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${tidal.user_id ? ' · user ' + esc(tidal.user_id) : ''}${tidal.country ? ' · ' + esc(tidal.country) : ''}${tidal.access_tier ? ' · ' + esc(tidal.access_tier) : ''}</span>${tidal.playback_limit ? `<span class="pill warn" title="TIDAL's answer to the last stream manifest">previews only · ${esc(tidal.playback_limit)}</span>` : ''}<button class="btn ghost" id="tidalout">Sign out</button></div>${tidal.playback_limit ? `<p class="muted small">TIDAL serves 30-second previews to apps on the ${esc(tidal.access_tier || 'THIRD_PARTY')} developer tier. Full tracks need a higher access tier granted by TIDAL for this app; search, albums and the collection and playlist imports are unaffected.</p>` : ''}`
             : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Connect TIDAL</button><span class="muted small">Opens TIDAL's sign-in; the app must list <code>${esc(tidal.redirect_uri)}</code> as a redirect URI. Search works without signing in; playback and your collection need it. The app must also have these scopes enabled: <code>${esc(tidal.requested_scopes || '')}</code> (change them with <code>[tidal] scopes</code> in the node config).</span></div>`;
-          main.innerHTML = pageHead('Sources', cur.id === 'tidal' || cur.id === 'spotify' ? 'your subscription, one account on this node · also answers in the main search' : cur.id === 'subsonic' || cur.id === 'jellyfin' ? 'your own music server · also answers in the main search' : 'streaming without an account') + tabs
+          main.innerHTML = pageHead('Sources', cur.id === 'tidal' || cur.id === 'spotify' ? 'your subscription, one account on this node · also answers in the main search' : cur.id === 'subsonic' || cur.id === 'jellyfin' ? 'your own music server · also answers in the main search' : cur.status === 'needs_config' ? 'not set up on this node yet' : 'free to stream, no account needed') + tabs
             + `<p class="muted small">${esc(cur.description)}</p>` + account
             + (cur.status === 'needs_config' ? '' : `<div class="toolbar"><button class="btn primary" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button><span class="muted small">Opens the one search, scoped to ${esc(cur.name)}.</span></div>`)
             + ''
@@ -1739,9 +1818,9 @@
           const sf = $('#subform'); if (sf) sf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(sf); const b = $('#subconnect'); b.disabled = true; try { const v = await api('PUT', '/sources/subsonic/server', { url: f.get('url'), user: f.get('user'), password: f.get('password') }); state.sources = null; toast(`Connected to ${v.name || 'your server'}`); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
           const jff = $('#jfform'); if (jff) jff.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(jff); const b = $('#jfin'); b.disabled = true; try { const v = await api('PUT', '/sources/jellyfin/server', { url: f.get('url'), user: f.get('user'), password: f.get('password') || '' }); state.sources = null; toast(`Signed in to ${v.server_name || 'Jellyfin'}`); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
           const jfo = $('#jfout'); if (jfo) jfo.onclick = async () => { try { await api('DELETE', '/sources/jellyfin/server'); state.sources = null; toast('Signed out of Jellyfin'); render(); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-jfpl]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/jellyfin/playlists/${encodeURIComponent(b.dataset.jfpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs${r.skipped ? `, ${r.skipped} without an id skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
+          $$('[data-jfpl]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/jellyfin/playlists/${encodeURIComponent(b.dataset.jfpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.skipped ? `, ${r.skipped} without an id skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
           const sfg = $('#subforget'); if (sfg) sfg.onclick = async () => { try { await api('DELETE', '/sources/subsonic/server'); state.sources = null; toast('Server forgotten'); render(); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-subpl]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/subsonic/playlists/${encodeURIComponent(b.dataset.subpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs${r.skipped ? `, ${r.skipped} without an id skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
+          $$('[data-subpl]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/subsonic/playlists/${encodeURIComponent(b.dataset.subpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.skipped ? `, ${r.skipped} without an id skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
           const ji = $('#jamin'); if (ji) ji.onclick = async () => { try { const r = await api('POST', '/sources/jamendo/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } };
           const jo = $('#jamout'); if (jo) jo.onclick = async () => { try { await api('POST', '/sources/jamendo/logout'); toast('Jamendo signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           const jm = $('#jamimport'); if (jm) jm.onclick = async () => { jm.disabled = true; try { const r = await api('POST', '/sources/jamendo/collection/import'); toast(`${r.imported} Jamendo song${r.imported === 1 ? '' : 's'} added to Favourites`); } catch (e) { toast(e.message, 'error'); } jm.disabled = false; };
@@ -1757,8 +1836,8 @@
                 const albums = col.items.filter((h) => h.kind === 'album'); const tracks = col.items.filter((h) => h.kind === 'track');
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}${h.library_track_id || h.library_album_id ? ' <span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><button class="icon-btn" data-splay="${esc(h.id)}" title="Play on Spotify">${icon('play')}</button></div>`;
                 box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your library</h3><span class="muted small">${tracks.length} tracks · ${albums.length} albums</span><button class="btn sm" id="spotfav" title="Favourite them here too, by ISRC where Spotify has one">${icon('heart')} Import as favourites</button></div>${albums.length || tracks.length ? `<div class="list">${albums.slice(0, 20).map(hit).join('')}${tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing saved on Spotify yet.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row">${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} tracks${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-spl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists on Spotify.</p>'}</section>`;
+                  <section class="section"><div class="section-head"><h3>Your library</h3><span class="muted small">${countOf(tracks.length, 'tracks')} · ${countOf(albums.length, 'albums')}</span><button class="btn sm" id="spotfav" title="Favourite them here too, by ISRC where Spotify has one">${icon('heart')} Import as favourites</button></div>${albums.length || tracks.length ? `<div class="list">${albums.slice(0, 20).map(hit).join('')}${tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing saved on Spotify yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row">${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-spl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists on Spotify.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'spotify', id: b.dataset.sitem }));
                 $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); spotifyPlay([b.dataset.splay], b); });
                 $('#spotfav').onclick = async () => { try { const r = await api('POST', '/sources/spotify/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
@@ -1774,15 +1853,15 @@
                 const [col, pls] = await Promise.all([api('GET', '/sources/tidal/collection'), api('GET', '/sources/tidal/playlists')]);
                 if (state.view !== 'sources' || state.sourceId !== 'tidal') return;
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind)}</span></div>`;
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${col.tracks.length} tracks · ${col.albums.length} albums</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.slice(0, 20).map(hit).join('')}${col.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} tracks${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.tracks.length, 'tracks')} · ${countOf(col.albums.length, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.slice(0, 20).map(hit).join('')}${col.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
                 $('#tidalfav').onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
                 $$('[data-tpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'tidal', b.dataset.tpl));
               } catch (e) { box.innerHTML = `<p class="muted small">TIDAL collection: ${esc(e.message)}</p>`; }
             })();
           }
-          const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
+          const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); search.select(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source: cur.id, id: b.dataset.sitem }));
           break;
         }
@@ -1791,7 +1870,7 @@
           const { source, id } = state.viewArg;
           const a = await api('GET', `/sources/${encodeURIComponent(source)}/artists/${encodeURIComponent(id)}`);
           if (state.view !== 'source-artist') return;
-          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" onerror="this.remove()">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${a.albums.length} albums · <a href="${esc(a.url)}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
+          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" onerror="this.remove()">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${countOf(a.albums.length, 'albums')} · <a href="${esc(a.url)}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source, id: b.dataset.sitem }));
           $$('[data-artist]', main).forEach((b) => b.onclick = () => setView('artist', Number(b.dataset.artist)));
           break;
@@ -1830,7 +1909,7 @@
             if (state.view !== 'radio') return;
           }
           const saved = (await api('GET', '/radio/stations')).stations;
-          const row = (st, isSaved) => `<div class="list-row"><button class="icon-btn" data-st-play="${esc(st.id)}" title="Play">${icon('play')}</button><div class="avatar" style="background:hsl(${hue(st.name)} 35% 28%);overflow:hidden">${st.favicon ? `<img src="${esc(st.favicon)}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : esc(initials(st.name))}</div><div class="grow"><div class="name">${esc(st.name)}</div><div class="sub">${esc([st.country, st.codec ? st.codec + (st.bitrate ? ' ' + st.bitrate + ' kbps' : '') : '', (st.tags || []).slice(0, 4).join(', ')].filter(Boolean).join(' · '))}</div></div>${isSaved ? `<button class="btn sm ghost" data-st-del="${esc(st.id)}">Remove</button>` : saved.some((x) => x.url === st.url) ? '<span class="pill ok">saved</span>' : `<button class="btn sm" data-st-save="${esc(st.id)}">Save</button>`}${st.homepage ? `<a class="icon-btn" href="${esc(st.homepage)}" target="_blank" rel="noopener" title="Homepage">${icon('external')}</a>` : ''}</div>`;
+          const row = (st, isSaved) => `<div class="list-row clickable" data-st-row="${esc(st.id)}"><button class="icon-btn" data-st-play="${esc(st.id)}" title="Play">${icon('play')}</button><div class="avatar" style="background:hsl(${hue(st.name)} 35% 28%);overflow:hidden">${st.favicon ? `<img src="${esc(st.favicon)}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : esc(initials(st.name))}</div><div class="grow"><div class="name">${esc(st.name)}</div><div class="sub">${esc([st.country, st.codec ? st.codec + (st.bitrate ? ' ' + st.bitrate + ' kbps' : '') : '', (st.tags || []).slice(0, 4).join(', ')].filter(Boolean).join(' · '))}</div></div>${isSaved ? `<button class="btn sm ghost" data-st-del="${esc(st.id)}">Remove</button>` : saved.some((x) => x.url === st.url) ? '<span class="pill ok">saved</span>' : `<button class="btn sm" data-st-save="${esc(st.id)}">Save</button>`}${st.homepage ? `<a class="icon-btn" href="${esc(st.homepage)}" target="_blank" rel="noopener" title="Homepage">${icon('external')}</a>` : ''}</div>`;
           const results = state.radioResults || { q: '', stations: [] };
           main.innerHTML = pageHead('Radio', 'internet radio via radio-browser.info')
             + `<div class="toolbar"><input class="input" id="rq" placeholder="Search stations by name (jazz, FIP, BBC 6…)" value="${esc(results.q)}" style="width:360px"><button class="btn primary" id="rsearch">${icon('search')} Search</button><span class="muted small">Streams play on any zone; lossy codecs show as Lossy in the signal path.</span></div>`
@@ -1841,6 +1920,8 @@
           const doSearch = async () => { const q = $('#rq').value.trim(); if (!q) return; $('#rsearch').disabled = true; try { const r = await api('GET', '/radio/search?limit=40&q=' + encodeURIComponent(q)); state.radioResults = { q, stations: r.stations }; render(); } catch (e) { toast(e.message, 'error'); $('#rsearch').disabled = false; } };
           $('#rsearch').onclick = doSearch; $('#rq').onkeydown = (e) => { if (e.key === 'Enter') doSearch(); }; needsText($('#rq'), $('#rsearch'));
           $$('[data-st-play]', main).forEach((b) => b.onclick = () => playStation(byId(b.dataset.stPlay)));
+          // The whole row plays the station, not only the small play button (fresh-eyes review)
+          $$('[data-st-row]', main).forEach((r) => r.onclick = (e) => { if (e.target.closest('button, a, input')) return; playStation(byId(r.dataset.stRow)); });
           $$('[data-st-save]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/radio/stations', byId(b.dataset.stSave)); toast('Station saved'); render(); } catch (e) { toast(e.message, 'error'); } });
           $$('[data-st-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/radio/stations/${encodeURIComponent(b.dataset.stDel)}`); render(); } catch (e) { toast(e.message, 'error'); } });
           break;
@@ -1908,7 +1989,11 @@
           $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
           const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
-          $('#ifav').onclick = async () => { try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); } };
+          $('#ifav').onclick = async () => {
+            // A file not matched yet: "Which song is this?" first, then the heart
+            if (!fav && target.track_id != null) { try { const t = await api('GET', `/library/tracks/${target.track_id}`); if (!trackHasId(t) && !(await whichSong(t))) return; } catch { /* the heart says why */ } }
+            try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
+          };
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri });
           $$('[data-vplay]', main).forEach((b) => b.onclick = async () => { const v = pg.versions[Number(b.dataset.vplay)]; if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); });
           $$('[data-tag-open]', $('#ipubky')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
@@ -2013,7 +2098,7 @@
           } }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: 'Queue · this browser' } : { zone: state.zone };
-            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${r.skipped.length} not identified yet were left out (Settings › Identify library)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
+            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
           };
           const qc = $('#qclear'); if (qc) qc.onclick = async () => { try { await api('DELETE', `/zones/${state.zone}/queue`); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
           break;
@@ -2062,10 +2147,10 @@
           main.innerHTML = pageHead('Settings') + `
             <section class="section"><div class="section-head"><h3>Library folders</h3></div><p class="muted small">Paths on the node. New folders are watched and scanned; removing one forgets its tracks.</p>
               ${folders.length ? `<div class="list">${folders.map(([p, present]) => `<div class="list-row"><div class="grow"><div class="name">${esc(p)}</div></div>${present ? '' : '<span class="pill warn">missing</span>'}<button class="btn sm ghost" data-folder-del="${esc(p)}">Remove</button></div>`).join('')}</div>` : '<p class="muted">No folders yet.</p>'}
-              <div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
+              ${info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${info.last_scan.error_count} ${info.last_scan.error_count === 1 ? 'file' : 'files'} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([p, why]) => `<li><code>${esc(p.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(p, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : ''}<div class="toolbar" style="margin-top:10px"><input class="input" id="folderadd" placeholder="/path/on/the/node/Music" style="width:360px"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div></section>
             <div class="cards">
-              <div class="card"><h3>Node</h3><dl class="kv"><dt>Name</dt><dd>${esc(info.name)}</dd><dt>Version</dt><dd>${esc(info.version)}</dd><dt>Library</dt><dd>${info.library.tracks} tracks · ${info.library.albums} albums · ${info.library.artists} artists</dd><dt>Files</dt><dd>${info.library.files}${info.library.missing_files ? ` · <span style="color:var(--warn)">${info.library.missing_files} missing</span>` : ''}</dd></dl>
-                <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan">Rescan outputs</button><button class="btn" id="tobackup">${icon('download')} Backup and restore</button><button class="btn ghost" id="logout">Change token</button></div></div>
+              <div class="card"><h3>Node</h3><dl class="kv"><dt>Name</dt><dd>${esc(info.name)}</dd><dt>Version</dt><dd>${esc(info.version)}</dd><dt>Library</dt><dd>${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}</dd><dt>Files</dt><dd>${info.library.files}${info.library.missing_files ? ` · <span style="color:var(--warn)">${info.library.missing_files} missing</span>` : ''}</dd></dl>
+                <div class="actions" style="margin-top:14px"><button class="btn" id="scan">Scan library</button><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn" id="tobackup">${icon('download')} Backup and restore</button><button class="btn ghost" id="logout" title="The access token is the password apps and this page use to reach the node">Change access token</button></div></div>
               <div class="card" id="backupcard"><h3>Backup and restore</h3><p class="muted small">One file with everything needed to rebuild this node: matches and corrections, playlists, favourites, tags, play history, queues and settings. Never your music files.</p>
                 <form id="bkform" class="stack"><label class="small" for="bkpass">Passphrase for your sign-ins (TIDAL, Spotify, ListenBrainz, Pubky…)</label><input class="input" id="bkpass" type="password" autocomplete="new-password" placeholder="Leave empty to leave sign-ins out"><input class="input" id="bkpass2" type="password" autocomplete="new-password" placeholder="The same passphrase again" aria-label="Repeat the passphrase" hidden><p class="muted small">Without it you can restore everything else and sign in to those services again. There is no way to open the sign-ins without it.</p><div class="actions"><button class="btn primary" id="bkdown" type="submit">${icon('download')} Download a backup</button></div></form>
                 <h3 style="margin-top:18px">Every day, to a folder</h3><div id="bksched"><div class="skeleton" style="height:60px"></div></div>
@@ -2093,7 +2178,7 @@
           $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
           const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
-          $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${r.removed_tracks} tracks gone`); render(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'tracks')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
           renderIdentify();
           api('GET', '/home/location').then((l) => { const c = $('#loccur'); if (c) c.textContent = l ? `Now: ${l.label || `${l.lat.toFixed(2)}, ${l.lon.toFixed(2)}`}` : 'Not set'; }).catch(() => {});
           $('#locsave').onclick = async () => { const city = $('#loccity').value.trim(); if (!city) return; try { const l = await api('PUT', '/home/location', { city }); toast(`Concerts near ${l.label}`); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -2109,7 +2194,7 @@
           };
           const bt = $('#bulktag'); if (bt) bt.onclick = async () => {
             const label = $('#bulklabel').value.trim(); if (!label) return; bt.disabled = true;
-            try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${r.tagged} tracks tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
+            try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'tracks')} tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
             catch (e) { toast(e.message, 'error'); }
             bt.disabled = false;
           };
@@ -2149,7 +2234,7 @@
                 const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
                 matched += r.matched;
                 const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
-                const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${r.playlist.imported} songs` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
+                const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
                 parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
                   + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
                   + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
@@ -2179,7 +2264,7 @@
             $('#lbsubmit').onchange = async (e) => { try { await api('PUT', '/listenbrainz', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to ListenBrainz' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); } };
             $('#lbimport').onclick = async (e) => { e.currentTarget.disabled = true; try { const r = await api('POST', '/listenbrainz/import'); toast(`${r.imported} listen${r.imported === 1 ? '' : 's'} added to your history${r.skipped ? `, ${r.skipped} without a MusicBrainz id skipped` : ''}`); } catch (er) { toast(er.message, 'error'); } loadLb(); };
             $('#lbout').onclick = async () => { try { await api('DELETE', '/listenbrainz'); toast('ListenBrainz disconnected'); loadLb(); } catch (er) { toast(er.message, 'error'); } };
-            $$('[data-lbpl]', box).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/listenbrainz/playlists/${b.dataset.lbpl}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${r.imported} songs`); } catch (er) { toast(er.message, 'error'); } b.disabled = false; });
+            $$('[data-lbpl]', box).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/listenbrainz/playlists/${b.dataset.lbpl}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}`); } catch (er) { toast(er.message, 'error'); } b.disabled = false; });
           };
           loadLb();
           // ---- backup and restore (steward next-4, item 1)
@@ -2250,7 +2335,8 @@
           const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
             try {
               const r = await api('POST', '/pubky/login');
-              $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve. This page updates by itself.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
+              $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
+              $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); state.pubkyUser = undefined; toast('Signed in as ' + st.user); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
@@ -2280,7 +2366,7 @@
   // round-trip time, and holds changes made while it is down for a few seconds.
   const link = { ws: null, up: false, ever: false, attempt: 0, retry: null, retryAt: 0, tick: null, ping: null, pingId: 0, pingSent: 0, awaiting: false, missed: 0, rtt: null, pongs: false, loaded: false, seq: null, boot: null, libRev: null, downSince: 0, waiters: [] };
   const HOLD_MS = 8000;
-  const nodeLabel = () => (state.info ? `${state.info.name} · ${state.info.library.tracks} tracks` : 'Connected');
+  const nodeLabel = () => (state.info ? `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}` : 'Connected');
   // kind: 'ok' (connected) | 'wait' (reconnecting) | 'bad' (offline); true/false for ok/bad.
   const setConn = (kind, text) => {
     if (kind === true) kind = 'ok'; else if (kind === false) kind = 'bad';
@@ -2379,7 +2465,7 @@
     box.innerHTML = `<div class="idbar"><span style="width:${pct}%"></span></div>
       <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
       ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : '')}
-      ${st.acoustid ? '' : '<p class="small" style="color:var(--warn)">No AcoustID key on this node: only tags and MusicBrainz search are used. Add <code>[acoustid] api_key</code> or PM_ACOUSTID_KEY.</p>'}
+      ${st.acoustid ? '' : '<p class="small muted">Songs are matched by their title and artist. Matching by how they sound (AcoustID) finds more; it needs a free key in the node\'s config (<code>[acoustid] api_key</code>).</p>'}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
       <div class="actions"><button class="btn primary" id="idrun" ${p.running ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
@@ -2390,14 +2476,22 @@
     if (p.running) idTimer = setTimeout(renderIdentify, 1500);
   };
   const watchScan = (info) => {
+    const was = state.wasScanning; state.wasScanning = !!(info && info.scanning);
     showScanning(!!(info && info.scanning));
     clearTimeout(scanTimer);
-    if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${i.library.tracks} tracks`); watchScan(i); } catch { showScanning(false); } }, 4000);
+    // A scan that ends says so, with what it could not read (fresh-eyes review)
+    if (was && info && !info.scanning && info.library) {
+      const ls = info.last_scan; const n = info.library.tracks;
+      toast(`Library up to date: ${n.toLocaleString()} ${n === 1 ? 'track' : 'tracks'}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Settings › Library folders)` : ''}`, ls && ls.error_count ? 'error' : '');
+      state.albums = null;
+      if (state.view === 'settings' || state.view === 'albums' || state.view === 'tracks') render();
+    }
+    if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${countOf(i.library.tracks, 'tracks')}`); watchScan(i); } catch { showScanning(false); } }, 2000);
   };
   const connect = async () => {
     try {
       state.info = await api('GET', '/info');
-      setConn(true, `${state.info.name} · ${state.info.library.tracks} tracks`);
+      setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}`);
       watchScan(state.info);
       loadFavourites().catch(() => {});
       const zones = await api('GET', '/zones');

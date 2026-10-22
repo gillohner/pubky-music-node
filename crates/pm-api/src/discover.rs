@@ -370,7 +370,8 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
         .filter(|l| access(acc, l.service) == Access::No)
         .map(|l| l.service.to_string())
         .collect();
-    connect.dedup();
+    let mut seen = std::collections::HashSet::new();
+    connect.retain(|x| seen.insert(x.clone()));
     Resolution {
         plays_from: best.as_ref().map(|l| plays_from_link(l, access(acc, l.service))),
         link: best,

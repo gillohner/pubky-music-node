@@ -432,7 +432,7 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chips.tabs { margin-bottom: 4px; }
-.chip.on { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; }
+.chip.on { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); font-weight: 600; }
 button.chip { cursor: pointer; font: inherit; }
 button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; font-size: 13px; }
@@ -584,7 +584,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .fmt.lossy { color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .chips .chip { cursor: pointer; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg-2); border-radius: 999px; padding: 5px 12px; font-size: 13px; }
-.chips .chip:hover { border-color: var(--accent); color: var(--fg); }
+.chips .chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .chips .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .chips .chip .count { margin-left: 4px; color: var(--muted); font-size: 12px; }
 .list.compact { margin-top: 8px; }
@@ -814,3 +814,26 @@ a.btn { text-decoration: none; }
 .notice.ok-notice { border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
 #backupcard .toolbar { margin-top: 8px; flex-wrap: wrap; }
 #backupcard .toolbar .input { flex: 1 1 200px; min-width: 0; }
+.scanerrs { margin-top: 10px; color: var(--fg-2); }
+.scanerrs summary { cursor: pointer; color: var(--warn); }
+.scanerrs ul { margin: 6px 0 0 18px; padding: 0; }
+
+/* Fresh-eyes review: phones */
+.track .dur { padding-right: 6px; }
+@media (max-width: 720px) {
+  .track .fmt-col { display: none; }
+  .np-top { gap: 4px; margin-bottom: 16px; }
+  .np-top > .muted { display: none; }
+  .np-top .btn { padding-left: 10px; padding-right: 10px; }
+}
+@media (max-width: 600px) {
+  .srow { gap: 8px; padding: 10px 8px; }
+  .srow .num { display: none; }
+  .srow .thumb { width: 36px; height: 36px; margin-right: 0; }
+  .srow .src-badges { display: none; }
+  .srow .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .search kbd, .search .kbd { display: none; }
+}
+@media (max-width: 420px) {
+  .player .zone-btn span { display: none; }
+}

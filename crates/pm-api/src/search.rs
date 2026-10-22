@@ -234,7 +234,7 @@ fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchH
         out.push(SearchHit {
             kind: "artist".into(),
             title: a.name.clone(),
-            subtitle: Some(format!("{} albums · your library", a.albums)),
+            subtitle: Some(format!("{} · your library", crate::plural(a.albums, "album"))),
             id: format!("lib-{}", a.id),
             keys: a.mbid.map(|m| vec![format!("mb:{m}")]).unwrap_or_default(),
             ..Default::default()

@@ -413,27 +413,35 @@ async fn lookup(
 async fn search_suggestions(s: &NodeState, t: &Track) -> Result<Vec<Candidate>, String> {
     let contact = s.contact();
     let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
-    if contact.is_empty() || artist.trim().is_empty() || t.title.trim().is_empty() {
+    if contact.is_empty() || t.title.trim().is_empty() {
         return Ok(Vec::new());
     }
     let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
     cfg.base_url = s.mb_base.read().expect("mb lock").clone();
     let mb = pm_library::musicbrainz::MusicBrainzClient::new(cfg).map_err(|e| e.to_string())?;
     let found = mb
-        .search_recording(&artist, &t.title, t.duration_ms)
+        .search_recording_hits(&artist, &t.title, t.duration_ms)
         .await
         .map_err(|e| e.to_string())?;
+    // A length far from the file's lowers the score: the owner decides
+    let near = |h: &pm_library::musicbrainz::RecordingHit| match (h.length_ms, t.duration_ms) {
+        (Some(a), Some(b)) => a.abs_diff(b) <= 3000,
+        _ => true,
+    };
+    // One choice per title, artist and release: identical-looking rows only confuse
+    let mut seen = std::collections::HashSet::new();
     Ok(found
         .into_iter()
-        .filter(|(_, score)| *score >= 80)
-        .take(3)
-        .map(|(mbid, score)| Candidate {
-            recording: mbid,
-            release: None,
-            title: Some(t.title.clone()),
-            artist: Some(artist.clone()),
-            release_title: t.album.as_ref().map(|a| a.title.clone()),
-            score: score as f32 / 100.0,
+        .filter(|h| h.score >= 80)
+        .filter(|h| seen.insert((h.title.to_lowercase(), h.artist.to_lowercase(), h.release.clone())))
+        .take(5)
+        .map(|h| Candidate {
+            recording: h.mbid,
+            release: h.release_mbid,
+            title: Some(h.title.clone()),
+            artist: Some(h.artist.clone()),
+            release_title: h.release.clone(),
+            score: h.score as f32 / 100.0 * if near(&h) { 1.0 } else { 0.7 },
             source: "search".into(),
         })
         .collect())
@@ -450,6 +458,47 @@ pub(crate) async fn suggestions(State(s): State<Arc<NodeState>>) -> ApiResult<Ve
         }
     }
     Ok(Json(out))
+}
+
+/// "Which song is this?" for one track: what MusicBrainz suggests, searched now.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrackCandidates {
+    pub track: Track,
+    pub suggestions: Vec<pm_library::SuggestionRow>,
+    /// MusicBrainz is asked only with a contact (Settings, or Get started on Home).
+    pub needs_contact: bool,
+}
+
+/// `GET /v1/library/tracks/{id}/candidates`: search MusicBrainz by the track's tags now (with
+/// and, failing that, without its length) and list the suggestions to pick from; picking one is
+/// `POST /v1/library/suggestions/{id}/accept`.
+pub(crate) async fn track_candidates(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<TrackCandidates> {
+    let track = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_track(pm_model::TrackId(id))?
+        .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
+    let needs_contact = s.contact().trim().is_empty();
+    if !needs_contact {
+        let found = search_suggestions(&s, &track)
+            .await
+            .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("MusicBrainz: {e}")))?;
+        let lib = s.library.lock().expect("library poisoned");
+        lib.add_suggestions(id, &found)?;
+        if !found.is_empty() {
+            lib.set_identify_state(id, "suggested", None)?;
+        }
+    }
+    let suggestions = s.library.lock().expect("library poisoned").suggestions_for(id)?;
+    Ok(Json(TrackCandidates {
+        track,
+        suggestions,
+        needs_contact,
+    }))
 }
 
 /// `POST /v1/library/suggestions/{id}/accept`: the owner confirms; the

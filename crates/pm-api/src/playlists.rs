@@ -108,7 +108,7 @@ fn uris_for_tracks(lib: &Library, ids: &[i64]) -> Result<Vec<String>, ApiError> 
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
-                    "track {id} ({}) has no canonical identity yet; tag it with a MusicBrainz id or ISRC",
+                    "“{}” is not matched to a song yet: press the ? next to it and pick which song it is",
                     t.title
                 ),
             )
@@ -263,10 +263,9 @@ pub(crate) async fn from_queue(
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
-                "{} track{} in the queue {} not identified yet: identify them in Settings › Identify library",
-                skipped.len(),
-                if skipped.len() == 1 { "" } else { "s" },
-                if skipped.len() == 1 { "is" } else { "are" }
+                "{} in the queue {} matched to a song yet, so there is nothing to save: press the ? next to a song (Tracks, album pages) and pick which song it is",
+                crate::plural(skipped.len() as u64, "song"),
+                if skipped.len() == 1 { "is not" } else { "are not" }
             ),
         ));
     }

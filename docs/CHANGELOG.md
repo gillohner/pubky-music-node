@@ -2,6 +2,18 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-22
+
+- **Fresh-eyes review, round 1** (steward next-4, item 2). A reviewer with no project context used a fresh install for 30 minutes and logged 31 findings. Fixed:
+  - **Your own songs can go into playlists and favourites.** Every library track looked unidentified: the page did not read the node's identity format, so it showed "?" and disabled hearts even on identified tracks. Now a song nobody has matched asks **"Which song is this?"** with MusicBrainz's suggestions (title, artist, release; searched again without the length when a file's length doesn't match), and remembers the pick for the file. The heart, Add to playlist, New playlist and the "?" mark all use it. Server messages say "not matched to a song yet" instead of "no canonical identity".
+  - **MP3 and Ogg files are read** (they were counted, then skipped quietly). A scan now ends with "Library up to date" and says how many files it could not read; Settings › Library folders lists them.
+  - Deezer results show the 30-second preview length they play (not the full song), with a one-time note; the list of services to connect no longer repeats ("TIDAL or Spotify or TIDAL or Spotify"); a song the browser can't play says so plainly.
+  - Internet Archive search ranks by title and artist, not by downloads. Jamendo says when this node still needs its app key; "Open on" names the service.
+  - Phones: track rows keep their "…" in the row; tapping a row plays it; search rows aren't crushed; the now-playing header fits; the player title gets room; no "/" hint.
+  - Player: the end of the queue keeps the last song on the bar; live radio shows "Live" (not "Infinity:NaN:NaN"); a radio row plays when clicked; the playing song is marked in track lists; "In this browser" instead of "Browser decode"; the sound-quality button has a name.
+  - Words: "1 album", not "1 albums" (everywhere); short albums in seconds, not "0 min"; artwork initials avoid "II"; selected chips stand out from hovered ones; plainer Favourites, Identify and Settings labels; sign-in from Home opens the Pubky Ring QR straight away, in view, and says what Pubky Ring is.
+  - Not yet: Audius songs in playlists (needs resolving an Audius page link at play time), an Internet Archive collection with no single item, Pinakes' "Untitled" trending entries (its data).
+
 ## 2026-10-21
 
 - **Backup and restore** (steward next-4, item 1). Settings → Backup and restore:
