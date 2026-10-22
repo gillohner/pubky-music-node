@@ -77,6 +77,7 @@ pub mod tunnel;
 pub mod types;
 pub mod watch;
 pub mod youtube;
+pub mod ytdlp;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -345,6 +346,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route(
             "/sources/youtube/key",
             get(youtube::get_key).put(youtube::put_key),
+        )
+        .route(
+            "/sources/youtube/unofficial",
+            get(ytdlp::get_status).put(ytdlp::put),
+        )
+        .route(
+            "/sources/youtube/unofficial/ytdlp",
+            post(ytdlp::install).delete(ytdlp::uninstall),
         )
         .route(
             "/sources/subsonic/server",
@@ -7298,6 +7307,126 @@ mod tests {
         )
         .await;
         assert_eq!(k["set"], false);
+    }
+
+    /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release
+    /// only when its checksum matches, and a zone then plays a video through it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn youtube_plays_on_zones_through_a_checked_ytdlp() {
+        use pm_zones::SourceFactory;
+        use sha2::Digest;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // A stand-in yt-dlp: its version, and the audio URL for any video
+        let fake = format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 2026.10.01; exit 0; fi\nfor a; do last=\"$a\"; done\ncase \"$last\" in *v=broken*) echo 'ERROR: [youtube] broken: Video unavailable' >&2; exit 1;; esac\necho {base}/file.flac\n");
+        let asset = if cfg!(target_arch = "aarch64") {
+            "yt-dlp_linux_aarch64"
+        } else {
+            "yt-dlp_linux"
+        };
+        let sum = Arc::new(std::sync::Mutex::new(format!(
+            "{:x}",
+            sha2::Sha256::digest(fake.as_bytes())
+        )));
+        let sum2 = sum.clone();
+        let mock = Router::new()
+            .route(
+                "/SHA2-256SUMS",
+                get(move || {
+                    let s = sum2.lock().unwrap().clone();
+                    async move { format!("0000  yt-dlp.tar.gz\n{s}  {asset}\n") }
+                }),
+            )
+            .route(
+                &format!("/{asset}"),
+                get({
+                    let f = fake.clone();
+                    move || {
+                        let f = f.clone();
+                        async move { f }
+                    }
+                }),
+            )
+            .route(
+                "/file.flac",
+                get({
+                    let f = flac.clone();
+                    move || {
+                        let f = f.clone();
+                        async move { f }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        ytdlp::set_releases_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, u) = call(&app, "GET", "/v1/sources/youtube/unofficial", None).await;
+        assert_eq!(
+            (u["enabled"].clone(), u["ytdlp"].clone()),
+            (serde_json::json!(false), serde_json::Value::Null)
+        );
+        // A download that doesn't match the release's checksum is not installed
+        *sum.lock().unwrap() = "ff".repeat(32);
+        let (st, _) = call(&app, "POST", "/v1/sources/youtube/unofficial/ytdlp", None).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
+        assert!(!dir.path().join("data/bin/yt-dlp").exists() && !dir.path().join("bin/yt-dlp").exists());
+        *sum.lock().unwrap() = format!("{:x}", sha2::Sha256::digest(fake.as_bytes()));
+        let (st, u) = call(&app, "POST", "/v1/sources/youtube/unofficial/ytdlp", None).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(u["ytdlp"]["from"], "downloaded");
+        assert_eq!(u["ytdlp"]["version"], "2026.10.01");
+        // Off: zones still refuse; on: a zone plays the video through yt-dlp
+        let item = pm_zones::QueueItem::new("youtube:video:dQw4w9WgXcQ");
+        let src = s.sources.clone();
+        let it = item.clone();
+        assert!(tokio::task::spawn_blocking(move || src.open(&it).is_err())
+            .await
+            .unwrap());
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/youtube/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(u["enabled"], true);
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let yt = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "youtube")
+            .unwrap()
+            .clone();
+        assert_eq!(yt["status"], "browser + zones");
+        let src = s.sources.clone();
+        let it = item.clone();
+        let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+            .await
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        let (_, u) = call(&app, "GET", "/v1/sources/youtube/unofficial", None).await;
+        assert_eq!(u["health"]["ok"], true, "{u}");
+        // yt-dlp's own error reaches the page
+        let src = s.sources.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            src.open(&pm_zones::QueueItem::new("youtube:video:broken_vid1"))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+        assert!(r.unwrap_err().contains("Video unavailable"));
+        let (_, u) = call(&app, "DELETE", "/v1/sources/youtube/unofficial/ytdlp", None).await;
+        assert!(u["ytdlp"].is_null());
     }
 
     #[tokio::test]

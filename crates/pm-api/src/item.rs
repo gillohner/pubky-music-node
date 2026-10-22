@@ -248,8 +248,16 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
             _ => Err("TIDAL isn't connected on this node".into()),
         },
         "jamendo" => Ok((crate::jamendo::track_uri(&n), "full")),
-        // YouTube's own player, in This browser only (official mode)
-        "youtube" => Ok((format!("{}{n}", crate::youtube::VIDEO_URI_PREFIX), "browser")),
+        // YouTube's own player, in This browser only (official mode); every zone through yt-dlp
+        // when the owner switched that on (unofficial)
+        "youtube" => Ok((
+            format!("{}{n}", crate::youtube::VIDEO_URI_PREFIX),
+            if crate::ytdlp::zones_on(s) {
+                "full"
+            } else {
+                "browser"
+            },
+        )),
         _ => Err(match a {
             Access::External => "Spotify plays only on a Spotify Connect device".into(),
             _ => "Spotify sends no audio to other apps".into(),
