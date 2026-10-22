@@ -625,6 +625,14 @@ fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> JamendoStatus 
         signed_in: u.is_some(),
         name: u.and_then(|u| u.name),
         redirect_uri: redirect_uri(s, headers),
+        can_sign_in: !s
+            .jamendo
+            .read()
+            .expect("jamendo")
+            .creds
+            .client_secret
+            .trim()
+            .is_empty(),
     }
 }
 

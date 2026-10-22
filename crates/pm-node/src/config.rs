@@ -16,20 +16,25 @@ pub struct NodeConfig {
     pub pubky: PmPubkyConfig,
     pub api: ApiConfig,
     pub outputs: OutputsConfig,
-    /// TIDAL developer app credentials (developer.tidal.com); empty = TIDAL off.
+    /// TIDAL developer app (developer.tidal.com); empty = the project's built-in app (sign-in with
+    /// PKCE through the return page, no secret).
     pub tidal: TidalConfig,
+    /// Qobuz (unofficial): an app ID and secret the owner may use; Sources › Qobuz can set them.
+    pub qobuz: QobuzConfig,
     /// Spotify developer app (developer.spotify.com); optional.
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
-    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = Jamendo off.
+    /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
     /// YouTube on the zones (unofficial): the yt-dlp to run; empty = one the node downloaded, or
     /// yt-dlp on the PATH. `PM_YTDLP` overrides.
     pub youtube: YoutubeConfig,
+    /// Sign-ins with the project's built-in apps.
+    pub auth: AuthConfig,
     /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
     /// BubbleUPnP can play to it). No token, like any renderer.
     pub renderer: RendererConfig,
@@ -88,6 +93,15 @@ pub struct YoutubeConfig {
     pub ytdlp: String,
 }
 
+/// Sign-ins with the project's built-in apps return through one static page that forwards the
+/// browser to this node (STEWARD-SHARED-APPS.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// The return page; empty = the project's (`pm_api::project_apps::RETURN_PAGE`).
+    pub return_page: String,
+}
+
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
 /// which only they can read (the private node record). Runs only while the node has a Pubky session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -143,6 +157,25 @@ pub struct AcoustIdConfig {
 pub struct SpotifyConfig {
     pub client_id: String,
     pub client_secret: String,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct QobuzConfig {
+    pub app_id: String,
+    pub app_secret: String,
+}
+
+impl std::fmt::Debug for QobuzConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QobuzConfig")
+            .field("app_id", &self.app_id)
+            .field(
+                "app_secret",
+                &if self.app_secret.is_empty() { "" } else { "<set>" },
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -213,6 +246,7 @@ impl Default for NodeConfig {
             api: ApiConfig::default(),
             outputs: OutputsConfig::default(),
             tidal: TidalConfig::default(),
+            qobuz: QobuzConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
             jamendo: JamendoConfig::default(),
@@ -220,6 +254,7 @@ impl Default for NodeConfig {
             youtube: YoutubeConfig::default(),
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
