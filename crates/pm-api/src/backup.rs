@@ -43,6 +43,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("tidal.user", "TIDAL"),
     ("tidal.unofficial", "TIDAL full tracks"),
     ("tidal.unofficial_client", "the TIDAL device client"),
+    ("qobuz.unofficial", "Qobuz"),
+    ("qobuz.app", "the Qobuz app"),
     ("spotify.user", "Spotify"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
