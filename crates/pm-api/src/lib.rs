@@ -47,6 +47,7 @@ pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
 pub mod radio;
+pub mod radio_sources;
 pub mod remote;
 pub mod reviews;
 pub mod roon_import;
@@ -349,6 +350,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
         .route("/radio/play", post(radio::play))
+        .route("/radio/curated", get(radio_sources::curated_route))
+        .route("/radio/countries", get(radio_sources::countries))
+        .route("/radio/tags", get(radio_sources::tags))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))

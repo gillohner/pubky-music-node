@@ -32,6 +32,7 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 | Your server (OpenSubsonic) | The server's address, a user and password (Sources › Your server; kept in the node's database) | **built**: search, albums, songs, playlists (import by MusicBrainz id or ISRC) | **built**: original files into zones (`subsonic:track:<id>`), relayed to browsers | Navidrome, Airsonic, Gonic, Ampache, LMS, another Pubky Music node; token auth on every request |
 
 | Jellyfin / Emby | The server's address and a user (Sources › Jellyfin; signs in once, keeps only the access token) | **built**: search, albums, songs, playlists (import by MusicBrainz recording id) | **built**: original files into zones (`jellyfin:track:<id>`), relayed to browsers | the owner's server is jellyfin.riginode.xyz |
+| Internet radio (`radio`) | none | **built**: radio-browser.info (search by name, browse by country and tag, `/v1/radio/countries`, `/v1/radio/tags`), SomaFM's channels (`channels.json`), Radio Paradise's channels (`/v1/radio/curated`); a source in `/v1/sources` (search, station pages) | **built**: the stream URL into zones; Radio Paradise in lossless FLAC (5 of 6 channels), SomaFM up to 256 kbps MP3; in-stream titles as now playing | channel lists follow Music Assistant's SomaFM and Radio Paradise providers (Apache-2.0); stations saved on the node (`/v1/radio/stations`) |
 
 ## Not offered, and why (STEWARD-PLAN step 5)
 

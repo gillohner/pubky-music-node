@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Internet radio is a source** (`radio`, owner-approved list §6.1): the radio-browser.info directory by name, country or tag (`/v1/radio/countries`, `/v1/radio/tags`); SomaFM's 51 channels; Radio Paradise's six channels, five in lossless FLAC (`/v1/radio/curated`). Radio joins `/v1/sources` for search and station pages, ready for its own tab in Sources. Checked live: Radio Paradise plays as FLAC 16/44.1 and SomaFM as MP3, both with track titles. Channel lists follow Music Assistant's providers (Apache-2.0; see NOTICE).
 - **Every zone is a UPnP/DLNA renderer** (`crates/pm-renderer`; `[renderer] enabled`, on by default). Music Assistant's DLNA provider, Home Assistant's DLNA renderer integration, BubbleUPnP and other UPnP controllers find the zones on the LAN and play to them.
   - Each zone is announced over SSDP as a standard MediaRenderer, with AVTransport, RenderingControl, ConnectionManager and events.
   - Tested with the real Music Assistant 2.10.5, both ways it streams: one continuous flow, and track by track with "next track" handed over in advance. Play, pause, resume, seek, next and the end of the queue all work, and MA's titles show.

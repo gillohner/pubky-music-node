@@ -1,0 +1,9 @@
+Pubky Music Node
+Copyright The Pubky Music Node authors. MIT licence (LICENSE).
+
+Parts of this project follow or port logic from Music Assistant
+(https://github.com/music-assistant/server), Apache License 2.0,
+Copyright The Music Assistant Authors. The files concerned say so in their
+header:
+- crates/pm-api/src/radio_sources.rs: SomaFM and Radio Paradise channel lists
+  and which Radio Paradise mounts carry FLAC with stream titles.
