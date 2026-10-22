@@ -11,6 +11,7 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path, State};
 use axum::Json;
 use pm_model::{MusicUri, Track, TrackId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// `GET /v1/item/{kind}/{id}`. A page is one instance (the library file, the TIDAL track…);
@@ -303,7 +304,7 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
 /// albums (the "likely" match), its picture is used, found in the background at most once a
 /// day (STEWARD-FIX-same-artist.md item 4). The page shows it from the next visit on.
 fn find_artist_picture(s: &Arc<NodeState>, n: i64, name: String) {
-    let tried = format!("artist.picture_tried.{n}");
+    let tried = format!("artist.picture_check.{n}");
     {
         let lib = s.library.lock().expect("library poisoned");
         let now = pm_library::db::now_unix();
@@ -1446,9 +1447,16 @@ pub(crate) async fn candidates(
             .then(b.1.cmp(&a.1))
             .then(a.0.cmp(&b.0))
     });
-    let with_evidence = out.iter().filter(|c| !c.2.evidence.is_empty()).count();
-    if with_evidence == 1 {
-        out[0].2.likely = true;
+    // Likely: the only one with evidence on its service (the same artist on Deezer and on TIDAL
+    // are not competitors)
+    let mut per_service: HashMap<String, usize> = HashMap::new();
+    for c in out.iter().filter(|c| !c.2.evidence.is_empty()) {
+        *per_service.entry(c.2.version.source.clone()).or_default() += 1;
+    }
+    for c in out.iter_mut() {
+        if !c.2.evidence.is_empty() && per_service.get(&c.2.version.source) == Some(&1) {
+            c.2.likely = true;
+        }
     }
     Ok(Json(out.into_iter().map(|c| c.2).collect()))
 }
