@@ -22,6 +22,18 @@ pub struct Ids {
     pub acoustid: Option<String>,
 }
 
+/// Fixes for a file's tags (owner, 2026-10-22: "a writer that fixes this"): the IDs a match
+/// found, and the artists as the node knows them, one value each (`ARTISTS`, with their
+/// MusicBrainz ids when known), so other players see "Sefa" and "Dr. Peacock", not one artist
+/// called "Sefa, Dr. Peacock". The display credit (`ARTIST`/`TPE1`) is left as it is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Fixes {
+    pub ids: Option<Ids>,
+    pub artists: Vec<String>,
+    /// One per artist, in the same order, or empty.
+    pub artist_mbids: Vec<Mbid>,
+}
+
 /// The saved state of a file's ID tags before a write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Backup {
@@ -55,32 +67,116 @@ fn failed(path: &Path, e: impl std::fmt::Display) -> WriteError {
     }
 }
 
-const FLAC_KEYS: [&str; 3] = ["MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ALBUMID", "ACOUSTID_ID"];
-const TXXX_KEYS: [&str; 3] = ["MusicBrainz Track Id", "MusicBrainz Album Id", "Acoustid Id"];
+const FLAC_KEYS: [&str; 5] = [
+    "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ_ALBUMID",
+    "ACOUSTID_ID",
+    "ARTISTS",
+    "MUSICBRAINZ_ARTISTID",
+];
+const TXXX_KEYS: [&str; 5] = [
+    "MusicBrainz Track Id",
+    "MusicBrainz Album Id",
+    "Acoustid Id",
+    "ARTISTS",
+    "MusicBrainz Artist Id",
+];
 
 fn format_of(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "flac" => Some("flac"),
         "wav" | "wave" => Some("wav"),
         "aif" | "aiff" | "aifc" => Some("aiff"),
+        "mp3" => Some("mp3"),
         _ => None,
     }
 }
 
-fn values(ids: &Ids) -> [Option<String>; 3] {
+/// The values per key (several for the artist keys); empty = leave that key alone.
+fn values(f: &Fixes) -> [Vec<String>; 5] {
+    let ids = f.ids.as_ref();
+    let artist_ids_fit = !f.artists.is_empty() && f.artist_mbids.len() == f.artists.len();
     [
-        Some(ids.recording.to_string()),
-        ids.release.map(|r| r.to_string()),
-        ids.acoustid.clone(),
+        ids.map(|i| i.recording.to_string()).into_iter().collect(),
+        ids.and_then(|i| i.release)
+            .map(|r| r.to_string())
+            .into_iter()
+            .collect(),
+        ids.and_then(|i| i.acoustid.clone()).into_iter().collect(),
+        // One artist needs no ARTISTS tag (the display credit already says it)
+        if f.artists.len() > 1 {
+            f.artists.clone()
+        } else {
+            Vec::new()
+        },
+        if artist_ids_fit {
+            f.artist_mbids.iter().map(|m| m.to_string()).collect()
+        } else {
+            Vec::new()
+        },
     ]
 }
 
 /// Write `ids` into the file at `path`, after saving a backup under
 /// `backup_dir`. Returns the backup's path.
 pub fn write_ids(path: &Path, ids: &Ids, backup_dir: &Path) -> Result<PathBuf, WriteError> {
+    write_fixes(
+        path,
+        &Fixes {
+            ids: Some(ids.clone()),
+            ..Default::default()
+        },
+        backup_dir,
+    )
+}
+
+/// One tag a fix changes: `(key, values now, values after)`.
+pub type Change = (String, Vec<String>, Vec<String>);
+
+/// What [`write_fixes`] would change in the file: `(key, now, then)` for each key that differs.
+pub fn preview(path: &Path, f: &Fixes) -> Result<Vec<Change>, WriteError> {
+    let format = format_of(path).ok_or_else(|| WriteError::Unsupported(path.display().to_string()))?;
+    let vals = values(f);
+    let mut out = Vec::new();
+    if format == "flac" {
+        let tag = metaflac::Tag::read_from_path(path).map_err(|e| failed(path, e))?;
+        for (k, v) in FLAC_KEYS.iter().zip(vals.iter()) {
+            if v.is_empty() {
+                continue;
+            }
+            let now: Vec<String> = tag
+                .get_vorbis(k)
+                .map(|i| i.map(str::to_string).collect())
+                .unwrap_or_default();
+            if &now != v {
+                out.push(((*k).to_string(), now, v.clone()));
+            }
+        }
+    } else {
+        let tag = id3::Tag::read_from_path(path).unwrap_or_default();
+        for (d, v) in TXXX_KEYS.iter().zip(vals.iter()) {
+            if v.is_empty() {
+                continue;
+            }
+            let now: Vec<String> = tag
+                .extended_texts()
+                .find(|t| t.description == *d)
+                .map(|t| t.value.split('\0').map(str::to_string).collect())
+                .unwrap_or_default();
+            if &now != v {
+                out.push(((*d).to_string(), now, v.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Write `f` into the file at `path`, after saving a backup under `backup_dir` (only the keys
+/// it touches; the audio is never rewritten). Returns the backup's path.
+pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf, WriteError> {
     let format = format_of(path).ok_or_else(|| WriteError::Unsupported(path.display().to_string()))?;
     std::fs::create_dir_all(backup_dir).map_err(|e| failed(backup_dir, e))?;
-    let vals = values(ids);
+    let vals = values(f);
     let mut backup = Backup {
         path: path.to_path_buf(),
         format: format.into(),
@@ -101,8 +197,8 @@ pub fn write_ids(path: &Path, ids: &Ids, backup_dir: &Path) -> Result<PathBuf, W
             }
             let bpath = save_backup(&backup, backup_dir)?;
             for (k, v) in FLAC_KEYS.iter().zip(vals.iter()) {
-                if let Some(v) = v {
-                    tag.set_vorbis(*k, vec![v.clone()]);
+                if !v.is_empty() {
+                    tag.set_vorbis(*k, v.clone());
                 }
             }
             tag.save().map_err(|e| failed(path, e))?;
@@ -126,11 +222,12 @@ pub fn write_ids(path: &Path, ids: &Ids, backup_dir: &Path) -> Result<PathBuf, W
             }
             let bpath = save_backup(&backup, backup_dir)?;
             for (d, v) in TXXX_KEYS.iter().zip(vals.iter()) {
-                if let Some(v) = v {
+                if !v.is_empty() {
                     tag.remove_extended_text(Some(d), None);
+                    // ID3v2.4: several values in one frame, NUL-separated (as Picard writes them)
                     tag.add_frame(id3::frame::ExtendedText {
                         description: (*d).into(),
-                        value: v.clone(),
+                        value: v.join("\0"),
                     });
                 }
             }
@@ -175,7 +272,7 @@ pub fn restore(backup: &Backup) -> Result<(), WriteError> {
             }
             tag.save().map_err(|e| failed(path, e))
         }
-        "wav" | "aiff" => {
+        "wav" | "aiff" | "mp3" => {
             let mut tag = id3::Tag::read_from_path(path).map_err(|e| failed(path, e))?;
             for (d, v) in &backup.txxx {
                 tag.remove_extended_text(Some(d), None);
@@ -273,6 +370,68 @@ mod tests {
         let (_, back) = crate::probe_and_read(&f).unwrap();
         assert!(back.recording_mbid.is_none(), "restored");
         assert_eq!(samples(&f), before);
+    }
+
+    /// The artists written one value each: the scanner reads them back as separate artists, the
+    /// preview says what changes, and the backup puts the file back.
+    #[test]
+    fn flac_artists_are_written_one_per_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.flac");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ietf-60-mono-audio.flac"
+            ),
+            &f,
+        )
+        .unwrap();
+        let before = samples(&f);
+        let fixes = Fixes {
+            ids: None,
+            artists: vec!["Sefa".into(), "Dr. Peacock".into()],
+            artist_mbids: vec![],
+        };
+        let p = preview(&f, &fixes).unwrap();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].0, "ARTISTS");
+        assert_eq!(p[0].2, vec!["Sefa", "Dr. Peacock"]);
+        let bpath = write_fixes(&f, &fixes, &dir.path().join("backups")).unwrap();
+        let (_, tags) = crate::probe_and_read(&f).unwrap();
+        assert_eq!(tags.artist_list, vec!["Sefa", "Dr. Peacock"]);
+        assert!(preview(&f, &fixes).unwrap().is_empty(), "nothing left to change");
+        assert_eq!(samples(&f), before, "audio untouched");
+        let b: Backup = serde_json::from_slice(&std::fs::read(&bpath).unwrap()).unwrap();
+        restore(&b).unwrap();
+        let (_, back) = crate::probe_and_read(&f).unwrap();
+        assert!(back.artist_list.is_empty(), "restored");
+    }
+
+    #[test]
+    fn mp3_artists_go_into_one_id3_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.mp3");
+        std::fs::write(&f, b"").unwrap();
+        let fixes = Fixes {
+            ids: None,
+            artists: vec!["Sefa".into(), "Cyclon".into()],
+            artist_mbids: vec![],
+        };
+        write_fixes(&f, &fixes, &dir.path().join("backups")).unwrap();
+        let t = id3::Tag::read_from_path(&f).unwrap();
+        let v = t
+            .extended_texts()
+            .find(|x| x.description == "ARTISTS")
+            .unwrap()
+            .value
+            .clone();
+        assert_eq!(v, "Sefa\0Cyclon");
+        let mut back = crate::tags::TagSet::default();
+        for et in t.extended_texts() {
+            back.merge_from(crate::tags::from_id3(&t));
+            let _ = et;
+        }
+        assert_eq!(back.artist_list, vec!["Sefa", "Cyclon"]);
     }
 
     #[test]

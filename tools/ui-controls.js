@@ -10,7 +10,7 @@
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const SKIP = /share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
+const SKIP = /share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|write into|fixgo|tag every|copy library|bring files|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
 const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Authorization: 'Bearer ' + TOKEN } })).json();
 
 (async () => {

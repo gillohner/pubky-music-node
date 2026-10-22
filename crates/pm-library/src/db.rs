@@ -1542,6 +1542,28 @@ impl Library {
 
     /// Tracks whose identity identification found (not their tags), with the
     /// release when known: candidates for "write IDs into my files".
+    /// Tracks credited to more than one artist (a file whose tags may name them as one).
+    pub fn tracks_with_several_artists(&self) -> Result<Vec<Track>> {
+        let ids: Vec<i64> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare(
+                "SELECT ta.track_id FROM track_artists ta JOIN files f ON f.track_id = ta.track_id AND f.missing = 0
+                 GROUP BY ta.track_id HAVING COUNT(*) > 1 ORDER BY ta.track_id",
+            )?;
+            let v = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            v
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(t) = self.get_track(TrackId(id))? {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn identified_not_tagged(&self) -> Result<Vec<(Track, Option<Mbid>)>> {
         let tracks = self.tracks_where(
             "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",

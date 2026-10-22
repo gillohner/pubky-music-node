@@ -139,6 +139,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE | `/v1/library/suggestions/{id}` | | not this one |
 | PUT | `/v1/library/identify/settings` | `{write_ids}` | "Write IDs into my files" on or off (off by default) |
 | POST | `/v1/library/identify/write` | | write the IDs found so far into the files now (FLAC, WAV, AIFF; tags backed up first): `{written, skipped: [{track_id, path, reason}], backup_dir}` |
+| GET, POST | `/v1/library/tag-fixes` | `?limit=`; POST `{track_ids?}` | GET: what would change per file (`{total, files: [{track_id, title, path, changes: [{key, now, then}]}], cannot}`): separate artists (`ARTISTS`, artist ids) and the IDs of confirmed matches. POST writes them (tags backed up first, audio untouched): `{written, skipped, backup_dir}` |
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |

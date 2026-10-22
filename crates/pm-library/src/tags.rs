@@ -43,6 +43,9 @@ pub struct TagSet {
     pub release_mbid: Option<Mbid>,
     pub release_group_mbid: Option<Mbid>,
     pub artist_mbids: Vec<Mbid>,
+    /// The `ARTISTS` tag (Picard's one value per artist), when the file has it: exact, so it wins
+    /// over splitting the display credit.
+    pub artist_list: Vec<String>,
     pub isrc: Option<Isrc>,
     pub upc: Option<Upc>,
     pub acoustid: Option<String>,
@@ -303,6 +306,9 @@ impl TagSet {
         if !other.artist_mbids.is_empty() {
             self.artist_mbids = other.artist_mbids;
         }
+        if !other.artist_list.is_empty() {
+            self.artist_list = other.artist_list;
+        }
     }
 
     fn set_mbid(slot: &mut Option<Mbid>, value: &str, what: &str) {
@@ -313,7 +319,7 @@ impl TagSet {
     }
 
     fn push_artist_mbid(&mut self, value: &str) {
-        for part in value.split(['/', ';', ',']) {
+        for part in value.split(['/', ';', ',', '\0']) {
             let part = part.trim();
             if part.is_empty() {
                 continue;
@@ -363,6 +369,14 @@ impl TagSet {
                 Self::set_mbid(&mut self.release_group_mbid, value, "release group")
             }
             "musicbrainzartistid" => self.push_artist_mbid(value),
+            "artists" => {
+                for a in value.split(['\0', ';']) {
+                    let a = a.trim();
+                    if !a.is_empty() && !self.artist_list.iter().any(|x| x == a) {
+                        self.artist_list.push(a.to_string());
+                    }
+                }
+            }
             "isrc" => self.set_isrc(value),
             "barcode" | "upc" => self.set_upc(value),
             "acoustidid" => self.acoustid = Some(value.trim().to_string()),

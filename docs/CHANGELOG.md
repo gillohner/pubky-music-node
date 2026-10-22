@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Fix my files' tags** (owner: "a writer that fixes this"). Settings › Library › Check my files lists, file by file, what the node knows that the file doesn't say yet:
+  - each artist on their own (`ARTISTS`, one value per artist, with MusicBrainz artist ids when known);
+  - the MusicBrainz song and album of a confirmed match.
+  "Write into N files" writes them. Each file's touched tags are saved first (`tag-backups` in the node's data folder), the display credit stays as it is, and the audio is never rewritten. FLAC, MP3, WAV and AIFF. API: `GET`/`POST /v1/library/tag-fixes`.
+- The scanner reads `ARTISTS` (Picard's one value per artist) and prefers it over splitting the display credit.
 - **Artists are split** (owner: "here all artists are wrong and not separated"). A credit like "Sefa, Dr. Peacock", "Sefa & Cyclon" or "Dr. Peacock feat. MC Lenny" now names separate artists, so the Artists page shows Sefa, Dr. Peacock, Cyclon and MC Lenny once each, with all their songs.
   - Joiners: `,` `&` `feat.` `ft.` `featuring` ` x ` ` vs ` `/` `;`.
   - Kept whole: an artist MusicBrainz identifies as one, and a short list of well-known acts with such names (Simon & Garfunkel, Earth, Wind & Fire, Tyler, The Creator…).

@@ -57,6 +57,7 @@ pub mod state;
 pub mod streaming;
 pub mod subsonic;
 pub mod sync;
+pub mod tag_fixes;
 pub mod tags;
 pub mod tidal;
 pub mod types;
@@ -250,6 +251,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/identify/settings", put(identify::put_settings))
         .route("/library/identify/write", post(identify::write_now))
+        .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
         .route("/library/suggestions/{id}/accept", post(identify::accept))

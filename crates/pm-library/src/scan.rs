@@ -347,7 +347,9 @@ pub fn track_from_tags(file: AudioFile, t: &TagSet) -> Track {
         });
     // "Sefa, Dr. Peacock" names two artists; a file whose MusicBrainz ids say one artist stays
     // whole (crate::credits)
-    let names: Vec<String> = if t.artist_mbids.len() == 1 && t.artists.len() == 1 {
+    let names: Vec<String> = if !t.artist_list.is_empty() {
+        t.artist_list.clone()
+    } else if t.artist_mbids.len() == 1 && t.artists.len() == 1 {
         t.artists.clone()
     } else {
         crate::credits::split_all(&t.artists)

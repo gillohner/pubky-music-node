@@ -903,3 +903,4 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .np-pubky-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .np-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .np-tags .taginput { width: 160px; }
+.fixlist .set-item .sub { white-space: normal; }

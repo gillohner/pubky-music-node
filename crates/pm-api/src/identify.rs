@@ -98,7 +98,7 @@ fn write_ids_on(s: &NodeState) -> bool {
 }
 
 /// Tag backups live next to the node's other data.
-fn backup_dir(s: &NodeState) -> PathBuf {
+pub(crate) fn backup_dir(s: &NodeState) -> PathBuf {
     s.art_dir
         .parent()
         .map(|p| p.join("tag-backups"))
