@@ -1585,6 +1585,10 @@ pub struct JamendoStatus {
     pub name: Option<String>,
     /// What the Jamendo app's redirect URL must allow (same domain).
     pub redirect_uri: String,
+    /// The app's secret is on this node, so the Jamendo sign-in (likes, favourites) is offered.
+    /// The project's built-in app ships only its client id: no sign-in.
+    #[serde(default)]
+    pub can_sign_in: bool,
 }
 
 // ---- your own Subsonic server as a source (opensubsonic.rs) ----

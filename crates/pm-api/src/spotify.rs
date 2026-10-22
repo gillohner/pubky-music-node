@@ -26,6 +26,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 pub const SOURCE_ID: &str = "spotify";
 const USER_KEY: &str = "spotify.user";
+/// The client id of the owner's own Spotify app, entered in Sources › Spotify (guided setup). No
+/// secret: its sign-in is PKCE through the return page (STEWARD-SHARED-APPS.md).
+pub const APP_KEY: &str = "spotify.app";
 pub const DEFAULT_SCOPES: &str =
     "user-library-read playlist-read-private playlist-read-collaborative user-read-playback-state user-modify-playback-state";
 
@@ -36,8 +39,15 @@ pub struct SpotifyCredentials {
 }
 
 impl SpotifyCredentials {
+    /// An app to sign in with (the client id is enough: PKCE).
     pub fn configured(&self) -> bool {
-        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+        !self.client_id.trim().is_empty()
+    }
+
+    /// The app's secret is on this node (`[spotify]`): catalogue reads without a signed-in user
+    /// (client credentials) need it, and its sign-in comes straight back to the node.
+    pub fn has_secret(&self) -> bool {
+        !self.client_secret.trim().is_empty()
     }
 }
 
@@ -94,6 +104,12 @@ pub struct SpotifyStatus {
     pub product: Option<String>,
     pub redirect_uri: String,
     pub requested_scopes: String,
+    /// Where the app comes from: `config` (node.toml, with its secret) or `settings` (the guided
+    /// setup: a client id only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,8 +156,33 @@ fn endpoints(s: &NodeState) -> SpotifyEndpoints {
     s.spotify.read().expect("spotify endpoints").clone()
 }
 
+/// The app from the node config, else the client id entered in Sources › Spotify.
 fn creds(s: &NodeState) -> SpotifyCredentials {
-    endpoints(s).creds
+    let c = endpoints(s).creds;
+    if c.configured() {
+        return c;
+    }
+    SpotifyCredentials {
+        client_id: settings_app(s).unwrap_or_default(),
+        client_secret: String::new(),
+    }
+}
+
+fn settings_app(s: &NodeState) -> Option<String> {
+    let lib = s.library.lock().expect("library poisoned");
+    lib.get_setting(APP_KEY)
+        .ok()
+        .flatten()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// Where the app comes from: `config`, `settings` or nowhere yet.
+fn app_from(s: &NodeState) -> Option<&'static str> {
+    if endpoints(s).creds.configured() {
+        Some("config")
+    } else {
+        settings_app(s).map(|_| "settings")
+    }
 }
 
 fn api_base(s: &NodeState) -> String {
@@ -152,8 +193,20 @@ fn accounts_base(s: &NodeState) -> String {
     endpoints(s).accounts_base.trim_end_matches('/').to_string()
 }
 
-pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+/// The node's own callback.
+fn callback_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
     format!("{}/spotify/callback", crate::tidal::external_base(s, headers))
+}
+
+/// The redirect URI the app must list: the node's callback for an app with its secret in the
+/// config, else the return page, which forwards to the node named in `state` (one fixed URI for
+/// any node address, a LAN one included, and Spotify takes only https or a loopback address).
+pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+    if creds(s).has_secret() {
+        callback_uri(s, headers)
+    } else {
+        s.return_page()
+    }
 }
 
 /// Pending sign-ins: state → (PKCE verifier, redirect URI used).
@@ -172,7 +225,7 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
     if !c.configured() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "Spotify is not configured: add [spotify] client_id and client_secret (PM_SPOTIFY_CLIENT_ID/SECRET)",
+            "Spotify is not set up on this node: Sources › Spotify",
         ));
     }
     let body = {
@@ -180,17 +233,20 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
         for (k, v) in form {
             ser.append_pair(k, v);
         }
+        // A public client names itself in the form
+        if !c.has_secret() && !form.iter().any(|(k, _)| *k == "client_id") {
+            ser.append_pair("client_id", &c.client_id);
+        }
         ser.finish()
     };
-    let resp = s
+    let mut req = s
         .http_client()
         .post(format!("{}/api/token", accounts_base(s)))
-        .basic_auth(&c.client_id, Some(&c.client_secret))
-        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(upstream)?;
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if c.has_secret() {
+        req = req.basic_auth(&c.client_id, Some(&c.client_secret));
+    }
+    let resp = req.body(body).send().await.map_err(upstream)?;
     let status = resp.status();
     let v: Value = resp.json().await.map_err(upstream)?;
     if !status.is_success() {
@@ -211,6 +267,13 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
         if exp - now_unix() > 60 {
             return Ok(t);
         }
+    }
+    if !creds(s).has_secret() {
+        // Client credentials need the secret, and an app set up here has none
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "Sign in to Spotify on this node to search it (Sources › Spotify)",
+        ));
     }
     let v = token_request(s, &[("grant_type", "client_credentials")]).await?;
     let token = v["access_token"]
@@ -484,20 +547,25 @@ impl StreamingService for Spotify {
     }
 
     fn unified(&self, s: &NodeState) -> bool {
-        creds(s).configured()
+        // Without the app's secret, the catalogue answers a signed-in user only
+        let c = creds(s);
+        c.configured() && (c.has_secret() || load_user(s).is_some())
     }
 
     fn info(&self, s: &NodeState) -> SourceInfo {
-        let c = creds(s).configured();
+        let app = creds(s);
+        let c = app.configured();
         let u = load_user(s);
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "Spotify".into(),
             description: "Catalogue with ISRC/UPC, your library and playlists imported by ISRC, playback on your Spotify Connect devices (no audio enters the node: DRM)".into(),
             status: if !c {
-                "not configured: add [spotify] client_id and client_secret".into()
+                "not configured: set up your Spotify app under Sources › Spotify".into()
             } else if u.is_some() {
                 "signed in".into()
+            } else if !app.has_secret() {
+                "needs sign-in".into()
             } else {
                 "ready (sign in for your library and devices)".into()
             },
@@ -642,19 +710,26 @@ pub(crate) async fn login(
     if !c.configured() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "Spotify is not configured: add [spotify] client_id and client_secret",
+            "Spotify is not set up on this node: Sources › Spotify",
         ));
     }
     use sha2::Digest;
     let verifier = random_urlsafe(48);
     let challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let state = random_urlsafe(24);
+    let nonce = random_urlsafe(24);
     let redirect = redirect_uri(&s, &headers);
+    // Without the secret the sign-in returns through the static page, which forwards to the
+    // callback named in `state`; the verifier never leaves the node.
+    let state = if c.has_secret() {
+        nonce.clone()
+    } else {
+        crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
+    };
     pending()
         .lock()
         .expect("pending")
-        .insert(state.clone(), (verifier, redirect.clone()));
+        .insert(nonce, (verifier, redirect.clone()));
     let mut url = url::Url::parse(&format!("{}/authorize", accounts_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -703,7 +778,7 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (verifier, redirect) = pending()
         .lock()
         .expect("pending")
-        .remove(&state)
+        .remove(crate::project_apps::state_nonce(&state))
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
     let c = creds(s);
     let v = token_request(
@@ -753,7 +828,50 @@ pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> Spo
         product: u.as_ref().and_then(|u| u.product.clone()),
         redirect_uri: redirect_uri(s, headers),
         requested_scopes: DEFAULT_SCOPES.into(),
+        app_from: app_from(s).map(str::to_string),
+        client_id: Some(creds(s).client_id).filter(|c| !c.is_empty()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AppUpdate {
+    /// The app's client id (32 hex characters); empty forgets it.
+    pub client_id: String,
+}
+
+/// `PUT /v1/sources/spotify/app {client_id}`: the guided setup's one value. A new app signs the
+/// node out of Spotify (a session belongs to the app it was made with).
+pub(crate) async fn set_app(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+    Json(u): Json<AppUpdate>,
+) -> ApiResult<SpotifyStatus> {
+    if endpoints(&s).creds.configured() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "This node's Spotify app is set in its config ([spotify]); change it there",
+        ));
+    }
+    let id = u.client_id.trim();
+    if !id.is_empty() && !(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(ApiError::bad_request(
+            "A Spotify client ID is 32 letters and digits (0-9, a-f): copy it from your app's Settings",
+        ));
+    }
+    if settings_app(&s).as_deref() != Some(id) {
+        store_user(&s, None)?;
+        *app_token_cache().lock().expect("app token") = None;
+    }
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        if id.is_empty() {
+            lib.delete_setting(APP_KEY)?;
+        } else {
+            lib.set_setting(APP_KEY, &id.to_ascii_lowercase())?;
+        }
+    }
+    crate::search::forget_answers();
+    Ok(Json(status_view(&s, &headers)))
 }
 
 pub(crate) async fn status(

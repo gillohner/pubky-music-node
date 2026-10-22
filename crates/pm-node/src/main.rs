@@ -194,7 +194,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             // An empty config falls back to the project's built-in apps (ids only, no secrets)
             tidal: if cfg.tidal.client_id.trim().is_empty() {
                 pm_api::tidal::TidalCredentials {
-                    client_id: pm_api::project_apps::tidal_client_id().unwrap_or_default().to_string(),
+                    client_id: pm_api::project_apps::tidal_client_id()
+                        .unwrap_or_default()
+                        .to_string(),
                     client_secret: String::new(),
                     scopes: cfg.tidal.scopes.clone(),
                 }
@@ -215,7 +217,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
                     .filter(|k| !k.trim().is_empty())
                     .unwrap_or_else(|| cfg.acoustid.api_key.clone());
                 if own.trim().is_empty() {
-                    pm_api::project_apps::acoustid_key().unwrap_or_default().to_string()
+                    pm_api::project_apps::acoustid_key()
+                        .unwrap_or_default()
+                        .to_string()
                 } else {
                     own
                 }
@@ -224,7 +228,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
                 let id = env_or("PM_JAMENDO_CLIENT_ID", &cfg.jamendo.client_id);
                 if id.trim().is_empty() {
                     pm_api::jamendo::JamendoCredentials {
-                        client_id: pm_api::project_apps::jamendo_client_id().unwrap_or_default().to_string(),
+                        client_id: pm_api::project_apps::jamendo_client_id()
+                            .unwrap_or_default()
+                            .to_string(),
                         client_secret: String::new(),
                     }
                 } else {
@@ -343,7 +349,12 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     state.set_return_page(&cfg.auth.return_page);
     // Tests point TIDAL at a mock (tools/ui-tidal-login.js); never needed in use
     {
-        let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let var = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
         let mut t = state.tidal.write().expect("tidal endpoints");
         if let Some(v) = var("PM_TIDAL_AUTH_BASE") {
             t.auth_base = v;

@@ -51,11 +51,6 @@ impl TidalCredentials {
         !self.client_secret.trim().is_empty()
     }
 
-    /// The project's built-in app: its sign-in returns through the static return page.
-    pub fn is_project_app(&self) -> bool {
-        crate::project_apps::tidal_client_id().is_some_and(|id| id == self.client_id.trim())
-    }
-
     pub fn scopes(&self) -> String {
         let s = self.scopes.split_whitespace().collect::<Vec<_>>().join(" ");
         if s.is_empty() {
@@ -208,8 +203,19 @@ pub(crate) fn external_base(s: &NodeState, headers: &axum::http::HeaderMap) -> S
     }
 }
 
-pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+/// The node's own callback.
+fn callback_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
     format!("{}/tidal/callback", external_base(s, headers))
+}
+
+/// The redirect URI the app lists: the node's callback for an app with its secret here, else
+/// (the project's built-in app, or any app without its secret) the return page.
+pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
+    if creds(s).has_secret() {
+        callback_uri(s, headers)
+    } else {
+        s.return_page()
+    }
 }
 
 // ---- tokens ----
@@ -438,7 +444,9 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         }
         Err((status, answer)) => {
             record_refresh_probe(s, "refused", &format!("{status}: {answer}"));
-            return Err(upstream(format!("TIDAL refused to renew the sign-in ({status}): {answer}")));
+            return Err(upstream(format!(
+                "TIDAL refused to renew the sign-in ({status}): {answer}"
+            )));
         }
     };
     let fresh = session_from(&v, Some(&u))?;
@@ -670,7 +678,7 @@ impl StreamingService for Tidal {
 
     fn info(&self, s: &NodeState) -> SourceInfo {
         let status = if !creds(s).configured() {
-            "not set up on this node".to_string()
+            "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()
         } else if load_user(s).is_some() {
             "ready".to_string()
         } else {
@@ -1018,14 +1026,14 @@ pub(crate) async fn login(
     let challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
     let nonce = random_urlsafe(24);
-    let callback = redirect_uri(&s, &headers);
-    // The project's app returns through the static page, which forwards to the callback named in
-    // `state`; the node's own app comes straight back. The verifier never leaves the node.
-    let (redirect, state) = if c.is_project_app() {
-        let page = s.return_page();
-        (page, crate::project_apps::return_state(&nonce, &callback))
+    // Without the secret (the project's app) the sign-in returns through the static page, which
+    // forwards to the callback named in `state`; an app with its secret here comes straight back.
+    // The verifier never leaves the node.
+    let redirect = redirect_uri(&s, &headers);
+    let state = if c.has_secret() {
+        nonce.clone()
     } else {
-        (callback, nonce.clone())
+        crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
     };
     pending()
         .lock()
@@ -1117,14 +1125,20 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     // same code goes again with the secret when this node has one.
     let v = match token_request_public(s, &form).await {
         Ok(v) => {
-            record_public_probe(s, "accepted", "the code exchange worked without the client secret");
+            record_public_probe(
+                s,
+                "accepted",
+                "the code exchange worked without the client secret",
+            );
             v
         }
         Err((status, answer)) => {
             tracing::warn!(status, %answer, "TIDAL refused the code exchange without the client secret");
             record_public_probe(s, "refused", &format!("{status}: {answer}"));
             if !c.has_secret() {
-                return Err(upstream(format!("TIDAL refused the sign-in ({status}): {answer}")));
+                return Err(upstream(format!(
+                    "TIDAL refused the sign-in ({status}): {answer}"
+                )));
             }
             token_request(s, &form).await?
         }
