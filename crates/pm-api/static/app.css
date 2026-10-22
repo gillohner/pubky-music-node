@@ -927,3 +927,7 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .chip.tag.tag-link { border-style: dashed; padding-left: 6px; }
 .chip.tag .chipx .ic { width: 12px; height: 12px; vertical-align: -1px; }
 .tagrow select.input { width: auto; padding: 4px 8px; font-size: 12px; height: auto; }
+/* Shuffle and repeat beside the transport: quieter than play, the accent when repeat is on */
+.transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
+.transport .mode-btn:hover { color: var(--fg); }
+.transport .mode-btn.on { color: var(--accent-strong); }

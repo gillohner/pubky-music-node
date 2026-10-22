@@ -71,9 +71,11 @@
     </div>
     <div class="player-center">
       <div class="transport">
+        <button class="icon-btn mode-btn" id="shufflebtn" aria-label="Shuffle what comes next" title="Shuffle what comes next"><svg class="ic"><use href="#i-shuffle"/></svg></button>
         <button class="icon-btn" id="prev" aria-label="Previous"><svg class="ic"><use href="#i-prev"/></svg></button>
         <button class="icon-btn play" id="toggle" aria-label="Play"><svg class="ic"><use href="#i-play"/></svg></button>
         <button class="icon-btn" id="next" aria-label="Next"><svg class="ic"><use href="#i-next"/></svg></button>
+        <button class="icon-btn mode-btn" id="repeatbtn" aria-label="Repeat: off" aria-pressed="false" title="Repeat: off"><svg class="ic"><use href="#i-repeat"/></svg></button>
       </div>
       <div class="seek">
         <span class="time" id="pos">0:00</span>
@@ -148,6 +150,8 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="i-playnext" viewBox="0 0 24 24"><path d="M4 6h10M4 12h7M4 18h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m15 11 5 3-5 3z" fill="currentColor"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18" cy="12" r="1.7" fill="currentColor"/></symbol>
+    <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 3.5 20 6.5l-3 3M4 11.5v-1a4 4 0 0 1 4-4h12M7 20.5l-3-3 3-3M20 12.5v1a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-repeat-one" viewBox="0 0 24 24"><path d="M17 3.5 20 6.5l-3 3M4 11.5v-1a4 4 0 0 1 4-4h12M7 20.5l-3-3 3-3M20 12.5v1a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M11.2 10.6 12.6 9.8v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M4 7h3.5l4 5-4 5H4M20 7h-3.5l-2.2 2.75M20 17h-3.5l-2.2-2.75M17.5 4.5 20 7l-2.5 2.5M17.5 14.5 20 17l-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>

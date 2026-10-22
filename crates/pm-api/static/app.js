@@ -104,6 +104,25 @@
   };
   const setFill = (el) => { const min = +el.min || 0; const max = +el.max || 1; el.style.setProperty('--fill', `${((el.value - min) / (max - min)) * 100}%`); };
 
+  // Errors in people's words: what happened and what to do, in one line. The node's own wording
+  // passes through; raw service answers ("…answered 403 Forbidden: …") are translated, and the raw
+  // text stays on the error as `raw` (UX review: wording leaks internals).
+  const SVC_WORDS = { tidal: 'TIDAL', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
+  const humanError = (raw, path = '') => {
+    const text = String(raw || '');
+    const svcKey = (/^\/sources\/([a-z]+)/.exec(path) || /^([a-z]+): /.exec(text) || [])[1];
+    const who = SVC_WORDS[svcKey] || (svcKey ? svcKey[0].toUpperCase() + svcKey.slice(1) : 'The service');
+    const where = svcKey && SVC_WORDS[svcKey] && svcKey !== 'pubky' && svcKey !== 'pinakes' ? ' · Sources' : '';
+    if (/premium/i.test(text)) return `${who} needs a Premium plan for this${where}.`;
+    if (/answered 401|unauthori[sz]ed|invalid[_ ]token|token (has )?expired/i.test(text)) return `${who} wants you to sign in again${where}.`;
+    if (/answered 403|forbidden/i.test(text)) return `${who} refused this request (your plan or region may not include it)${where}.`;
+    if (/answered 404|not found/i.test(text) && /answered/.test(text)) return `${who} doesn't have this any more.`;
+    if (/answered 429|rate.?limit|too many requests/i.test(text)) return `${who} is busy; try again in a minute.`;
+    if (/answered 5\d\d|bad gateway|service unavailable/i.test(text)) return `${who} isn't answering right now; try again later.`;
+    if (/timed? ?out|deadline/i.test(text)) return `${who} took too long to answer; try again.`;
+    if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
+    return text;
+  };
   const api = async (method, path, body) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
@@ -119,7 +138,7 @@
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
-    if (!r.ok) throw new Error(json && json.error ? json.error : `HTTP ${r.status}`);
+    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; const err = new Error(humanError(raw, path)); err.raw = raw; throw err; }
     return json;
   };
 
@@ -383,7 +402,13 @@
     audio.addEventListener('play', () => { try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ignore */ } });
     audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
   }
-  audio.addEventListener('ended', () => browserPlay(state.browserIndex + 1));
+  // The end of a song in this browser: repeat one plays it again, repeat all wraps to the start
+  audio.addEventListener('ended', () => {
+    const r = browserRepeat();
+    if (r === 'one') return browserPlay(state.browserIndex);
+    if (r === 'all' && state.browserIndex + 1 >= state.browserQueue.length) return browserPlay(0);
+    browserPlay(state.browserIndex + 1);
+  });
   // A stream that breaks off mid-song (a dropped connection) picks up where it was, once
   audio.addEventListener('error', () => {
     const i = state.browserIndex; const at = audio.currentTime;
@@ -457,6 +482,30 @@
     if (!$('#nowplaying').hidden) renderNowPlaying();
   };
 
+  // Repeat (off → all → one) for the zone in use; this browser keeps its own choice
+  const REPEATS = ['off', 'all', 'one'];
+  const browserRepeat = () => { try { return localStorage.getItem('pm.repeat') || 'off'; } catch { return 'off'; } };
+  const zoneRepeat = () => (isBrowser() ? browserRepeat() : (state.zones[state.zone] || {}).repeat || 'off');
+  const renderModes = () => {
+    const r = zoneRepeat(); const b = $('#repeatbtn'); if (!b) return;
+    const words = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r];
+    b.innerHTML = icon(r === 'one' ? 'repeat-one' : 'repeat'); b.classList.toggle('on', r !== 'off');
+    b.setAttribute('aria-pressed', String(r !== 'off')); b.setAttribute('aria-label', words); b.title = words;
+  };
+  $('#repeatbtn').onclick = async () => {
+    const next = REPEATS[(REPEATS.indexOf(zoneRepeat()) + 1) % REPEATS.length];
+    if (isBrowser()) { try { localStorage.setItem('pm.repeat', next); } catch { /* no storage */ } renderModes(); return; }
+    try { const st = await api('PUT', `/zones/${state.zone}/repeat`, { repeat: next }); if (st && st.id) state.zones[st.id] = st; else if (state.zones[state.zone]) state.zones[state.zone].repeat = next; renderModes(); } catch (e) { toast(e.message, 'error'); }
+  };
+  $('#shufflebtn').onclick = async () => {
+    if (isBrowser()) {
+      const q = state.browserQueue; const i = state.browserIndex;
+      const rest = q.slice(i + 1); if (rest.length < 2) { toast('Nothing to shuffle: add more songs to the queue first'); return; }
+      for (let k = rest.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [rest[k], rest[j]] = [rest[j], rest[k]]; }
+      state.browserQueue = [...q.slice(0, i + 1), ...rest]; toast('Shuffled what comes next'); if (state.view === 'queue') render(); return;
+    }
+    try { await api('POST', `/zones/${state.zone}/shuffle`); toast('Shuffled what comes next'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+  };
   $('#toggle').onclick = () => transport({ action: 'toggle' });
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
@@ -577,7 +626,7 @@
     $$('#main .track[data-tid]').forEach((r) => r.classList.toggle('cur', r.dataset.tid === id));
   };
   const renderBar = () => {
-    markPlaying();
+    markPlaying(); renderModes();
     const z = currentZone(); const np = z && z.now_playing;
     const playing = z && z.transport === 'playing';
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
@@ -1399,8 +1448,8 @@
       else body = `<div class="list">${items.slice(0, 10).map((h, k) => `<div class="list-row clickable" data-sother="${kind}:${k}">${svcBadge(h.sources[0])}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${icon('external')}</div>`).join('')}</div>`;
       sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}</section>`);
     }
-    const short = (e) => { const m = String(e || '').replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
-    const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
+    const short = (e, src) => { const m = humanError(String(e || ''), `/sources/${src}`).replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
+    const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error, src))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     box.innerHTML = notes + (nothing ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     // Bind: rows and tiles use the shared components.

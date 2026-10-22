@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Repeat and shuffle in the player bar** (UX review #1).
+  - Repeat cycles off → the whole queue → this song. It's per zone, and "This browser" keeps its own choice.
+  - Shuffle mixes what comes next; the playing song stays.
+- **Errors in plain words** (UX review #5). A service's raw answer ("/search answered 403 Forbidden: Active premium subscription required…") becomes one line that says what happened and what to do ("Spotify needs a Premium plan for this · Sources"). Sign-in, busy, down, timeout and unreachable cases are covered too. The node's own messages pass through as they are.
 - **Song pages are one source each, with the others one click away** (owner: "page is always streamer specific but has linking to the rest"; STEWARD-UX-INSTANCES items 1–3 and 5).
   - **A page is one instance:** the library file (`/song/lib-5`) or the service's track (`/song/deezer-105304346`, `/song/tidal-…`, `/song/spotify-…`, readable instead of base64). Its Play plays that instance.
   - A generic link (`/song/isrc-…`, `/song/mb-…`) opens the first source in your Play from order that has the song, and the address follows.
