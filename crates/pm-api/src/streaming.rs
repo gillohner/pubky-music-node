@@ -104,6 +104,15 @@ pub(crate) async fn set_enabled(
     }))
 }
 
+/// For a source's own routes: 404 "… is turned off on Sources" while it is off.
+pub(crate) fn ensure_on(s: &NodeState, id: &str) -> Result<(), ApiError> {
+    if s.source_enabled(id) {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(format!("{id} is turned off on Sources")))
+    }
+}
+
 /// A source that is switched on, for routes that search or browse it.
 fn find_on(s: &NodeState, id: &str) -> Result<Box<dyn StreamingService>, ApiError> {
     let svc = find(id)?;

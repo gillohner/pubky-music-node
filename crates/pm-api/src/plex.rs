@@ -448,6 +448,7 @@ pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let id = valid_id(&id)?.to_string();
     let srv = server(&s)?;
     let meta = get(&s, &srv, &format!("/library/metadata/{id}"), &[]).await?;
@@ -468,6 +469,7 @@ pub(crate) async fn cover(
     State(s): State<Arc<NodeState>>,
     Path((id, ver)): Path<(String, String)>,
 ) -> Result<axum::response::Response, ApiError> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let (id, ver) = (valid_id(&id)?.to_string(), valid_id(&ver)?.to_string());
     let srv = server(&s)?;
     let url = format!(
@@ -573,6 +575,7 @@ pub(crate) async fn connect(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<PlexConnect>,
 ) -> ApiResult<PlexView> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let url = http_url(&body.url)?;
     let token = body.token.trim();
     if token.is_empty() || token.len() > 200 || !token.bytes().all(|b| b.is_ascii_graphic()) {
@@ -602,6 +605,7 @@ pub struct PlexPin {
 
 /// `POST /v1/sources/plex/pin`: starts "Sign in with Plex".
 pub(crate) async fn start_pin(State(s): State<Arc<NodeState>>) -> ApiResult<PlexPin> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let (cid, tv) = {
         let p = s.plex.read().expect("plex");
         (p.client_id.clone(), p.tv_base.clone())
@@ -663,6 +667,7 @@ pub(crate) async fn poll_pin(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<u64>,
 ) -> ApiResult<PlexPinStatus> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let (cid, tv) = {
         let p = s.plex.read().expect("plex");
         (p.client_id.clone(), p.tv_base.clone())

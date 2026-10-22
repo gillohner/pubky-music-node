@@ -4112,6 +4112,34 @@ mod tests {
         assert!(srcs.to_string().contains("Your audiobooks at"), "{srcs}");
     }
 
+    #[tokio::test]
+    async fn a_source_turned_off_answers_404_on_its_own_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        for (id, method, path) in [
+            ("podcasts", "GET", "/v1/podcasts/subscriptions"),
+            ("radio", "GET", "/v1/radio/tags"),
+            ("plex", "GET", "/v1/sources/plex/stream/1"),
+            ("audiobookshelf", "GET", "/v1/sources/audiobookshelf/continue"),
+        ] {
+            s.set_source_enabled(id, false).unwrap();
+            let (st, v) = call(&app, method, path, None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{path}: {v}");
+            assert!(v.to_string().contains("turned off on Sources"), "{path}: {v}");
+            s.set_source_enabled(id, true).unwrap();
+            if id == "radio" {
+                continue; // on, it asks radio-browser.info: no network in unit tests
+            }
+            let (st, _) = call(&app, method, path, None).await;
+            assert_ne!(st, StatusCode::NOT_FOUND, "{path} works again when on");
+        }
+        // Settings stay readable while off, so the tab can show (and clear) a connection
+        s.set_source_enabled("plex", false).unwrap();
+        let (st, _) = call(&app, "GET", "/v1/sources/plex/server", None).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn jamendo_searches_plays_lossless_and_keeps_the_app_id_to_itself() {
         let flac = std::fs::read(concat!(

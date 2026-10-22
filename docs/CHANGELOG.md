@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Radio, podcasts, Plex and Audiobookshelf respect the Sources on/off switch.** While one is off, its own routes answer 404 "… is turned off on Sources", as search and items already did. Its settings stay readable, so the tab can show or clear a connection. Podcast feed refreshes, podcast positions and Audiobookshelf progress reports pause.
 - **Adding music, and saving without a "Sync now"** (STEWARD-BUNDLED-HOMESERVER.md §7, the plumbing; the UI is the node agent's).
   - **Upload files from the browser:** resumable, a file at a time in 4 MiB chunks; a wrong offset answers with the one to resume from. Content the homeserver already has is not sent again when the page gives its BLAKE3.
   - **Copy from a folder:** an `import` job in the same slot as the other copies, skipping what's already there.

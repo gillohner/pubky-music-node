@@ -445,6 +445,7 @@ pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path((item, ino)): Path<(String, String)>,
 ) -> Result<axum::response::Response, ApiError> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let (item, ino) = (valid_id(&item)?.to_string(), valid_id(&ino)?.to_string());
     let srv = server(&s)?;
     relay(
@@ -460,6 +461,7 @@ pub(crate) async fn cover(
     State(s): State<Arc<NodeState>>,
     Path(item): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let item = valid_id(&item)?.to_string();
     let srv = server(&s)?;
     relay(&s, format!("{}/api/items/{item}/cover", base(&srv)), "image/jpeg").await
@@ -489,6 +491,7 @@ pub(crate) fn locate(book: &Book, at_ms: u64) -> (usize, u64) {
 /// `POST /v1/sources/audiobookshelf/play {zone, item, restart?}`: the whole book into the zone,
 /// from where Audiobookshelf says you left off.
 pub(crate) async fn play(State(s): State<Arc<NodeState>>, Json(b): Json<PlayBook>) -> ApiResult<PlayStarted> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let zone = s
         .zones
         .get(&ZoneId::new(&b.zone))
@@ -559,6 +562,7 @@ pub struct PlayStarted {
 
 /// `GET /v1/sources/audiobookshelf/continue`: the books you are in the middle of.
 pub(crate) async fn in_progress(State(s): State<Arc<NodeState>>) -> ApiResult<SourceResults> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let srv = server(&s)?;
     let v = get(&s, &srv, "/api/me/items-in-progress", &[]).await?;
     Ok(Json(SourceResults {
@@ -578,7 +582,7 @@ pub fn spawn_background(s: &Arc<NodeState>) {
         loop {
             tick.tick().await;
             let Some(s) = weak.upgrade() else { return };
-            if connected(&s) {
+            if connected(&s) && s.source_enabled(SOURCE_ID) {
                 report_positions(&s).await;
             }
         }
@@ -705,6 +709,7 @@ pub(crate) async fn connect(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<AbsConnect>,
 ) -> ApiResult<AbsView> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let url = body.url.trim().trim_end_matches('/').to_string();
     let parsed = url::Url::parse(&url)
         .map_err(|_| ApiError::bad_request("the server address must be an http(s) URL"))?;

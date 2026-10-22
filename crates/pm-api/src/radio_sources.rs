@@ -206,6 +206,7 @@ pub async fn curated(s: &NodeState) -> Vec<Station> {
 
 /// `GET /v1/radio/curated`: SomaFM's channels and Radio Paradise's.
 pub(crate) async fn curated_route(State(s): State<Arc<NodeState>>) -> ApiResult<crate::radio::Stations> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     Ok(Json(crate::radio::Stations {
         stations: curated(&s).await,
     }))
@@ -273,6 +274,7 @@ pub(crate) async fn countries(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<FacetQuery>,
 ) -> ApiResult<Facets> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     Ok(Json(Facets {
         items: facets(&s, "countries", q.limit.unwrap_or(250).clamp(1, 300)).await?,
     }))
@@ -280,6 +282,7 @@ pub(crate) async fn countries(
 
 /// `GET /v1/radio/tags?limit=`: the most used station tags (genres, moods, languages).
 pub(crate) async fn tags(State(s): State<Arc<NodeState>>, Query(q): Query<FacetQuery>) -> ApiResult<Facets> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     Ok(Json(Facets {
         items: facets(&s, "tags", q.limit.unwrap_or(100).clamp(1, 500)).await?,
     }))

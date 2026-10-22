@@ -558,6 +558,7 @@ pub(crate) async fn search(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<SearchQuery>,
 ) -> ApiResult<Shows> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let term = q.q.trim();
     if term.is_empty() {
         return Err(ApiError::bad_request("q is required"));
@@ -609,6 +610,7 @@ pub struct Subscriptions {
 
 /// `GET /v1/podcasts/subscriptions`.
 pub(crate) async fn subscriptions(State(s): State<Arc<NodeState>>) -> ApiResult<Subscriptions> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let prog = progress(&s);
     Ok(Json(Subscriptions {
         subscriptions: feeds(&s).iter().map(|f| summary(f, &prog)).collect(),
@@ -626,6 +628,7 @@ pub(crate) async fn subscribe(
     State(s): State<Arc<NodeState>>,
     Json(b): Json<Subscribe>,
 ) -> ApiResult<Subscription> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let url = feed_from_show_id(&b.feed).unwrap_or_else(|| b.feed.trim().to_string());
     let f = fetch_feed(&s, &url).await?;
     let mut all = feeds(&s);
@@ -641,6 +644,7 @@ pub(crate) async fn unsubscribe(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Subscriptions> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let mut all = feeds(&s);
     let before = all.len();
     all.retain(|f| f.id != id);
@@ -696,6 +700,7 @@ pub(crate) async fn subscription(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<FeedView> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let f = feeds(&s)
         .into_iter()
         .find(|f| f.id == id)
@@ -725,6 +730,7 @@ pub(crate) async fn newest(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<NewQuery>,
 ) -> ApiResult<Episodes> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let prog = progress(&s);
     let mut all: Vec<EpisodeView> = feeds(&s)
         .iter()
@@ -738,6 +744,7 @@ pub(crate) async fn newest(
 
 /// `POST /v1/podcasts/refresh`: fetch every feed again now.
 pub(crate) async fn refresh_route(State(s): State<Arc<NodeState>>) -> ApiResult<Subscriptions> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     refresh_all(&s).await;
     let prog = progress(&s);
     Ok(Json(Subscriptions {
@@ -801,6 +808,7 @@ fn queue_item(f: &Feed, e: &Episode) -> QueueItem {
 
 /// `POST /v1/podcasts/play {zone, episode, restart?}`: play an episode, from where it was left.
 pub(crate) async fn play(State(s): State<Arc<NodeState>>, Json(b): Json<PlayEpisode>) -> ApiResult<Enqueued> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let zone = s
         .zones
         .get(&ZoneId::new(&b.zone))
@@ -840,6 +848,7 @@ pub(crate) async fn set_progress(
     Path(id): Path<String>,
     Json(b): Json<SetProgress>,
 ) -> ApiResult<Progress> {
+    crate::streaming::ensure_on(&s, SOURCE_ID)?;
     find_episode(&s, &id).ok_or_else(|| ApiError::not_found(format!("no episode {id}")))?;
     let mut prog = progress(&s);
     let p = prog.entry(id).or_default();
@@ -867,6 +876,9 @@ pub fn spawn_background(s: &Arc<NodeState>) {
         loop {
             tick.tick().await;
             let Some(s) = weak.upgrade() else { return };
+            if !s.source_enabled(SOURCE_ID) {
+                continue;
+            }
             record_positions(&s);
             if last_refresh.elapsed() >= REFRESH_EVERY && !feeds(&s).is_empty() {
                 last_refresh = std::time::Instant::now();
