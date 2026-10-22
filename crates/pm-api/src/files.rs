@@ -17,6 +17,23 @@ use std::sync::Arc;
 
 /// Remote name for a local file: content hash prefix plus the original name,
 /// so the same file uploaded twice lands on one path.
+/// How fast copies to the homeserver go (bytes per second, 0 = full speed).
+pub const COPY_RATE_KEY: &str = "copy.rate";
+/// The default leaves room on a home uplink (often 20–40 Mbit/s) for the node's pages and the
+/// music it streams to a browser away from home: a full-speed copy starved both (owner, 2026-10-22).
+pub const DEFAULT_COPY_RATE: u64 = 2_500_000;
+
+pub fn copy_rate(s: &NodeState) -> u64 {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(COPY_RATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_COPY_RATE)
+}
+
 pub fn remote_name(bytes: &[u8], local: &Path) -> String {
     let hash = blake3_hex(bytes);
     let name = local
@@ -196,7 +213,19 @@ pub(crate) async fn upload_many(
                     continue;
                 }
             };
-            let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &path));
+            // Hashing a big FLAC is CPU work: off the threads that answer requests
+            let (bytes, remote) = {
+                let p = path.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let r = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &p));
+                    (bytes, r)
+                })
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            };
             if present.contains(&remote) {
                 set(&|j| {
                     j.skipped += 1;
@@ -204,7 +233,11 @@ pub(crate) async fn upload_many(
                 });
                 continue;
             }
-            match sync.upload_private(&remote, bytes).await {
+            let rate = copy_rate(&s2);
+            match sync
+                .upload_private_paced(&remote, bytes, (rate > 0).then_some(rate))
+                .await
+            {
                 Ok(()) => set(&|j| {
                     j.done += 1;
                     j.bytes_done += size;

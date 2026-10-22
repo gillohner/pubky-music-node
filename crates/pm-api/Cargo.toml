@@ -54,6 +54,7 @@ bytes = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tempfile = "3"
 pm-endpoint = { workspace = true }
 id3 = { workspace = true }

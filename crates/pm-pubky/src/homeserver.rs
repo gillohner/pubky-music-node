@@ -365,16 +365,29 @@ impl NodeHomeserver {
         user_z32: &str,
         known: &std::collections::HashSet<String>,
     ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
+        self.read_music_tags_in(user_z32, known, true).await
+    }
+
+    /// The same; `legacy`: also the old `pubky.app/tags/` folder, which once the node has moved
+    /// its tags out holds only other apps' tags (hundreds for an active user: skip it then).
+    pub async fn read_music_tags_in(
+        &self,
+        user_z32: &str,
+        known: &std::collections::HashSet<String>,
+        legacy: bool,
+    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
         let mut out = Vec::new();
         let mut paths = self
             .list_dir(&user, crate::schemas::TAG_DIR, Visibility::Public, None)
             .await
             .unwrap_or_default();
-        paths.extend(
-            self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
-                .await?,
-        );
+        if legacy {
+            paths.extend(
+                self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
+                    .await?,
+            );
+        }
         paths.retain(|p| !known.contains(file_name(p)));
         for (path, bytes) in self.fetch_many(&user, paths, Visibility::Public, None).await? {
             match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
@@ -407,8 +420,8 @@ impl NodeHomeserver {
             .list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
             .await?;
         let (mut moved, mut kept) = (0, 0);
-        for path in legacy {
-            let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
+        // The old folder also holds other apps' tags: read 8 at a time (a node runs this once)
+        for (path, bytes) in self.fetch_many(&user, legacy, Visibility::Public, None).await? {
             let Ok(tag) = serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) else {
                 kept += 1;
                 continue;
@@ -523,6 +536,47 @@ impl NodeHomeserver {
             )));
         }
         session.storage().put(path, bytes).await?;
+        Ok(())
+    }
+
+    /// The same, sent no faster than `bytes_per_sec` (`None`: as fast as the line allows). The
+    /// node's uplink also carries its pages and the music it streams to a browser away from home:
+    /// a copy at full speed starved both (owner, 2026-10-22).
+    pub async fn upload_private_paced(
+        &self,
+        session: &PubkySession,
+        path: &str,
+        bytes: Vec<u8>,
+        bytes_per_sec: Option<u64>,
+    ) -> Result<(), HomeserverError> {
+        let Some(rate) = bytes_per_sec.filter(|r| *r > 0) else {
+            return self.upload_private(session, path, bytes).await;
+        };
+        if !path.starts_with(PRIVATE_FILES_DIR) {
+            return Err(HomeserverError::Transport(format!(
+                "refusing to upload audio outside {PRIVATE_FILES_DIR}: {path}"
+            )));
+        }
+        let len = bytes.len() as u64;
+        let data = bytes::Bytes::from(bytes);
+        let start = tokio::time::Instant::now();
+        const CHUNK: usize = 64 * 1024;
+        let stream = futures_util::stream::unfold(0usize, move |sent| {
+            let data = data.clone();
+            async move {
+                if sent >= data.len() {
+                    return None;
+                }
+                // Wait until this chunk is due at the chosen rate
+                let due = start + std::time::Duration::from_secs_f64(sent as f64 / rate as f64);
+                tokio::time::sleep_until(due).await;
+                let end = (sent + CHUNK).min(data.len());
+                Some((Ok::<_, std::io::Error>(data.slice(sent..end)), end))
+            }
+        });
+        let body = reqwest::Body::wrap_stream(stream);
+        tracing::debug!(path, len, rate, "paced upload");
+        session.storage().put(path, body).await?;
         Ok(())
     }
 

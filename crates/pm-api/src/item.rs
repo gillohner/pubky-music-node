@@ -25,12 +25,11 @@ pub(crate) async fn page(
         let n: i64 = n
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
-        let mut pg = match kind.as_str() {
+        let pg = match kind.as_str() {
             "song" => library_song(&s, n, None).await,
             "album" => library_album(&s, n).await,
             _ => library_artist(&s, n).await,
         }?;
-        extras(&s, &mut pg).await;
         return Ok(Json(pg));
     }
     let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
@@ -49,9 +48,46 @@ pub(crate) async fn page(
             }
         }
     }
-    let mut pg = external(&s, &kind, &id, &url).await;
+    Ok(Json(external(&s, &kind, &id, &url).await))
+}
+
+/// What an item page shows after its main part (related items, an artist's concerts), asked
+/// separately so the page never waits on it: `{related, concerts}`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ItemExtras {
+    pub related: Vec<DiscoverItem>,
+    pub concerts: Vec<DiscoverItem>,
+}
+
+/// Each outside call gets this long; what is not ready is left out.
+const EXTRAS_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// `GET /v1/item/{kind}/{id}/extras`.
+pub(crate) async fn page_extras(
+    State(s): State<Arc<NodeState>>,
+    Path((kind, id)): Path<(String, String)>,
+) -> ApiResult<ItemExtras> {
+    // The facts extras need (the canonical uri, the artist's MusicBrainz id) come from the page,
+    // which is cached by now
+    let pg = if let Some(n) = id.strip_prefix("lib-") {
+        let n: i64 = n
+            .parse()
+            .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
+        match kind.as_str() {
+            "song" => library_song(&s, n, None).await,
+            "album" => library_album(&s, n).await,
+            _ => library_artist(&s, n).await,
+        }?
+    } else {
+        let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
+        external(&s, &kind, &id, &url).await
+    };
+    let mut pg = pg;
     extras(&s, &mut pg).await;
-    Ok(Json(pg))
+    Ok(Json(ItemExtras {
+        related: pg.related,
+        concerts: pg.concerts,
+    }))
 }
 
 /// Sections that appear once Pinakes ships them: related items (announced in
@@ -59,6 +95,7 @@ pub(crate) async fn page(
 /// performer).
 async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) {
     let Some(d) = s.discovery() else { return };
+    let budget = EXTRAS_BUDGET;
     let acc = crate::discover::service_access(s);
     let to_items = |cards: Vec<pm_pubky::pinakes::Card>| -> Vec<DiscoverItem> {
         let lib = s.library.lock().expect("library poisoned");
@@ -68,22 +105,21 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) {
             .map(|c| crate::discover::card_item(&acc, &lib, c))
             .collect()
     };
-    if let Some(card_id) = pg.uri.clone() {
-        if crate::home::pinakes_has_related(s).await {
-            if let Ok(Some(r)) = d.resource_for(&card_id).await {
-                let q = pm_pubky::pinakes::SearchQuery {
-                    related: Some(r.card.id.clone()),
-                    collapse: Some("group".into()),
-                    limit: Some(12),
-                    ..Default::default()
-                };
-                if let Ok(p) = d.pinakes().search(&q).await {
-                    pg.related = to_items(p.items);
-                }
-            }
+    let related = async {
+        let card_id = pg.uri.clone()?;
+        if !crate::home::pinakes_has_related(s).await {
+            return None;
         }
-    }
-    if pg.kind == "artist" {
+        let r = d.resource_for(&card_id).await.ok()??;
+        let q = pm_pubky::pinakes::SearchQuery {
+            related: Some(r.card.id.clone()),
+            collapse: Some("group".into()),
+            limit: Some(12),
+            ..Default::default()
+        };
+        d.pinakes().search(&q).await.ok()
+    };
+    let mbid = if pg.kind == "artist" {
         let mbid = pg
             .uri
             .as_deref()
@@ -99,19 +135,31 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) {
                     })
                     .map(|f| f.value.clone())
             });
-        if let Some(m) = mbid {
-            let q = pm_pubky::pinakes::SearchQuery {
-                key: Some(format!("mbid:{m}")),
-                type_: Some("MusicEvent".into()),
-                from: Some("now".into()),
-                sort: Some("start".into()),
-                limit: Some(6),
-                ..Default::default()
-            };
-            if let Ok(p) = d.pinakes().search(&q).await {
-                pg.concerts = to_items(p.items);
-            }
-        }
+        mbid
+    } else {
+        None
+    };
+    let concerts = async {
+        let q = pm_pubky::pinakes::SearchQuery {
+            key: Some(format!("mbid:{}", mbid?)),
+            type_: Some("MusicEvent".into()),
+            from: Some("now".into()),
+            sort: Some("start".into()),
+            limit: Some(6),
+            ..Default::default()
+        };
+        d.pinakes().search(&q).await.ok()
+    };
+    // Both at once, each within the budget: what is not ready is left out
+    let (related, concerts) = tokio::join!(
+        tokio::time::timeout(budget, related),
+        tokio::time::timeout(budget, concerts)
+    );
+    if let Ok(Some(p)) = related {
+        pg.related = to_items(p.items);
+    }
+    if let Ok(Some(p)) = concerts {
+        pg.concerts = to_items(p.items);
     }
 }
 

@@ -1063,3 +1063,129 @@ async fn one_client_and_a_batched_first_sync() {
         r.pulled
     );
 }
+
+/// A copy to the homeserver must not hold up the rest of the node (owner, 2026-10-22: an artist
+/// page stayed on skeletons and a library FLAC did not play in the browser while 1.1 GB were
+/// copied). While twenty 20 MB files go up, other calls answer quickly and a library file streams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_job_does_not_hold_up_the_node() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    for i in 0..20 {
+        // About 20 MB each: two minutes of 44.1 kHz stereo, noise so nothing compresses it away
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(music.join(format!("{i:02} big.wav")), spec).unwrap();
+        let mut x: u32 = 12345 + i;
+        for _ in 0..(44_100 * 2 * 118) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            w.write_sample((x & 0xffff) as u16 as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+    let mut settings_node = node(dir.path(), "n");
+    let _ = &mut settings_node;
+    let n = settings_node;
+    let app = router(n.clone());
+    let (st, _) = call(
+        &app,
+        "POST",
+        "/v1/library/folders",
+        Some(serde_json::json!({"path": music})),
+    )
+    .await;
+    assert!(st.is_success(), "{st}");
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if !n.is_scanning() {
+            break;
+        }
+    }
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::from_pubky(pubky.clone()),
+        session,
+    ))));
+    // Paced (the default is 2.5 MB/s): here 40 MB/s so the test stays short
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/node/settings",
+        Some(serde_json::json!({"copy_rate": 40_000_000})),
+    )
+    .await;
+    assert!(st.is_success());
+    let copy_started = std::time::Instant::now();
+    let (st, job) = call(
+        &app,
+        "POST",
+        "/v1/pubky/files/upload",
+        Some(serde_json::json!({"all": true})),
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {job}");
+    let id = job["id"].as_str().unwrap().to_string();
+
+    // While it runs: the API and a library file answer quickly
+    let mut slowest = 0u128;
+    let mut rounds = 0;
+    loop {
+        let (_, p) = call(&app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+        if p["finished"].as_bool().unwrap_or(false) {
+            break;
+        }
+        for path in [
+            "/v1/info",
+            "/v1/library/home",
+            "/v1/library/albums?limit=60",
+            "/v1/library/tracks?limit=50",
+            "/v1/health",
+        ] {
+            let t = std::time::Instant::now();
+            let (st, _) = call(&app, "GET", path, None).await;
+            assert!(st.is_success(), "{path}: {st}");
+            slowest = slowest.max(t.elapsed().as_millis());
+        }
+        // The browser player's request: the first megabyte of a library file
+        let t = std::time::Instant::now();
+        let req = Request::builder()
+            .uri("/v1/library/tracks/1/file")
+            .header("range", "bytes=0-1048575")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(!body.is_empty());
+        slowest = slowest.max(t.elapsed().as_millis());
+        rounds += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let (_, p) = call(&app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+    let secs = copy_started.elapsed().as_secs_f64();
+    eprintln!("copy: {} done, {} failed in {secs:.1} s; {rounds} rounds of calls while it ran, slowest {slowest} ms", p["done"], p["failed"]);
+    assert!(
+        secs >= 9.0,
+        "400 MB at 40 MB/s takes at least 10 s, not {secs:.1} s: the pace was not kept"
+    );
+    assert!(rounds > 0, "the copy ended before anything was measured");
+    assert!(slowest < 1000, "a call waited {slowest} ms during the copy");
+}

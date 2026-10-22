@@ -243,6 +243,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/item/candidates", get(item::candidates))
         .route("/item/matches", post(item::confirm_match))
         .route("/item/{kind}/{id}", get(item::page))
+        .route("/item/{kind}/{id}/extras", get(item::page_extras))
         .route(
             "/library/identify",
             get(identify::get_status).post(identify::start),
@@ -1795,6 +1796,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         contact: s.contact(),
         discovery: s.discovery().is_some(),
         jukebox_zone,
+        copy_rate: files::copy_rate(s),
     }
 }
 
@@ -1850,6 +1852,12 @@ async fn update_node_settings(
             .lock()
             .expect("library poisoned")
             .set_setting(subsonic::JUKEBOX_ZONE_KEY, &z)?;
+    }
+    if let Some(r) = req.copy_rate {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(files::COPY_RATE_KEY, &r.to_string())?;
     }
     Ok(Json(settings_view(&s)))
 }

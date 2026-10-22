@@ -428,6 +428,9 @@ pub struct NodeSettingsView {
     /// The zone Subsonic clients drive through `jukeboxControl` (none = first by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jukebox_zone: Option<String>,
+    /// How fast copies to the homeserver go, in bytes per second; 0 = as fast as the line allows.
+    #[serde(default)]
+    pub copy_rate: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -437,6 +440,9 @@ pub struct NodeSettingsUpdate {
     /// Zone id for Subsonic jukebox control; an empty string clears the choice.
     #[serde(default)]
     pub jukebox_zone: Option<String>,
+    /// Bytes per second for copies to the homeserver; 0 = full speed.
+    #[serde(default)]
+    pub copy_rate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

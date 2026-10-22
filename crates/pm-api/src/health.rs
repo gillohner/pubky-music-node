@@ -54,6 +54,22 @@ fn part(id: &str, name: &str, r: Result<u64, String>) -> HealthPart {
     }
 }
 
+fn refresh_in_background(s: &Arc<NodeState>) {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        let parts = probe_all(&s).await;
+        cache()
+            .lock()
+            .expect("health cache")
+            .insert(s.node_id.clone(), (Instant::now(), parts));
+        RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
 async fn probe_all(s: &Arc<NodeState>) -> Vec<HealthPart> {
     let pinakes = s
         .discovery()
@@ -139,9 +155,12 @@ async fn probe_all(s: &Arc<NodeState>) -> Vec<HealthPart> {
 /// `needs_sign_in`. Parts that are not set up are left out.
 pub(crate) async fn health(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<HealthPart>> {
     if let Some((at, parts)) = cache().lock().expect("health cache").get(&s.node_id).cloned() {
-        if at.elapsed() < TTL {
-            return Ok(Json(parts));
+        if at.elapsed() >= TTL {
+            // The last answer now, a fresh look in the background (a cold check took 1.3 s and
+            // held one of the browser's few connections to the node)
+            refresh_in_background(&s);
         }
+        return Ok(Json(parts));
     }
     let parts = probe_all(&s).await;
     cache()

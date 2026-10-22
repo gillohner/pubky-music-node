@@ -106,6 +106,9 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
     });
 }
 
+/// Set once the node has moved its tags out of the old `pubky.app/tags/` folder.
+const TAGS_MOVED: &str = "pubky.tags_moved";
+
 /// What the owner reads when the session cannot reach every folder the node uses.
 pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
 
@@ -207,6 +210,19 @@ impl PubkySync {
         Ok(self.homeserver.list_private_files(&self.session).await?)
     }
 
+    /// The same, no faster than `bytes_per_sec`.
+    pub async fn upload_private_paced(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        bytes_per_sec: Option<u64>,
+    ) -> Result<(), SyncError> {
+        Ok(self
+            .homeserver
+            .upload_private_paced(&self.session, path, bytes, bytes_per_sec)
+            .await?)
+    }
+
     pub async fn upload_private(&self, path: &str, bytes: Vec<u8>) -> Result<(), SyncError> {
         Ok(self.homeserver.upload_private(&self.session, path, bytes).await?)
     }
@@ -298,19 +314,34 @@ impl PubkySync {
         // Tags: public PubkyAppTags under the node's namespace (Nexus indexes
         // tags on external links only there), pushed and pulled the same way.
         // Tags written under pubky.app/tags/ before are moved first.
-        match self.homeserver.migrate_music_tags(&self.session).await {
-            Ok((moved, kept)) if moved > 0 => {
-                tracing::info!(
-                    moved,
-                    kept,
-                    "tags moved to /pub/pubky.music/tags/ so Nexus indexes them"
-                );
-                report.pushed += moved;
+        // Once per node: the old folder is read in full (it holds other apps' tags too), so a
+        // sync that does it every time costs hundreds of requests
+        let mut tags_moved = library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(TAGS_MOVED)?
+            .is_some();
+        if !tags_moved {
+            match self.homeserver.migrate_music_tags(&self.session).await {
+                Ok((moved, kept)) => {
+                    if moved > 0 {
+                        tracing::info!(
+                            moved,
+                            kept,
+                            "tags moved to /pub/pubky.music/tags/ so Nexus indexes them"
+                        );
+                        report.pushed += moved;
+                    }
+                    library
+                        .lock()
+                        .expect("library poisoned")
+                        .set_setting(TAGS_MOVED, &now_micros().to_string())?;
+                    tags_moved = true;
+                }
+                Err(e) => report.errors.push(tag_write_hint(format!(
+                    "moving tags to /pub/pubky.music/tags/: {e}"
+                ))),
             }
-            Ok(_) => {}
-            Err(e) => report.errors.push(tag_write_hint(format!(
-                "moving tags to /pub/pubky.music/tags/: {e}"
-            ))),
         }
         let pending = library.lock().expect("library poisoned").unsynced_tags()?;
         let total = pending.len();
@@ -357,7 +388,7 @@ impl PubkySync {
         let known_tags = library.lock().expect("library poisoned").tag_ids()?;
         match self
             .homeserver
-            .read_music_tags_except(&self.z32, &known_tags)
+            .read_music_tags_in(&self.z32, &known_tags, !tags_moved)
             .await
         {
             Ok(remote_tags) => {

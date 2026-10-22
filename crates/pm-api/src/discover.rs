@@ -1040,7 +1040,8 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             .ok()
             .flatten()
             .and_then(|j| serde_json::from_str::<(i64, ItemContents)>(&j).ok())
-            .filter(|(at, c)| pm_library::db::now_unix() - at < 6 * 3600 && !c.tracks.is_empty())
+            // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s
+            .filter(|(at, c)| pm_library::db::now_unix() - at < 24 * 3600 && !c.tracks.is_empty())
             .map(|(_, c)| c)
     };
     let card = crate::pinakes_reader::card(s, &uri).await;

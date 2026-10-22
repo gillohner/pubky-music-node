@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Syncs stop reading other apps' tags; pages don't wait on extras; copies leave room** (STEWARD-FIX-pubky-signin-speed.md, STEWARD-FIX-artist-page-speed.md).
+  - **Every sync used to reread the old `pubky.app/tags/` folder,** one tag at a time. That folder also holds other apps' tags, about 450 for the owner, and the tag reader then read it again. Tags now move out of it once per node, 8 at a time, and later syncs skip it. Real account, empty library: **first sync 125 s → 9 s**. This also ends the stream of homeserver lookups in the log.
+  - **A copy to the homeserver runs at a set pace,** 2.5 MB/s by default (Settings › Accounts › Copy speed: Gentle, Normal or As fast as possible). The node's uplink also carries its pages and the music it streams to a browser away from home, and a full-speed copy starved both: the artist page sat on skeletons and a library FLAC failed to play. File hashing during a copy moved off the threads that answer requests.
+  - **Testnet:** during a 400 MB copy the other calls answered within 54 ms and a library file streamed; the pace held.
+  - **Item pages answer without their extras:** related items and an artist's concerts come from `GET /v1/item/{kind}/{id}/extras`, both at once, each within 1.5 s, and the page fills them in when they arrive.
+  - A page's contents are kept for a day, in the library, so they survive restarts.
+  - `/v1/health` answers from its last result at once and checks again in the background.
 - **Pubky sign-in is fast** (owner: "pubky sign in is very slow"; STEWARD-FIX-pubky-signin-speed.md). The log of the last sign-in had 957 homeserver lookups after the approval (until about 9 minutes later) and 119 Pubky clients, each with its own DHT node.
   - **One Pubky client for the node's lifetime,** shared by sign-in, session restore, sync, uploads and reads of other people's data. Its homeserver cache is shared too, so repeated lookups are answered from it.
   - **"Signed in" right after approval:** the node record, the settings and the first sync now run in the background. Settings › Accounts shows what the sync is doing, then how long it took (or why it failed).

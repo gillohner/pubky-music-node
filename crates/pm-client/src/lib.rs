@@ -148,6 +148,7 @@ impl NodeClient {
             Some(&NodeSettingsUpdate {
                 contact: None,
                 jukebox_zone: Some(zone.unwrap_or("").to_string()),
+                ..Default::default()
             }),
         )
         .await
@@ -159,7 +160,7 @@ impl NodeClient {
             "node/settings",
             Some(&NodeSettingsUpdate {
                 contact: Some(contact.to_string()),
-                jukebox_zone: None,
+                ..Default::default()
             }),
         )
         .await
