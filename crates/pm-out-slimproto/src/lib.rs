@@ -259,6 +259,13 @@ pub fn parse_stat(data: &[u8]) -> Option<Stat> {
 /// Serve players on `listener`; `on_player` is called once per player (by
 /// MAC) with its output, the first time it connects. A player that connects
 /// again gets the same output back. Blocks; run on a thread.
+/// How often the node asks each player for its status, as LMS does: a player hears from the
+/// server at least this often even when nothing else is sent.
+#[cfg(not(test))]
+pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub fn serve(
     listener: TcpListener,
     server_port: u16,
@@ -328,6 +335,18 @@ fn session(
         reconnected = !new, "slimproto player");
     let generation = output.link().attach(stream);
     output.greet().map_err(|e| SlimError::Protocol(e.to_string()))?;
+    let link = output.link().clone();
+    std::thread::Builder::new()
+        .name(format!("slimproto heartbeat {}", hello.mac_string()))
+        .spawn(move || {
+            let since = std::time::Instant::now();
+            loop {
+                std::thread::sleep(HEARTBEAT);
+                if !link.heartbeat(generation, since.elapsed().as_millis() as u32) {
+                    break;
+                }
+            }
+        })?;
     if new {
         on_player(output.clone());
     }

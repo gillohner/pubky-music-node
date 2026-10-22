@@ -76,6 +76,20 @@ impl Link {
         self.conn.lock().expect("conn").is_some()
     }
 
+    /// A status request (`strm t`, with a timestamp the player echoes) on connection `g`, if it
+    /// is still the current one. Players count a server silent for 35 s as gone (squeezelite:
+    /// "No messages from server - connection dead"), and LMS asks every few seconds. False once
+    /// `g` is replaced or ended.
+    pub(crate) fn heartbeat(&self, g: u64, timestamp_ms: u32) -> bool {
+        let mut c = self.conn.lock().expect("conn");
+        match c.as_mut() {
+            Some((cur, w)) if *cur == g => {
+                write_frame(w, b"strm", &strm(b't', b'0', 16, 44_100, 2, 0, timestamp_ms, "")).is_ok()
+            }
+            _ => false,
+        }
+    }
+
     fn send(&self, op: &[u8; 4], data: &[u8]) -> std::io::Result<()> {
         let mut c = self.conn.lock().expect("conn");
         let Some((_, w)) = c.as_mut() else {
@@ -497,6 +511,41 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
 
+    /// The next frame from the server that is not a heartbeat (`strm t`).
+    fn next_frame(player: &mut TcpStream) -> std::io::Result<([u8; 4], Vec<u8>)> {
+        loop {
+            let (op, data) = read_frame_server(player)?;
+            if !(&op == b"strm" && data.first() == Some(&b't')) {
+                return Ok((op, data));
+            }
+        }
+    }
+
+    /// An idle player still hears from the server (squeezelite gives up after 35 s of silence).
+    #[test]
+    fn idle_players_get_heartbeats() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(|_| {});
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
+        std::thread::spawn(move || crate::serve(listener, 7788, stream_path, on_player).unwrap());
+        let mut player = TcpStream::connect(addr).unwrap();
+        let mut hello = vec![12u8, 0, 0xaa, 0xbb, 0xcc, 0x00, 0x11, 0x33];
+        hello.extend_from_slice(&[0u8; 28]);
+        player.write_all(b"HELO").unwrap();
+        player.write_all(&(hello.len() as u32).to_be_bytes()).unwrap();
+        player.write_all(&hello).unwrap();
+        player.set_read_timeout(Some(crate::HEARTBEAT * 5)).unwrap();
+        let mut beats = Vec::new();
+        while beats.len() < 2 {
+            let (op, data) = read_frame_server(&mut player).unwrap();
+            if &op == b"strm" && data[0] == b't' {
+                beats.push(u32::from_be_bytes([data[14], data[15], data[16], data[17]]));
+            }
+        }
+        assert!(beats[1] > beats[0], "the timestamp moves on: {beats:?}");
+    }
+
     /// A fake squeezelite: connects, sends HELO, then lets the test read
     /// what the server sends.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -523,11 +572,11 @@ mod tests {
         assert!(out.name().starts_with("SqueezeLite"));
         assert_eq!(out.caps().pcm_rates, vec![44_100, 48_000, 88_200, 96_000]);
         // aude first.
-        let (op, data) = read_frame_server(&mut player).unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
         assert_eq!(&op, b"aude");
         assert_eq!(data, vec![1, 1]);
         // Full volume: squeezelite plays silence until it gets one.
-        let (op, data) = read_frame_server(&mut player).unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
         assert_eq!(&op, b"audg");
         assert_eq!(&data[10..14], &FIXED_ONE.to_be_bytes());
 
@@ -539,7 +588,7 @@ mod tests {
             sink.write(&block).unwrap();
             drop(sink);
         });
-        let (op, data) = read_frame_server(&mut player).unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
         assert_eq!(&op, b"strm");
         assert_eq!(&data[0..7], b"s1p2421");
         assert_eq!(&data[18..20], &7788u16.to_be_bytes());
@@ -560,13 +609,13 @@ mod tests {
         let pcm = live.rx.recv().await.unwrap();
         assert_eq!(pcm, vec![1, 0, 0, 0xff, 0xff, 0xff]);
         writer.join().unwrap();
-        let (op, data) = read_frame_server(&mut player).unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
         assert_eq!(&op, b"strm");
         assert_eq!(data[0], b'q');
 
         // Volume: -6 dB ≈ 0.501 in 16.16.
         out.set_volume(Volume::Db(-6.0)).await.unwrap();
-        let (op, data) = read_frame_server(&mut player).unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
         assert_eq!(&op, b"audg");
         let g = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
         assert!((g as f64 / FIXED_ONE as f64 - 0.501).abs() < 0.01, "{g}");
@@ -629,16 +678,16 @@ mod tests {
         again.write_all(b"HELO").unwrap();
         again.write_all(&(hello.len() as u32).to_be_bytes()).unwrap();
         again.write_all(&hello).unwrap();
-        let (op, _) = read_frame_server(&mut again).unwrap();
+        let (op, _) = next_frame(&mut again).unwrap();
         assert_eq!(&op, b"aude");
         // The last volume set (0 dB, while it was away) comes back with the connection.
-        let (op, data) = read_frame_server(&mut again).unwrap();
+        let (op, data) = next_frame(&mut again).unwrap();
         assert_eq!(&op, b"audg");
         assert_eq!(&data[10..14], &FIXED_ONE.to_be_bytes());
         assert!(!out.is_gone());
         assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err());
         out.set_volume(Volume::Db(0.0)).await.unwrap();
-        let (op, _) = read_frame_server(&mut again).unwrap();
+        let (op, _) = next_frame(&mut again).unwrap();
         assert_eq!(&op, b"audg");
     }
 }
