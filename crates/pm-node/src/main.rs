@@ -162,6 +162,10 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     let db_path = cfg.db_path();
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
+    pm_api::tidal_unofficial::set_config_client(
+        &cfg.tidal.unofficial_client_id,
+        &cfg.tidal.unofficial_client_secret,
+    );
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
         tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");

@@ -41,6 +41,8 @@ pub const VERSION: u32 = 1;
 /// Settings that hold sign-ins: only ever in the encrypted part.
 pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("tidal.user", "TIDAL"),
+    ("tidal.unofficial", "TIDAL full tracks"),
+    ("tidal.unofficial_client", "the TIDAL device client"),
     ("spotify.user", "Spotify"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),

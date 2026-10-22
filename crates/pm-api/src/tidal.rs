@@ -61,6 +61,8 @@ pub struct TidalEndpoints {
     pub api_base: String,
     pub auth_base: String,
     pub login_base: String,
+    /// TIDAL's private v1 API (full tracks, unofficial).
+    pub v1_base: String,
 }
 
 impl Default for TidalEndpoints {
@@ -70,6 +72,7 @@ impl Default for TidalEndpoints {
             api_base: "https://openapi.tidal.com/v2".into(),
             auth_base: "https://auth.tidal.com".into(),
             login_base: "https://login.tidal.com".into(),
+            v1_base: "https://api.tidal.com/v1".into(),
         }
     }
 }
@@ -1669,9 +1672,54 @@ pub(crate) async fn stream(
             .find(|(k, _, _, _)| *k == id)
             .map(|(_, _, b, mime)| (b.clone(), mime.clone()))
     };
-    let (bytes, mime) = match cached {
-        Some(c) => c,
-        None => {
+    // Full tracks (unofficial) first when switched on; any trouble falls back to the official
+    // stream (a preview), as on the node
+    let full = if cached.is_none()
+        && crate::tidal_unofficial::load(&s.library.lock().expect("library poisoned")).enabled
+    {
+        let s2 = s.clone();
+        let id2 = id.clone();
+        tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, String)> {
+            use std::io::Read;
+            let ep = endpoints(&s2);
+            let r = crate::tidal_unofficial::open_blocking(&s2.library, &ep, &id2);
+            crate::tidal_unofficial::record(&s2.library, &r);
+            let mut f = match r {
+                Ok(Some(f)) => f,
+                Ok(None) => return None,
+                Err(e) => {
+                    tracing::warn!(track = %id2, "TIDAL full track not available: {e:?}");
+                    return None;
+                }
+            };
+            let mut out = Vec::new();
+            f.reader
+                .by_ref()
+                .take(STREAM_MAX_BYTES as u64)
+                .read_to_end(&mut out)
+                .ok()?;
+            Some((out, f.mime.to_string()))
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    let (bytes, mime) = match (cached, full) {
+        (Some(c), _) => c,
+        (None, Some((b, mime))) => {
+            let bytes = Arc::new(b);
+            let mut c = stream_cache().lock().expect("stream cache");
+            c.retain(|(k, _, _, _)| *k != id);
+            if c.len() >= STREAM_CACHE_ENTRIES {
+                c.remove(0);
+            }
+            c.push((id.clone(), std::time::Instant::now(), bytes.clone(), mime.clone()));
+            tracing::info!(track = %id, bytes = bytes.len(), "TIDAL full track fetched for a browser (unofficial)");
+            (bytes, mime)
+        }
+        (None, None) => {
             let token = user_token(&s).await?.ok_or_else(|| {
                 ApiError::new(
                     StatusCode::PRECONDITION_FAILED,
@@ -1847,6 +1895,24 @@ pub(crate) fn open_track_blocking(
         .read()
         .map_err(|_| err("endpoints poisoned".into()))?
         .clone();
+    // Full tracks (unofficial) first when the owner switched it on; any trouble falls back to the
+    // official path (a preview) and is noted
+    let full = crate::tidal_unofficial::open_blocking(library, &ep, id);
+    crate::tidal_unofficial::record(library, &full);
+    match full {
+        Ok(Some(f)) => {
+            tracing::info!(track = id, "TIDAL full track (unofficial)");
+            if let Ok(lib) = library.lock() {
+                let _ = lib.delete_setting(PLAYBACK_LIMIT_KEY);
+            }
+            return crate::sources::frame_source_from_reader(f.reader, Some(f.ext), &uri);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            track = id,
+            "TIDAL full track not available, playing the official stream: {e:?}"
+        ),
+    }
     if !ep.creds.configured() {
         return Err(err("TIDAL is not configured on this node".into()));
     }

@@ -25,6 +25,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 }
 
 pub mod backup;
+pub mod dash;
 pub mod deezer;
 pub mod discover;
 pub mod events;
@@ -60,6 +61,7 @@ pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
 pub mod tidal;
+pub mod tidal_unofficial;
 pub mod types;
 pub mod watch;
 
@@ -265,6 +267,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
         .route("/sources/tidal/login", get(tidal::login))
         .route("/sources/tidal/status", get(tidal::status))
+        .route(
+            "/sources/tidal/unofficial",
+            get(tidal_unofficial::get_status).put(tidal_unofficial::put),
+        )
+        .route(
+            "/sources/tidal/unofficial/login",
+            post(tidal_unofficial::login).delete(tidal_unofficial::logout),
+        )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))

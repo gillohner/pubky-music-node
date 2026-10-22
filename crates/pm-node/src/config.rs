@@ -86,7 +86,7 @@ pub struct SpotifyConfig {
     pub client_secret: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TidalConfig {
     pub client_id: String,
@@ -95,6 +95,23 @@ pub struct TidalConfig {
     /// (user.read collection.read collection.write playlists.read playlists.write playback
     /// entitlements.read search.read). Every scope must be enabled on the developer app.
     pub scopes: String,
+    /// Full tracks (unofficial): a TIDAL device client id and secret for the device sign-in.
+    /// Settings › Sources › TIDAL can set or override them.
+    pub unofficial_client_id: String,
+    pub unofficial_client_secret: String,
+}
+
+impl std::fmt::Debug for TidalConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |v: &str| if v.is_empty() { "" } else { "<set>" };
+        f.debug_struct("TidalConfig")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &set(&self.client_secret))
+            .field("scopes", &self.scopes)
+            .field("unofficial_client_id", &set(&self.unofficial_client_id))
+            .field("unofficial_client_secret", &set(&self.unofficial_client_secret))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
