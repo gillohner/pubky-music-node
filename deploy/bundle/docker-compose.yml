@@ -103,10 +103,13 @@ services:
       PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
       PM_HOMESERVER_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}
       PM_TUNNEL_DIR: "/tunnel"
+      # The homeserver's own files, read-only: the owner's music there is a library folder.
+      PM_HOMESERVER_FILES_DIR: "/homeserver/data/files"
       RUST_LOG: "info"
     volumes:
       - music-node:/data
       - cloudflare:/tunnel
+      - ${HOMESERVER_DATA:-homeserver}:/homeserver:ro
       - ${MUSIC_DIR:-./music}:/music:ro
     depends_on:
       homeserver:

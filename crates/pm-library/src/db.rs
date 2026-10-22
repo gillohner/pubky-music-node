@@ -1954,6 +1954,21 @@ impl Library {
         Ok(v)
     }
 
+    /// Tracks and bytes of the present files under `root` (a library folder), for the storage
+    /// status line.
+    pub fn folder_totals(&self, root: &Path) -> Result<(u64, u64)> {
+        let mut prefix = root.to_string_lossy().to_string();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE missing = 0 AND path LIKE ?1 ESCAPE '\\'",
+            params![format!("{}%", like_escape(&prefix))],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )?)
+    }
+
     // ----- scanner support ----------------------------------------------
 
     pub fn file_by_path(&self, path: &Path) -> Result<Option<FileRow>> {

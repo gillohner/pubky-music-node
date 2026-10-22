@@ -44,6 +44,9 @@ pub struct HomeserverConfig {
     /// The folder shared with cloudflared and the config wrapper (`PM_TUNNEL_DIR`); empty = no
     /// tunnel setup from Settings.
     pub tunnel_dir: String,
+    /// The bundled homeserver's files folder, mounted read-only (`PM_HOMESERVER_FILES_DIR`): its
+    /// music becomes a library folder.
+    pub files_dir: String,
 }
 
 impl std::fmt::Debug for HomeserverConfig {
@@ -59,6 +62,7 @@ impl std::fmt::Debug for HomeserverConfig {
                 },
             )
             .field("tunnel_dir", &self.tunnel_dir)
+            .field("files_dir", &self.files_dir)
             .finish()
     }
 }

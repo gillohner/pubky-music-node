@@ -295,3 +295,202 @@ async fn invites_become_people_with_quotas_and_access() {
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "no quota for an account elsewhere");
 }
+
+async fn put_bytes(app: &axum::Router, uri: &str, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Signs a fresh owner up on the bundled homeserver, as the first test does.
+async fn signed_up_owner(app: &axum::Router) -> String {
+    let (_, started) = call(app, "POST", "/v1/homeserver/bundled/owner-signup").await;
+    let url = started["url"].as_str().unwrap().to_string();
+    let hs = param(&url, "hs").unwrap();
+    let token = param(&url, "st").unwrap();
+    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    signer
+        .signup(&PublicKey::try_from(hs.as_str()).unwrap(), Some(&token))
+        .await
+        .unwrap();
+    signer.approve_auth(&url).await.unwrap();
+    for _ in 0..60 {
+        let (_, v) = call(app, "GET", "/v1/pubky/login").await;
+        if v["status"] == "signed_in" {
+            return signer.public_key().z32();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("the owner did not get signed in");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn music_added_to_the_homeserver_plays_from_its_own_folder() {
+    let (Some(ep), Ok(files)) = (bundled(), std::env::var("PM_BUNDLED_HS_FILES")) else {
+        eprintln!("skipped: set PM_BUNDLED_HS_ADMIN, PM_BUNDLED_HS_PASSWORD and PM_BUNDLED_HS_FILES");
+        return;
+    };
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pm-audio/tests/fixtures");
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    s.set_bundled_homeserver(ep);
+    s.set_homeserver_files_dir(std::path::PathBuf::from(&files));
+    let app = router(s.clone());
+    let owner = signed_up_owner(&app).await;
+
+    // Upload one file in two chunks, with a wrong offset on the way
+    let flac = std::fs::read(fixtures.join("60_mono_audio.flac")).unwrap();
+    let (st, up) = call_json(&app, "POST", "/v1/library/uploads",
+        serde_json::json!({"name": "Mono Song.flac", "size": flac.len(), "relative_path": "Tests/Mono Song.flac"})).await;
+    assert_eq!(st, StatusCode::OK, "{up}");
+    let id = up["id"].as_str().unwrap().to_string();
+    let half = flac.len() / 2;
+    let (st, v) = put_bytes(
+        &app,
+        &format!("/v1/library/uploads/{id}?offset=0"),
+        flac[..half].to_vec(),
+    )
+    .await;
+    assert_eq!((st, v["offset"].as_u64()), (StatusCode::OK, Some(half as u64)));
+    let (st, v) = put_bytes(
+        &app,
+        &format!("/v1/library/uploads/{id}?offset=0"),
+        flac[half..].to_vec(),
+    )
+    .await;
+    assert_eq!(
+        (st, v["offset"].as_u64()),
+        (StatusCode::CONFLICT, Some(half as u64)),
+        "resume from the node's offset"
+    );
+    let (st, _) = put_bytes(
+        &app,
+        &format!("/v1/library/uploads/{id}?offset={half}"),
+        flac[half..].to_vec(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let mut stored = serde_json::Value::Null;
+    for _ in 0..100 {
+        let (_, v) = call(&app, "GET", &format!("/v1/library/uploads/{id}")).await;
+        if v["state"] == "stored" || v["state"] == "failed" {
+            stored = v;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(stored["state"], "stored", "{stored}");
+    let remote = stored["stored_as"].as_str().unwrap();
+    assert!(
+        remote.starts_with("/priv/pubky.music/files/") && remote.ends_with("-Mono_Song.flac"),
+        "{remote}"
+    );
+    // It is on the homeserver's disk, and that folder is now a library folder
+    let on_disk = std::path::Path::new(&files)
+        .join(&owner)
+        .join(remote.trim_start_matches('/'));
+    assert_eq!(
+        std::fs::read(&on_disk).unwrap(),
+        flac,
+        "byte-identical in the homeserver's storage"
+    );
+    let (_, folders) = call(&app, "GET", "/v1/library/folders").await;
+    assert!(folders.to_string().contains(&owner), "{folders}");
+
+    // The same content again: nothing sent
+    let hash = blake3::hash(&flac).to_hex().to_string();
+    let (_, again) = call_json(
+        &app,
+        "POST",
+        "/v1/library/uploads",
+        serde_json::json!({"name": "Copy.flac", "size": flac.len(), "blake3": hash}),
+    )
+    .await;
+    assert_eq!(again["already"], true, "{again}");
+
+    // Copy a folder: the file already there is skipped, the new one sent
+    let src = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures.join("60_mono_audio.flac"),
+        src.path().join("01 Mono.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures.join("14_wasted_bits.flac"),
+        src.path().join("02 Wasted.flac"),
+    )
+    .unwrap();
+    std::fs::write(src.path().join("cover.txt"), b"not audio").unwrap();
+    let (_, dry) = call_json(
+        &app,
+        "POST",
+        "/v1/library/imports",
+        serde_json::json!({"path": src.path(), "dry_run": true}),
+    )
+    .await;
+    assert_eq!(dry["total"], 2, "{dry}");
+    let (st, job) = call_json(
+        &app,
+        "POST",
+        "/v1/library/imports",
+        serde_json::json!({"path": src.path()}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{job}");
+    let jid = job["id"].as_str().unwrap().to_string();
+    let mut done = serde_json::Value::Null;
+    for _ in 0..150 {
+        let (_, v) = call(&app, "GET", &format!("/v1/pubky/files/upload/{jid}")).await;
+        if v["finished"] == true {
+            done = v;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        (
+            done["done"].as_u64(),
+            done["skipped"].as_u64(),
+            done["failed"].as_u64()
+        ),
+        (Some(1), Some(1), Some(0)),
+        "{done}"
+    );
+
+    // The library scans the homeserver's folder: both songs, counted on the status line
+    let mut st_v = serde_json::Value::Null;
+    for _ in 0..100 {
+        let (_, v) = call(&app, "GET", "/v1/storage").await;
+        if v["music"]["on_homeserver"]["tracks"].as_u64() == Some(2) {
+            st_v = v;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if st_v.is_null() {
+        let (_, v) = call(&app, "GET", "/v1/storage").await;
+        let (_, f) = call(&app, "GET", "/v1/library/folders").await;
+        let (_, t) = call(&app, "GET", "/v1/library/tracks").await;
+        panic!(
+            "status {v}\nfolders {f}\ntracks {}",
+            t.to_string().chars().take(600).collect::<String>()
+        );
+    }
+    assert_eq!(st_v["music"]["on_homeserver"]["tracks"], 2, "{st_v}");
+    assert_eq!(st_v["homeserver"]["mode"], "bundled");
+    assert!(st_v["homeserver"]["used_bytes"].as_u64().unwrap() >= flac.len() as u64);
+    assert!(
+        ["saved", "saving"].contains(&st_v["saving"]["state"].as_str().unwrap()),
+        "{st_v}"
+    );
+}

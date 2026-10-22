@@ -308,6 +308,11 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     if !tunnel_dir.trim().is_empty() {
         state.set_tunnel_dir(PathBuf::from(tunnel_dir.trim()));
     }
+    let files_dir = env_or("PM_HOMESERVER_FILES_DIR", &cfg.homeserver.files_dir);
+    if !files_dir.trim().is_empty() {
+        state.set_homeserver_files_dir(PathBuf::from(files_dir.trim()));
+    }
+    pm_api::storage::spawn_autosave(&state);
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     pm_api::backup::start_schedule(&state);
     pm_api::podcasts::spawn_background(&state);

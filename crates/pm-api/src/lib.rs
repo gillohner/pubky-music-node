@@ -25,6 +25,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
     }
 }
 
+pub mod add_music;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bundled;
@@ -62,6 +63,7 @@ pub mod shared;
 pub mod sources;
 pub mod spotify;
 pub mod state;
+pub mod storage;
 pub mod streaming;
 pub mod subsonic;
 pub mod sync;
@@ -452,6 +454,17 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/remote/tunnel",
             get(tunnel::status).put(tunnel::setup).delete(tunnel::remove),
         )
+        .route("/storage", get(storage::status))
+        .route("/storage/save", post(storage::save))
+        .route("/library/uploads", get(add_music::list).post(add_music::start))
+        .route(
+            "/library/uploads/{id}",
+            get(add_music::get)
+                .put(add_music::put_chunk)
+                .delete(add_music::cancel)
+                .layer(axum::extract::DefaultBodyLimit::max(add_music::CHUNK_LIMIT)),
+        )
+        .route("/library/imports", post(add_music::import))
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(

@@ -78,6 +78,12 @@ pub struct NodeState {
     bundled_homeserver: std::sync::OnceLock<crate::bundled::AdminEndpoint>,
     /// The folder shared with cloudflared and the homeserver config wrapper (deploy/bundle).
     tunnel_dir: std::sync::OnceLock<PathBuf>,
+    /// The bundled homeserver's files folder, mounted read-only (`<dir>/<user>/<path>`).
+    homeserver_files_dir: std::sync::OnceLock<PathBuf>,
+    /// What auto-save last did (storage.rs).
+    pub storage_save: Mutex<crate::storage::SaveState>,
+    /// Uploads from the browser (add_music.rs).
+    pub music_uploads: crate::add_music::Uploads,
     /// The background sync after a sign-in (or a restore), for the page.
     pub sync_activity: Mutex<crate::types::SyncActivity>,
     /// What the last scan did (shown when it ends, and in Settings).
@@ -378,6 +384,9 @@ impl NodeState {
             pubky_client: std::sync::OnceLock::new(),
             bundled_homeserver: std::sync::OnceLock::new(),
             tunnel_dir: std::sync::OnceLock::new(),
+            homeserver_files_dir: std::sync::OnceLock::new(),
+            storage_save: Mutex::new(Default::default()),
+            music_uploads: Default::default(),
             sync_activity: Mutex::new(Default::default()),
             last_scan: Mutex::new(None),
         })
@@ -1266,6 +1275,23 @@ impl NodeState {
 
     pub fn tunnel_dir(&self) -> Option<&std::path::Path> {
         self.tunnel_dir.get().map(PathBuf::as_path)
+    }
+
+    /// Set once at start with the bundled homeserver's files folder (`PM_HOMESERVER_FILES_DIR`).
+    pub fn set_homeserver_files_dir(&self, dir: PathBuf) {
+        let _ = self.homeserver_files_dir.set(dir);
+    }
+
+    pub fn homeserver_files_dir(&self) -> Option<&std::path::Path> {
+        self.homeserver_files_dir.get().map(PathBuf::as_path)
+    }
+
+    /// The node's data folder (where the library database lives).
+    pub fn data_dir(&self) -> PathBuf {
+        self.db_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     pub fn set_config_file(&self, path: Option<PathBuf>) {

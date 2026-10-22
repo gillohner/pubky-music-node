@@ -199,12 +199,15 @@ jobs:
         run: |
           ./setup.sh
           sed -i 's/^PM_TAG=.*/PM_TAG=ci/' .env && echo PM_IMAGE=pubky-music-node >> .env
+          # The homeserver's data in a folder the tests on the runner can read
+          echo "HOMESERVER_DATA=$PWD/hsdata" >> .env
           mkdir -p music
           docker compose up -d
       - run: python3 -I tools/bundle-check.py deploy/bundle
-      - name: the owner signs up on the bundled homeserver (a test signer stands in for Pubky Ring)
+      - name: owner sign-up, people, adding music (a test signer stands in for Pubky Ring)
         run: |
           export PM_BUNDLED_HS_ADMIN=http://127.0.0.1:6288
+          export PM_BUNDLED_HS_FILES=$PWD/deploy/bundle/hsdata/data/files
           PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
           cargo test -p pm-api --test bundled_homeserver
       - if: failure()
