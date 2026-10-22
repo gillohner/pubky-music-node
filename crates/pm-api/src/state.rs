@@ -76,6 +76,8 @@ pub struct NodeState {
     pubky_client: std::sync::OnceLock<pm_pubky::homeserver::NodeHomeserver>,
     /// The homeserver bundled with the node (deploy/bundle), managed through its admin API.
     bundled_homeserver: std::sync::OnceLock<crate::bundled::AdminEndpoint>,
+    /// The folder shared with cloudflared and the homeserver config wrapper (deploy/bundle).
+    tunnel_dir: std::sync::OnceLock<PathBuf>,
     /// The background sync after a sign-in (or a restore), for the page.
     pub sync_activity: Mutex<crate::types::SyncActivity>,
     /// What the last scan did (shown when it ends, and in Settings).
@@ -375,6 +377,7 @@ impl NodeState {
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
             bundled_homeserver: std::sync::OnceLock::new(),
+            tunnel_dir: std::sync::OnceLock::new(),
             sync_activity: Mutex::new(Default::default()),
             last_scan: Mutex::new(None),
         })
@@ -1254,6 +1257,15 @@ impl NodeState {
 
     pub fn bundled_homeserver(&self) -> Option<&crate::bundled::AdminEndpoint> {
         self.bundled_homeserver.get()
+    }
+
+    /// Set once at start when the install shares a tunnel folder (`PM_TUNNEL_DIR`).
+    pub fn set_tunnel_dir(&self, dir: PathBuf) {
+        let _ = self.tunnel_dir.set(dir);
+    }
+
+    pub fn tunnel_dir(&self) -> Option<&std::path::Path> {
+        self.tunnel_dir.get().map(PathBuf::as_path)
     }
 
     pub fn set_config_file(&self, path: Option<PathBuf>) {

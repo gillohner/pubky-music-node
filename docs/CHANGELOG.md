@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Remote access through a Cloudflare Tunnel, from Settings** (STEWARD-BUNDLED-HOMESERVER.md, step 4). With the bundled install, `PUT /v1/remote/tunnel` takes a tunnel token and two hostnames, one for the homeserver and one for the music node. The node saves them in the folder it shares with cloudflared (which reads the token with `--token-file`) and Pubky's config wrapper, which then publishes the homeserver's hostname on 443. The homeserver needs one restart, and the node shows the command; it can't restart containers itself without root on the host. `GET /v1/remote/tunnel?check=1` then checks the published record and both hostnames over HTTPS. The token is never returned or logged. Checked end to end here: the wrapper picked up the saved hostname, two real Cloudflare quick tunnels reached the homeserver and the node, and after the restart the record pointed at the tunnel. A real token from the owner's account is still to try (QUESTIONS.md).
 - **People on the node and its homeserver** (STEWARD-BUNDLED-HOMESERVER.md, step 3, first part). `/v1/people` invites someone and picks what they get:
   - **Homeserver only:** a Pubky account on the bundled homeserver with a storage quota.
   - **Homeserver + music:** the same, plus this node's music service.

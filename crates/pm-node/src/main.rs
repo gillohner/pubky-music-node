@@ -304,6 +304,10 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tracing::info!(admin = %ep.url, "bundled homeserver");
         state.set_bundled_homeserver(ep);
     }
+    let tunnel_dir = env_or("PM_TUNNEL_DIR", &cfg.homeserver.tunnel_dir);
+    if !tunnel_dir.trim().is_empty() {
+        state.set_tunnel_dir(PathBuf::from(tunnel_dir.trim()));
+    }
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     pm_api::backup::start_schedule(&state);
     pm_api::podcasts::spawn_background(&state);

@@ -3,7 +3,7 @@
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends libasound2t64 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 1001 -g audio -d /data pm
+    && (userdel -r ubuntu 2>/dev/null || true) && useradd -r -u 1000 -g audio -d /data pm
 COPY pm-node /usr/local/bin/pm-node
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/pm-node && mkdir -p /data /music && chown pm:audio /data

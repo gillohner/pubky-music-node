@@ -41,6 +41,9 @@ pub struct NodeConfig {
 pub struct HomeserverConfig {
     pub admin_url: String,
     pub admin_password: String,
+    /// The folder shared with cloudflared and the config wrapper (`PM_TUNNEL_DIR`); empty = no
+    /// tunnel setup from Settings.
+    pub tunnel_dir: String,
 }
 
 impl std::fmt::Debug for HomeserverConfig {
@@ -55,6 +58,7 @@ impl std::fmt::Debug for HomeserverConfig {
                     "<set>"
                 },
             )
+            .field("tunnel_dir", &self.tunnel_dir)
             .finish()
     }
 }

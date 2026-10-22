@@ -69,6 +69,7 @@ pub mod tag_fixes;
 pub mod tags;
 pub mod tidal;
 pub mod tidal_unofficial;
+pub mod tunnel;
 pub mod types;
 pub mod watch;
 pub mod youtube;
@@ -447,6 +448,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/tags", get(radio_sources::tags))
         .route("/homeserver/bundled", get(bundled::status))
         .route("/homeserver/bundled/owner-signup", post(bundled::owner_signup))
+        .route(
+            "/remote/tunnel",
+            get(tunnel::status).put(tunnel::setup).delete(tunnel::remove),
+        )
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(
@@ -3743,6 +3748,54 @@ mod tests {
             .get_setting("jellyfin.server")
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn tunnel_settings_go_into_the_shared_folder_and_out_again() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let tun = dir.path().join("tunnel");
+        std::fs::create_dir_all(&tun).unwrap();
+        s.set_tunnel_dir(tun.clone());
+        let app = router(s.clone());
+        let tok = base64::engine::general_purpose::STANDARD.encode(
+            r#"{"a":"0123456789abcdef","t":"6ff42ae2-765d-4adf-8112-31c55c1551ef","s":"c2VjcmV0c2VjcmV0"}"#,
+        );
+        let (st, _) = call(&app, "PUT", "/v1/remote/tunnel", Some(serde_json::json!({"token": tok, "homeserver_domain": "hs.example.org", "music_hostname": "hs.example.org"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "two different hostnames");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/remote/tunnel",
+            Some(serde_json::json!({"token": "abc", "homeserver_domain": "hs.example.org"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "not a tunnel token");
+        let (st, v) = call(&app, "PUT", "/v1/remote/tunnel", Some(serde_json::json!({"token": tok, "homeserver_domain": "HS.example.org", "music_hostname": "music.example.org"}))).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            (
+                v["configured"].as_bool(),
+                v["homeserver_domain"].as_str(),
+                v["music_hostname"].as_str()
+            ),
+            (Some(true), Some("hs.example.org"), Some("music.example.org"))
+        );
+        assert!(!v.to_string().contains(&tok), "never the token");
+        assert_eq!(std::fs::read_to_string(tun.join("token")).unwrap().trim(), tok);
+        assert_eq!(
+            std::fs::read_to_string(tun.join("domain")).unwrap().trim(),
+            "hs.example.org"
+        );
+        let (_, v) = call(&app, "DELETE", "/v1/remote/tunnel", None).await;
+        assert_eq!(v["configured"], false);
+        assert!(!tun.join("token").exists() && !tun.join("domain").exists());
+        // Without a tunnel folder the install has no tunnel setup
+        let other = tempfile::tempdir().unwrap();
+        let s2 = state(other.path(), None).await;
+        let (_, v) = call(&router(s2), "GET", "/v1/remote/tunnel", None).await;
+        assert_eq!(v["available"], false);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

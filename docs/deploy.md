@@ -54,12 +54,29 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
 - **Storage:** users' files are under the homeserver's data volume. Set `HOMESERVER_DATA` to a
   folder on the big disk (e.g. `/mnt/tank/pubky-homeserver`) before the first start. Quotas are
   per user.
-- **Reachable from outside:** set `HOMESERVER_DOMAIN` to a public hostname and either run the
-  `tunnel` profile with `CLOUDFLARE_TUNNEL_TOKEN` (send that hostname to `http://localhost:6286`
-  and a second one to the node at `http://localhost:7788` in the tunnel's settings), or put your
-  own reverse proxy (Caddy) on 443 in front of 6286. The homeserver then publishes the domain on
-  443, and Pubky clients use HTTPS through it. Without a domain the homeserver publishes the LAN
-  address, so Pubky Ring on the same network can sign up.
+- **Reachable from outside, option A: Cloudflare Tunnel.** No open ports and no static IP.
+  1. In Cloudflare Zero Trust → Networks → Tunnels, create a tunnel. Under its public hostnames,
+     send one hostname to `http://localhost:6286` (the homeserver) and another to
+     `http://localhost:7788` (the node).
+  2. In the node's Settings › Remote access (`PUT /v1/remote/tunnel`), paste the tunnel's token and
+     the two hostnames. The node saves them in the folder it shares with cloudflared and the
+     homeserver's config wrapper.
+  3. Start cloudflared once with `docker compose --profile tunnel up -d`. It then picks up the token
+     by itself.
+  4. Restart the homeserver once (the node shows the command:
+     `docker compose up -d --force-recreate homeserver-config homeserver`). The node can't do this
+     itself without Docker's socket, which would mean root on the host.
+
+  After that the homeserver publishes its hostname on 443, and Pubky clients use HTTPS through it.
+  Settings checks the published record and both hostnames over HTTPS
+  (`GET /v1/remote/tunnel?check=1`). Pubky TLS (6287) doesn't cross a tunnel; clients don't need
+  it then.
+- **Option B: your own domain.** You need a static IP, ports 80, 443 and 6287 forwarded, and Caddy
+  on 443 in front of `127.0.0.1:6286` (and the node). Set `HOMESERVER_DOMAIN` in `.env` and
+  `PUBLIC_IP` to the static IP. The homeserver publishes the domain on 443, and Pubky TLS on 6287
+  answers directly.
+- **No domain:** the homeserver publishes the LAN address, so Pubky Ring on the same network can
+  sign up.
 - **What the operator can see:** whoever runs the homeserver can read every account's files,
   including `/priv` (it is access-controlled, not encrypted from the operator). That is fine when
   the operator is you; tell anyone you invite.

@@ -34,6 +34,14 @@ services:
 
   # Renders /data/config.toml on first start (token-required signups, the database, the admin
   # password) and on every start points the published address at the domain, if one is set.
+  # One-shot: lets the node (uid 1000) write the tunnel folder it shares with cloudflared and the
+  # config wrapper (Settings › Remote access saves the token and the homeserver's hostname there).
+  tunnel-folder:
+    image: alpine:3.22@sha256:d406446bc05b82480756ce8f1287964d28768c23955fa9480d2a74a2eae7a654
+    command: ["sh", "-c", "chown 1000 /tunnel && chmod 755 /tunnel"]
+    volumes:
+      - cloudflare:/tunnel
+
   homeserver-config:
     image: synonymsoft/homeserver-umbrel-config-wrapper:v0.0.8@sha256:23d2ba85fa07e61a9d87550179910d85a03cd49b6532b62c584d9b4e8ba2eb14
     restart: on-failure
@@ -50,6 +58,9 @@ services:
     volumes:
       - ${HOMESERVER_DATA:-homeserver}:/data
       - cloudflare:/etc/pubky-cloudflare
+    depends_on:
+      tunnel-folder:
+        condition: service_completed_successfully
 
   homeserver:
     image: synonymsoft/homeserver:v0.16.2@sha256:b357fecec481a37c8af40a7ed70562871a587ecb5bfd251a6e95330f1e61c7df
@@ -91,9 +102,11 @@ services:
       PM_FOLDERS: "/music"
       PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
       PM_HOMESERVER_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}
+      PM_TUNNEL_DIR: "/tunnel"
       RUST_LOG: "info"
     volumes:
       - music-node:/data
+      - cloudflare:/tunnel
       - ${MUSIC_DIR:-./music}:/music:ro
     depends_on:
       homeserver:
@@ -121,9 +134,11 @@ services:
       homeserver:
         condition: service_healthy
 
-  # Cloudflare Tunnel (a token from Cloudflare Zero Trust → Networks → Tunnels). In the tunnel's
-  # public hostnames, send the music hostname to http://localhost:7788 and HOMESERVER_DOMAIN to
+  # Cloudflare Tunnel (a token from Cloudflare Zero Trust → Networks → Tunnels). Save it in the
+  # node's Settings › Remote access, or put it in .env as CLOUDFLARE_TUNNEL_TOKEN. In the tunnel's
+  # public hostnames, send the music hostname to http://localhost:7788 and the homeserver's to
   # http://localhost:6286. Only HTTP crosses a tunnel; Pubky clients then use HTTPS via the domain.
+  # Until a token exists this container exits and retries, as in Pubky's Umbrel app.
   cloudflared:
     profiles: ["tunnel"]
     image: cloudflare/cloudflared:2026.5.2@sha256:12ff5c6992a9863db4da270746af7c244bcaee49353039af8104268a18d6c4f0
@@ -131,8 +146,11 @@ services:
     network_mode: host
     command: tunnel --no-autoupdate run
     environment:
-      # Compose resolves every variable even for profiles that are off, so this one is optional here.
+      # Compose resolves every variable even for profiles that are off, so this one is optional.
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      TUNNEL_TOKEN_FILE: /etc/pubky-cloudflare/token
+    volumes:
+      - cloudflare:/etc/pubky-cloudflare:ro
 
 volumes:
   postgres:
