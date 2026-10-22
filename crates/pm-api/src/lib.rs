@@ -343,6 +343,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             post(qobuz::login).delete(qobuz::logout),
         )
         .route(
+            "/sources/youtube/key",
+            get(youtube::get_key).put(youtube::put_key),
+        )
+        .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
                 .put(opensubsonic::set_server)
@@ -3179,7 +3183,11 @@ mod tests {
             .clone();
         assert_eq!(yt["status"], "browser");
         let (st, _) = call(&app, "GET", "/v1/sources/youtube/search?q=x", None).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            st,
+            StatusCode::PRECONDITION_FAILED,
+            "search needs the owner's key"
+        );
         assert!(!crate::search::sources_for(&s, "everywhere").contains(&"youtube".to_string()));
         let err = s
             .sources
@@ -7210,6 +7218,86 @@ mod tests {
             (q["enabled"].clone(), q["health"].clone()),
             (serde_json::json!(true), serde_json::Value::Null)
         );
+    }
+
+    /// YouTube search with the owner's own Data API key: the key is checked before it is kept,
+    /// never comes back, and search finds music videos that play in This browser.
+    #[tokio::test]
+    async fn youtube_search_uses_the_owners_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
+        let good = "AIzaSyD-ci-key-0123456789abcdefghijklmn";
+        let mock = Router::new()
+            .route("/videos", get(move |Query(q): Q| async move {
+                if q["key"] != good {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"message": "API key not valid.", "errors": [{"reason": "keyInvalid"}]}})));
+                }
+                (StatusCode::OK, Json(serde_json::json!({"items": [{"id": "5NV6Rdv1a3I", "snippet": {"title": "Daft Punk - Get Lucky (Official Audio) ft. Pharrell Williams, Nile Rodgers", "channelTitle": "Daft Punk - Topic", "publishedAt": "2013-05-17T00:00:00Z", "thumbnails": {"high": {"url": "https://i.ytimg.com/vi/5NV6Rdv1a3I/hq.jpg"}}}, "contentDetails": {"duration": "PT6M10S"}}]})))
+            }))
+            .route("/search", get(move |Query(q): Q| async move {
+                assert_eq!((q["type"].as_str(), q["videoCategoryId"].as_str(), q["key"].as_str()), ("video", "10", good));
+                Json(serde_json::json!({"items": [{"id": {"kind": "youtube#video", "videoId": "5NV6Rdv1a3I"}, "snippet": {"title": "Daft Punk &amp; Pharrell - Get Lucky", "channelTitle": "Daft Punk - Topic", "publishedAt": "2013-05-17T00:00:00Z", "thumbnails": {"high": {"url": "https://i.ytimg.com/vi/5NV6Rdv1a3I/hq.jpg"}}}}]}))
+            }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        youtube::set_api_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(&app, "GET", "/v1/sources/youtube/search?q=get%20lucky", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "no key, no search");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/youtube/key",
+            Some(serde_json::json!({"key": "AIzaSyD-wrong-key-0123456789abcdefghijk"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a key YouTube refuses is not kept");
+        let (st, k) = call(
+            &app,
+            "PUT",
+            "/v1/sources/youtube/key",
+            Some(serde_json::json!({"key": good})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(k, serde_json::json!({"set": true}), "the key never comes back");
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let yt = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "youtube")
+            .unwrap()
+            .clone();
+        assert_eq!(yt["status"], "browser + search");
+        let (st, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/youtube/search?q=get%20lucky&limit=5",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let hit = &r["items"][0];
+        assert_eq!(hit["title"], "Daft Punk & Pharrell - Get Lucky");
+        assert_eq!(hit["creator"], "Daft Punk", "a Topic channel is the artist");
+        assert_eq!(hit["uri"], "youtube:video:5NV6Rdv1a3I");
+        assert_eq!(hit["duration_ms"], 370_000);
+        let (st, it) = call(&app, "GET", "/v1/sources/youtube/items/video:5NV6Rdv1a3I", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(it["tracks"][0]["url"], "youtube:video:5NV6Rdv1a3I");
+        // Never in the everyday search (quota)
+        assert!(!streaming::find("youtube").unwrap().unified(&s));
+        let (_, k) = call(
+            &app,
+            "PUT",
+            "/v1/sources/youtube/key",
+            Some(serde_json::json!({"key": ""})),
+        )
+        .await;
+        assert_eq!(k["set"], false);
     }
 
     #[tokio::test]
