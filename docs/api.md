@@ -68,6 +68,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/plex/pin/{id}` | | `{status: waiting\|connected\|expired, server}`; once approved the node picks your server (your own first) and the first connection that answers (local, then remote, then relay), and keeps that server's token only |
 | GET | `/v1/sources/plex/search`, `/v1/sources/plex/items/{track:<id>\|album:<id>}` | | Plex as a source; songs queue as `plex:track:<ratingKey>` |
 | GET | `/v1/sources/plex/stream/{id}`, `/v1/sources/plex/cover/{id}/{version}` | | the original file and the cover, relayed so the token stays in the node |
+| GET / PUT / DELETE | `/v1/sources/audiobookshelf/server` | PUT: `{url, api_key}` or `{url, user, password}` | `{connected, url, user, version}`, never the key. With a password, an admin's sign-in makes the node its own API key ("Pubky Music node") and ends the session; other users get 403 (only admins make keys). 401 when refused. DELETE forgets the server and deletes the key the node made |
+| GET | `/v1/sources/audiobookshelf/search`, `/v1/sources/audiobookshelf/items/book:<id>` | | audiobooks from every book library; a book's tracks are its files (`audiobookshelf:file:<item>/<ino>`), titled by chapter |
+| POST | `/v1/sources/audiobookshelf/play` | `{zone, item, restart?}` | `{ids, index, position_ms}`: the whole book into the zone from Audiobookshelf's saved position. While a zone plays a book, the node reports the position back every 10 s |
+| GET | `/v1/sources/audiobookshelf/continue` | | `{items}`: the books you are in the middle of |
+| GET | `/v1/sources/audiobookshelf/stream/{item}/{ino}`, `/v1/sources/audiobookshelf/cover/{item}` | | the original file and the cover, relayed so the key stays in the node |
 | GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
 | POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |

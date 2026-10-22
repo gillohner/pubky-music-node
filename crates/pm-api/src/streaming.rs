@@ -42,6 +42,7 @@ pub fn services() -> Vec<Box<dyn StreamingService>> {
         Box::new(crate::plex::PlexSource),
         Box::new(crate::podcasts::Podcasts),
         Box::new(crate::radio_sources::Radio),
+        Box::new(crate::audiobookshelf::Audiobookshelf),
     ]
 }
 

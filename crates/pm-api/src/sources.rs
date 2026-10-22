@@ -33,6 +33,8 @@ pub struct NodeSources {
     jellyfin: crate::jellyfin::Shared,
     /// The user's Plex, for `plex:track:` URIs.
     plex: crate::plex::Shared,
+    /// The user's Audiobookshelf, for `audiobookshelf:file:` URIs.
+    audiobookshelf: crate::audiobookshelf::Shared,
 }
 
 impl NodeSources {
@@ -47,6 +49,7 @@ impl NodeSources {
         opensubsonic: crate::opensubsonic::Shared,
         jellyfin: crate::jellyfin::Shared,
         plex: crate::plex::Shared,
+        audiobookshelf: crate::audiobookshelf::Shared,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -70,6 +73,7 @@ impl NodeSources {
             opensubsonic,
             jellyfin,
             plex,
+            audiobookshelf,
         }
     }
 
@@ -534,6 +538,9 @@ impl SourceFactory for NodeSources {
         }
         if let Some(id) = item.uri.strip_prefix(crate::plex::TRACK_URI_PREFIX) {
             return crate::plex::open_track_blocking(&self.plex, id);
+        }
+        if let Some(rest) = item.uri.strip_prefix(crate::audiobookshelf::TRACK_URI_PREFIX) {
+            return crate::audiobookshelf::open_track_blocking(&self.audiobookshelf, rest);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

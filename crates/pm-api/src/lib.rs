@@ -25,6 +25,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
     }
 }
 
+pub mod audiobookshelf;
 pub mod backup;
 pub mod deezer;
 pub mod discover;
@@ -349,6 +350,22 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/plex/pin/{id}", get(plex::poll_pin))
         .route("/sources/plex/stream/{id}", get(plex::stream))
         .route("/sources/plex/cover/{id}/{ver}", get(plex::cover))
+        .route(
+            "/sources/audiobookshelf/server",
+            get(audiobookshelf::get_server)
+                .put(audiobookshelf::connect)
+                .delete(audiobookshelf::disconnect),
+        )
+        .route("/sources/audiobookshelf/play", post(audiobookshelf::play))
+        .route(
+            "/sources/audiobookshelf/continue",
+            get(audiobookshelf::in_progress),
+        )
+        .route(
+            "/sources/audiobookshelf/stream/{item}/{ino}",
+            get(audiobookshelf::stream),
+        )
+        .route("/sources/audiobookshelf/cover/{item}", get(audiobookshelf::cover))
         .route("/sources/jellyfin/playlists", get(jellyfin::playlists))
         .route(
             "/sources/jellyfin/playlists/{id}/import",
@@ -3634,6 +3651,85 @@ mod tests {
             .get_setting("plex.server")
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audiobookshelf_asks_non_admins_for_a_key_and_ends_the_session() {
+        let logouts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let lo = logouts.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route("/status", get(|| async { Json(serde_json::json!({"app": "audiobookshelf", "serverVersion": "2.37.1"})) }))
+            .route(
+                "/login",
+                post(|h: axum::http::HeaderMap| async move {
+                    assert_eq!(h["x-return-tokens"], "true");
+                    Json(serde_json::json!({"user": {"id": "u2", "username": "kid", "type": "user", "accessToken": "eyJACCESS", "refreshToken": "eyJREFRESH"}}))
+                }),
+            )
+            .route(
+                "/logout",
+                post(move |h: axum::http::HeaderMap| {
+                    let lo = lo.clone();
+                    async move {
+                        assert_eq!(h["x-refresh-token"], "eyJREFRESH");
+                        lo.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/api/me",
+                get(|h: axum::http::HeaderMap| async move {
+                    if h["authorization"] != "Bearer KEY1" {
+                        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({"username": "kid", "type": "user"})))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let url = format!("http://127.0.0.1:{port}");
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/sources/audiobookshelf/server",
+            Some(serde_json::json!({"url": url, "user": "kid", "password": "pw"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(v.to_string().contains("API Keys"), "{v}");
+        assert_eq!(
+            logouts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the session is ended"
+        );
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/audiobookshelf/server",
+            Some(serde_json::json!({"url": url, "api_key": "WRONG"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/sources/audiobookshelf/server",
+            Some(serde_json::json!({"url": url, "api_key": "KEY1"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            (v["connected"].as_bool(), v["user"].as_str()),
+            (Some(true), Some("kid"))
+        );
+        assert!(!v.to_string().contains("KEY1"));
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(srcs.to_string().contains("Your audiobooks at"), "{srcs}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

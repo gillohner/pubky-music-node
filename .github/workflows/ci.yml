@@ -154,6 +154,31 @@ jobs:
       - run: python3 -I tools/plex-source.py target/debug/pm-node /tmp/pms-root /tmp/plex
       - if: failure()
         run: tail -50 /tmp/plex/node.log /tmp/plex/pms.log
+  audiobookshelf:
+    # The Audiobookshelf source against a real Audiobookshelf: its server built from a pinned
+    # release (tag and commit), run without Docker (tools/abs-source.py).
+    runs-on: ubuntu-24.04
+    needs: check
+    env:
+      ABS_TAG: v2.37.1
+      ABS_COMMIT: 3563d49424d50170324de9236a24c591b6d965e9
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Audiobookshelf
+        run: |
+          git clone -q --depth 1 -b "$ABS_TAG" https://github.com/advplyr/audiobookshelf.git /tmp/abs-src
+          test "$(git -C /tmp/abs-src rev-parse HEAD)" = "$ABS_COMMIT"
+          cd /tmp/abs-src && npm ci --no-audit --no-fund && npm run build:server
+      - run: cargo build -p pm-node
+      - run: python3 -I tools/abs-source.py target/debug/pm-node /tmp/abs-src "$(command -v ffmpeg)" /tmp/abs
+      - if: failure()
+        run: tail -50 /tmp/abs/node.log /tmp/abs/abs.log
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

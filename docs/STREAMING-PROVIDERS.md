@@ -37,6 +37,8 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 | Plex | "Sign in with Plex" (a plex.tv PIN; the node finds your server) or the server's address and a token (Sources › Plex; keeps only the server's token) | **built**: search, albums, songs | **built**: original files into zones (`plex:track:<ratingKey>`), relayed to browsers | CI runs Plex's own Linux server (`tools/plex-source.py`); playlists later (Plex rarely carries MusicBrainz recording ids) |
 
+| Audiobookshelf | An API key (Settings › API Keys), or an admin's user and password once: the node makes itself a key and keeps only that | **built**: audiobooks from every book library, by chapter; "continue listening" | **built**: original files into zones (`audiobookshelf:file:<item>/<ino>`), resumed from and reported back to Audiobookshelf's position, so a phone picks up where a zone left off | CI runs Audiobookshelf itself (`tools/abs-source.py`); its podcast libraries later (the node has its own podcasts) |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).
