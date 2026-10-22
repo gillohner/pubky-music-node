@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Search finds Pubky tags** (owner: "search does not include search on pubky tags"; STEWARD-FIX-search-tags.md).
+  - Every search also asks Pinakes for the term as a tag ("bohemian rhapsody" also as `bohemian-rhapsody`) and merges the hits by group. A row found through a tag says "tagged #chill".
+  - `#chill` in the box searches tags only: your library by your own tags (works offline) plus Pubky. `#chill #90s` needs both.
+  - A **Tags** group above the results suggests labels as you type: your own first ("Your #chill · 24 items"), then Pubky's (Nexus). Picking one opens the tag view. API: `GET /v1/search/tags?prefix=`.
 - **Podcasts** (`podcasts`, owner-approved list §6.2): search through Pinakes, which keeps the Podcast Index key on its side so the node never has it, with Apple's iTunes Search as the keyless fallback. Subscribe from search or by RSS URL. Episodes play on any zone and resume where you left off; the position is recorded while a zone plays one, and an episode counts as played past 95 %. `/v1/podcasts/new` lists the newest unplayed episodes across subscriptions, for a Home row. Feeds refresh every 6 hours. Podcasts joins `/v1/sources`, ready for its own tab. Checked live: found Hardcore History through Pinakes with its feed, subscribed (13 episodes), played one, stopped, and resumed from 8 s.
 - **A song page plays its own source, and says what Play will do** (owner: Play on a Deezer page failed with "the node answered 404" while the page claimed TIDAL; STEWARD-UX-INSTANCES items 8 and 9).
   - The 404 came from Deezer itself: it doesn't offer that track in the node's country (no preview), and the page queued it anyway.
