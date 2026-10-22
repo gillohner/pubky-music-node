@@ -43,6 +43,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("tidal.user", "TIDAL"),
     ("tidal.unofficial", "TIDAL full tracks"),
     ("tidal.unofficial_client", "the TIDAL device client"),
+    ("youtube.api_key", "your YouTube Data API key"),
     ("spotify.user", "Spotify"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
