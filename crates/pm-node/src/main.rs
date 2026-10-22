@@ -166,6 +166,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         &cfg.tidal.unofficial_client_id,
         &cfg.tidal.unofficial_client_secret,
     );
+    pm_api::qobuz::set_config_app(&cfg.qobuz.app_id, &cfg.qobuz.app_secret);
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
         tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
