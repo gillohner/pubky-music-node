@@ -31,9 +31,13 @@ pub struct NodeSources {
     opensubsonic: crate::opensubsonic::Shared,
     /// The user's Jellyfin, for `jellyfin:track:` URIs.
     jellyfin: crate::jellyfin::Shared,
+    /// The user's Plex, for `plex:track:` URIs.
+    plex: crate::plex::Shared,
 }
 
 impl NodeSources {
+    /// One handle per source that opens its own URIs on the audio thread.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         library: Arc<Mutex<Library>>,
         cfg: PipelineConfig,
@@ -42,6 +46,7 @@ impl NodeSources {
         jamendo: crate::jamendo::SharedEndpoints,
         opensubsonic: crate::opensubsonic::Shared,
         jellyfin: crate::jellyfin::Shared,
+        plex: crate::plex::Shared,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -64,6 +69,7 @@ impl NodeSources {
             jamendo,
             opensubsonic,
             jellyfin,
+            plex,
         }
     }
 
@@ -525,6 +531,9 @@ impl SourceFactory for NodeSources {
         }
         if let Some(id) = item.uri.strip_prefix(crate::jellyfin::TRACK_URI_PREFIX) {
             return crate::jellyfin::open_track_blocking(&self.jellyfin, id);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::plex::TRACK_URI_PREFIX) {
+            return crate::plex::open_track_blocking(&self.plex, id);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
             return self.files.open(item);

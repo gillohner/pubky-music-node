@@ -133,6 +133,27 @@ jobs:
       - run: python3 -I tools/slim-squeezelite.py target/debug/pm-node /tmp/slim
       - if: failure()
         run: tail -50 /tmp/slim/node.log /tmp/slim/squeezelite.log
+  plex:
+    # The Plex source against a real Plex Media Server: Plex's official Linux build, pinned by
+    # version and checksum, unpacked and run without Docker (tools/plex-source.py).
+    runs-on: ubuntu-24.04
+    needs: check
+    env:
+      PMS_VERSION: 1.43.5.11029-6bf8af3f0
+      PMS_SHA256: 562edf9456be338a24182f837fe5d532d7e75ba7b3d5f6bea2503083e77622e1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Plex Media Server
+        run: |
+          curl -fsSLo /tmp/pms.deb "https://downloads.plex.tv/plex-media-server-new/$PMS_VERSION/debian/plexmediaserver_${PMS_VERSION}_amd64.deb"
+          echo "$PMS_SHA256  /tmp/pms.deb" | sha256sum -c
+          dpkg-deb -x /tmp/pms.deb /tmp/pms-root
+      - run: cargo build -p pm-node
+      - run: python3 -I tools/plex-source.py target/debug/pm-node /tmp/pms-root /tmp/plex
+      - if: failure()
+        run: tail -50 /tmp/plex/node.log /tmp/plex/pms.log
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

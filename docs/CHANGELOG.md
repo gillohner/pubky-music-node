@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Plex is a source** (`plex`, owner-approved list §6.3). "Sign in with Plex" asks plex.tv for a PIN, you approve it on app.plex.tv, and the node picks your server and the first connection that answers (local, then remote, then Plex's relay); or give the server's address and a token. The node keeps only the server's token, sent in `X-Plex-Token`. Search, albums and songs; songs play the original file in any zone (`plex:track:<ratingKey>`); browser streams and covers are relayed. Tested in CI against Plex Media Server itself (`tools/plex-source.py`, the official Linux build, pinned by checksum): the relayed file is byte-identical. API: `/v1/sources/plex/…` (docs/api.md).
 - **Search finds Pubky tags** (owner: "search does not include search on pubky tags"; STEWARD-FIX-search-tags.md).
   - Every search also asks Pinakes for the term as a tag ("bohemian rhapsody" also as `bohemian-rhapsody`) and merges the hits by group. A row found through a tag says "tagged #chill".
   - `#chill` in the box searches tags only: your library by your own tags (works offline) plus Pubky. `#chill #90s` needs both.

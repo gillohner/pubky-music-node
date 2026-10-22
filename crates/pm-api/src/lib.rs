@@ -46,6 +46,7 @@ pub mod opensubsonic;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
+pub mod plex;
 pub mod podcasts;
 pub mod radio;
 pub mod radio_sources;
@@ -340,6 +341,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
             post(listenbrainz::import_playlist),
         )
         .route("/sources/jellyfin/cover/{id}", get(jellyfin::cover))
+        .route(
+            "/sources/plex/server",
+            get(plex::get_server).put(plex::connect).delete(plex::disconnect),
+        )
+        .route("/sources/plex/pin", post(plex::start_pin))
+        .route("/sources/plex/pin/{id}", get(plex::poll_pin))
+        .route("/sources/plex/stream/{id}", get(plex::stream))
+        .route("/sources/plex/cover/{id}/{ver}", get(plex::cover))
         .route("/sources/jellyfin/playlists", get(jellyfin::playlists))
         .route(
             "/sources/jellyfin/playlists/{id}/import",
@@ -3401,6 +3410,228 @@ mod tests {
             .lock()
             .unwrap()
             .get_setting("jellyfin.server")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plex_signs_in_with_a_pin_and_keeps_the_token_to_itself() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let song = serde_json::json!({"ratingKey": "1201", "type": "track", "title": "Bohemian Rhapsody",
+            "grandparentTitle": "Queen", "parentTitle": "A Night at the Opera", "parentRatingKey": "1200",
+            "parentThumb": "/library/metadata/1200/thumb/1", "duration": 5000, "index": 11,
+            "Media": [{"audioCodec": "flac", "container": "flac", "Part": [{"key": "/library/parts/9/1/file.flac"}]}]});
+        let album = serde_json::json!({"ratingKey": "1200", "type": "album", "title": "A Night at the Opera",
+            "parentTitle": "Queen", "year": 1975, "thumb": "/library/metadata/1200/thumb/1"});
+        type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
+        fn authed(h: &axum::http::HeaderMap, q: &std::collections::HashMap<String, String>) -> bool {
+            h.get("x-plex-token").and_then(|v| v.to_str().ok()) == Some("T1")
+                || q.get("X-Plex-Token").map(String::as_str) == Some("T1")
+        }
+        let mc = |m: Vec<serde_json::Value>| Json(serde_json::json!({"MediaContainer": {"Metadata": m}}));
+        let pms_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pms_port = pms_l.local_addr().unwrap().port();
+        let (s1, s2, a1, a2) = (song.clone(), song.clone(), album.clone(), album.clone());
+        let pms = Router::new()
+            .route("/identity", get(|| async { Json(serde_json::json!({"MediaContainer": {"machineIdentifier": "m1", "version": "1.41.0"}})) }))
+            .route(
+                "/",
+                get(|h: axum::http::HeaderMap, q: Q| async move {
+                    if !authed(&h, &q) {
+                        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({"MediaContainer": {"friendlyName": "Rigiplex", "machineIdentifier": "m1", "version": "1.41.0"}})))
+                }),
+            )
+            .route(
+                "/hubs/search",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let (s1, a1) = (s1.clone(), a1.clone());
+                    async move {
+                        assert!(authed(&h, &q) && q["query"] == "bohemian");
+                        Json(serde_json::json!({"MediaContainer": {"Hub": [
+                            {"type": "movie", "Metadata": [{"ratingKey": "7", "type": "movie", "title": "Bohemian Rhapsody"}]},
+                            {"type": "track", "Metadata": [s1]},
+                            {"type": "album", "Metadata": [a1]}]}}))
+                    }
+                }),
+            )
+            .route(
+                "/library/metadata/{id}",
+                get(move |h: axum::http::HeaderMap, q: Q, axum::extract::Path(id): axum::extract::Path<String>| {
+                    let (s2, a2) = (s2.clone(), a2.clone());
+                    async move {
+                        assert!(authed(&h, &q));
+                        mc(vec![if id == "1200" { a2 } else { s2 }])
+                    }
+                }),
+            )
+            .route(
+                "/library/metadata/{id}/children",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let s3 = song.clone();
+                    async move {
+                        assert!(authed(&h, &q));
+                        mc(vec![s3])
+                    }
+                }),
+            )
+            .route(
+                "/library/metadata/{id}/thumb/{ver}",
+                get(|h: axum::http::HeaderMap, q: Q| async move {
+                    assert!(authed(&h, &q));
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                }),
+            )
+            .route(
+                "/library/parts/{a}/{b}/{file}",
+                get(move |h: axum::http::HeaderMap, q: Q| {
+                    let flac = flac.clone();
+                    async move {
+                        if !authed(&h, &q) {
+                            return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/plain")], Vec::new());
+                        }
+                        (StatusCode::OK, [(header::CONTENT_TYPE, "audio/flac")], flac)
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(pms_l, pms).await.unwrap() });
+
+        // plex.tv: the PIN is approved on the second poll
+        let tv_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tv_port = tv_l.local_addr().unwrap().port();
+        let polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let tv = Router::new()
+            .route(
+                "/api/v2/pins",
+                post(|h: axum::http::HeaderMap, q: Q| async move {
+                    assert!(h["x-plex-client-identifier"].to_str().unwrap().starts_with("pubky-music-"));
+                    assert_eq!(q["strong"], "true");
+                    Json(serde_json::json!({"id": 42, "code": "abcd1234"}))
+                }),
+            )
+            .route(
+                "/api/v2/pins/{id}",
+                get(move || {
+                    let n = polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        Json(if n == 0 {
+                            serde_json::json!({"id": 42, "authToken": null})
+                        } else {
+                            serde_json::json!({"id": 42, "authToken": "ACCOUNT"})
+                        })
+                    }
+                }),
+            )
+            .route("/api/v2/user", get(|| async { Json(serde_json::json!({"username": "owner"})) }))
+            .route(
+                "/api/v2/resources",
+                get(move |h: axum::http::HeaderMap| async move {
+                    assert_eq!(h["x-plex-token"], "ACCOUNT");
+                    Json(serde_json::json!([
+                        {"name": "Phone", "provides": "player", "connections": []},
+                        {"name": "Rigiplex", "provides": "server", "owned": true, "accessToken": "T1", "connections": [
+                            {"uri": "http://127.0.0.1:1", "local": true, "relay": false},
+                            {"uri": format!("http://127.0.0.1:{pms_port}"), "local": false, "relay": false}]}]))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(tv_l, tv).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.plex.write().unwrap().tv_base = format!("http://127.0.0.1:{tv_port}");
+        let app = router(s.clone());
+        // By address: a wrong token is refused
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/plex/server",
+            Some(serde_json::json!({"url": format!("http://127.0.0.1:{pms_port}"), "token": "nope"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // Sign in with Plex
+        let (st, pin) = call(&app, "POST", "/v1/sources/plex/pin", None).await;
+        assert_eq!(st, StatusCode::OK, "{pin}");
+        let auth = pin["auth_url"].as_str().unwrap();
+        assert!(
+            auth.starts_with("https://app.plex.tv/auth#?clientID=pubky-music-")
+                && auth.contains("code=abcd1234"),
+            "{auth}"
+        );
+        let (_, w) = call(&app, "GET", "/v1/sources/plex/pin/42", None).await;
+        assert_eq!(w["status"], "waiting");
+        let (st, c) = call(&app, "GET", "/v1/sources/plex/pin/42", None).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        assert_eq!(c["status"], "connected");
+        assert_eq!(c["server"]["server_name"], "Rigiplex");
+        assert_eq!(c["server"]["user"], "owner");
+        assert_eq!(
+            c["server"]["url"],
+            format!("http://127.0.0.1:{pms_port}"),
+            "the dead local connection is skipped"
+        );
+        {
+            let stored = s
+                .library
+                .lock()
+                .unwrap()
+                .get_setting("plex.server")
+                .unwrap()
+                .unwrap();
+            assert!(
+                stored.contains("T1") && !stored.contains("ACCOUNT"),
+                "the server's token is kept, the account's is not"
+            );
+        }
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(srcs.to_string().contains("Your Plex “Rigiplex”"), "{srcs}");
+        let (st, r) = call(&app, "GET", "/v1/sources/plex/search?q=bohemian", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["items"].as_array().unwrap().len(), 2, "films are left out: {r}");
+        assert_eq!(r["items"][0]["kind"], "album");
+        assert_eq!(r["items"][1]["uri"], "plex:track:1201");
+        assert!(!r.to_string().contains("T1"));
+        let (st, al) = call(&app, "GET", "/v1/sources/plex/items/album:1200", None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        assert_eq!(
+            (al["year"].as_i64(), al["tracks"][0]["format"].as_str()),
+            (Some(1975), Some("FLAC (Plex)"))
+        );
+        // A zone plays the original file
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [{"uri": "plex:track:1201", "title": "x"}], "replace": true, "play": true}))).await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        // Browsers and covers go through the node
+        for (path, magic) in [
+            ("/v1/sources/plex/stream/1201", &b"fLaC"[..]),
+            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG"[..]),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+        }
+        let (_, v) = call(&app, "DELETE", "/v1/sources/plex/server", None).await;
+        assert_eq!(v["connected"], false);
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("plex.server")
             .unwrap()
             .is_none());
     }

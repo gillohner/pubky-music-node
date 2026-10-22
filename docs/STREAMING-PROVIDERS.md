@@ -35,10 +35,11 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 | Podcasts (`podcasts`) | none (search through Pinakes, which keeps the Podcast Index key; Apple's iTunes Search API as the fallback, also keyless) | **built**: search, subscribe by search or RSS URL, episodes (`/v1/podcasts/…`); a source in `/v1/sources` | **built**: the episode's audio file into zones; resume where you left off (position recorded while a zone plays it; played past 95 %); newest unplayed across subscriptions for Home (`/v1/podcasts/new`) | feeds refresh every 6 hours; stored on the node |
 | Internet radio (`radio`) | none | **built**: radio-browser.info (search by name, browse by country and tag, `/v1/radio/countries`, `/v1/radio/tags`), SomaFM's channels (`channels.json`), Radio Paradise's channels (`/v1/radio/curated`); a source in `/v1/sources` (search, station pages) | **built**: the stream URL into zones; Radio Paradise in lossless FLAC (5 of 6 channels), SomaFM up to 256 kbps MP3; in-stream titles as now playing | channel lists follow Music Assistant's SomaFM and Radio Paradise providers (Apache-2.0); stations saved on the node (`/v1/radio/stations`) |
 
+| Plex | "Sign in with Plex" (a plex.tv PIN; the node finds your server) or the server's address and a token (Sources › Plex; keeps only the server's token) | **built**: search, albums, songs | **built**: original files into zones (`plex:track:<ratingKey>`), relayed to browsers | CI runs Plex's own Linux server (`tools/plex-source.py`); playlists later (Plex rarely carries MusicBrainz recording ids) |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).
-- **Plex:** the owner has an account but no Plex server, so there is nothing to stream from; build it when there is one.
 - **Apple Music:** needs a paid developer account, and MusicKit plays in the browser only, never on the node's outputs.
 - **No official playback API:** YouTube Music, Amazon Music, Bandcamp streaming, Mixcloud. The node's rule is no reverse
   engineering. The `qobuz-api` crate is out for the same reason (it scrapes the web player's credentials) and its GPL-3.0

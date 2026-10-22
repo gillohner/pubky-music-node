@@ -63,6 +63,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/spotify/playlists` | | the user's playlists |
 | POST | `/v1/sources/spotify/playlists/{id}/import` | `?keep_source=true` | a private Pubky playlist by ISRC; with `keep_source` each song is pinned to its Spotify track (ADR 0015) |
 | POST | `/v1/sources/tidal/playlists/{id}/import` | `?keep_source=true` | the same for TIDAL |
+| GET / PUT / DELETE | `/v1/sources/plex/server` | PUT: `{url, token}` | `{connected, url, server_name, version, user}`, never the token; PUT checks the server (`/identity`, then the token on `/`): 401 when Plex refuses the token; DELETE forgets it |
+| POST | `/v1/sources/plex/pin` | | "Sign in with Plex": `{id, code, auth_url}`; open `auth_url` (app.plex.tv) and approve |
+| GET | `/v1/sources/plex/pin/{id}` | | `{status: waiting\|connected\|expired, server}`; once approved the node picks your server (your own first) and the first connection that answers (local, then remote, then relay), and keeps that server's token only |
+| GET | `/v1/sources/plex/search`, `/v1/sources/plex/items/{track:<id>\|album:<id>}` | | Plex as a source; songs queue as `plex:track:<ratingKey>` |
+| GET | `/v1/sources/plex/stream/{id}`, `/v1/sources/plex/cover/{id}/{version}` | | the original file and the cover, relayed so the token stays in the node |
 | GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
 | POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |

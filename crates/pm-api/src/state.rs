@@ -173,6 +173,8 @@ pub struct NodeState {
     pub opensubsonic: crate::opensubsonic::Shared,
     /// The user's Jellyfin, shared with the audio thread.
     pub jellyfin: crate::jellyfin::Shared,
+    /// The user's Plex, shared with the audio thread.
+    pub plex: crate::plex::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -218,6 +220,9 @@ impl NodeState {
         let jellyfin: crate::jellyfin::Shared = Arc::new(std::sync::RwLock::new(crate::jellyfin::load(
             &library.lock().expect("library poisoned"),
         )));
+        let plex: crate::plex::Shared = Arc::new(std::sync::RwLock::new(crate::plex::load(
+            &library.lock().expect("library poisoned"),
+        )));
         let sources = Arc::new(NodeSources::new(
             library.clone(),
             settings.pipeline,
@@ -226,6 +231,7 @@ impl NodeState {
             jamendo.clone(),
             opensubsonic.clone(),
             jellyfin.clone(),
+            plex.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
         // A contact saved through the API wins over an unset config value.
@@ -299,6 +305,7 @@ impl NodeState {
             jamendo,
             opensubsonic,
             jellyfin,
+            plex,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
                 api_key: settings.acoustid_key.clone(),
