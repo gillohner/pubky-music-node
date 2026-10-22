@@ -88,14 +88,7 @@ pub(crate) fn also_on_rows(links: &[pm_pubky::pinakes::AlsoOn]) -> Vec<Version> 
                 page: None,
                 source: site_slug(&site),
                 id: a.id.clone().unwrap_or_default(),
-                label: if a.is_tagged() {
-                    format!("{site} · tagged on Pubky")
-                } else {
-                    format!(
-                        "{site} · via {}",
-                        a.via.clone().unwrap_or_else(|| "Pinakes".into())
-                    )
-                },
+                label: site.clone(),
                 url: a.uri.clone(),
                 uri: playable_uri(&a.uri),
             }
@@ -271,7 +264,6 @@ pub(crate) fn plays_from_link(l: &ServiceLink, a: Access) -> PlaysFrom {
         label: match a {
             Access::Preview => format!("{name} · 30 s preview"),
             Access::External => format!("{name} · plays on a Connect device"),
-            _ if l.tagged => format!("{name} · tagged on Pubky"),
             _ => name.to_string(),
         },
         url: Some(l.url.clone()),
@@ -1767,7 +1759,7 @@ pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) 
             page: None,
             source: site_slug(&site),
             id: card.id.clone(),
-            label: format!("{site} · tagged on Pubky"),
+            label: site.clone(),
             url: card.uri.clone(),
             uri: playable_uri(&card.uri),
         });
@@ -1782,14 +1774,7 @@ pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) 
                 page: None,
                 source: site_slug(&site),
                 id: a.id.clone().unwrap_or_default(),
-                label: if a.is_tagged() {
-                    format!("{site} · tagged on Pubky")
-                } else {
-                    format!(
-                        "{site} · via {}",
-                        a.via.clone().unwrap_or_else(|| "Pinakes".into())
-                    )
-                },
+                label: site.clone(),
                 url: a.uri.clone(),
                 uri: playable_uri(&a.uri),
             });

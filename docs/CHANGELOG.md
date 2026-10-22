@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **A song page plays its own source, and says what Play will do** (owner: Play on a Deezer page failed with "the node answered 404" while the page claimed TIDAL; STEWARD-UX-INSTANCES items 8 and 9).
+  - The 404 came from Deezer itself: it doesn't offer that track in the node's country (no preview), and the page queued it anyway.
+  - The node now makes one decision that sets both the song Play queues and the eyebrow: the page's own source whenever it can play anything (a Deezer page plays its 30 s preview). Otherwise it falls back to your Play from order and says why ("Song on Deezer · Deezer doesn't offer it in this country · plays from TIDAL here").
+  - Settings › Playback › "Prefer full tracks" (off by default) lets a preview give way to a full track from another source.
+  - **One global page per identified song** (`/song/isrc-…`, `/song/mb-…`): platform-neutral, every source a row (your library's copy too), tags on the song's own id, versions and reviews. Source pages are thin views with "All about this song →".
+  - Source chips name the source only (no more "· tagged on Pubky").
 - **Song pages say where they are from, and one tag block** (owner review of a live Spotify song page; STEWARD-UX-INSTANCES items 6 and 7).
   - **The page's own source comes first** in the source row, highlighted ("Spotify · this page", with its link), then "Also on". The eyebrow covers both, e.g. "Song on Spotify · plays from TIDAL here", "Song in your library", "plays on your Spotify device".
   - **"Find on other services" is gone from the page.** Matching is automatic and the source row shows the result. Corrections live in the ⋯ menu:

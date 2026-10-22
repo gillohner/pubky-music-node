@@ -463,6 +463,9 @@ pub struct NodeSettingsView {
     /// Publish the files' genres as Pubky tags on matched songs (off by default; public).
     #[serde(default)]
     pub genre_tags: bool,
+    /// A song page whose own source has only a preview plays the full track from another source.
+    #[serde(default)]
+    pub prefer_full: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -479,6 +482,8 @@ pub struct NodeSettingsUpdate {
     pub dev_outputs: Option<bool>,
     #[serde(default)]
     pub genre_tags: Option<bool>,
+    #[serde(default)]
+    pub prefer_full: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1101,6 +1106,10 @@ pub struct ItemPage {
     /// instance by the play-from order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_as: Option<String>,
+    /// Why Play uses another source than the page's own ("Deezer doesn't offer it in this
+    /// country"); none when it plays the page's own source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_note: Option<String>,
     /// The song (album, artist) itself, on every source: its MusicBrainz or ISRC link. Tags
     /// "on the song" attach here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1203,7 +1212,7 @@ pub struct PlaysFrom {
     pub kind: String,
     /// Source item id (`track:<id>` / `album:<id>`); the library track or album id.
     pub id: String,
-    /// Short text for the chip ("TIDAL · tagged on Pubky", "Your library · FLAC").
+    /// Short text for the chip ("TIDAL", "Deezer · 30 s preview", "Your library · FLAC").
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,

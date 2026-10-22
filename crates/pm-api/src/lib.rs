@@ -1856,28 +1856,30 @@ async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool
 }
 
 fn settings_view(s: &NodeState) -> NodeSettingsView {
-    let jukebox_zone = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(subsonic::JUKEBOX_ZONE_KEY)
-        .ok()
-        .flatten()
-        .filter(|z| !z.is_empty());
+    let copy_rate = files::copy_rate(s);
+    // One lock, taken and released here: a guard in a struct literal lives until the end of the
+    // whole expression, so a second `lock()` in another field would wait for ever
+    let (jukebox_zone, dev_setting, genre_tags, prefer_full) = {
+        let lib = s.library.lock().expect("library poisoned");
+        let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
+        (
+            lib.get_setting(subsonic::JUKEBOX_ZONE_KEY)
+                .ok()
+                .flatten()
+                .filter(|z| !z.is_empty()),
+            on(DEV_OUTPUTS_KEY),
+            tags::genre_tags_on(&lib),
+            on(item::PREFER_FULL_KEY),
+        )
+    };
     NodeSettingsView {
         contact: s.contact(),
         discovery: s.discovery().is_some(),
         jukebox_zone,
-        copy_rate: files::copy_rate(s),
-        dev_outputs: std::env::var("PM_DEV_OUTPUTS").is_ok_and(|v| v == "1")
-            || s.library
-                .lock()
-                .expect("library poisoned")
-                .get_setting(DEV_OUTPUTS_KEY)
-                .ok()
-                .flatten()
-                .is_some_and(|v| v == "1"),
-        genre_tags: tags::genre_tags_on(&s.library.lock().expect("library poisoned")),
+        copy_rate,
+        dev_outputs: std::env::var("PM_DEV_OUTPUTS").is_ok_and(|v| v == "1") || dev_setting,
+        genre_tags,
+        prefer_full,
     }
 }
 
@@ -1936,6 +1938,12 @@ async fn update_node_settings(
             .lock()
             .expect("library poisoned")
             .set_setting(subsonic::JUKEBOX_ZONE_KEY, &z)?;
+    }
+    if let Some(f) = req.prefer_full {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(item::PREFER_FULL_KEY, if f { "1" } else { "0" })?;
     }
     if let Some(g) = req.genre_tags {
         let lib = s.library.lock().expect("library poisoned");
@@ -5075,9 +5083,23 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{so}");
         assert_eq!(so["target"]["track_id"], tid.0);
-        // It is the library instance's page, opened from the generic id
-        assert_eq!(so["id"], format!("lib-{}", tid.0));
-        assert_eq!(so["opened_as"], "mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69");
+        // The generic id is the song's global page; the library copy is one of its sources
+        assert_eq!(so["id"], "mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69");
+        assert_eq!(so["source_id"], "global");
+        assert!(
+            so["also_on"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["page"] == format!("lib-{}", tid.0)),
+            "{so}"
+        );
+        // The library page itself is the thin view, linking to the global page
+        let (_, lp) = call(&app, "GET", &format!("/v1/item/song/lib-{}", tid.0), None).await;
+        assert_eq!(
+            lp["song_uri"],
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
+        );
         // Versions are other recordings only; the page itself and MusicBrainz are not "also on"
         let versions = so["versions"].as_array().unwrap();
         assert_eq!(versions.len(), 1, "{so}");
@@ -5238,6 +5260,38 @@ mod tests {
             .map(|x| x["label"].as_str().unwrap())
             .collect();
         assert!(labels.contains(&"hardcore"), "{t}");
+    }
+
+    /// The owner's Deezer page (STEWARD-UX-INSTANCES item 9): Play and the eyebrow come from one
+    /// decision. A track Deezer doesn't offer here says why instead of failing with a 404; a
+    /// playable one plays its own 30 s preview.
+    #[tokio::test]
+    async fn a_deezer_page_plays_its_preview_or_says_why_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/track/{id}",
+            get(|Path(id): Path<String>| async move {
+                let readable = id != "4329888262";
+                Json(serde_json::json!({"id": id.parse::<u64>().unwrap(), "title": "Bohemian Rhapsody", "readable": readable,
+                    "preview": if readable { "https://cdn.example/p.mp3" } else { "" }, "duration": 354,
+                    "artist": {"id": 412, "name": "Queen"}, "album": {"id": 9, "title": "Greatest Hits"}}))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.deezer_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, pg) = call(&app, "GET", "/v1/item/song/deezer-4329888262", None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert!(pg["plays_note"].as_str().unwrap().contains("country"), "{pg}");
+        assert_ne!(pg["plays_from"]["service"], "deezer", "{pg}");
+        let (_, pg) = call(&app, "GET", "/v1/item/song/deezer-1109731", None).await;
+        assert!(pg.get("plays_note").is_none(), "{pg}");
+        assert_eq!(pg["plays_from"]["service"], "deezer");
+        assert_eq!(pg["plays_from"]["mode"], "preview");
+        assert_eq!(pg["songs"][0]["uri"], "deezer:track:1109731");
     }
 
     /// One search, streamed per source: the library answers first, a slow
@@ -5581,7 +5635,7 @@ mod tests {
             .find(|x| x["source"] == "deezer")
             .unwrap();
         assert_eq!(deezer["uri"], "deezer:track:4329888262");
-        assert!(deezer["label"].as_str().unwrap().contains("tagged on Pubky"));
+        assert_eq!(deezer["label"], "Deezer", "a chip names the source");
         // No page twice, even though every item repeats the group's links.
         let mut urls: Vec<&str> = v
             .as_array()

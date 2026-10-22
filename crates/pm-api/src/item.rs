@@ -24,34 +24,35 @@ pub(crate) async fn page(
         return Err(ApiError::bad_request("kind is song, album or artist"));
     }
     let mut pg = raw_page(&s, &kind, &id).await?;
-    // A generic id (`isrc-…`, `mb-…`) opens the best instance by the play-from order
-    if kind == "song" && (id.starts_with("isrc-") || id.starts_with("mb-")) {
-        if let Some((pid, url)) = best_instance(&s, &pg) {
-            let mut inst = if let Some(n) = pid.strip_prefix("lib-").and_then(|n| n.parse().ok()) {
-                library_song(&s, n).await?
-            } else {
-                external(&s, &kind, &pid, &url).await
-            };
-            if inst.id != pg.id {
-                // Keep what the generic page knew (its sources and its About facts)
-                let mut known = std::mem::take(&mut pg.versions);
-                known.append(&mut inst.versions);
-                inst.versions = known;
-                for f in pg.about.drain(..) {
-                    if !inst.about.iter().any(|x| x.label == f.label) {
-                        inst.about.push(f);
-                    }
+    // A generic id (`isrc-…`, `mb-…`) is the item's global page: platform-neutral, every source
+    // a row (the library's copy too), tags on the item's own id (STEWARD-UX-INSTANCES item 8)
+    if id.starts_with("isrc-") || id.starts_with("mb-") {
+        let generic = url_of_page(&kind, &id);
+        // What the generic page lacks (cover, album, title) comes from the best source
+        if pg.image.is_none() || pg.title.is_none() || (kind == "song" && pg.album.is_none()) {
+            if let Some((pid, url)) = best_instance(&s, &pg).filter(|(pid, _)| !pid.starts_with("lib-")) {
+                let inst = external(&s, &kind, &pid, &url).await;
+                pg.image = pg.image.take().or(inst.image);
+                pg.title = pg.title.take().or(inst.title);
+                pg.artist = pg.artist.take().or(inst.artist);
+                if pg.album.is_none() {
+                    pg.album = inst.album;
                 }
-                if inst.on_pubky.is_none() {
-                    inst.on_pubky = pg.on_pubky.take();
+                pg.year = pg.year.or(inst.year);
+                if pg.albums.is_empty() {
+                    pg.albums = inst.albums;
                 }
-                pg = inst;
+                pg.versions.extend(inst.versions);
             }
         }
-        if pg.song_uri.is_none() {
-            pg.song_uri = url_of_page(&kind, &id);
+        if !pg.id.starts_with("lib-") {
+            pg.target = serde_json::json!({ "uri": generic.clone().unwrap_or_default() });
         }
-        pg.opened_as = Some(id.clone());
+        pg.id = id.clone();
+        pg.source = "All sources".into();
+        pg.source_id = "global".into();
+        pg.link = None;
+        pg.song_uri = pg.song_uri.take().or(generic);
     }
     // A service's own track page: its ISRC ties it to the song, so the library copy and the
     // other services are "also on", not other versions
@@ -92,6 +93,9 @@ pub(crate) async fn page(
     }
     let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
     split_sources(&mut pg, &order);
+    if kind == "song" {
+        decide_play(&s, &mut pg).await;
+    }
     // A song's album when nothing else knew it: from the page's own service, then from the same
     // recording on another service (Deezer answers without a sign-in)
     if kind == "song" && pg.albums.is_empty() {
@@ -201,6 +205,98 @@ async fn service_isrc(s: &NodeState, svc: &str, id: &str) -> Option<String> {
         let _ = s.library.lock().expect("library poisoned").set_setting(&key, i);
     }
     found
+}
+
+/// "Prefer full tracks from another source": a page whose own source only has a preview plays
+/// the full track from the play-from order instead (off by default).
+pub const PREFER_FULL_KEY: &str = "play.prefer_full";
+
+/// What Play does on a song page, decided once: the page's own source whenever it can play
+/// anything (previews included), else the play-from order with the reason. The page's song row
+/// and its eyebrow (`plays_from`, `plays_note`) both come from here, so they can't disagree
+/// (STEWARD-UX-INSTANCES item 9).
+async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
+    let Some((svc, n)) = pg.id.split_once('-').map(|(a, b)| (a.to_string(), b.to_string())) else {
+        return;
+    };
+    if !matches!(svc.as_str(), "tidal" | "deezer" | "spotify" | "jamendo") {
+        return;
+    }
+    let acc = crate::discover::service_access(s);
+    let a = crate::discover::access(&acc, &svc);
+    use crate::discover::Access;
+    let own: Result<(String, &'static str), String> = match svc.as_str() {
+        "deezer" => match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::deezer::track_playable(s, &n),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok((crate::deezer::track_uri(&n), "preview")),
+            Ok(Err(why)) => Err(why),
+            Err(_) => Err("Deezer didn't answer in time".into()),
+        },
+        "tidal" => match a {
+            Access::Full => Ok((crate::tidal::track_uri(&n), "full")),
+            Access::Preview => Ok((crate::tidal::track_uri(&n), "preview")),
+            _ => Err("TIDAL isn't connected on this node".into()),
+        },
+        "jamendo" => Ok((crate::jamendo::track_uri(&n), "full")),
+        _ => Err(match a {
+            Access::External => "Spotify plays only on a Spotify Connect device".into(),
+            _ => "Spotify sends no audio to other apps".into(),
+        }),
+    };
+    let prefer_full = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(PREFER_FULL_KEY)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "1");
+    let fallback = pg.plays_from.clone().filter(|p| p.service != svc);
+    let fallback_full = fallback.as_ref().is_some_and(|p| p.mode == "full");
+    match own {
+        Ok((uri, mode)) if !(prefer_full && mode == "preview" && fallback_full) => {
+            pg.plays_from = Some(PlaysFrom {
+                service: svc.clone(),
+                kind: "track".into(),
+                id: format!("track:{n}"),
+                label: if mode == "preview" {
+                    format!("{} · 30 s preview", crate::discover::service_title(&svc))
+                } else {
+                    crate::discover::service_title(&svc)
+                },
+                url: pg.link.clone(),
+                mode: mode.into(),
+            });
+            if let Some(first) = pg.songs.first_mut() {
+                first.uri = Some(uri);
+                first.track_id = None;
+            }
+        }
+        own => {
+            pg.plays_note = Some(match own {
+                Err(why) => why,
+                Ok(_) => "you prefer full tracks from another source".into(),
+            });
+            // The song row plays what the eyebrow says
+            if let (Some(p), Some(first)) = (fallback.as_ref(), pg.songs.first_mut()) {
+                let id = p.id.strip_prefix("track:").unwrap_or(&p.id).to_string();
+                match p.service.as_str() {
+                    "library" => {
+                        first.track_id = id.parse().ok();
+                        first.uri = None;
+                    }
+                    "tidal" => first.uri = Some(crate::tidal::track_uri(&id)),
+                    "deezer" => first.uri = Some(crate::deezer::track_uri(&id)),
+                    "jamendo" => first.uri = Some(crate::jamendo::track_uri(&id)),
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// A version's own page id on a page of `kind`.
@@ -627,6 +723,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         versions,
         also_on: Vec::new(),
         opened_as: None,
+        plays_note: None,
         link: None,
         on_pubky,
         about,
@@ -738,6 +835,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         versions,
         also_on: Vec::new(),
         opened_as: None,
+        plays_note: None,
         song_uri: None,
         link: None,
         on_pubky,
@@ -839,6 +937,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         versions: matches_for(s, &format!("lib:artist:{n}")),
         also_on: Vec::new(),
         opened_as: None,
+        plays_note: None,
         song_uri: None,
         link: None,
         open_on: Vec::new(),
@@ -1017,6 +1116,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         versions,
         also_on: Vec::new(),
         opened_as: None,
+        plays_note: None,
         song_uri: song_uri.or_else(|| it.uri.contains("://musicbrainz.org/").then(|| it.uri.clone())),
         link: Some(
             it.page

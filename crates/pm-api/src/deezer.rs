@@ -370,6 +370,24 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
 }
 
 /// Deezer's track with this ISRC (public catalogue, no account; cached per ISRC).
+/// Whether Deezer plays a track's preview here: `Err` says why not (not offered in this country,
+/// no preview).
+pub(crate) async fn track_playable(s: &NodeState, id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("not a Deezer track".into());
+    }
+    let v = get_json(s, &format!("/track/{id}"), &[])
+        .await
+        .map_err(|e| format!("Deezer didn't answer ({})", e.message))?;
+    if v["readable"].as_bool() == Some(false) {
+        return Err("Deezer doesn't offer it in this country".into());
+    }
+    if v["preview"].as_str().is_none_or(str::is_empty) {
+        return Err("Deezer has no preview of it".into());
+    }
+    Ok(())
+}
+
 /// The album of a Deezer track: (title, link, cover, year).
 pub(crate) async fn track_album(
     s: &NodeState,
