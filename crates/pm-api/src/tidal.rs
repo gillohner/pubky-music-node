@@ -420,7 +420,7 @@ async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(1 + attempt);
-            tracing::debug!(%url, wait, "tidal rate limit, retrying");
+            tracing::info!(%url, wait, "TIDAL rate limit: waiting before the retry");
             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             continue;
         }

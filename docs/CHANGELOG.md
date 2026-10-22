@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **A cold TIDAL artist page answers within 2.5 s** (it took up to 83 s on the dev node, waiting out TIDAL's rate limits one request after another). The service's songs and albums get 2.5 s. Past that the page shows its header, "about" and versions with a "Getting the songs and albums from TIDAL…" line. The fetch goes on in the background, fills the cache, and the page asks again every 3 s. An artist's albums and top tracks are fetched together. TIDAL rate limits now show in the log.
 - **Syncs stop reading other apps' tags; pages don't wait on extras; copies leave room** (STEWARD-FIX-pubky-signin-speed.md, STEWARD-FIX-artist-page-speed.md).
   - **Every sync used to reread the old `pubky.app/tags/` folder,** one tag at a time. That folder also holds other apps' tags, about 450 for the owner, and the tag reader then read it again. Tags now move out of it once per node, 8 at a time, and later syncs skip it. Real account, empty library: **first sync 125 s → 9 s**. This also ends the stream of homeserver lookups in the log.
   - **A copy to the homeserver runs at a set pace,** 2.5 MB/s by default (Settings › Accounts › Copy speed: Gentle, Normal or As fast as possible). The node's uplink also carries its pages and the music it streams to a browser away from home, and a full-speed copy starved both: the artist page sat on skeletons and a library FLAC failed to play. File hashing during a copy moved off the threads that answer requests.

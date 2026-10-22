@@ -283,6 +283,7 @@ pub(crate) fn plays_from_link(l: &ServiceLink, a: Access) -> PlaysFrom {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Resolution {
     pub plays_from: Option<PlaysFrom>,
     pub link: Option<ServiceLink>,
@@ -1028,10 +1029,11 @@ pub(crate) struct External {
     pub card: Option<pm_pubky::pinakes::ResourceDetail>,
     pub reading: bool,
     pub contents: ItemContents,
+    /// The service's list did not arrive within the budget; ask again shortly.
+    pub pending: bool,
 }
 
 pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
-    use crate::streaming::StreamingService;
     let uri = uri.trim().to_string();
     let cache_key = format!("item.contents.{uri}");
     let cached: Option<ItemContents> = {
@@ -1077,7 +1079,7 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     }
     let acc = service_access(s);
     let res = resolve(&acc, &it, album_id);
-    let mut out = ItemContents {
+    let out = ItemContents {
         kind: it.kind.clone(),
         plays_from: res.plays_from.clone(),
         connect: res.connect.clone(),
@@ -1090,8 +1092,66 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             card: r,
             reading,
             contents: c,
+            pending: false,
         };
     }
+    // The service's tracks and albums within a budget: a cold TIDAL artist took 20–80 s (rate
+    // limits waited out one request at a time). Past the budget the page answers with what it
+    // has ("pending") and the fetch goes on in the background, filling the cache for the next
+    // look.
+    let task = {
+        let (s, uri, it, r, acc, cache_key) = (
+            s.clone(),
+            uri.clone(),
+            it.clone(),
+            r.clone(),
+            acc,
+            cache_key.clone(),
+        );
+        let res = res.clone();
+        tokio::spawn(async move {
+            fetch_contents(&s, &uri, &it, album_id, r.as_ref(), &acc, &res, out, &cache_key).await
+        })
+    };
+    let (contents, pending) = match tokio::time::timeout(CONTENTS_BUDGET, task).await {
+        Ok(Ok(c)) => (c, false),
+        _ => (
+            ItemContents {
+                kind: it.kind.clone(),
+                plays_from: res.plays_from.clone(),
+                connect: res.connect.clone(),
+                ..Default::default()
+            },
+            true,
+        ),
+    };
+    External {
+        it,
+        album_id,
+        card: r,
+        reading,
+        contents,
+        pending,
+    }
+}
+
+/// How long a page waits for a service's tracks and albums before answering without them.
+pub(crate) const CONTENTS_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_contents(
+    s: &Arc<NodeState>,
+    uri: &str,
+    it: &DiscoverItem,
+    album_id: Option<i64>,
+    r: Option<&pm_pubky::pinakes::ResourceDetail>,
+    acc: &ServiceAccess,
+    res: &Resolution,
+    mut out: ItemContents,
+    cache_key: &str,
+) -> ItemContents {
+    use crate::streaming::StreamingService;
+    let _ = uri;
     // The library album: its tracks, in order.
     if let (Some(p), Some(a)) = (&res.plays_from, album_id) {
         if p.service == "library" && p.kind == "album" {
@@ -1172,7 +1232,17 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
                         }
                     }
                     "artist" => {
-                        if let Ok(a) = svc.artist(s, &format!("artist:{}", l.id)).await {
+                        // The artist's albums and top tracks at once
+                        let top_f = async {
+                            match l.service {
+                                "tidal" => crate::tidal::artist_top_tracks(s, &l.id, 10).await.ok(),
+                                "deezer" => crate::deezer::artist_top_tracks(s, &l.id, 10).await.ok(),
+                                _ => None,
+                            }
+                        };
+                        let artist_id = format!("artist:{}", l.id);
+                        let (art, top) = tokio::join!(svc.artist(s, &artist_id), top_f);
+                        if let Ok(a) = art {
                             out.albums = a
                                 .albums
                                 .iter()
@@ -1185,11 +1255,6 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
                                 })
                                 .collect();
                         }
-                        let top = match l.service {
-                            "tidal" => crate::tidal::artist_top_tracks(s, &l.id, 10).await.ok(),
-                            "deezer" => crate::deezer::artist_top_tracks(s, &l.id, 10).await.ok(),
-                            _ => None,
-                        };
                         out.tracks = top
                             .unwrap_or_default()
                             .into_iter()
@@ -1212,14 +1277,14 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         }
         if (!out.tracks.is_empty() || !out.albums.is_empty()) && res.link.as_ref() != Some(l) {
             // Say where the list (and Play) actually comes from.
-            out.plays_from = Some(plays_from_link(l, access(&acc, l.service)));
+            out.plays_from = Some(plays_from_link(l, access(acc, l.service)));
         }
     }
     // No service lists it: MusicBrainz by the card's MBID (owner's scope decision:
     // Pinakes carries no tracklists or discographies). Rows open their pages;
     // they play once a connected service has them.
     if out.tracks.is_empty() && out.albums.is_empty() {
-        if let Some(mbid) = r.as_ref().and_then(|r| r.mbid()) {
+        if let Some(mbid) = r.and_then(|r| r.mbid()) {
             let (t, a) = musicbrainz_contents(s, &it.kind, &mbid).await;
             out.tracks = t;
             out.albums = a;
@@ -1234,17 +1299,11 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     if !out.tracks.is_empty() || !out.albums.is_empty() {
         let lib = s.library.lock().expect("library poisoned");
         let _ = lib.set_setting(
-            &cache_key,
+            cache_key,
             &serde_json::to_string(&(pm_library::db::now_unix(), &out)).unwrap_or_default(),
         );
     }
-    External {
-        it,
-        album_id,
-        card: r,
-        reading,
-        contents: out,
-    }
+    out
 }
 
 /// Queue items for a service link: a track straight from the card, an

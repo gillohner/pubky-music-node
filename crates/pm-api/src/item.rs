@@ -316,6 +316,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, id: Option<String>) -> Result<
         }),
         connect: Vec::new(),
         reading: false,
+        pending: false,
         total_ms: t.duration_ms.unwrap_or(0),
         songs: vec![row],
         albums,
@@ -420,6 +421,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         }),
         connect: Vec::new(),
         reading: false,
+        pending: false,
         total_ms: songs.iter().filter_map(|t| t.duration_ms).sum(),
         songs,
         albums: Vec::new(),
@@ -500,6 +502,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         }),
         connect: Vec::new(),
         reading: false,
+        pending: false,
         total_ms: songs.iter().filter_map(|t| t.duration_ms).sum(),
         songs,
         albums: albums
@@ -644,6 +647,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
             c.connect.clone()
         },
         reading: ext.reading,
+        pending: ext.pending,
         total_ms: c.total_ms,
         songs: if c.tracks.is_empty() {
             song_self.into_iter().collect()

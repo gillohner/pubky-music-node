@@ -894,3 +894,4 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .set-list .set-item .caps { flex: 0 1 50%; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 720px) { .set-list .set-item { flex-wrap: wrap; } .set-list .set-item .caps { flex-basis: 100%; text-align: left; } }
 .set-help .spin { display: inline-block; vertical-align: -1px; margin-right: 4px; }
+.reading .spin { display: inline-block; vertical-align: -1px; margin-right: 6px; }

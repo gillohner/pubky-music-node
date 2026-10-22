@@ -1029,6 +1029,10 @@ pub struct ItemPage {
     /// Pinakes is still reading this link.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reading: bool,
+    /// The service's songs and albums are still on their way (they took longer than the page
+    /// waits): the page shows the rest and asks again shortly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     #[serde(default)]
     pub songs: Vec<ItemTrack>,
     #[serde(default)]

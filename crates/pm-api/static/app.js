@@ -1978,6 +1978,7 @@
           const crumbBar = crumbs.length ? `<nav class="crumbs" aria-label="Breadcrumb"><ol>${crumbs.map(([k, l]) => `<li><button class="lnk" data-crumb-kind="${k}" data-crumb-id="${esc(l.id)}">${esc(l.name)}</button></li>`).join('')}<li aria-current="page">${esc(state.itemTitle || '')}</li></ol></nav>` : '';
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
+            + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero">${pg.image ? `<div class="art"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" onerror="this.remove()"></div>` : `<div class="art placeholder" style="background:hsl(${hue(state.itemTitle)} 35% 28%);border-radius:${kind === 'artist' ? '50%' : '12px'}"></div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button></div>
               <div class="playsfrom">${playsChip({ plays_from: pf, connect: pg.connect }, true) || ''}</div></div></div>`
@@ -2038,7 +2039,7 @@
             if (!link) { body.innerHTML = empty('This version has no public link.'); return; }
             try { const v = await api('GET', `/discover/uri?uri=${encodeURIComponent(link)}`); body.innerHTML = v && v.tags && v.tags.length ? `<p class="muted small">${v.taggers} ${v.taggers === 1 ? 'person' : 'people'} · ${esc(link)}</p><div class="chips">${v.tags.map(([l, c]) => `<span class="chip">#${esc(l)} <span class="muted">${c}</span></span>`).join('')}</div>` : empty(`No one has tagged ${b.dataset.scope === 'this' ? 'this version' : 'this'} on Pubky yet.`); } catch { body.innerHTML = empty('Pubky did not answer.'); }
           });
-          if (pg.reading) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 8) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, 4000); }
+          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
           break;
         }
         case 'queue': {
