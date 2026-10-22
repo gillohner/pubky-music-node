@@ -499,6 +499,10 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
             .map(|j| j.0)
             .unwrap_or_default(),
     );
+    versions.extend(matches_for(s, &format!("lib:song:{n}")));
+    if let Some((u, _)) = &t.canonical {
+        versions.extend(matches_for(s, &u.to_url()));
+    }
     let canonical = t.canonical.as_ref().map(|(u, _)| u.to_url());
     let on_pubky = match &canonical {
         Some(u) => crate::discover::on_pubky_for(s, u).await,
@@ -618,6 +622,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
             .map(|j| j.0)
             .unwrap_or_default(),
     );
+    versions.extend(matches_for(s, &format!("lib:album:{n}")));
     let canonical = a
         .release_group_mbid
         .map(|m| format!("https://musicbrainz.org/release-group/{m}"))
@@ -750,10 +755,15 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         artist: None,
         album: None,
         year: None,
-        image: info
-            .as_ref()
-            .filter(|i| i.image)
-            .map(|_| format!("/v1/library/artists/{n}/image")),
+        image: (info.as_ref().is_some_and(|i| i.image)
+            || s.library
+                .lock()
+                .expect("library poisoned")
+                .get_setting(&format!("artist.picture.{n}"))
+                .ok()
+                .flatten()
+                .is_some())
+        .then(|| format!("/v1/library/artists/{n}/image")),
         source: "Your library".into(),
         plays_from: Some(PlaysFrom {
             service: "library".into(),
@@ -780,7 +790,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 })
             })
             .collect(),
-        versions: Vec::new(),
+        versions: matches_for(s, &format!("lib:artist:{n}")),
         also_on: Vec::new(),
         opened_as: None,
         song_uri: None,
@@ -986,76 +996,268 @@ pub(crate) fn matches_for(s: &NodeState, uri: &str) -> Vec<Version> {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct CandidateQuery {
+    /// The item's canonical URL or service link; a library item without one gives `item`.
+    #[serde(default)]
     pub uri: String,
     pub kind: String,
     pub title: String,
     #[serde(default)]
     pub artist: Option<String>,
+    /// The page id (`lib-6`), so library facts (albums, ISRC, length) can back a match.
+    #[serde(default)]
+    pub item: Option<String>,
 }
 
-/// `GET /v1/item/candidates?uri&kind&title&artist`: the same title (and
-/// artist) on the connected services, shown as "possibly the same".
+/// What a match is stored under: the item's URL, else its library id (`lib:artist:6`).
+pub(crate) fn match_target(kind: &str, uri: Option<&str>, item: Option<&str>) -> Option<String> {
+    if let Some(u) = uri.map(str::trim).filter(|u| !u.is_empty()) {
+        return Some(u.to_string());
+    }
+    let n: i64 = item?.strip_prefix("lib-")?.parse().ok()?;
+    matches!(kind, "song" | "album" | "artist").then(|| format!("lib:{kind}:{n}"))
+}
+
+fn norm(x: &str) -> String {
+    x.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// What the library knows about an item, to weigh candidates with.
+#[derive(Default)]
+struct Known {
+    albums: Vec<String>,
+    isrc: Option<String>,
+    upc: Option<String>,
+    year: Option<i32>,
+    duration_ms: Option<u64>,
+    lib_id: Option<i64>,
+}
+
+fn known(s: &NodeState, kind: &str, item: Option<&str>) -> Known {
+    let Some(n) = item
+        .and_then(|i| i.strip_prefix("lib-"))
+        .and_then(|n| n.parse::<i64>().ok())
+    else {
+        return Known::default();
+    };
+    let lib = s.library.lock().expect("library poisoned");
+    let mut k = Known {
+        lib_id: Some(n),
+        ..Default::default()
+    };
+    match kind {
+        "artist" => {
+            k.albums = lib
+                .artist_albums(n)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.title)
+                .collect();
+        }
+        "album" => {
+            if let Ok(Some(a)) = lib.get_album(n) {
+                k.upc = a.upc.map(|u| u.to_string());
+                k.year = a.year;
+            }
+        }
+        _ => {
+            if let Ok(Some(t)) = lib.get_track(TrackId(n)) {
+                k.isrc = t.isrc.map(|i| i.to_string());
+                k.duration_ms = t.duration_ms;
+            }
+        }
+    }
+    k
+}
+
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `GET /v1/item/candidates?uri&kind&title&artist&item`: the same title (and artist) on the
+/// connected services, as "possibly the same", with what tells same-named ones apart and the
+/// evidence for each (an artist that has your album, the same ISRC or barcode), best first.
 pub(crate) async fn candidates(
     State(s): State<Arc<NodeState>>,
     axum::extract::Query(q): axum::extract::Query<CandidateQuery>,
-) -> ApiResult<Vec<Version>> {
-    let term = format!("{} {}", q.artist.clone().unwrap_or_default(), q.title)
-        .trim()
-        .to_string();
+) -> ApiResult<Vec<MatchCandidate>> {
+    let term = if q.kind == "artist" {
+        q.title.trim().to_string()
+    } else {
+        format!("{} {}", q.artist.clone().unwrap_or_default(), q.title)
+            .trim()
+            .to_string()
+    };
     let want = if q.kind == "song" {
         "track"
     } else {
         q.kind.as_str()
     };
-    let norm = |x: &str| {
-        x.to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-    };
     let title = norm(&q.title);
-    let have: Vec<String> = matches_for(&s, &q.uri).into_iter().map(|v| v.url).collect();
-    let mut out = Vec::new();
+    let key = match_target(&q.kind, Some(&q.uri), q.item.as_deref());
+    let have: Vec<String> = key
+        .as_deref()
+        .map(|k| matches_for(&s, k).into_iter().map(|v| v.url).collect())
+        .unwrap_or_default();
+    let k = known(&s, &q.kind, q.item.as_deref());
+    let mut hits = Vec::new();
     for r in crate::streaming::unified_search(&s, &term, 10).await {
         for h in r.items {
             if h.kind != want || h.url == q.uri || have.contains(&h.url) {
                 continue;
             }
             let t = norm(&h.title);
-            if !(t.starts_with(&title) || title.starts_with(&t)) {
+            if t.is_empty() || !(t.starts_with(&title) || title.starts_with(&t)) {
                 continue;
             }
-            out.push(Version {
-                page: None,
-                source: r.source.clone(),
-                id: h.id.clone(),
-                label: format!(
-                    "{} · {}{}",
-                    crate::discover::service_title(&r.source),
-                    h.title,
-                    h.creator.map(|c| format!(" · {c}")).unwrap_or_default()
-                ),
-                url: h.url.clone(),
-                uri: h.uri.clone(),
-            });
+            hits.push((r.source.clone(), h));
         }
     }
-    Ok(Json(out))
+    // An artist: does it have one of your albums? (each service's artist page, at once)
+    let lib_albums: Vec<(String, String)> = k
+        .albums
+        .iter()
+        .map(|a| (norm(a), a.clone()))
+        .filter(|(n, _)| !n.is_empty())
+        .collect();
+    let artist_albums: Vec<Vec<String>> = if q.kind == "artist" && !lib_albums.is_empty() {
+        let futs = hits.iter().take(8).map(|(src, h)| {
+            let s = s.clone();
+            let (src, id) = (src.clone(), h.id.clone());
+            async move {
+                let Ok(svc) = crate::streaming::find(&src) else {
+                    return Vec::new();
+                };
+                match tokio::time::timeout(std::time::Duration::from_secs(4), svc.artist(&s, &id)).await {
+                    Ok(Ok(a)) => a.albums.into_iter().map(|x| x.title).collect(),
+                    _ => Vec::new(),
+                }
+            }
+        });
+        futures_util::future::join_all(futs).await
+    } else {
+        Vec::new()
+    };
+    let mut out: Vec<(usize, u64, MatchCandidate)> = hits
+        .into_iter()
+        .enumerate()
+        .map(|(i, (src, h))| {
+            let mut evidence = Vec::new();
+            if let Some(albums) = artist_albums.get(i) {
+                for (n, name) in &lib_albums {
+                    if albums
+                        .iter()
+                        .any(|a| norm(a) == *n || norm(a).starts_with(n.as_str()))
+                        && evidence.len() < 2
+                    {
+                        evidence.push(format!("has your album {name}"));
+                    }
+                }
+            }
+            if k.isrc.is_some() && h.isrc.as_deref().map(str::to_ascii_uppercase) == k.isrc {
+                evidence.push("same ISRC".into());
+            }
+            if k.upc.is_some() && h.upc == k.upc {
+                evidence.push("same barcode (UPC)".into());
+            }
+            if q.kind == "album" && k.year.is_some() && h.year == k.year {
+                evidence.push(format!("same year {}", h.year.unwrap_or_default()));
+            }
+            if let (Some(a), Some(b)) = (k.duration_ms, h.duration_ms) {
+                if a.abs_diff(b) <= 2000 {
+                    evidence.push(format!("same length {}:{:02}", b / 60_000, b / 1000 % 60));
+                }
+            }
+            if k.lib_id.is_some() && (h.library_album_id == k.lib_id || h.library_track_id == k.lib_id) {
+                evidence.push("matches your copy".into());
+            }
+            let fans = h.downloads.unwrap_or(0);
+            let detail = match q.kind.as_str() {
+                "artist" => h.downloads.map(|n| {
+                    format!(
+                        "{} {}",
+                        thousands(n),
+                        if src == "deezer" { "fans" } else { "followers" }
+                    )
+                }),
+                _ => {
+                    let parts: Vec<String> = [h.year.map(|y| y.to_string()), h.creator.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    (!parts.is_empty()).then(|| parts.join(" · "))
+                }
+            };
+            let c = MatchCandidate {
+                version: Version {
+                    page: None,
+                    source: src.clone(),
+                    id: h.id.clone(),
+                    label: format!(
+                        "{} · {}{}",
+                        crate::discover::service_title(&src),
+                        h.title,
+                        h.creator.clone().map(|c| format!(" · {c}")).unwrap_or_default()
+                    ),
+                    url: h.url.clone(),
+                    uri: h.uri.clone(),
+                },
+                image: h.image.clone(),
+                detail,
+                evidence,
+                likely: false,
+            };
+            (i, fans, c)
+        })
+        .collect();
+    // Evidence first, then the better known one, else the services' own order
+    out.sort_by(|a, b| {
+        b.2.evidence
+            .len()
+            .cmp(&a.2.evidence.len())
+            .then(b.1.cmp(&a.1))
+            .then(a.0.cmp(&b.0))
+    });
+    let with_evidence = out.iter().filter(|c| !c.2.evidence.is_empty()).count();
+    if with_evidence == 1 {
+        out[0].2.likely = true;
+    }
+    Ok(Json(out.into_iter().map(|c| c.2).collect()))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ConfirmMatch {
-    pub uri: String,
+    /// The item's URL; a library item without one names itself by `kind` and `id` (`lib-6`).
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
     pub version: Version,
+    /// The match's picture (a library artist without one shows it).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
-/// `POST /v1/item/matches {uri, version}`: the owner confirms "the same";
+/// `POST /v1/item/matches {uri | kind+id, version, image?}`: the owner confirms "the same";
 /// stored on this node only.
 pub(crate) async fn confirm_match(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<ConfirmMatch>,
 ) -> ApiResult<Vec<Version>> {
-    let mut v = matches_for(&s, &body.uri);
+    let kind = body.kind.clone().unwrap_or_else(|| "song".into());
+    let key = match_target(&kind, body.uri.as_deref(), body.id.as_deref()).ok_or_else(|| {
+        ApiError::bad_request("Couldn't tell which item to match: give its uri, or kind and id")
+    })?;
+    let mut v = matches_for(&s, &key);
     if !v.iter().any(|x| x.url == body.version.url) {
         let mut m = body.version.clone();
         m.label = format!("{} · matched by you", crate::discover::service_title(&m.source));
@@ -1063,12 +1265,23 @@ pub(crate) async fn confirm_match(
     }
     {
         let lib = s.library.lock().expect("library poisoned");
-        lib.set_setting(
-            &match_key(&body.uri),
-            &serde_json::to_string(&v).unwrap_or_default(),
-        )?;
+        lib.set_setting(&match_key(&key), &serde_json::to_string(&v).unwrap_or_default())?;
         // The cached contents may now come from the matched service.
-        let _ = lib.delete_setting(&format!("item.contents.{}", body.uri));
+        let _ = lib.delete_setting(&format!("item.contents.{key}"));
+        // A library artist's picture from the match, when it has none
+        if let (Some(n), Some(img)) = (
+            key.strip_prefix("lib:artist:"),
+            body.image.as_deref().filter(|i| i.starts_with("https://")),
+        ) {
+            if lib
+                .get_setting(&format!("artist.picture.{n}"))
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                lib.set_setting(&format!("artist.picture.{n}"), img)?;
+            }
+        }
     }
     Ok(Json(v))
 }

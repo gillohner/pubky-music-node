@@ -123,6 +123,34 @@ pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 // ---- router ----
 
+/// The framework's own refusals (a JSON body that doesn't fit, a wrong method) come as plain
+/// text such as "Failed to deserialize the JSON body…". Pages show `error` to people, so those
+/// become the node's error shape with a plain sentence; the detail goes to the log and `detail`
+/// (STEWARD-FIX-same-artist.md: no raw errors in the UI).
+async fn plain_errors(resp: Response) -> Response {
+    let st = resp.status();
+    let text = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.starts_with("text/plain"));
+    if !(st.is_client_error() || st.is_server_error()) || !text || st == StatusCode::UNAUTHORIZED {
+        return resp;
+    }
+    let (_, body) = resp.into_parts();
+    let raw = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    tracing::warn!(status = %st, "request refused: {raw}");
+    let error = match st.as_u16() {
+        400 | 415 | 422 => "The node didn't understand that request. Reload the page and try again.",
+        404 => "That isn't here (any more).",
+        405 => "The node can't do that here.",
+        413 => "That is too big for the node to take.",
+        _ => "Something went wrong on the node. Try again.",
+    };
+    (st, Json(serde_json::json!({ "error": error, "detail": raw }))).into_response()
+}
+
 pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
@@ -368,6 +396,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/pubky/files/jobs/{id}/cancel", post(files::cancel_job))
         .route("/events", get(events::events_ws))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
+        .layer(middleware::map_response(plain_errors))
         .with_state(state.clone());
     // The web UI's paths (navigation brief): a deep link or reload lands on
     // the same view, so every page path serves index.html.
@@ -1673,7 +1702,28 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
         // The first request may have to fetch it.
         let info = artist_info::artist_info(&s, id).await?;
         if !info.image {
-            return Err(ApiError::not_found(format!("no portrait for artist {id}")));
+            // Else the picture of the service artist the owner matched it to
+            let matched = s
+                .library
+                .lock()
+                .expect("library poisoned")
+                .get_setting(&format!("artist.picture.{id}"))
+                .ok()
+                .flatten();
+            let got = match matched {
+                Some(url) => match s.http_client().get(&url).send().await {
+                    Ok(r) if r.status().is_success() => r.bytes().await.ok(),
+                    _ => None,
+                },
+                None => None,
+            };
+            let Some(bytes) = got.filter(|b| b.len() > 100) else {
+                return Err(ApiError::not_found(format!("no portrait for artist {id}")));
+            };
+            let _ = tokio::fs::create_dir_all(&s.art_dir).await;
+            tokio::fs::write(&path, &bytes)
+                .await
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
     }
     let bytes = tokio::fs::read(&path)
@@ -5035,6 +5085,80 @@ mod tests {
         );
         let (st, _) = call(&app, "GET", "/v1/item/playlist/x", None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// "Same artist" on a library artist, album and song (no canonical URL): the match is kept
+    /// by kind and id and shows on the page as "also on"; a body that doesn't fit answers in
+    /// plain words (STEWARD-FIX-same-artist.md).
+    #[tokio::test]
+    async fn library_items_take_matches_and_bad_bodies_answer_plainly() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (tid, artist, album) = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("01.flac"), "Trip to Serbia", "Sefa");
+            tr.album = Some(pm_model::Album {
+                id: None,
+                title: "Trip To Bangladesh".into(),
+                album_artist: Some("Sefa".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(2024),
+                upc: None,
+                total_discs: None,
+            });
+            let tid = lib.upsert_track(&tr).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (tid.0, t.artists[0].id.unwrap(), t.album.unwrap().id.unwrap())
+        };
+        let app = router(s.clone());
+        for (kind, id, url) in [
+            ("artist", artist, "https://www.deezer.com/artist/123"),
+            ("album", album, "https://www.deezer.com/album/456"),
+            ("song", tid, "https://www.deezer.com/track/789"),
+        ] {
+            let (st, v) = call(
+                &app,
+                "POST",
+                "/v1/item/matches",
+                Some(serde_json::json!({"kind": kind, "id": format!("lib-{id}"), "image": "https://cdn.example/p.jpg",
+                    "version": {"source": "deezer", "id": "x", "label": "Deezer · Sefa", "url": url}})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{kind}: {v}");
+            let (st, pg) = call(&app, "GET", &format!("/v1/item/{kind}/lib-{id}"), None).await;
+            assert_eq!(st, StatusCode::OK, "{pg}");
+            assert!(
+                pg["also_on"].as_array().unwrap().iter().any(|v| v["url"] == url),
+                "{kind}: {pg}"
+            );
+        }
+        // The artist page now has a picture (the match's)
+        let (_, pg) = call(&app, "GET", &format!("/v1/item/artist/lib-{artist}"), None).await;
+        assert_eq!(pg["image"], format!("/v1/library/artists/{artist}/image"));
+        // The owner's case: no uri, no kind; and a body that is not a match at all
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/item/matches",
+            Some(serde_json::json!({"version": {"source": "deezer", "id": "x", "label": "x", "url": "u"}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(!e["error"].as_str().unwrap().contains("deserialize"), "{e}");
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/item/matches",
+            Some(serde_json::json!({"uri": "x"})),
+        )
+        .await;
+        assert!(st.is_client_error(), "{st}");
+        assert_eq!(
+            e["error"], "The node didn't understand that request. Reload the page and try again.",
+            "{e}"
+        );
+        assert!(e["detail"].as_str().unwrap().contains("version"), "{e}");
     }
 
     /// One search, streamed per source: the library answers first, a slow

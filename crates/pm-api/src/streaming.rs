@@ -43,7 +43,7 @@ pub fn services() -> Vec<Box<dyn StreamingService>> {
     ]
 }
 
-fn find(id: &str) -> Result<Box<dyn StreamingService>, ApiError> {
+pub(crate) fn find(id: &str) -> Result<Box<dyn StreamingService>, ApiError> {
     services()
         .into_iter()
         .find(|svc| svc.id() == id)

@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **"Same artist" works on library items** (owner screenshot: "Failed to deserialize the JSON body…"; STEWARD-FIX-same-artist.md).
+  - A library artist, album or song is matched by its page id; before, the match needed a URL that library items don't have. The match shows as "Also on" on the page.
+  - **Same-named candidates told apart:** each has its picture and its fans or followers. An artist that has one of your albums says so ("has your album Bad Dreams"). Candidates with evidence come first, and when exactly one has evidence it's marked likely.
+  - **A library artist gets a picture** from the service artist you matched it to, when it has none of its own.
+  - **Top songs** on an artist page are numbered 1, 2, 3 (they showed track numbers).
+  - **No raw errors:** a request body the node doesn't understand answers with a plain sentence. The detail goes to the node log and the browser console.
 - **Internet radio is a source** (`radio`, owner-approved list §6.1): the radio-browser.info directory by name, country or tag (`/v1/radio/countries`, `/v1/radio/tags`); SomaFM's 51 channels; Radio Paradise's six channels, five in lossless FLAC (`/v1/radio/curated`). Radio joins `/v1/sources` for search and station pages, ready for its own tab in Sources. Checked live: Radio Paradise plays as FLAC 16/44.1 and SomaFM as MP3, both with track titles. Channel lists follow Music Assistant's providers (Apache-2.0; see NOTICE).
 - **Every zone is a UPnP/DLNA renderer** (`crates/pm-renderer`; `[renderer] enabled`, on by default). Music Assistant's DLNA provider, Home Assistant's DLNA renderer integration, BubbleUPnP and other UPnP controllers find the zones on the LAN and play to them.
   - Each zone is announced over SSDP as a standard MediaRenderer, with AVTransport, RenderingControl, ConnectionManager and events.
