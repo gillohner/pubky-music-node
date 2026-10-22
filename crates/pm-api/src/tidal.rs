@@ -1153,6 +1153,33 @@ async fn relationship_ids(
     Ok(ids)
 }
 
+/// The album of a TIDAL track: (title, link, cover, year).
+pub(crate) async fn track_album(
+    s: &NodeState,
+    id: &str,
+) -> Option<(String, String, Option<String>, Option<i32>)> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) || !endpoints(s).creds.configured() {
+        return None;
+    }
+    let v = get_json(
+        s,
+        &format!("/tracks/{id}"),
+        &[("countryCode", country(s)), ("include", "albums".into())],
+    )
+    .await
+    .ok()?;
+    let inc = included(&v);
+    let (aid, _) = rel_ids(&v["data"], "albums").into_iter().next()?;
+    let a = inc.get(&("albums".to_string(), aid.clone()))?;
+    let attrs = &a["attributes"];
+    Some((
+        attrs["title"].as_str()?.to_string(),
+        tidal_url("album", &aid),
+        None,
+        year_of(attrs["releaseDate"].as_str()),
+    ))
+}
+
 /// A TIDAL track's ISRC (needs the node's TIDAL app).
 pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) || !endpoints(s).creds.configured() {

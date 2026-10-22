@@ -276,7 +276,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/home/location", get(home::get_location).put(home::set_location))
         .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
-        .route("/item/matches", post(item::confirm_match))
+        .route(
+            "/item/matches",
+            post(item::confirm_match).delete(item::unlink_match),
+        )
         .route("/item/{kind}/{id}", get(item::page))
         .route("/item/{kind}/{id}/extras", get(item::page_extras))
         .route(
@@ -1874,6 +1877,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
                 .ok()
                 .flatten()
                 .is_some_and(|v| v == "1"),
+        genre_tags: tags::genre_tags_on(&s.library.lock().expect("library poisoned")),
     }
 }
 
@@ -1932,6 +1936,15 @@ async fn update_node_settings(
             .lock()
             .expect("library poisoned")
             .set_setting(subsonic::JUKEBOX_ZONE_KEY, &z)?;
+    }
+    if let Some(g) = req.genre_tags {
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(tags::GENRE_TAGS_KEY, if g { "1" } else { "0" })?;
+        // Switched on: the tags now (they go out with the next sync); off keeps the ones made
+        if g {
+            let n = tags::publish_genres(&lib)?;
+            tracing::info!(tags = n, "files' genres published as tags");
+        }
     }
     if let Some(d) = req.dev_outputs {
         s.library
@@ -5159,6 +5172,72 @@ mod tests {
             "{e}"
         );
         assert!(e["detail"].as_str().unwrap().contains("version"), "{e}");
+    }
+
+    /// Library tags are Pubky tags (STEWARD-UX-INSTANCES item 6): an unmatched file takes a tag
+    /// that waits and is published once matched; the files' genres become tags when switched on.
+    #[tokio::test]
+    async fn unmatched_files_take_tags_and_genres_publish_on_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("01.flac"), "Trip to Serbia", "Sefa");
+            tr.genres = vec!["Hardcore".into()];
+            lib.upsert_track(&tr).unwrap().0
+        };
+        let app = router(s.clone());
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/tags",
+            Some(serde_json::json!({"track_id": tid, "label": "Frenchcore"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (_, t) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        assert_eq!(t["tags"][0]["label"], "frenchcore", "{t}");
+        assert_eq!(t["tags"][0]["pending"], true);
+        let (_, all) = call(&app, "GET", "/v1/tags", None).await;
+        assert!(
+            all["tags"].as_array().unwrap().is_empty(),
+            "nothing to publish yet: {all}"
+        );
+        // Genres switched on: nothing yet (not matched)
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/node/settings",
+            Some(serde_json::json!({"genre_tags": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Matched: the waiting tag becomes an ordinary one, and the genre follows at the next sync pass
+        s.library
+            .lock()
+            .unwrap()
+            .set_identity(
+                tid,
+                &pm_model::MusicUri::Isrc {
+                    isrc: pm_model::Isrc::parse("NLZ3R2400021").unwrap(),
+                },
+                pm_model::Confidence::ConfirmedByUser,
+                None,
+            )
+            .unwrap();
+        let (_, t) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        assert_eq!(t["uri"], "https://musicbrainz.org/isrc/NLZ3R2400021", "{t}");
+        assert_eq!(t["tags"][0]["label"], "frenchcore");
+        assert!(t["tags"][0].get("pending").is_none());
+        crate::tags::before_sync(&s.library.lock().unwrap());
+        let (_, t) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        let labels: Vec<&str> = t["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["label"].as_str().unwrap())
+            .collect();
+        assert!(labels.contains(&"hardcore"), "{t}");
     }
 
     /// One search, streamed per source: the library answers first, a slow

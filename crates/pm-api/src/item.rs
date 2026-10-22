@@ -90,6 +90,43 @@ pub(crate) async fn page(
             }
         }
     }
+    // A service's track page: its album from the service itself when nothing else knew it
+    if kind == "song" && pg.albums.is_empty() {
+        if let Some((svc, n)) = pg
+            .id
+            .split_once('-')
+            .filter(|(svc, _)| matches!(*svc, "tidal" | "deezer" | "spotify"))
+        {
+            let fut = async {
+                match svc {
+                    "deezer" => crate::deezer::track_album(&s, n).await,
+                    "spotify" => crate::spotify::track_album(&s, n).await,
+                    _ => crate::tidal::track_album(&s, n).await,
+                }
+            };
+            if let Ok(Some((title, url, image, year))) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), fut).await
+            {
+                let aid = page_id(&url);
+                if pg.album.is_none() {
+                    pg.album = Some(PageLink {
+                        name: title.clone(),
+                        id: Some(aid.clone()),
+                    });
+                }
+                if pg.year.is_none() {
+                    pg.year = year;
+                }
+                pg.albums.push(ItemAlbum {
+                    id: aid,
+                    title,
+                    year,
+                    image,
+                    page: url,
+                });
+            }
+        }
+    }
     let order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
     split_sources(&mut pg, &order);
     if kind == "song" {
@@ -565,6 +602,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         year: t.album.as_ref().and_then(|a| a.year),
         image: row.image.clone(),
         source: "Your library".into(),
+        source_id: "library".into(),
         plays_from: Some(PlaysFrom {
             service: "library".into(),
             kind: "track".into(),
@@ -675,6 +713,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         year: a.year,
         image: Some(cover(n)),
         source: "Your library".into(),
+        source_id: "library".into(),
         plays_from: Some(PlaysFrom {
             service: "library".into(),
             kind: "album".into(),
@@ -765,6 +804,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 .is_some())
         .then(|| format!("/v1/library/artists/{n}/image")),
         source: "Your library".into(),
+        source_id: "library".into(),
         plays_from: Some(PlaysFrom {
             service: "library".into(),
             kind: "artist".into(),
@@ -940,6 +980,18 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         year: None,
         image: it.image.clone(),
         source: it.site.clone().unwrap_or_else(|| "Pubky".into()),
+        source_id: id
+            .split_once('-')
+            .map(|(p, _)| p)
+            .filter(|p| matches!(*p, "tidal" | "deezer" | "spotify"))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                it.site
+                    .clone()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .replace(' ', "-")
+            }),
         plays_from: c.plays_from.clone().or_else(|| it.plays_from.clone()),
         connect: if c.connect.is_empty() {
             it.connect.clone()
@@ -1178,7 +1230,17 @@ pub(crate) async fn candidates(
             if k.lib_id.is_some() && (h.library_album_id == k.lib_id || h.library_track_id == k.lib_id) {
                 evidence.push("matches your copy".into());
             }
-            let fans = h.downloads.unwrap_or(0);
+            // A song or album by someone else (Queen + Adam Lambert for Queen) is not the same
+            let other_artist = q.kind != "artist"
+                && q.artist.as_deref().is_some_and(|a| {
+                    h.creator
+                        .as_deref()
+                        .is_some_and(|c| !norm(c).is_empty() && norm(c) != norm(a))
+                });
+            if other_artist {
+                evidence.clear();
+            }
+            let fans = if other_artist { 0 } else { h.downloads.unwrap_or(0) };
             let detail = match q.kind.as_str() {
                 "artist" => h.downloads.map(|n| {
                     format!(
@@ -1286,6 +1348,46 @@ pub(crate) async fn confirm_match(
     Ok(Json(v))
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UnlinkMatch {
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The linked source's URL.
+    pub url: String,
+}
+
+/// `DELETE /v1/item/matches {uri | kind+id, url}`: "Wrong match": unlink a source the owner
+/// linked by hand.
+pub(crate) async fn unlink_match(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<UnlinkMatch>,
+) -> ApiResult<Vec<Version>> {
+    let kind = body.kind.clone().unwrap_or_else(|| "song".into());
+    let key = match_target(&kind, body.uri.as_deref(), body.id.as_deref()).ok_or_else(|| {
+        ApiError::bad_request("Couldn't tell which item to change: give its uri, or kind and id")
+    })?;
+    let mut v = matches_for(&s, &key);
+    let before = v.len();
+    v.retain(|x| x.url.trim_end_matches('/') != body.url.trim_end_matches('/'));
+    if v.len() == before {
+        return Err(ApiError::not_found(
+            "That source wasn't linked by hand, so there is nothing to unlink",
+        ));
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    if v.is_empty() {
+        lib.delete_setting(&match_key(&key))?;
+    } else {
+        lib.set_setting(&match_key(&key), &serde_json::to_string(&v).unwrap_or_default())?;
+    }
+    let _ = lib.delete_setting(&format!("item.contents.{key}"));
+    Ok(Json(v))
+}
+
 #[cfg(test)]
 mod instance_tests {
     use super::*;
@@ -1308,6 +1410,7 @@ mod instance_tests {
             kind: "song".into(),
             id: "lib-7".into(),
             source: "Your library".into(),
+            source_id: "library".into(),
             section: "tracks".into(),
             target: serde_json::json!({}),
             versions: vec![

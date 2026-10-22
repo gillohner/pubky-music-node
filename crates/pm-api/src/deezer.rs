@@ -370,6 +370,25 @@ pub(crate) async fn track_versions(s: &NodeState, track: &pm_model::Track) -> Re
 }
 
 /// Deezer's track with this ISRC (public catalogue, no account; cached per ISRC).
+/// The album of a Deezer track: (title, link, cover, year).
+pub(crate) async fn track_album(
+    s: &NodeState,
+    id: &str,
+) -> Option<(String, String, Option<String>, Option<i32>)> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v = get_json(s, &format!("/track/{id}"), &[]).await.ok()?;
+    let a = &v["album"];
+    let aid = id_of(a)?;
+    Some((
+        a["title"].as_str()?.to_string(),
+        page_url("album", &aid),
+        cover(a),
+        year_of(a).or_else(|| year_of(&v)),
+    ))
+}
+
 /// A Deezer track's ISRC.
 pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {

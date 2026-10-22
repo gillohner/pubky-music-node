@@ -569,7 +569,8 @@ async fn playlist_lifecycle() {
             Some(serde_json::json!({"track_id": u["id"], "label": "disco"})),
         )
         .await;
-        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        // It waits for a match (STEWARD-UX-INSTANCES item 6)
+        assert_eq!(st, StatusCode::OK);
     }
     let (st, mine) = call(&app, "GET", &format!("/v1/tags?track_id={tagged_id}"), None).await;
     assert_eq!(st, StatusCode::OK, "{mine}");

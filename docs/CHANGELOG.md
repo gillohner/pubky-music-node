@@ -4,6 +4,15 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Song pages say where they are from, and one tag block** (owner review of a live Spotify song page; STEWARD-UX-INSTANCES items 6 and 7).
+  - **The page's own source comes first** in the source row, highlighted ("Spotify · this page", with its link), then "Also on". The eyebrow covers both, e.g. "Song on Spotify · plays from TIDAL here", "Song in your library", "plays on your Spotify device".
+  - **"Find on other services" is gone from the page.** Matching is automatic and the source row shows the result. Corrections live in the ⋯ menu:
+    - **"Link another source…"** shows candidates with their evidence (same length, ISRC, your album). A recording by a different artist (Queen + Adam Lambert for Queen) is never offered as likely.
+    - **"Wrong match…"** unlinks a source you linked (`DELETE /v1/item/matches`).
+  - **One Tags block** replaces "On Pubky" and "Yours". Your tags and others' tags are in one list with counts, yours removable. The only choice is the scope, shown only when the page has a link of its own.
+  - **Tags on files that aren't matched yet** wait ("waits for a match") and are published as ordinary Pubky tags once the file is matched. This works on song pages and in Now playing.
+  - **The Genres page** shows your Pubky tags beside the genres from your files. An opt-in switch publishes the files' genres as Pubky tags on matched songs (off by default; public).
+  - **A service track page fills its album** from the service (Spotify, TIDAL, Deezer). Song pages drop the one-song "Song" section.
 - **"Same artist" works on library items** (owner screenshot: "Failed to deserialize the JSON body…"; STEWARD-FIX-same-artist.md).
   - A library artist, album or song is matched by its page id; before, the match needed a URL that library items don't have. The match shows as "Also on" on the page.
   - **Same-named candidates told apart:** each has its picture and its fans or followers. An artist that has one of your albums says so ("has your album Bad Dreams"). Candidates with evidence come first, and when exactly one has evidence it's marked likely.

@@ -354,6 +354,9 @@ pub struct TagEntry {
     pub created_at: i64,
     /// Pushed to the homeserver.
     pub synced: bool,
+    /// On a song not matched yet: published the moment it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -457,6 +460,9 @@ pub struct NodeSettingsView {
     /// About this node or `PM_DEV_OUTPUTS=1`.
     #[serde(default)]
     pub dev_outputs: bool,
+    /// Publish the files' genres as Pubky tags on matched songs (off by default; public).
+    #[serde(default)]
+    pub genre_tags: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -471,6 +477,8 @@ pub struct NodeSettingsUpdate {
     pub copy_rate: Option<u64>,
     #[serde(default)]
     pub dev_outputs: Option<bool>,
+    #[serde(default)]
+    pub genre_tags: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1061,6 +1069,10 @@ pub struct ItemPage {
     pub image: Option<String>,
     /// Where the item comes from: "Your library", "TIDAL", "Deezer", "Pubky".
     pub source: String,
+    /// The same as a service id (`library`, `tidal`, `spotify`, `deezer`, a site's slug), for the
+    /// page's own entry in the source row.
+    #[serde(default)]
+    pub source_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plays_from: Option<PlaysFrom>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

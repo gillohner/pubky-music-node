@@ -938,3 +938,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .cand .evidence { color: var(--ok, var(--accent-strong)); }
 .cand .evidence .ic { width: 12px; height: 12px; vertical-align: -1px; }
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
+.alsoon .also.here { background: var(--accent-soft); color: var(--accent-strong); border-radius: 999px; padding: 3px 10px 3px 4px; gap: 6px; }
+.alsoon .also.here .muted { color: inherit; opacity: 0.75; }
+.tag-wait { padding: 0 6px 0 2px; font-style: italic; }
+.dialog.wide { width: min(640px, calc(100vw - 32px)); }
+.genre-pub { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); }

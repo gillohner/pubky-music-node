@@ -282,6 +282,23 @@ fn need_user(s: &NodeState) -> Result<UserSession, ApiError> {
     })
 }
 
+/// The album of a Spotify track: (title, link, cover, year).
+pub(crate) async fn track_album(
+    s: &NodeState,
+    id: &str,
+) -> Option<(String, String, Option<String>, Option<i32>)> {
+    let t = valid_id(id).ok()?;
+    let v = get_json(s, &format!("/tracks/{t}"), &[]).await.ok()?;
+    let a = &v["album"];
+    let aid = a["id"].as_str()?;
+    Some((
+        a["name"].as_str()?.to_string(),
+        spotify_url("album", aid),
+        image_of(a),
+        year_of(a),
+    ))
+}
+
 /// A Spotify track's ISRC (needs the node's Spotify app).
 pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
     let t = valid_id(id).ok()?;
