@@ -44,7 +44,6 @@ Newest first. Dates are when the change landed on `main`.
   - measures every group member at the same instant: a member measured after another's write had waited seemed ahead by the wait.
   - asks every player for its status every 5 s, as LMS does. Fixed: a player that heard nothing from the node for 35 s dropped the connection mid-track ("No messages from server - connection dead"). This happened to any group member that needed no drift correction for that long.
   - **Measured in CI** with two squeezelite players on ALSA in one group, recorded together on left and right (`tools/slim-sync-alsa.py`): they start within one period of the sound card (CI's mixer: 5.8 ms), and the node's own estimate of the gap is good to about a millisecond, so a start that lands a period apart is pulled together within seconds. CI holds them to 2 ms after the first 10 s. Simulated players 500 ppm fast and slow stay within 4 ms (unit test).
-  - **Measured in CI** with two squeezelite players on ALSA in one group, recorded together on left and right (`tools/slim-sync-alsa.py`). Simulated players 500 ppm fast and slow stay within 10 ms (unit test).
 - **Songs that aren't identified yet go into playlists and favourites** (mn-infra: Music Assistant failed on every other song of an untagged library, with "check your permissions" and a 500).
   - They're kept on this node only, after the playlist's songs, and never synced.
   - The playlist page lists them under "On this node only", with a line saying why and how to fix it.
