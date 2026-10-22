@@ -953,6 +953,9 @@
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
     searchRuns.set(key, run);
+    // Tag labels as you type (yours first), beside the results: STEWARD-FIX-search-tags.md
+    const word = (/#(\S+)$/.exec(q.trim()) || [])[1] || (q.includes('#') ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
+    if (word && word.length <= 20) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
     (async () => {
       try {
         const r = await fetch(`/v1/search?${new URLSearchParams({ q, in: scope })}`, { headers: state.token ? { authorization: 'Bearer ' + state.token } : {}, signal: run.ctrl.signal });
@@ -1426,7 +1429,7 @@
     for (const ans of answers) for (const h of ans.hits) {
       if (!byKind[h.kind]) continue;
       const found = (h.keys || []).map((k) => index.get(h.kind + '|' + k)).find(Boolean);
-      if (found) { if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
+      if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
       const m = { ...h, sources: [ans.source] };
       byKind[h.kind].push(m);
       for (const k of h.keys || []) index.set(h.kind + '|' + k, m);
@@ -1449,6 +1452,7 @@
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
     const top = byKind.artist.find((x) => x.sources.includes('library')) || byKind.song.find((x) => x.sources.includes('library')) || byKind.artist[0] || byKind.album[0] || byKind.song[0];
+    const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => `<button class="chip on" data-stag="${esc(t.label)}" title="Your tag">Your #${esc(t.label)} <span class="muted">${countOf(t.count, 'items')}</span></button>`).join('')}${(tg.others || []).map((l) => `<button class="chip" data-stag="${esc(l)}">#${esc(l)}</button>`).join('')}</div></section>`);
     if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" onerror="this.remove()">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     for (const [kind, label] of SEARCH_KINDS) {
       const items = byKind[kind];
@@ -1456,7 +1460,7 @@
       const head = `<div class="section-head"><h3>${label}</h3><span class="muted small">${items.length ? items.length : ''}${counts[kind] && counts[kind] > items.length ? ` of ${counts[kind]} on Pubky` : ''}</span></div>`;
       let body;
       if (!items.length) body = skel(kind === 'song' ? 4 : 1, kind === 'album' || kind === 'artist');
-      else if (kind === 'song') body = songRows(items.slice(0, 12).map((h) => ({ ...h, artist: h.subtitle, id: h.id })), { showAlbum: true, numbers: 'index', extra: (t) => `<span class="src-badges">${t.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span>` });
+      else if (kind === 'song') body = songRows(items.slice(0, 12).map((h) => ({ ...h, artist: h.subtitle, id: h.id })), { showAlbum: true, numbers: 'index', extra: (t) => `${t.tagged ? `<span class="muted small tagged-by">tagged ${esc(t.tagged)}</span>` : ''}<span class="src-badges">${t.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span>` });
       else if (kind === 'album' || kind === 'artist') body = itemTileGrid(items.slice(0, 12).map((h) => ({ ...h, year: h.year || h.subtitle })), kind);
       else body = `<div class="list">${items.slice(0, 10).map((h, k) => `<div class="list-row clickable" data-sother="${kind}:${k}">${svcBadge(h.sources[0])}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${icon('external')}</div>`).join('')}</div>`;
       sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}</section>`);
@@ -1464,7 +1468,9 @@
     const short = (e, src) => { const m = humanError(String(e || ''), `/sources/${src}`).replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error, src))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
-    box.innerHTML = notes + (nothing ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
+    box.innerHTML = notes + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    $$('[data-stag]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.stag }));
     // Bind: rows and tiles use the shared components.
     const songsSec = $('[data-skind="song"]', box);
     if (songsSec && byKind.song.length) bindSongRows(songsSec, byKind.song.slice(0, 12).map((h) => ({ ...h, artist: h.subtitle })), {});

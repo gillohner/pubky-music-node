@@ -188,6 +188,16 @@ impl NexusClient {
         Self::json(self.http.get(url).send().await?).await
     }
 
+    /// Tag labels that start with `prefix` (`/v0/search/tags/by_prefix/{prefix}`).
+    pub async fn tags_by_prefix(&self, prefix: &str, limit: u32) -> Result<Vec<String>, NexusError> {
+        let p: String = url::form_urlencoded::byte_serialize(prefix.as_bytes()).collect();
+        let url = with_query(
+            &self.url(&format!("/search/tags/by_prefix/{p}")),
+            &[("limit", &limit.clamp(1, 40).to_string())],
+        );
+        Self::json(self.http.get(url).send().await?).await
+    }
+
     pub async fn tags_hot(&self, limit: Option<u32>) -> Result<Vec<HotTag>, NexusError> {
         let mut url = self.url("/tags/hot");
         if let Some(l) = limit {

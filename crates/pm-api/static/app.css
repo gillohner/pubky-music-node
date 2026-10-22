@@ -944,3 +944,4 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .genre-pub { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); }
 .to-global { margin: 6px 0 0; }
+.tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }

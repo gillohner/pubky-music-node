@@ -274,6 +274,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/describe", post(discover::describe))
         .route("/discover/contents", get(discover::contents))
         .route("/search", get(search::search))
+        .route("/search/tags", get(search::tag_suggestions))
         .route("/home/location", get(home::get_location).put(home::set_location))
         .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
@@ -5309,6 +5310,105 @@ mod tests {
         assert_eq!(pg["plays_from"]["service"], "deezer");
         assert_eq!(pg["plays_from"]["mode"], "preview");
         assert_eq!(pg["songs"][0]["uri"], "deezer:track:1109731");
+    }
+
+    /// Search finds Pubky tags (STEWARD-FIX-search-tags.md): a term that only a tag matches
+    /// still finds the song; `#a #b` asks for both tags; suggestions list yours first.
+    #[tokio::test]
+    async fn search_finds_songs_by_their_pubky_tags() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let card = |id: &str, name: &str| serde_json::json!({"id": id, "uri": format!("https://www.deezer.com/track/{id}"), "status": "ok", "type": "MusicRecording", "name": name, "site": "Deezer"});
+        let mock = Router::new()
+            .route(
+                "/v1/search",
+                get(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let items = match (
+                            q.get("q"),
+                            q.get("tags").map(String::as_str),
+                            q.get("match").map(String::as_str),
+                        ) {
+                            (Some(_), _, _) => vec![],
+                            (None, Some("chill"), None) => vec![card("1", "Tagged Only")],
+                            (None, Some("chill,90s"), Some("all")) => vec![card("2", "Both Tags")],
+                            _ => vec![],
+                        };
+                        async move { Json(serde_json::json!({"items": items})) }
+                    },
+                ),
+            )
+            .route(
+                "/nexus/v0/search/tags/by_prefix/{p}",
+                get(|| async { Json(serde_json::json!(["chill", "chicago"])) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("c.flac"), "Calm Song", "Someone");
+            tr.canonical = Some((
+                pm_model::MusicUri::Isrc {
+                    isrc: pm_model::Isrc::parse("USAAA1111111").unwrap(),
+                },
+                pm_model::Confidence::TaggedIsrc,
+            ));
+            lib.upsert_track(&tr).unwrap().0
+        };
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/tags",
+            Some(serde_json::json!({"track_id": tid, "label": "chill"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let lines = |app: Router, uri: String| async move {
+            let resp = app
+                .oneshot(
+                    axum::http::Request::get(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8_lossy(&body)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v.get("source").is_some())
+                .collect::<Vec<_>>()
+        };
+        let ans = lines(app.clone(), "/v1/search?q=chill&in=pubky".into()).await;
+        let pubky = ans
+            .iter()
+            .find(|a| a["source"] == "pubky")
+            .expect("pubky answered");
+        assert_eq!(pubky["hits"][0]["title"], "Tagged Only", "{pubky}");
+        assert_eq!(pubky["hits"][0]["tagged"], "#chill");
+        let ans = lines(app.clone(), "/v1/search?q=%23chill%20%2390s".into()).await;
+        let srcs: Vec<&str> = ans.iter().filter_map(|a| a["source"].as_str()).collect();
+        assert!(srcs.iter().all(|x| *x == "library" || *x == "pubky"), "{srcs:?}");
+        let pubky = ans.iter().find(|a| a["source"] == "pubky").unwrap();
+        assert_eq!(pubky["hits"][0]["title"], "Both Tags", "{pubky}");
+        let ans = lines(app.clone(), "/v1/search?q=%23chill".into()).await;
+        let lib = ans.iter().find(|a| a["source"] == "library").unwrap();
+        assert_eq!(
+            lib["hits"][0]["title"], "Calm Song",
+            "your own tag, offline: {lib}"
+        );
+        let (_, sug) = call(&app, "GET", "/v1/search/tags?prefix=chi", None).await;
+        assert_eq!(sug["mine"][0]["label"], "chill", "{sug}");
+        assert_eq!(sug["others"], serde_json::json!(["chicago"]));
     }
 
     /// One search, streamed per source: the library answers first, a slow

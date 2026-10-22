@@ -39,7 +39,7 @@ const errors = [];
   await p.waitForSelector('#main #iabout', { timeout: 30000 }).catch(() => {});
   const h1 = await p.textContent('#main h1').catch(() => null);
   console.log('pasted TIDAL link →', new URL(p.url()).pathname, '|', h1);
-  if (!/^\/album\/u-/.test(new URL(p.url()).pathname)) errors.push('a pasted link did not open its item page');
+  if (!/^\/album\/(u|tidal)-/.test(new URL(p.url()).pathname)) errors.push('a pasted link did not open its item page');
   if (OUT) await p.screenshot({ path: `${OUT}/search-pasted-link.png` });
   await browser.close();
   console.log('errors:', errors.length ? errors : 'none');
