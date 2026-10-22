@@ -1416,11 +1416,14 @@
   const srcState = (x) => {
     if (!x.enabled) return { cls: 'off', label: 'Turned off', long: 'Turned off.' };
     const st = String(x.status || '');
-    if (st === 'ready') return { cls: 'ok', label: 'Connected', long: 'Ready.' };
+    if (st === 'ready' || st === 'signed in') return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : 'Ready.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
     if (st === 'browser') return { cls: 'ok', label: 'Ready', long: 'Plays in This browser, in YouTube\u2019s own player.' };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
-    return { cls: 'bad', label: 'Problem', long: st };
+    if (/^ready\b/.test(st)) return { cls: 'ok', label: 'Ready', long: st.charAt(0).toUpperCase() + st.slice(1) + '.' };
+    // Only a real failure is red; any other note is shown as it is
+    if (/error|fail|expired|refused|revoked|unreachable|broken/i.test(st)) return { cls: 'bad', label: 'Problem', long: st };
+    return { cls: 'none', label: 'Not set up', long: st };
   };
   // Sources switched off disappear from the sidebar and search scopes too.
   const applySourcesOff = () => {
