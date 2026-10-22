@@ -4,6 +4,15 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Settings, rebuilt** (owner: "very cluttered … maybe separate tabs on side"; STEWARD-UX-SETTINGS.md).
+  - **Side tabs, one topic each:** Library, Playback, Accounts, Discover, Backup, Import, Appearance, About this node.
+  - **Rows, not cards:** each setting is a row with its label and one line of help, and its control on the right. On phones the controls go below, and Settings is a list you tap into, with Back.
+  - At most one primary button per section.
+  - Each tab has its own address (`/settings/backup`, and `#settings/backup` from anywhere). Get started, the sign-in buttons, Zones and the DSP link open the right tab.
+  - **Pubky keys without the `pubky` prefix,** shortened in the middle (`gi169r…hbhet4m86y`), with a button that copies the whole key: in Settings, on shared playlists, in the sign-in toast and in the restore report.
+  - **No overlap, anywhere:** `tools/ui-overlap.js` (in CI) walks every screen and every Settings tab, the now-playing overlay and a menu, at 1440, 1024 and 390 px in light and dark. It fails on sideways scroll, on anything spilling out of its card, row or container, and on overlapping neighbours. It found an output's sample-rate list spilling out of its row on phones; fixed.
+  - The control audit and the accessibility audit visit every tab.
+  - Screenshots, before and after: `docs/ux/shots/settings/`.
 - **Fresh-eyes review, round 1** (steward next-4, item 2). A reviewer with no project context used a fresh install for 30 minutes and logged 31 findings. Fixed:
   - **Your own songs can go into playlists and favourites.** Every library track looked unidentified: the page did not read the node's identity format, so it showed "?" and disabled hearts even on identified tracks. Now a song nobody has matched asks **"Which song is this?"** with MusicBrainz's suggestions (title, artist, release; searched again without the length when a file's length doesn't match), and remembers the pick for the file. The heart, Add to playlist, New playlist and the "?" mark all use it. Server messages say "not matched to a song yet" instead of "no canonical identity".
   - **MP3 and Ogg files are read** (they were counted, then skipped quietly). A scan now ends with "Library up to date" and says how many files it could not read; Settings › Library folders lists them.

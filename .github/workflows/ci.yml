@@ -304,6 +304,9 @@ jobs:
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788
+      - name: no overlap on any screen (1440, 1024, 390 px; light and dark)
+        timeout-minutes: 20
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-overlap.js ci-token http://127.0.0.1:7788
       - name: first run from zero (a new node, no folders, contact or Pubky identity, until music plays)
         timeout-minutes: 10
         run: |

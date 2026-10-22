@@ -837,3 +837,59 @@ a.btn { text-decoration: none; }
 @media (max-width: 420px) {
   .player .zone-btn span { display: none; }
 }
+
+/* Settings: side tabs, one topic per tab, settings as rows (STEWARD-UX-SETTINGS.md) */
+.settings { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
+.set-nav { position: sticky; top: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-tab { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--radius-sm); background: none; border: 0; color: var(--fg-2); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.set-tab .ic { width: 18px; height: 18px; flex: none; }
+.set-tab:hover { background: var(--surface-2); color: var(--fg); }
+.set-tab.on { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.set-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.set-tab .chev { display: none; margin-left: auto; }
+.set-body-wrap { min-width: 0; max-width: 860px; }
+.set-title { font-size: 20px; margin: 0 0 16px; }
+.set-back { display: none; margin-bottom: 8px; }
+.set-group { margin-bottom: 28px; }
+.set-h { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
+.set-rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.set-row { display: flex; align-items: center; gap: 20px; padding: 14px 16px; border-top: 1px solid var(--line); min-width: 0; }
+.set-rows > :first-child { border-top: 0; }
+.set-label { flex: 1 1 auto; min-width: 0; }
+.set-name { font-weight: 550; overflow-wrap: anywhere; }
+.set-help { margin: 3px 0 0; color: var(--muted); font-size: 13px; max-width: 64ch; overflow-wrap: anywhere; }
+.set-ctl { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: 60%; min-width: 0; }
+.set-block { flex-direction: column; align-items: stretch; gap: 10px; }
+.set-body { min-width: 0; }
+.set-body .toolbar { flex-wrap: wrap; }
+.set-body .toolbar .input { flex: 1 1 220px; min-width: 0; width: auto; }
+.set-list .set-item { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.set-list .set-item:first-child { border-top: 0; padding-top: 0; }
+.set-list .set-item .grow { flex: 1; min-width: 0; }
+.set-list .set-item .name, .set-list .set-item .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-list .set-item .sub { color: var(--muted); font-size: 12px; }
+.set-rows > #pkurl:not(:empty), .set-rows > #dspbox:not(:empty), .set-rows > .set-note { padding: 0 16px 14px; }
+.set-rows > .notice { margin: 0 16px 14px; }
+.set-rows #pkfiles .list { margin-top: 6px; }
+.nowrap { white-space: nowrap; }
+code.path { font-size: 13px; overflow-wrap: anywhere; }
+.pkey { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; vertical-align: middle; }
+.pkey code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.icon-btn.sm { width: 28px; height: 28px; }
+.icon-btn.sm .ic { width: 15px; height: 15px; }
+@media (max-width: 720px) {
+  .settings { grid-template-columns: 1fr; gap: 0; }
+  .settings.no-panel .set-body-wrap { display: none; }
+  .settings.has-panel .set-nav { display: none; }
+  .set-nav { position: static; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; gap: 0; }
+  .set-tab { padding: 14px 14px; border-radius: 0; border-top: 1px solid var(--line); font-size: 15px; }
+  .set-tab:first-child { border-top: 0; }
+  .set-tab.on { background: none; color: var(--fg-2); font-weight: 400; }
+  .set-tab .chev { display: inline; transform: rotate(-90deg); }
+  .set-back { display: inline-flex; }
+  .set-row { flex-direction: column; align-items: stretch; gap: 10px; }
+  .set-ctl { max-width: none; justify-content: flex-start; }
+}
+.set-panel { min-width: 0; }
+.set-list .set-item .caps { flex: 0 1 50%; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 720px) { .set-list .set-item { flex-wrap: wrap; } .set-list .set-item .caps { flex-basis: 100%; text-align: left; } }

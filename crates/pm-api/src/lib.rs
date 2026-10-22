@@ -365,6 +365,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
         .route("/source/{id}", get(web_ui))
+        .route("/settings/{tab}", get(web_ui))
         .route("/home/{section}", get(web_ui))
         .route("/tag/{labels}", get(web_ui))
         .route("/discover", get(web_ui))
@@ -4658,6 +4659,7 @@ mod tests {
             "/search?q=cro%20bad%20chick",
             "/discover",
             "/settings",
+            "/settings/backup",
             "/shared/zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o/0035WKVKQDHSM",
         ] {
             let resp = app

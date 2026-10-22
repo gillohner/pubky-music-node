@@ -60,10 +60,10 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
 
   // 4. Sign in: opens the Pubky Ring sign-in on Settings
   await p.click('#setupsignin');
-  await p.waitForFunction(() => location.pathname === '/settings' && document.querySelector('#pkurl') && document.querySelector('#pkurl').textContent.trim().length > 0, null, { timeout: 20000 }).catch(() => null);
-  check(new URL(p.url()).pathname === '/settings', 'sign-in goes to Settings');
+  await p.waitForFunction(() => location.pathname.startsWith('/settings') && document.querySelector('#pkurl') && document.querySelector('#pkurl').textContent.trim().length > 0, null, { timeout: 20000 }).catch(() => null);
+  check(new URL(p.url()).pathname.startsWith('/settings'), 'sign-in goes to Settings');
   check(!!(await p.evaluate(() => { const u = document.querySelector('#pkurl'); return u && /Pubky Ring/.test(u.textContent); })), 'the Pubky Ring sign-in (QR and link) is open');
-  check(/Library folders/.test(await p.textContent('main h3')), 'Settings starts with the library folders');
+  check(new URL(p.url()).pathname === '/settings/accounts' && /Music folders/.test(await p.textContent('#set-library')), 'sign-in opens the Accounts tab; the Library tab has the music folders');
 
   // Phone width: the card fits
   const phone = await browser.newContext({ viewport: { width: 375, height: 812 }, reducedMotion: 'reduce' });

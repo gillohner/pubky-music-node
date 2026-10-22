@@ -547,7 +547,9 @@ async fn restore_locked(
             match crate::sync::PubkySync::connect(s.pubky.network, &secret).await {
                 Ok(sync) => {
                     let sync = Arc::new(sync);
-                    report.signed_in.push(format!("Pubky ({})", sync.z32()));
+                    report
+                        .signed_in
+                        .push(format!("Pubky ({})", short_key(sync.z32())));
                     s.set_sync(Some(sync.clone()));
                     let st = s.clone();
                     tokio::spawn(async move {
@@ -574,6 +576,25 @@ async fn restore_locked(
         let _ = s.set_contact(&c);
     }
     Ok(report)
+}
+
+/// A Pubky key as people read it: no `pubky` prefix, shortened in the middle.
+pub fn short_key(k: &str) -> String {
+    let k = k.trim_start_matches("pubky");
+    if k.chars().count() > 20 {
+        let head: String = k.chars().take(6).collect();
+        let tail: String = k
+            .chars()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{head}…{tail}")
+    } else {
+        k.to_string()
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
