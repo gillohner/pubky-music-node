@@ -107,7 +107,7 @@
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
   // passes through; raw service answers ("…answered 403 Forbidden: …") are translated, and the raw
   // text stays on the error as `raw` (UX review: wording leaks internals).
-  const SVC_WORDS = { tidal: 'TIDAL', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
+  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
   const humanError = (raw, path = '') => {
     const text = String(raw || '');
     const svcKey = (/^\/sources\/([a-z]+)/.exec(path) || /^([a-z]+): /.exec(text) || [])[1];
@@ -399,7 +399,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -1443,7 +1443,7 @@
     $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
-  const SERVICE_NAMES = { tidal: 'TIDAL', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -2226,8 +2226,9 @@
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
+              + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2266,6 +2267,35 @@
             if (u.pending) state.tidalFullPoll = setTimeout(async () => { const was = u.signed_in; await fillTidalFull(); if (!was && tf.querySelector('#tfout')) toast('TIDAL full tracks signed in'); }, 3000);
           };
           fillTidalFull();
+          // Qobuz (unofficial-only): opt-in, warned, the owner's own app and sign-in (STEWARD-DUAL-MODE.md)
+          const qm = $('#qobuzmode');
+          const fillQobuz = async () => {
+            if (!qm || !qm.isConnected) return;
+            let u; try { u = await api('GET', '/sources/qobuz/unofficial'); } catch (e) { qm.innerHTML = ''; return; }
+            if (!qm.isConnected) return;
+            const broke = u.health && !u.health.ok;
+            const rows = [row('Qobuz (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz (unofficial)">`)];
+            if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>`);
+            if (u.enabled || u.signed_in || u.app_from) {
+              if (u.app_from) rows.push(row('App', u.app_from === 'config' ? 'Set in the node config.' : 'Set here. Qobuz can stop accepting an app at any time; then enter another one.', `<button class="btn ghost sm" id="qbappchange">Change</button>${u.app_from === 'settings' ? '<button class="btn ghost sm" id="qbappforget">Forget</button>' : ''}`));
+              rows.push(`<form class="set-row set-block" id="qbapp" ${u.app_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">App</div>${help('The node has no built-in Qobuz app: enter a Qobuz app ID and secret you are allowed to use. Until you do, Qobuz stays off. The node keeps them like a sign-in.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="App ID" inputmode="numeric" autocomplete="off" aria-label="Qobuz app ID" required><input class="input" name="secret" type="password" placeholder="App secret" autocomplete="off" aria-label="Qobuz app secret" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              if (u.signed_in) rows.push(row('Signed in', `Qobuz account${u.user ? ' ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''}${u.hires ? ' · hi-res' : ''}.`, '<button class="btn ghost sm" id="qbout">Sign out</button>'));
+              else if (u.app_from) rows.push(`<form class="set-row set-block" id="qbin"><div class="set-label"><div class="set-name">Sign in</div>${help('Your password goes to Qobuz once, to sign in. The node keeps only the session Qobuz answers with, never the password.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required><input class="input" name="password" type="password" placeholder="Password" autocomplete="current-password" aria-label="Qobuz password" required><button class="btn primary" type="submit">Sign in</button></div></div></form>`);
+              rows.push(row('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option></select>`));
+              if (u.health && u.health.ok && u.signed_in) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+            }
+            qm.innerHTML = group('Unofficial mode', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#qbon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz is on' : 'Qobuz is off');
+            const qr = $('#qbretry'); if (qr) qr.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
+            const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
+            const af = $('#qbapp'); if (af) af.onsubmit = (e) => { e.preventDefault(); const f = new FormData(af); put({ app_id: String(f.get('id') || '').trim(), app_secret: String(f.get('secret') || '').trim() }, 'Qobuz app saved'); };
+            const ac = $('#qbappchange'); if (ac) ac.onclick = () => { af.hidden = false; af.querySelector('input').focus(); };
+            const ag = $('#qbappforget'); if (ag) ag.onclick = () => put({ app_id: '' }, 'Qobuz app forgotten');
+            const qi = $('#qbin'); if (qi) qi.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(qi); const b = qi.querySelector('button'); b.disabled = true; try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
+            const qo = $('#qbout'); if (qo) qo.onclick = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
+          };
+          fillQobuz();
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;

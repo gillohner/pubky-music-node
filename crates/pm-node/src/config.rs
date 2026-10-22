@@ -19,6 +19,8 @@ pub struct NodeConfig {
     /// TIDAL developer app (developer.tidal.com); empty = the project's built-in app (sign-in with
     /// PKCE through the return page, no secret).
     pub tidal: TidalConfig,
+    /// Qobuz (unofficial): an app ID and secret the owner may use; Sources › Qobuz can set them.
+    pub qobuz: QobuzConfig,
     /// Spotify developer app (developer.spotify.com); optional.
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
@@ -150,6 +152,25 @@ pub struct SpotifyConfig {
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct QobuzConfig {
+    pub app_id: String,
+    pub app_secret: String,
+}
+
+impl std::fmt::Debug for QobuzConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QobuzConfig")
+            .field("app_id", &self.app_id)
+            .field(
+                "app_secret",
+                &if self.app_secret.is_empty() { "" } else { "<set>" },
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct TidalConfig {
     pub client_id: String,
     pub client_secret: String,
@@ -216,6 +237,7 @@ impl Default for NodeConfig {
             api: ApiConfig::default(),
             outputs: OutputsConfig::default(),
             tidal: TidalConfig::default(),
+            qobuz: QobuzConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
             jamendo: JamendoConfig::default(),

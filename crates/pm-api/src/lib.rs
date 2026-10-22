@@ -54,6 +54,7 @@ pub mod playlists;
 pub mod plex;
 pub mod podcasts;
 pub mod project_apps;
+pub mod qobuz;
 pub mod radio;
 pub mod radio_sources;
 pub mod remote;
@@ -332,6 +333,15 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
+        .route("/sources/qobuz/stream/{id}", get(qobuz::stream))
+        .route(
+            "/sources/qobuz/unofficial",
+            get(qobuz::get_status).put(qobuz::put),
+        )
+        .route(
+            "/sources/qobuz/unofficial/login",
+            post(qobuz::login).delete(qobuz::logout),
+        )
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -6980,6 +6990,226 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT);
+    }
+
+    /// Qobuz (unofficial-only): the owner's app and sign-in, search, an album, a signed stream
+    /// request for browsers and zones, and the mode switching itself off when Qobuz refuses the app.
+    #[tokio::test]
+    async fn qobuz_signs_in_searches_and_streams_from_a_mock() {
+        use md5::Digest;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let secret_ok = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let file_base = base.clone();
+        let ok2 = secret_ok.clone();
+        let album = serde_json::json!({"id": "0060253780968", "title": "Random Access Memories", "artist": {"name": "Daft Punk"}, "upc": "0886443927087",
+            "release_date_original": "2013-05-17", "image": {"large": "https://img/600.jpg"}, "maximum_bit_depth": 24, "maximum_sampling_rate": 88.2,
+            "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "track_number": 8, "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108"}]}});
+        let mock = Router::new()
+            .route(
+                "/user/login",
+                post(|headers: axum::http::HeaderMap, body: String| async move {
+                    assert_eq!(headers.get("x-app-id").unwrap(), "100000000");
+                    let f: std::collections::HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+                    let want = format!("{:x}", md5::Md5::digest(b"hunter2"));
+                    assert_eq!(f["password"], want, "the password goes as its MD5");
+                    if f["email"] == "free@example.com" {
+                        return Json(serde_json::json!({"user_auth_token": "t-free", "user": {"id": 2, "credential": {"parameters": null}}}));
+                    }
+                    Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "display_name": "Listener", "country_code": "CH",
+                        "credential": {"label": "Studio", "parameters": {"lossless_streaming": true, "hires_streaming": true}}}}))
+                }),
+            )
+            .route("/catalog/search", get({ let album = album.clone(); move |headers: axum::http::HeaderMap| { let album = album.clone(); async move {
+                assert_eq!(headers.get("x-user-auth-token").unwrap(), "t-1");
+                Json(serde_json::json!({"albums": {"items": [album.clone()]}, "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108", "album": album}]},
+                    "artists": {"items": [{"id": 36819, "name": "Daft Punk"}]}}))
+            } } }))
+            .route("/album/get", get({ let album = album.clone(); move || { let album = album.clone(); async move { Json(album) } } }))
+            .route(
+                "/track/getFileUrl",
+                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let (base, ok) = (file_base.clone(), ok2.clone());
+                    async move {
+                        let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                        if !ok.load(std::sync::atomic::Ordering::SeqCst) || q["request_sig"] != want {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "code": 400, "message": "Invalid Request Signature parameter (request_sig)"})));
+                        }
+                        if q["track_id"] == "2" {
+                            return (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "sample": true})));
+                        }
+                        assert_eq!(q["format_id"], "27", "hi-res plan, max quality");
+                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27, "mime_type": "audio/flac"})))
+                    }
+                }),
+            )
+            .route("/file.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let row = |srcs: &serde_json::Value| {
+            srcs.as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == "qobuz")
+                .unwrap()["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(row(&srcs).starts_with("not configured"), "no built-in app");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "a@b.c", "password": "x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/qobuz/unofficial",
+            Some(serde_json::json!({"app_id": "abc", "app_secret": "s3cret"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, q) = call(
+            &app,
+            "PUT",
+            "/v1/sources/qobuz/unofficial",
+            Some(serde_json::json!({"app_id": "100000000", "app_secret": "s3cret", "enabled": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(q["app_from"], "settings");
+        assert!(
+            q.to_string().find("s3cret").is_none(),
+            "the secret never comes back: {q}"
+        );
+        // A free account is refused; a paid one signs in and only its token is kept
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "free@example.com", "password": "hunter2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, q) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "me@example.com", "password": "hunter2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(
+            (q["signed_in"].clone(), q["plan"].clone(), q["hires"].clone()),
+            (
+                serde_json::json!(true),
+                serde_json::json!("Studio"),
+                serde_json::json!(true)
+            )
+        );
+        let kept = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(qobuz::STATE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !kept.contains("hunter2") && !kept.contains("me@example.com"),
+            "neither password nor email is stored"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(row(&srcs), "signed in");
+        // Search, an album, and the stream for browsers
+        let (st, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/qobuz/search?q=daft%20punk&limit=10",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["kind"], "artist");
+        assert_eq!(items[1]["id"], "album:0060253780968");
+        assert_eq!(items[1]["year"], 2013);
+        assert_eq!(items[2]["uri"], "qobuz:track:5966783");
+        assert_eq!(items[2]["isrc"], "USQX91300108");
+        let (st, it) = call(&app, "GET", "/v1/sources/qobuz/items/album:0060253780968", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(it["tracks"][0]["url"], "qobuz:track:5966783");
+        assert_eq!(it["tracks"][0]["format"], "FLAC 24-bit/88.2 kHz (Qobuz)");
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/5966783")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "audio/flac");
+        assert_eq!(
+            resp.into_body().collect().await.unwrap().to_bytes().as_ref(),
+            flac.as_slice()
+        );
+        // A zone opens it through the decoder; a sample is refused, not played
+        let lib = s.library.clone();
+        let opened = tokio::task::spawn_blocking(move || qobuz::open_track_blocking(&lib, "5966783").is_ok())
+            .await
+            .unwrap();
+        assert!(opened);
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/2")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        // Qobuz refusing the app switches the source off, says why, and Retry switches it on
+        secret_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/5966783")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::BAD_GATEWAY
+        );
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert_eq!(q["enabled"], false, "{q}");
+        assert!(
+            q["health"]["detail"].as_str().unwrap().contains("app secret"),
+            "{q}"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(row(&srcs).starts_with("error:"));
+        let (st, _) = call(&app, "GET", "/v1/sources/qobuz/search?q=x", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        secret_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, q) = call(
+            &app,
+            "PUT",
+            "/v1/sources/qobuz/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(
+            (q["enabled"].clone(), q["health"].clone()),
+            (serde_json::json!(true), serde_json::Value::Null)
+        );
     }
 
     #[tokio::test]
