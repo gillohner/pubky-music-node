@@ -36,6 +36,10 @@ API = "http://127.0.0.1:7815"
 SLIM = 3486
 RATE = 44100
 MACS = ["02:00:00:00:01:0a", "02:00:00:00:01:0b"]
+# The shared mixer in asoundrc: a player that joins it can lose one whole mixer buffer at the
+# start (ALSA dmix, not the player), which shows as one click interval short by exactly that.
+MIX_BUFFER = 4096
+MIX_PERIOD = 256
 
 
 def log(m):
@@ -161,7 +165,31 @@ enabled = false
             right.append(n)
     if len(left) < a.seconds - 1 or len(right) < a.seconds - 1:
         raise SystemExit(f"FAIL: heard {len(left)} clicks from A and {len(right)} from B, of {a.seconds}")
+    # A channel whose click interval is short by exactly one mixer buffer lost that buffer in
+    # dmix; the clicks before it are not comparable, so measure from the one after.
+    first = 0
+    for name, clicks in (("A", left), ("B", right)):
+        for k in range(min(3, len(clicks) - 1)):
+            gap = clicks[k + 1] - clicks[k]
+            if abs(gap - (RATE - MIX_BUFFER)) <= MIX_PERIOD:
+                log(f"the mixer dropped one buffer ({MIX_BUFFER} frames) of {name} between clicks {k + 1} and {k + 2}: "
+                    f"this is the test's shared dmix, so the clicks are compared from click {k + 2}")
+                first = max(first, k + 1)
+    left, right = left[first:], right[first:]
     offs = [(b - x) * 1000 / RATE for x, b in zip(left, right)]
+    # The players' own logs say when each began the track (one host clock), independent of dmix.
+    starts = []
+    for i in range(2):
+        for line in open(work / f"squeezelite-{i}.log"):
+            m = re.match(r"\[(\d+):(\d+):([\d.]+)\] _output_frames:\d+ track start", line)
+            if m:
+                starts.append(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]))
+                break
+    if len(starts) == 2:
+        gap = abs(starts[1] - starts[0]) * 1000
+        log(f"the players' own logs: track start {gap:.2f} ms apart")
+        if gap > a.max_start_ms:
+            raise SystemExit(f"FAIL: the players began the track {gap:.2f} ms apart (limit {a.max_start_ms} ms)")
     log("B - A at each click (ms): " + " ".join(f"{o:+.1f}" for o in offs))
     worst = max(abs(o) for o in offs)
     log(f"start {offs[0]:+.2f} ms, end {offs[-1]:+.2f} ms, worst {worst:.2f} ms over {len(offs)} clicks")
