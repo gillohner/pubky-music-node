@@ -388,6 +388,8 @@ jobs:
       - name: library FLACs play in the browser (also after a busy answer)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-playback.js ci-token http://127.0.0.1:7788
+      - name: YouTube in this browser (YouTube's player API stood in; our controls drive it)
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-youtube.js ci-token http://127.0.0.1:7788
       - name: no overlap on any screen (1440, 1024, 390 px; light and dark)
         timeout-minutes: 20
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-overlap.js ci-token http://127.0.0.1:7788

@@ -70,6 +70,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod types;
 pub mod watch;
+pub mod youtube;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -3119,6 +3120,34 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// YouTube is a Sources tab (on/off) that plays in the browser only: a zone refuses its items
+    /// with the reason, and it does not search yet.
+    #[tokio::test]
+    async fn youtube_items_play_only_in_the_browser() {
+        use pm_zones::SourceFactory;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+        let yt = sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "youtube")
+            .unwrap()
+            .clone();
+        assert_eq!(yt["status"], "browser");
+        let (st, _) = call(&app, "GET", "/v1/sources/youtube/search?q=x", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(!crate::search::sources_for(&s, "everywhere").contains(&"youtube".to_string()));
+        let err = s
+            .sources
+            .open(&pm_zones::QueueItem::new("youtube:video:dQw4w9WgXcQ"))
+            .err()
+            .expect("a zone refuses a YouTube item");
+        assert!(err.to_string().contains("only in This browser"), "{err}");
     }
 
     /// A source switched off on Sources: hidden from search and the play order, kept listed,

@@ -933,6 +933,13 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
 .tf-code { font-size: 22px; font-weight: 700; letter-spacing: 0.12em; padding: 4px 10px; border-radius: var(--radius-sm); background: var(--surface-2); }
 .set-body .notice code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; vertical-align: bottom; }
+.ytpanel .ytbox { aspect-ratio: 16 / 9; background: #000; }
+.ytpanel .ytbox iframe, .ytpanel #ytframe { width: 100%; height: 100%; border: 0; display: block; }
+.ytpanel.small { width: min(360px, calc(100vw - 32px)); }
+.ytpanel.small .embedhead .muted { display: none; }
+.ytpanel #ytmin .ic { transition: transform 0.15s; }
+.ytpanel.small #ytmin .ic { transform: rotate(180deg); }
+@media (max-width: 720px) { .ytpanel { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); } }
 
 /* Player bar: the cover opens Now playing; Now playing's Pubky row */
 .np-artbtn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 6px; }

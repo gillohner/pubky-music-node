@@ -271,6 +271,7 @@ pub(crate) fn service_title(id: &str) -> String {
         "archive" => "Internet Archive".into(),
         "audius" => "Audius".into(),
         "jamendo" => "Jamendo".into(),
+        "youtube" => "YouTube".into(),
         other => other.to_string(),
     }
 }

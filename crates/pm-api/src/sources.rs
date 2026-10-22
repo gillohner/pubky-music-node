@@ -518,6 +518,12 @@ pub fn is_http_uri(uri: &str) -> bool {
 
 impl SourceFactory for NodeSources {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
+        if item.uri.starts_with(crate::youtube::VIDEO_URI_PREFIX) {
+            return Err(SourceError::Open {
+                uri: item.uri.clone(),
+                reason: crate::youtube::ZONE_REFUSAL.into(),
+            });
+        }
         if is_http_uri(&item.uri) {
             return open_http_stream(&item.uri);
         }
