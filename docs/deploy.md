@@ -62,8 +62,9 @@ app store. Points worth knowing:
   (`[library] watch`, `watch_quiet_secs`), so downloads appear on their own; `POST /v1/library/scan`
   and the controller's Settings page still trigger a scan at any time.
 - Your own files on your homeserver: `pm-node upload a.flac` (or `POST /v1/pubky/files`) puts audio
-  into the homeserver's private storage; every node with your session mirrors it into
-  `data_dir/homeserver` and indexes it. Private only, never `/pub/`.
+  into the homeserver's private storage. On another node with your session, Settings › Accounts ›
+  Bring files here downloads what that node lacks into a library folder (`From homeserver` by
+  default) and indexes it. Private only, never `/pub/`.
 - Hard constraints hold on every shape: audio stays node-local or in private storage, nothing under
   `/pub/`, and the node never serves one person's library to many users.
 
@@ -130,7 +131,7 @@ The node scans folders; anything the operating system can mount is a folder.
 | NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
 | Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
 | Downloads from another app (Umbrel, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
-| Your Pubky homeserver | `pm-node upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; `POST /v1/pubky/files/mirror` (and start-up) pulls them into `data_dir/homeserver`, which is scanned like any folder |
+| Your Pubky homeserver | `pm-node upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |
 | Streams | internet radio and the Internet Archive need no storage at all |
 
 Scans read tags, embedded art and MusicBrainz ids; tag with Picard first and favourites, tags,

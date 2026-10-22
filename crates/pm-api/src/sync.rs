@@ -231,6 +231,27 @@ impl PubkySync {
         Ok(self.homeserver.download_private(&self.session, path).await?)
     }
 
+    pub async fn download_private_to(
+        &self,
+        path: &str,
+        dest: &std::path::Path,
+        bytes_per_sec: Option<u64>,
+        progress: impl FnMut(u64) -> bool,
+    ) -> Result<u64, SyncError> {
+        Ok(self
+            .homeserver
+            .download_private_to(&self.session, path, dest, bytes_per_sec, progress)
+            .await?)
+    }
+
+    pub async fn stat_private(&self, path: &str) -> Result<Option<u64>, SyncError> {
+        Ok(self.homeserver.stat_private(&self.session, path).await?)
+    }
+
+    pub async fn delete_private(&self, path: &str) -> Result<(), SyncError> {
+        Ok(self.homeserver.delete_private(&self.session, path).await?)
+    }
+
     /// The signed-in user's raw z32 key.
     pub fn z32(&self) -> &str {
         &self.z32

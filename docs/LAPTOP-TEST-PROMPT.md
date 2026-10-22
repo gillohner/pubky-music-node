@@ -91,8 +91,8 @@ G3. UPnP: if a WiiM, Bluesound, Linn or any DLNA renderer is on the network, it 
    http://<laptop-ip>:7788/ should show the same zones; try it on a phone too.
 G. If you have a Pubky session secret (exported from Pubky Ring): set
    `pubky.session_secret_file`, restart serve, confirm the log says "Pubky session restored", then
-   `pm-node upload some.flac` and check `/v1/pubky/files`; on restart the file is mirrored into
-   data_dir/homeserver and scanned. Playlists appear under /priv/pubky.app/posts on the homeserver.
+   `pm-node upload some.flac` and check `/v1/pubky/files`; Settings › Accounts › Bring files here
+   then downloads it into the library folder's `From homeserver` and scans it. Playlists appear under /priv/pubky.app/posts on the homeserver.
 
 H. Newer screens (web UI at http://<laptop-ip>:7788/ and the app): Settings → set the upstream
    contact and add a library folder from the UI (watch it scan); Home (recently added/played,

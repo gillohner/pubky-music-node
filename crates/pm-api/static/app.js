@@ -124,14 +124,15 @@
   };
 
   // A small dialog with a few choices; resolves to the picked value, or null (Esc, Cancel).
-  const choiceDialog = ({ title, text, choices }) => new Promise((resolve) => {
+  // With `field` ({label, value}) it shows a text field and resolves to {value, text}.
+  const choiceDialog = ({ title, text, choices, field }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
+    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
     const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(v); };
     transients.push(tr); pushTransient();
-    $$('[data-ci]', d).forEach((b) => b.onclick = () => done(Number(b.dataset.ci) < 0 ? null : choices[Number(b.dataset.ci)].value));
+    $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
@@ -161,22 +162,89 @@
     const go = await choiceDialog({ title: 'Copy to your homeserver', text: `${plan.total} file${plan.total === 1 ? '' : 's'}, ${fmtBytes(plan.bytes_total)}, into your homeserver's private storage (never public). Files already there are skipped.`, choices: [{ label: 'Copy', note: 'Runs on the node; you can leave this page.', value: true, primary: true }] });
     if (!go) return;
     let job; try { job = await api('POST', '/pubky/files/upload', body); } catch (e) { return toast(e.message, 'error'); }
-    watchUpload(job.id);
+    watchJob(job.id);
   };
-  const watchUpload = (id) => {
-    let card = $('#jobcard'); if (!card) { card = document.createElement('div'); card.id = 'jobcard'; card.className = 'jobcard'; card.setAttribute('role', 'status'); document.body.appendChild(card); }
-    const draw = (p) => {
-      const pct = p.bytes_total ? Math.round((100 * p.bytes_done) / p.bytes_total) : 0;
-      card.innerHTML = `<div class="jobhead"><strong>${p.finished ? 'Copied to your homeserver' : 'Copying to your homeserver'}</strong><button class="icon-btn" data-jobclose title="${p.finished ? 'Close' : 'Hide (it keeps going)'}">${icon('close')}</button></div>`
-        + `<div class="jobbar"><span style="width:${pct}%"></span></div>`
-        + `<p class="muted small">${p.done + p.skipped} of ${p.total} files · ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${p.skipped ? ` · ${p.skipped} already there` : ''}${p.failed ? ` · ${p.failed} failed` : ''}</p>`
-        + (p.current && !p.finished ? `<p class="muted small jobcur">${esc(p.current)}</p>` : '')
-        + (p.errors.length ? `<p class="small joberr">${p.errors.map(esc).join('<br>')}</p>` : '');
-      $('[data-jobclose]', card).onclick = () => card.remove();
-    };
-    const tick = async () => { let p; try { p = await api('GET', `/pubky/files/upload/${id}`); } catch { return; } if (!document.body.contains(card)) return; draw(p); if (!p.finished) setTimeout(tick, 1000); };
-    tick();
+  // The homeserver's private files in Settings: sizes that read right for small files, and the
+  // broken ones (empty, or a second copy under a doubled name) marked with Remove.
+  const fileSize = (b) => (b == null ? '' : b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} KB` : `${b} bytes`);
+  const brokenWhy = (f, names) => {
+    if (f.size === 0) return 'Empty: copy the library again to send it again';
+    const n = f.path.split('/').pop(); const m = /^([0-9a-f]{16})-(.+)$/.exec(n);
+    if (m && m[2].startsWith(`${m[1]}-`) && names.has(m[2])) return 'A second copy (doubled name)';
+    return '';
   };
+  const drawHomeFiles = (box, files) => {
+    if (!files.length) { box.innerHTML = '<span>No private files on the homeserver yet. Copy the library, or an album from its ⋯ menu; audio only ever goes under /priv/.</span>'; return; }
+    const names = new Set(files.map((f) => f.path.split('/').pop()));
+    const rows = files.map((f) => ({ f, why: brokenWhy(f, names) })).sort((a, b) => (b.why ? 1 : 0) - (a.why ? 1 : 0));
+    const broken = rows.filter((r) => r.why);
+    const total = files.reduce((n, f) => n + (f.size || 0), 0);
+    box.innerHTML = `<div class="eyebrow">Private files on the homeserver · ${files.length} · ${fileSize(total)}</div>`
+      + (broken.length ? `<div class="set-warn small">${countOf(broken.length, 'files')} ${broken.length === 1 ? 'is' : 'are'} broken or a second copy. <button class="btn ghost sm" data-rmbroken>Remove ${broken.length === 1 ? 'it' : 'them'}</button></div>` : '')
+      + `<div class="list compact">${rows.slice(0, 50).map(({ f, why }) => `<div class="list-row${why ? ' broken' : ''}"><div class="grow"><div class="name">${esc(f.path.split('/').pop())}</div>${why ? `<div class="muted small">${esc(why)}</div>` : ''}</div><span class="muted small">${fileSize(f.size)}</span>${why ? `<button class="btn ghost sm" data-rmfile="${esc(f.path)}">Remove</button>` : ''}</div>`).join('')}${files.length > 50 ? `<div class="muted small">… and ${files.length - 50} more</div>` : ''}</div>`;
+    const removeFiles = async (paths, btn) => { btn.disabled = true; try { drawHomeFiles(box, await api('DELETE', '/pubky/files', { paths })); toast(`Removed ${countOf(paths.length, 'files')} from your homeserver`); } catch (e) { toast(e.message, 'error'); btn.disabled = false; } };
+    const all = $('[data-rmbroken]', box); if (all) all.onclick = () => removeFiles(broken.map((r) => r.f.path), all);
+    $$('[data-rmfile]', box).forEach((b) => b.onclick = () => removeFiles([b.dataset.rmfile], b));
+  };
+  // "Bring files here": how much first (and what is here already), where to, then a job.
+  const bringFiles = async () => {
+    let plan; try { plan = await api('POST', '/pubky/files/mirror', { dry_run: true }); } catch (e) { return toast(e.message, 'error'); }
+    const broken = plan.broken ? ` ${countOf(plan.broken, 'files')} on the homeserver are empty or a second copy; they are left out (remove them below).` : '';
+    if (!plan.total) return toast(`Nothing to bring: ${countOf(plan.skipped, 'files')} already on this node.${broken}`);
+    const go = await choiceDialog({
+      title: 'Bring files here',
+      text: `${countOf(plan.total, 'files')} (${fmtBytes(plan.bytes_total)}) to bring${plan.skipped ? `, ${plan.skipped} already here` : ''}. They go into this folder, then into your library.${broken}`,
+      field: { label: 'Folder', value: plan.dest },
+      choices: [{ label: 'Bring them', note: 'Runs on the node at your copy speed; you can leave this page.', value: true, primary: true }],
+    });
+    if (!go) return;
+    let job; try { job = await api('POST', '/pubky/files/mirror', go.text && go.text !== plan.dest ? { dest: go.text } : {}); } catch (e) { return toast(e.message, 'error'); }
+    if (job.finished) return toast(`Nothing to bring: ${countOf(job.skipped, 'files')} already here.`);
+    watchJob(job.id);
+  };
+  // A running files job (copy or bring) is a compact chip in the player bar; tapping it shows the
+  // details with Cancel. Opened menus stay on top of it (overlap brief: no floating card).
+  const fjob = { id: null, p: null, timer: null };
+  const jobTitle = (p) => (p.kind === 'bring'
+    ? (p.finished ? (p.cancelled ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
+    : (p.finished ? (p.cancelled ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
+  const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (p.finished ? 100 : 0));
+  const jobPop = () => $('#jobpop');
+  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); if (fjob.p && fjob.p.finished) hideJobChip(); };
+  const hideJobChip = () => { const c = $('#jobchip'); if (c) c.hidden = true; fjob.p = null; };
+  const drawJobPop = () => {
+    const jp = jobPop(); const p = fjob.p; if (!jp || !p) return;
+    const files = p.done + p.failed;
+    jp.innerHTML = `<div class="pop-title">${esc(jobTitle(p))}</div><div class="jobpop-body">`
+      + `<div class="jobbar"><span style="width:${jobPct(p)}%"></span></div>`
+      + `<p class="small">${files} of ${countOf(p.total, 'files')} · ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${p.skipped ? ` · ${p.skipped} already ${p.kind === 'bring' ? 'here' : 'there'}` : ''}${p.failed ? ` · ${p.failed} failed` : ''}</p>`
+      + (p.kind === 'bring' && p.dest ? `<p class="muted small">Into ${esc(p.dest)}, then added to your library.</p>` : '')
+      + (p.current && !p.finished ? `<p class="muted small jobcur">${esc(p.current)}</p>` : '')
+      + (p.errors.length ? `<p class="small joberr">${p.errors.map(esc).join('<br>')}</p>` : '')
+      + `<div class="row-btns">${p.finished ? '<button class="btn ghost" data-jobclose>Close</button>' : '<button class="btn ghost" data-jobcancel>Cancel</button><button class="btn ghost" data-jobclose>Hide</button>'}</div></div>`;
+    const cl = $('[data-jobclose]', jp); if (cl) cl.onclick = () => closeJobPop();
+    const ca = $('[data-jobcancel]', jp); if (ca) ca.onclick = async () => { ca.disabled = true; try { fjob.p = await api('POST', `/pubky/files/jobs/${fjob.id}/cancel`); drawJobPop(); } catch (e) { toast(e.message, 'error'); ca.disabled = false; } };
+  };
+  const drawJobChip = () => {
+    const c = $('#jobchip'); const p = fjob.p; if (!c || !p) return;
+    c.hidden = false;
+    c.classList.toggle('done', !!p.finished);
+    c.innerHTML = `${icon(p.kind === 'bring' ? 'download' : 'upload')}<span class="jc-text">${p.finished ? (p.failed ? `${p.failed} failed` : 'Done') : `${p.done + p.failed}/${p.total}`}</span><span class="jc-bar"><span style="width:${jobPct(p)}%"></span></span>`;
+    const t = `${jobTitle(p)}: ${p.done + p.failed} of ${p.total} files, ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}`;
+    c.title = t; c.setAttribute('aria-label', t);
+    if (!jobPop().hidden) drawJobPop();
+  };
+  const watchJob = (id) => { fjob.id = id; clearTimeout(fjob.timer); tickJob(); };
+  const tickJob = async () => {
+    let p; try { p = await api('GET', `/pubky/files/jobs/${fjob.id}`); } catch { fjob.timer = setTimeout(tickJob, 5000); return; }
+    fjob.p = p; drawJobChip();
+    if (!p.finished) { fjob.timer = setTimeout(tickJob, 1000); return; }
+    if (p.kind === 'bring' && p.done) toast(`Brought ${countOf(p.done, 'files')} here; they are being added to your library.`);
+    // The chip stays a little so the end is seen, unless its details are open
+    fjob.timer = setTimeout(() => { if (jobPop().hidden) hideJobChip(); }, 8000);
+  };
+  // A job already running (another tab started it, or the node carried on after a restart)
+  const findJob = async () => { try { const p = await api('GET', '/pubky/files/jobs'); if (p && p.id && p.id !== fjob.id) watchJob(p.id); } catch { /* not signed in */ } };
   // Outside parts that do not answer (Pinakes, the homeserver, a service): one quiet line under
   // the node status, only when something is wrong; the library keeps playing without them.
   let healthTimer = null;
@@ -409,6 +477,7 @@
   const closePop = (fromBack) => { if (zonePop.hidden) return; zonePop.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
   $('#zonebtn').onclick = () => {
     if (!zonePop.hidden) { closePop(); return; }
+    closeJobPop();
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
@@ -420,7 +489,11 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); if ($('#sidebar').classList.contains('open')) closeSheet(); };
+  $('#jobchip').onclick = () => {
+    const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
+    closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
+  };
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); if ($('#sidebar').classList.contains('open')) closeSheet(); };
   // The menu button: phones open the sidebar as a sheet (closes on back, outside tap, Esc or a pick);
   // wider screens collapse it to icons (or expand it on tablets), remembered per browser.
   const shell = $('.shell');
@@ -992,7 +1065,7 @@
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
   const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
-  transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop });
+  transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
   const showMenu = (anchor, items) => {
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
@@ -2349,13 +2422,11 @@
           $('#logout').onclick = () => login();
           const pkf = $('#pkfiles'); if (pkf) {
             try {
-              const files = await api('GET', '/pubky/files');
-              const total = files.reduce((n, f) => n + (f.size || 0), 0);
-              pkf.innerHTML = files.length ? `<div class="eyebrow">Private files on the homeserver · ${files.length} · ${(total / 1e6).toFixed(1)} MB</div><div class="list compact">${files.slice(0, 50).map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.path.split('/').pop())}</div></div><span class="muted small">${f.size != null ? (f.size / 1e6).toFixed(1) + ' MB' : ''}</span></div>`).join('')}${files.length > 50 ? `<div class="muted small">… and ${files.length - 50} more</div>` : ''}</div>` : '<span>No private files on the homeserver yet. Upload tracks from their ⋯ menu; audio only ever goes under /priv/.</span>';
+              drawHomeFiles(pkf, await api('GET', '/pubky/files'));
             } catch (e) { pkf.textContent = 'Homeserver files: ' + e.message; }
           }
           const ca = $('#pkcopyall'); if (ca) ca.onclick = () => startUpload({ all: true });
-          const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; try { const r = await api('POST', '/pubky/files/mirror'); toast(`Mirrored ${r.fetched} file${r.fetched === 1 ? '' : 's'} (${r.present} already here${r.errors.length ? `, ${r.errors.length} errors` : ''})`); } catch (e) { toast(e.message, 'error'); } mi.disabled = false; };
+          const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; await bringFiles(); mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
           // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
@@ -2578,7 +2649,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth();
+    setConn('ok', nodeLabel()); checkHealth(); findJob();
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {

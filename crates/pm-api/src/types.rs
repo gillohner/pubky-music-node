@@ -862,12 +862,19 @@ pub struct UploadedFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MirrorReport {
-    pub fetched: usize,
-    pub present: usize,
-    pub bytes: u64,
+pub struct MirrorRequest {
+    /// Where the files go; default: `From homeserver` in the first library folder.
     #[serde(default)]
-    pub errors: Vec<String>,
+    pub dest: Option<String>,
+    /// Only say how many files and bytes it would be, and how many are here already.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `DELETE /v1/pubky/files`: private files to remove (only under the files folder).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveFiles {
+    pub paths: Vec<String>,
 }
 
 // ---- artists ----
@@ -1606,10 +1613,23 @@ pub struct UploadRequest {
     pub dry_run: bool,
 }
 
-/// A bulk upload: planned (`dry_run`), running or finished.
+/// A files job between the node and the homeserver (`copy`: library → homeserver; `bring`:
+/// homeserver → this node): planned (`dry_run`), running or finished.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UploadProgress {
     pub id: String,
+    /// `copy` or `bring`.
+    #[serde(default)]
+    pub kind: String,
+    /// Bring: the folder the files go into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// Bring: the homeserver files left out because they are empty or a second copy under a
+    /// doubled name (Settings offers to remove them).
+    #[serde(default)]
+    pub broken: usize,
+    #[serde(default)]
+    pub cancelled: bool,
     pub total: usize,
     pub bytes_total: u64,
     /// Uploaded now.

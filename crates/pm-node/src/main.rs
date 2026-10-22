@@ -234,6 +234,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
     }
+    // A "Bring files here" job the node was running carries on
+    pm_api::files::resume_jobs(&state);
     {
         let ocfg = cfg.outputs.clone();
         state.set_discover(std::sync::Arc::new(move || {

@@ -56,6 +56,30 @@ fn node(dir: &std::path::Path, name: &str) -> Arc<NodeState> {
     )
 }
 
+/// Bring the homeserver's files into `dest` as a job; wait for it and return the last progress.
+async fn bring(app: &axum::Router, dest: &std::path::Path) -> serde_json::Value {
+    let (st, job) = call(
+        app,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({"dest": dest})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{job}");
+    if job["finished"] == true {
+        return job;
+    }
+    let id = job["id"].as_str().unwrap().to_string();
+    for _ in 0..1200 {
+        let (_, p) = call(app, "GET", &format!("/v1/pubky/files/jobs/{id}"), None).await;
+        if p["finished"] == true {
+            return p;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("bringing files did not finish");
+}
+
 async fn call(
     app: &axum::Router,
     method: &str,
@@ -222,15 +246,28 @@ async fn playlists_round_trip_through_the_private_folder() {
     sync_a.upload_private(&remote, bytes.clone()).await.unwrap();
     let listed = sync_a.list_private_files().await.unwrap();
     assert!(listed.iter().any(|f| f.path == remote), "{listed:?}");
+    b.set_sync(Some(sync_b.clone()));
     let mirror = dir.path().join("mirror-b");
-    let r = pm_api::files::mirror_into(&sync_b, &mirror).await.unwrap();
-    assert_eq!(r.fetched, 1, "{r:?}");
+    let r = bring(&app_b, &mirror).await;
     assert_eq!(
-        std::fs::read(mirror.join(remote.rsplit('/').next().unwrap())).unwrap(),
-        bytes
+        (r["done"].as_u64(), r["failed"].as_u64()),
+        (Some(1), Some(0)),
+        "{r}"
     );
-    let r = pm_api::files::mirror_into(&sync_b, &mirror).await.unwrap();
-    assert_eq!((r.fetched, r.present), (0, 1));
+    // Under its own name, without the hash prefix
+    assert_eq!(std::fs::read(mirror.join("song.wav")).unwrap(), bytes);
+    let (_, plan) = call(
+        &app_b,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({"dest": mirror, "dry_run": true})),
+    )
+    .await;
+    assert_eq!(
+        (plan["total"].as_u64(), plan["skipped"].as_u64()),
+        (Some(0), Some(1)),
+        "{plan}"
+    );
     // Public listing must not see it.
     assert!(pubky
         .public_storage()
@@ -1188,4 +1225,309 @@ async fn a_copy_job_does_not_hold_up_the_node() {
     );
     assert!(rounds > 0, "the copy ended before anything was measured");
     assert!(slowest < 1000, "a call waited {slowest} ms during the copy");
+}
+
+/// Steward fix-mirror: a paced (streamed) upload lands whole, and the listing reports its size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paced_upload_lands_whole() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let sync = PubkySync::from_session(NodeHomeserver::from_pubky(pubky.clone()), session);
+    let bytes: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let path = "/priv/pubky.music/files/0123456789abcdef-paced.flac";
+    sync.upload_private_paced(path, bytes.clone(), Some(1_000_000))
+        .await
+        .unwrap();
+    let path2 = "/priv/pubky.music/files/0123456789abcdee-plain.flac";
+    sync.upload_private(path2, bytes.clone()).await.unwrap();
+    let files = sync.list_private_files().await.unwrap();
+    eprintln!("{files:?}");
+    let back = sync.download_private(path).await.unwrap();
+    assert_eq!(
+        back.len(),
+        bytes.len(),
+        "the paced upload came back {} bytes",
+        back.len()
+    );
+    for f in &files {
+        assert_eq!(f.size, Some(bytes.len() as u64), "{f:?}");
+    }
+}
+
+/// Steward fix-mirror: "Bring files here" is a paced background job that only downloads what the
+/// node lacks (matched by content hash), into a library folder under the files' own names; empty
+/// and doubled-name uploads are left out and can be removed; copying brought files back never
+/// doubles the name prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bringing_files_here_skips_what_the_node_has() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let keypair = Keypair::random();
+    let signer = pubky.signer(keypair.clone());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music-a");
+    std::fs::create_dir(&music).unwrap();
+    for i in 0..100u32 {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(music.join(format!("{i:03} song.wav")), spec).unwrap();
+        for k in 0..4000u32 {
+            w.write_sample(((k * (i + 3)) % 2000) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+    let wait_scan = |n: Arc<NodeState>| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for _ in 0..600 {
+            if !n.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    let wait_job = |app: axum::Router, id: String| async move {
+        for _ in 0..2400 {
+            let (_, p) = call(&app, "GET", &format!("/v1/pubky/files/jobs/{id}"), None).await;
+            if p["finished"] == true {
+                return p;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the job did not finish");
+    };
+
+    // Node A copies its library up
+    let a = node(dir.path(), "a");
+    let app_a = router(a.clone());
+    call(
+        &app_a,
+        "POST",
+        "/v1/library/folders",
+        Some(serde_json::json!({"path": music})),
+    )
+    .await;
+    wait_scan(a.clone()).await;
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync_a.clone()));
+    let (st, job) = call(
+        &app_a,
+        "POST",
+        "/v1/pubky/files/upload",
+        Some(serde_json::json!({"all": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{job}");
+    let done = wait_job(app_a.clone(), job["id"].as_str().unwrap().into()).await;
+    assert_eq!(
+        (done["done"].as_u64(), done["failed"].as_u64()),
+        (Some(100), Some(0)),
+        "{done}"
+    );
+
+    // A broken upload and a doubled name, as the NAS had
+    let listed = sync_a.list_private_files().await.unwrap();
+    let one = listed[0].name().to_string();
+    let (h, _) = pm_api::files::split_remote_name(&one).unwrap();
+    let doubled = format!("{}{h}-{one}", pm_pubky::homeserver::PRIVATE_FILES_DIR);
+    let bytes = sync_a.download_private(&listed[0].path).await.unwrap();
+    sync_a.upload_private(&doubled, bytes).await.unwrap();
+    let empty = format!(
+        "{}0000000000000000-empty.wav",
+        pm_pubky::homeserver::PRIVATE_FILES_DIR
+    );
+    sync_a.upload_private(&empty, Vec::new()).await.unwrap();
+
+    // Node A has every file already: nothing to bring
+    let (_, plan) = call(
+        &app_a,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({"dry_run": true})),
+    )
+    .await;
+    assert_eq!(
+        (
+            plan["total"].as_u64(),
+            plan["skipped"].as_u64(),
+            plan["broken"].as_u64()
+        ),
+        (Some(0), Some(100), Some(2)),
+        "{plan}"
+    );
+    assert!(
+        plan["dest"]
+            .as_str()
+            .unwrap()
+            .ends_with("music-a/From homeserver"),
+        "{plan}"
+    );
+    let (_, files) = call(
+        &app_a,
+        "DELETE",
+        "/v1/pubky/files",
+        Some(serde_json::json!({"paths": [doubled, empty]})),
+    )
+    .await;
+    assert_eq!(files.as_array().unwrap().len(), 100, "{files}");
+
+    // Node B (same account, empty library folder) brings all 100 as a paced job with progress
+    let signer_b = pubky.signer(keypair.clone());
+    let session_b = signer_b
+        .signin_blocking(ClientId::new("pm-api-test-b").unwrap())
+        .await
+        .unwrap();
+    let b = node(dir.path(), "b");
+    let app_b = router(b.clone());
+    let music_b = dir.path().join("music-b");
+    std::fs::create_dir(&music_b).unwrap();
+    call(
+        &app_b,
+        "POST",
+        "/v1/library/folders",
+        Some(serde_json::json!({"path": music_b})),
+    )
+    .await;
+    wait_scan(b.clone()).await;
+    b.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        session_b,
+    ))));
+    // 100 × 8 KB at 400 KB/s: about two seconds
+    call(
+        &app_b,
+        "PUT",
+        "/v1/node/settings",
+        Some(serde_json::json!({"copy_rate": 400_000})),
+    )
+    .await;
+    let (_, plan) = call(
+        &app_b,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({"dry_run": true})),
+    )
+    .await;
+    assert_eq!(
+        (plan["total"].as_u64(), plan["skipped"].as_u64()),
+        (Some(100), Some(0)),
+        "{plan}"
+    );
+    let started = std::time::Instant::now();
+    let (st, job) = call(
+        &app_b,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{job}");
+    assert!(
+        started.elapsed().as_millis() < 3000,
+        "the request waited for the downloads"
+    );
+    let id = job["id"].as_str().unwrap().to_string();
+    let mut midway = false;
+    let last = loop {
+        let (_, p) = call(&app_b, "GET", "/v1/pubky/files/jobs", None).await;
+        if p.is_null() {
+            let (_, p) = call(&app_b, "GET", &format!("/v1/pubky/files/jobs/{id}"), None).await;
+            break p;
+        }
+        let d = p["done"].as_u64().unwrap();
+        if d > 0 && d < 100 && p["bytes_done"].as_u64().unwrap() > 0 {
+            midway = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert!(midway, "no progress was seen while the job ran");
+    assert_eq!(
+        (last["done"].as_u64(), last["failed"].as_u64()),
+        (Some(100), Some(0)),
+        "{last}"
+    );
+    let secs = started.elapsed().as_secs_f64();
+    assert!(secs >= 1.5, "the download pace was not kept ({secs:.1} s)");
+    let into = music_b.join("From homeserver");
+    assert!(into.join("000_song.wav").is_file());
+    assert_eq!(
+        std::fs::read_dir(&into).unwrap().count(),
+        100,
+        "no partial files left"
+    );
+    wait_scan(b.clone()).await;
+    let mut tracks = 0;
+    for _ in 0..100 {
+        let (_, t) = call(&app_b, "GET", "/v1/library/tracks?limit=200", None).await;
+        tracks = t["tracks"].as_array().unwrap().len();
+        if tracks == 100 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(tracks, 100, "the brought files were not added to the library");
+
+    // Again: nothing left to bring
+    let (_, again) = call(
+        &app_b,
+        "POST",
+        "/v1/pubky/files/mirror",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        (
+            again["total"].as_u64(),
+            again["skipped"].as_u64(),
+            again["finished"].as_bool()
+        ),
+        (Some(0), Some(100), Some(true)),
+        "{again}"
+    );
+
+    // Copying B's library (the brought files) back adds nothing and doubles no names
+    let (_, job) = call(
+        &app_b,
+        "POST",
+        "/v1/pubky/files/upload",
+        Some(serde_json::json!({"all": true})),
+    )
+    .await;
+    let done = wait_job(app_b.clone(), job["id"].as_str().unwrap().into()).await;
+    assert_eq!(
+        (done["done"].as_u64(), done["skipped"].as_u64()),
+        (Some(0), Some(100)),
+        "{done}"
+    );
+    let names: Vec<String> = sync_a
+        .list_private_files()
+        .await
+        .unwrap()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(names.len(), 100, "{names:?}");
 }

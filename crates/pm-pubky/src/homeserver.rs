@@ -618,6 +618,69 @@ impl NodeHomeserver {
         Ok(out)
     }
 
+    /// The size of one private file, as the homeserver reports it (`None`: not there).
+    pub async fn stat_private(
+        &self,
+        session: &PubkySession,
+        path: &str,
+    ) -> Result<Option<u64>, HomeserverError> {
+        Ok(session
+            .storage()
+            .stats(path)
+            .await?
+            .map(|s| s.content_length.unwrap_or(0)))
+    }
+
+    /// Remove one private file (only under the files folder).
+    pub async fn delete_private(&self, session: &PubkySession, path: &str) -> Result<(), HomeserverError> {
+        if !path.starts_with(PRIVATE_FILES_DIR) {
+            return Err(HomeserverError::Transport(format!(
+                "refusing to delete outside {PRIVATE_FILES_DIR}: {path}"
+            )));
+        }
+        session.storage().delete(path).await?;
+        Ok(())
+    }
+
+    /// Download a private file into `dest` as it arrives (no whole file in memory), no faster
+    /// than `bytes_per_sec` when set; `progress` hears each chunk's size and returns `false` to
+    /// stop (the partial file is removed). Returns the bytes written.
+    pub async fn download_private_to(
+        &self,
+        session: &PubkySession,
+        path: &str,
+        dest: &std::path::Path,
+        bytes_per_sec: Option<u64>,
+        mut progress: impl FnMut(u64) -> bool,
+    ) -> Result<u64, HomeserverError> {
+        use tokio::io::AsyncWriteExt;
+        let io = |e: std::io::Error| HomeserverError::Transport(format!("{}: {e}", dest.display()));
+        let mut resp = session.storage().get(path).await?;
+        let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        let start = tokio::time::Instant::now();
+        let mut written: u64 = 0;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| HomeserverError::Transport(e.to_string()))?
+        {
+            file.write_all(&chunk).await.map_err(io)?;
+            written += chunk.len() as u64;
+            if !progress(chunk.len() as u64) {
+                drop(file);
+                let _ = tokio::fs::remove_file(dest).await;
+                return Err(HomeserverError::Transport("cancelled".into()));
+            }
+            if let Some(rate) = bytes_per_sec.filter(|r| *r > 0) {
+                let due = start + std::time::Duration::from_secs_f64(written as f64 / rate as f64);
+                tokio::time::sleep_until(due).await;
+            }
+        }
+        file.flush().await.map_err(io)?;
+        file.sync_all().await.map_err(io)?;
+        Ok(written)
+    }
+
     pub async fn download_private(
         &self,
         session: &PubkySession,

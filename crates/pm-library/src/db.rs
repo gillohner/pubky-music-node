@@ -26,6 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (10, include_str!("migrations/0010_identify.sql")),
     (11, include_str!("migrations/0011_identify_release.sql")),
     (12, include_str!("migrations/0012_fts_rowid.sql")),
+    (13, include_str!("migrations/0013_file_hashes.sql")),
 ];
 
 pub struct Library {
@@ -1754,6 +1755,51 @@ impl Library {
         Ok(())
     }
 
+    // ---- content hashes (files on the homeserver) ----
+
+    /// Library files present on disk whose size is one of `sizes`: (path, size, mtime).
+    pub fn files_of_sizes(&self, sizes: &std::collections::HashSet<u64>) -> Result<Vec<(PathBuf, u64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path, size_bytes, mtime_unix FROM files WHERE missing = 0")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                PathBuf::from(r.get::<_, String>(0)?),
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let row = row?;
+            if sizes.contains(&row.1) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The kept hash of a file, when its size and mtime are unchanged.
+    pub fn cached_file_hash(&self, path: &Path, size: u64, mtime: i64) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT blake3 FROM file_hashes WHERE path = ?1 AND size_bytes = ?2 AND mtime_unix = ?3",
+                params![path.to_string_lossy(), size as i64, mtime],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn store_file_hash(&self, path: &Path, size: u64, mtime: i64, hash: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO file_hashes(path, size_bytes, mtime_unix, blake3) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes,
+             mtime_unix = excluded.mtime_unix, blake3 = excluded.blake3",
+            params![path.to_string_lossy(), size as i64, mtime, hash],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_setting(&self, key: &str) -> Result<bool> {
         Ok(self
             .lock()
@@ -2486,7 +2532,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 12);
+        assert_eq!(lib.schema_version().unwrap(), 13);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

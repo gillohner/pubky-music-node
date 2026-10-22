@@ -82,6 +82,7 @@
       </div>
     </div>
     <div class="player-right">
+      <button class="jobchip" id="jobchip" hidden aria-label="Files job"></button>
       <button class="quality" id="quality" title="Sound quality: how the sound gets to you" aria-label="Sound quality"><span class="qdot"></span><span class="qtext">—</span></button>
       <div class="volume">
         <svg class="ic"><use href="#i-volume"/></svg>
@@ -93,6 +94,7 @@
 </div>
 
 <div class="popover" id="zonepop" hidden></div>
+<div class="popover" id="jobpop" hidden role="status"></div>
 <div class="overlay" id="nowplaying" hidden></div>
 <aside class="embedpanel" id="embedpanel" hidden><div class="embedhead"><strong id="embedtitle">TIDAL player</strong><span class="muted small">full length for subscribers · sign in inside the player, Nostr (NIP-07) works</span><button class="icon-btn" id="embedclose" title="Close" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><iframe id="embedframe" title="TIDAL player" allow="autoplay; encrypted-media; clipboard-write" referrerpolicy="origin"></iframe></aside>
 <div class="scrim" id="scrim" hidden></div>

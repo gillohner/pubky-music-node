@@ -13,7 +13,7 @@ const problems = [];
 const where = (file, src, idx) => `${file}:${src.slice(0, idx).split('\n').length}`;
 
 // The component set a button may belong to.
-const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams'];
+const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams', 'jobchip'];
 // Classes set only by the browser or third parties, never styled by us.
 const IGNORE_CLASSES = new Set(['ic']);
 

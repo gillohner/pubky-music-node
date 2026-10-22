@@ -1024,8 +1024,9 @@ impl NodeClient {
         self.send(reqwest::Method::POST, "pubky/files", Some(req)).await
     }
 
-    pub async fn pubky_mirror(&self) -> Result<MirrorReport> {
-        self.send::<MirrorReport, ()>(reqwest::Method::POST, "pubky/files/mirror", None)
+    /// Start bringing the homeserver's files this node lacks into a library folder (a job).
+    pub async fn pubky_mirror(&self, req: &MirrorRequest) -> Result<UploadProgress> {
+        self.send(reqwest::Method::POST, "pubky/files/mirror", Some(req))
             .await
     }
 
