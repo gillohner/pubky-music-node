@@ -77,6 +77,7 @@ pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
 pub mod watch;
+pub mod webdav;
 pub mod youtube;
 pub mod ytdlp;
 
@@ -498,6 +499,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/profiles/{id}/follow",
             axum::routing::put(profiles::follow).delete(profiles::unfollow),
         )
+        .route("/library/webdav", get(webdav::list).post(webdav::add))
+        .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
+        .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(
@@ -1728,7 +1732,7 @@ async fn track_file(
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let bytes = tokio::fs::read(&t.file.path)
+    let bytes = webdav::read_library_file(&s, &t.file.path)
         .await
         .map_err(|e| ApiError::not_found(format!("file for track {id}: {e}")))?;
     let mime = match t.file.container.as_str() {

@@ -58,6 +58,8 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 | Audiobookshelf | An API key (Settings › API Keys), or an admin's user and password once: the node makes itself a key and keeps only that | **built**: audiobooks from every book library, by chapter; "continue listening" | **built**: original files into zones (`audiobookshelf:file:<item>/<ino>`), resumed from and reported back to Audiobookshelf's position, so a phone picks up where a zone left off | CI runs Audiobookshelf itself (`tools/abs-source.py`); its podcast libraries later (the node has its own podcasts) |
 
+| WebDAV (Nextcloud, ownCloud, a NAS) | The folder's address, a user and password or app password (Settings › Library › WebDAV shares; kept in the node) | **built**: a library root like a folder; only each song's tags are read (range requests), rescanned every 6 hours | **built**: played from the share in any zone, relayed to browsers | CI runs a real WebDAV server (WsgiDAV, `tools/webdav-source.py`); Google Drive and OneDrive wait for project apps (QUESTIONS.md) |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud (API access is by application).

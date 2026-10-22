@@ -193,7 +193,19 @@ impl<'a> Scanner<'a> {
     }
 
     fn index_file(&self, path: &Path, size: u64, mtime: i64, existing: Option<TrackId>) -> Result<TrackId> {
-        let (probe, tagset) = tags::probe_and_read(path)?;
+        let probed = tags::probe_and_read(path)?;
+        self.index_probed(path, size, mtime, existing, probed)
+    }
+
+    /// Indexes a file whose probe is done (local or remote).
+    fn index_probed(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime: i64,
+        existing: Option<TrackId>,
+        (probe, tagset): (tags::FileProbe, TagSet),
+    ) -> Result<TrackId> {
         let has_album = tagset.album.is_some();
         let file = AudioFile {
             path: path.to_path_buf(),
@@ -220,6 +232,80 @@ impl<'a> Scanner<'a> {
             }
         }
         Ok(id)
+    }
+}
+
+/// A file in a remote library root (a WebDAV share): its key in the library (`webdav://<share>/…`),
+/// size and modification time from the listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntry {
+    pub path: PathBuf,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+impl<'a> Scanner<'a> {
+    /// [`Scanner::scan`] for a remote root: `entries` is its listing, `root` the key prefix
+    /// (`webdav://<share>`), and `open` reads one file (ranged, so only the tags are fetched).
+    /// Unchanged files (same size and time) are skipped; files gone from the listing are
+    /// marked missing. Covers come from embedded art; folder covers and `.lrc` sidecars are
+    /// local-only for now.
+    pub fn scan_remote(
+        &self,
+        root: &Path,
+        entries: Vec<RemoteEntry>,
+        open: &dyn Fn(&RemoteEntry) -> std::io::Result<Box<dyn tags::RemoteRead>>,
+    ) -> Result<ScanReport> {
+        let scan_id = self.lib.begin_scan(root)?;
+        let mut report = ScanReport {
+            scan_id,
+            ..Default::default()
+        };
+        let batch = Batch::new(self.lib)?;
+        for e in entries {
+            if !tags::is_supported(&e.path) {
+                continue;
+            }
+            report.files_seen += 1;
+            batch.tick()?;
+            let existing = self.lib.file_by_path(&e.path)?;
+            if let Some(row) = &existing {
+                if row.size_bytes == e.size && row.mtime_unix == e.mtime {
+                    self.lib.mark_file_seen(&e.path, scan_id)?;
+                    report.files_unchanged += 1;
+                    continue;
+                }
+            }
+            let probed = tags::probe_and_read_from(&e.path, &|| open(&e));
+            match probed.and_then(|p| {
+                self.index_probed(&e.path, e.size, e.mtime, existing.as_ref().map(|r| r.track_id), p)
+            }) {
+                Ok(_) => {
+                    self.lib.mark_file_seen(&e.path, scan_id)?;
+                    if existing.is_some() {
+                        report.files_updated += 1;
+                    } else {
+                        report.files_added += 1;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(path = %e.path.display(), "skipping remote file: {err}");
+                    report.errors.push((e.path.clone(), err.to_string()));
+                }
+            }
+        }
+        batch.finish()?;
+        report.files_removed = self.lib.mark_missing_under(root, scan_id)?;
+        self.lib.finish_scan(
+            scan_id,
+            &ScanCounts {
+                files_seen: report.files_seen,
+                files_added: report.files_added,
+                files_updated: report.files_updated,
+                files_removed: report.files_removed,
+            },
+        )?;
+        Ok(report)
     }
 }
 

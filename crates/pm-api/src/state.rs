@@ -187,6 +187,8 @@ pub struct NodeState {
     pub jellyfin: crate::jellyfin::Shared,
     /// The user's Plex, shared with the audio thread.
     pub plex: crate::plex::Shared,
+    /// WebDAV shares that are library roots, shared with the audio thread.
+    pub webdav: crate::webdav::Shared,
     /// The user's Audiobookshelf, shared with the audio thread.
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -279,6 +281,9 @@ impl NodeState {
         let plex: crate::plex::Shared = Arc::new(std::sync::RwLock::new(crate::plex::load(
             &library.lock().expect("library poisoned"),
         )));
+        let webdav: crate::webdav::Shared = Arc::new(std::sync::RwLock::new(crate::webdav::load(
+            &library.lock().expect("library poisoned"),
+        )));
         let audiobookshelf: crate::audiobookshelf::Shared = Arc::new(std::sync::RwLock::new(
             crate::audiobookshelf::load(&library.lock().expect("library poisoned")),
         ));
@@ -292,6 +297,7 @@ impl NodeState {
             jellyfin.clone(),
             plex.clone(),
             audiobookshelf.clone(),
+            webdav.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
         let sources_off =
@@ -370,6 +376,7 @@ impl NodeState {
             jellyfin,
             plex,
             audiobookshelf,
+            webdav,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
                 api_key: settings.acoustid_key.clone(),

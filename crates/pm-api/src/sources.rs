@@ -35,6 +35,8 @@ pub struct NodeSources {
     plex: crate::plex::Shared,
     /// The user's Audiobookshelf, for `audiobookshelf:file:` URIs.
     audiobookshelf: crate::audiobookshelf::Shared,
+    /// WebDAV shares, for library files on them (`webdav://…`).
+    webdav: crate::webdav::Shared,
 }
 
 impl NodeSources {
@@ -50,6 +52,7 @@ impl NodeSources {
         jellyfin: crate::jellyfin::Shared,
         plex: crate::plex::Shared,
         audiobookshelf: crate::audiobookshelf::Shared,
+        webdav: crate::webdav::Shared,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -74,6 +77,7 @@ impl NodeSources {
             jellyfin,
             plex,
             audiobookshelf,
+            webdav,
         }
     }
 
@@ -575,9 +579,13 @@ impl SourceFactory for NodeSources {
                 uri: item.uri.clone(),
                 reason: "no such track".into(),
             })?;
-        let mut file_item = QueueItem::new(track.file.path.to_string_lossy());
-        file_item.id = item.id;
-        let inner = self.files.open(&file_item)?;
+        let inner = if crate::webdav::is_key(&track.file.path) {
+            crate::webdav::open_blocking(&self.webdav, &track.file.path)?
+        } else {
+            let mut file_item = QueueItem::new(track.file.path.to_string_lossy());
+            file_item.id = item.id;
+            self.files.open(&file_item)?
+        };
         Ok(Box::new(pm_zones::WithReplayGain {
             inner,
             gain: pm_zones::ReplayGain {
