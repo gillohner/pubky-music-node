@@ -815,13 +815,9 @@ async fn dispatch(
             };
             m.insert(key.into(), json!({}));
         }
+        // Both answer in <albumInfo> (Subsonic API; unlike getArtistInfo2's <artistInfo2>).
         "getAlbumInfo2" | "getAlbumInfo" => {
-            let key = if method == "getAlbumInfo2" {
-                "albumInfo2"
-            } else {
-                "albumInfo"
-            };
-            m.insert(key.into(), json!({}));
+            m.insert("albumInfo".into(), json!({}));
         }
         "getAlbum" => {
             let id = parse_id(&want(p, "id")?, "al-").ok_or_else(|| SubErr::not_found("Album not found"))?;
@@ -969,31 +965,45 @@ async fn dispatch(
         "search3" | "search2" => {
             let q = p.get("query").cloned().unwrap_or_default();
             let q = q.trim().trim_matches('"').to_string();
+            // Counts and offsets per kind: clients page through the whole library with an
+            // empty query and growing offsets (Music Assistant, Symfonium's sync).
             let artist_count = num(p, "artistCount", 20);
             let album_count = num(p, "albumCount", 20);
             let song_count = num(p, "songCount", 20);
+            let artist_offset = num(p, "artistOffset", 0);
+            let album_offset = num(p, "albumOffset", 0);
+            let song_offset = num(p, "songOffset", 0);
             let lib = s.library.lock().expect("library poisoned");
             let ql = q.to_lowercase();
             let artists: Vec<Value> = lib
                 .list_artists()?
                 .iter()
                 .filter(|a| q.is_empty() || a.name.to_lowercase().contains(&ql))
+                .skip(artist_offset as usize)
                 .take(artist_count as usize)
                 .map(artist_json)
                 .collect();
-            let albums = if q.is_empty() {
-                lib.list_albums(None, album_count)?
-            } else {
-                lib.search_albums(&q, album_count)?
+            let albums = match (q.is_empty(), album_count) {
+                (_, 0) => Vec::new(),
+                (true, _) => lib.recent_albums(album_offset, album_count)?,
+                (false, _) => lib
+                    .search_albums(&q, album_offset + album_count)?
+                    .into_iter()
+                    .skip(album_offset as usize)
+                    .collect(),
             };
             let albums = albums
                 .iter()
                 .map(|a| album_json(&lib, a))
                 .collect::<Result<Vec<_>, _>>()?;
-            let songs: Vec<Value> = if q.is_empty() {
-                lib.list_tracks(None, song_count)?
-            } else {
-                lib.search_tracks(&q, song_count)?
+            let songs: Vec<Value> = match (q.is_empty(), song_count) {
+                (_, 0) => Vec::new(),
+                (true, _) => lib.tracks_page(song_offset, song_count)?,
+                (false, _) => lib
+                    .search_tracks(&q, song_offset + song_count)?
+                    .into_iter()
+                    .skip(song_offset as usize)
+                    .collect(),
             }
             .iter()
             .map(song_json)
@@ -1136,6 +1146,86 @@ async fn dispatch(
             }
             m.insert("lyricsList".into(), json!({"structuredLyrics": list}));
         }
+        // An artist's most played songs (then in album order), by artist name.
+        "getTopSongs" => {
+            let name = want(p, "artist")?.to_lowercase();
+            let count = num(p, "count", 50) as usize;
+            let lib = s.library.lock().expect("library poisoned");
+            let songs: Vec<Value> = match lib
+                .list_artists()?
+                .into_iter()
+                .find(|a| a.name.to_lowercase() == name)
+            {
+                Some(a) => {
+                    let mut tracks: Vec<(u64, Track)> = lib
+                        .artist_tracks(a.id)?
+                        .into_iter()
+                        .map(|t| (t.id.map(|id| lib.play_count(id).unwrap_or(0)).unwrap_or(0), t))
+                        .collect();
+                    tracks.sort_by_key(|(plays, _)| std::cmp::Reverse(*plays));
+                    tracks.iter().take(count).map(|(_, t)| song_json(t)).collect()
+                }
+                None => Vec::new(),
+            };
+            m.insert("topSongs".into(), json!({"song": songs}));
+        }
+        // Songs by the same artists as the song, album or artist given, in random order
+        // (the node has no similarity data of its own yet).
+        "getSimilarSongs" | "getSimilarSongs2" => {
+            let id = want(p, "id")?;
+            let count = num(p, "count", 50) as usize;
+            let lib = s.library.lock().expect("library poisoned");
+            let (artists, seed): (Vec<i64>, Option<i64>) = if let Some(a) = parse_id(&id, "ar-") {
+                (vec![a], None)
+            } else if let Some(al) = parse_id(&id, "al-") {
+                let mut ids: Vec<i64> = lib
+                    .album_tracks(al)?
+                    .iter()
+                    .flat_map(|t| t.artists.iter().filter_map(|a| a.id))
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                (ids, None)
+            } else {
+                let tid = id
+                    .parse::<i64>()
+                    .map_err(|_| SubErr::not_found("Song not found"))?;
+                let t = lib
+                    .get_track(TrackId(tid))?
+                    .ok_or_else(|| SubErr::not_found("Song not found"))?;
+                (t.artists.iter().filter_map(|a| a.id).collect(), Some(tid))
+            };
+            let mut tracks: Vec<Track> = Vec::new();
+            for a in artists {
+                for t in lib.artist_tracks(a)? {
+                    if t.id.map(|i| i.0) != seed && !tracks.iter().any(|x| x.id == t.id) {
+                        tracks.push(t);
+                    }
+                }
+            }
+            use rand::seq::SliceRandom;
+            tracks.shuffle(&mut rand::thread_rng());
+            let songs: Vec<Value> = tracks.iter().take(count).map(song_json).collect();
+            let key = if method == "getSimilarSongs2" {
+                "similarSongs2"
+            } else {
+                "similarSongs"
+            };
+            m.insert(key.into(), json!({"song": songs}));
+        }
+        // No podcasts on this node: empty lists, not errors (clients sync them unasked).
+        "getPodcasts" => {
+            m.insert("podcasts".into(), json!({"channel": []}));
+        }
+        "getNewestPodcasts" => {
+            m.insert("newestPodcasts".into(), json!({"episode": []}));
+        }
+        "getPodcastEpisode" => return Err(SubErr::not_found("Podcast episode not found")),
+        // Bookmarks resume podcasts and audiobooks, which the node does not have: none kept.
+        "getBookmarks" => {
+            m.insert("bookmarks".into(), json!({"bookmark": []}));
+        }
+        "createBookmark" | "deleteBookmark" => {}
         "getPlaylists" => {
             let lib = s.library.lock().expect("library poisoned");
             let list: Vec<Value> = playlist_rows(&lib)?

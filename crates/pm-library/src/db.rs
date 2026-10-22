@@ -556,6 +556,16 @@ impl Library {
         raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
     }
 
+    /// Tracks by id, `limit` from `offset` (clients that page by offset: Subsonic `search3`).
+    pub fn tracks_page(&self, offset: u32, limit: u32) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} ORDER BY t.id LIMIT ?1 OFFSET ?2"))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![limit as i64, offset as i64], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
     /// Full-text search over title, artist and album.
     pub fn search_tracks(&self, query: &str, limit: u32) -> Result<Vec<Track>> {
         let q = fts_query(query);

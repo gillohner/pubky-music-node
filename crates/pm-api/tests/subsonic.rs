@@ -467,3 +467,169 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let r = call(&app, &format!("/rest/getSong?id=999&{auth}")).await;
     assert_eq!(r["error"]["code"], 70);
 }
+
+/// What Music Assistant's OpenSubsonic provider calls beyond the basics: paging the whole
+/// library through `search3` with offsets (it loops until a page comes back empty), album
+/// info under `albumInfo`, top and similar songs, and podcasts and bookmarks answered as
+/// empty lists, not errors.
+#[tokio::test]
+async fn music_assistant_paging_and_extras() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(
+        &music.join("01.wav"),
+        "Get Lucky",
+        "Daft Punk",
+        "Random Access Memories",
+        1,
+        None,
+    );
+    write_wav(
+        &music.join("02.wav"),
+        "Instant Crush",
+        "Daft Punk",
+        "Random Access Memories",
+        2,
+        None,
+    );
+    write_wav(
+        &music.join("03.wav"),
+        "Blue Monday",
+        "New Order",
+        "Substance",
+        1,
+        None,
+    );
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some("pw".into()),
+            subsonic_user: "alice".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    let auth = "u=alice&p=pw&v=1.16.1&c=test&f=json";
+    call(&app, &format!("/rest/startScan?{auth}")).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Paging: two songs, then one, then none; the same for albums and artists.
+    let page = |kind: &'static str, offset: u32| {
+        let app = app.clone();
+        async move {
+            let r = call(
+                &app,
+                &format!(
+                    "/rest/search3?{auth}&query=&artistCount={a}&albumCount={b}&songCount={c}&{kind}Offset={offset}",
+                    a = if kind == "artist" { 1 } else { 0 },
+                    b = if kind == "album" { 1 } else { 0 },
+                    c = if kind == "song" { 2 } else { 0 },
+                ),
+            )
+            .await;
+            r["searchResult3"][kind]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .map(|x| x["id"].as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }
+    };
+    let (s0, s2, s3) = (
+        page("song", 0).await,
+        page("song", 2).await,
+        page("song", 3).await,
+    );
+    assert_eq!((s0.len(), s2.len(), s3.len()), (2, 1, 0), "{s0:?} {s2:?} {s3:?}");
+    assert!(!s0.contains(&s2[0]), "pages overlap: {s0:?} {s2:?}");
+    let (a0, a1, a2) = (
+        page("album", 0).await,
+        page("album", 1).await,
+        page("album", 2).await,
+    );
+    assert_eq!((a0.len(), a1.len(), a2.len()), (1, 1, 0));
+    assert_ne!(a0, a1);
+    let (r0, r1, r2) = (
+        page("artist", 0).await,
+        page("artist", 1).await,
+        page("artist", 2).await,
+    );
+    assert_eq!((r0.len(), r1.len(), r2.len()), (1, 1, 0));
+    assert_ne!(r0, r1);
+
+    // getAlbumInfo2 answers in <albumInfo>.
+    let r = call(&app, &format!("/rest/getAlbumInfo2?{auth}&id={}", a0[0])).await;
+    assert_eq!(r["status"], "ok");
+    assert!(r["albumInfo"].is_object(), "{r}");
+
+    // Top songs by artist name; similar songs by the same artists, never the seed song.
+    let r = call(&app, &format!("/rest/getTopSongs?{auth}&artist=Daft%20Punk")).await;
+    assert_eq!(r["topSongs"]["song"].as_array().unwrap().len(), 2, "{r}");
+    let r = call(
+        &app,
+        &format!("/rest/search3?{auth}&query=Get%20Lucky&artistCount=0&albumCount=0"),
+    )
+    .await;
+    let lucky = r["searchResult3"]["song"][0]["id"].as_str().unwrap().to_string();
+    let r = call(&app, &format!("/rest/getSimilarSongs?{auth}&id={lucky}")).await;
+    let titles: Vec<&str> = r["similarSongs"]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, vec!["Instant Crush"]);
+    let r = call(&app, &format!("/rest/getArtists?{auth}")).await;
+    let daft = r["artists"]["index"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|i| i["artist"].as_array().unwrap())
+        .find(|a| a["name"] == "Daft Punk")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = call(&app, &format!("/rest/getSimilarSongs2?{auth}&id={daft}")).await;
+    assert_eq!(r["similarSongs2"]["song"].as_array().unwrap().len(), 2, "{r}");
+
+    // No podcasts or bookmarks here: empty lists and plain ok, not "not implemented".
+    let r = call(&app, &format!("/rest/getPodcasts?{auth}")).await;
+    assert_eq!(r["podcasts"]["channel"], serde_json::json!([]));
+    let r = call(&app, &format!("/rest/getNewestPodcasts?{auth}")).await;
+    assert_eq!(r["newestPodcasts"]["episode"], serde_json::json!([]));
+    let r = call(&app, &format!("/rest/getBookmarks?{auth}")).await;
+    assert_eq!(r["bookmarks"]["bookmark"], serde_json::json!([]));
+    let r = call(
+        &app,
+        &format!("/rest/createBookmark?{auth}&id={lucky}&position=1000"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok");
+}

@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Music Assistant can use the node as a music source** (OpenSubsonic; tested with the real Music Assistant 2.10.5). It adds the node with a username and the API token, then imports artists, albums and tracks, searches, shows cover art and creates playlists. Fixed on our side:
+  - `search3` with an empty query ignored `songOffset`, `albumOffset` and `artistOffset`. Clients that page through the whole library got the first page again and again; Music Assistant never finished importing.
+  - `getAlbumInfo2` answered in `albumInfo2`; the Subsonic API says `albumInfo`. Music Assistant's track import stopped at the first track with an album.
+  - New: `getTopSongs` (an artist's most played) and `getSimilarSongs`/`getSimilarSongs2` (songs by the same artists, until the node has similarity data). Podcasts and bookmarks answer with empty lists instead of "not implemented", which broke Music Assistant's podcast import.
+  - Still open: adding a song to a playlist, or favouriting it, from Music Assistant fails for songs with no MusicBrainz id or ISRC (the node's rule for anything it publishes). Asked in QUESTIONS.md.
 - **Slimproto groups play in sync** (infra item 2; "In sync" again). In a group of Slimproto players, the node now:
   - holds each player's start, waits until all have buffered, and starts them on one instant on each player's own clock (`strm u`). It does this again after every pause, seek or skip.
   - corrects drift on the player itself: it holds a player back (`strm p`) or skips it ahead (`strm a`, at most 10 ms at a time) when the players have been more than 4 ms apart for 3 s, judged on a 2 s average. It acts at most every 4 s, and not in the first 3 s after a start, because a player reports its start up to a second late. The old way slipped frames into the stream, and with a player 5 s ahead those corrections were heard 5 s late.
