@@ -199,26 +199,56 @@ pub(crate) struct ServiceAccess {
     jamendo: Access,
     tidal: Access,
     spotify: Access,
+    deezer: Access,
+    /// The services switched off on Sources (bits in `OFF_IDS` order).
+    off: u8,
+}
+
+const OFF_IDS: [&str; 4] = ["tidal", "spotify", "jamendo", "deezer"];
+
+/// Whether `service` is switched off on Sources.
+pub(crate) fn turned_off(acc: &ServiceAccess, service: &str) -> bool {
+    OFF_IDS
+        .iter()
+        .position(|x| *x == service)
+        .is_some_and(|i| acc.off & (1 << i) != 0)
 }
 
 pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
+    let on = |id: &str, a: Access| if s.source_enabled(id) { a } else { Access::No };
     ServiceAccess {
+        off: OFF_IDS
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !s.source_enabled(id))
+            .fold(0, |m, (i, _)| m | (1 << i)),
+        deezer: on("deezer", Access::Preview),
         // No account: the node's developer app is enough
-        jamendo: if crate::jamendo::configured(s) {
-            Access::Full
-        } else {
-            Access::No
-        },
-        tidal: if crate::tidal::connected(s) {
-            Access::Full
-        } else {
-            Access::No
-        },
-        spotify: if crate::spotify::load_user(s).is_some() {
-            Access::External
-        } else {
-            Access::No
-        },
+        jamendo: on(
+            "jamendo",
+            if crate::jamendo::configured(s) {
+                Access::Full
+            } else {
+                Access::No
+            },
+        ),
+        tidal: on(
+            "tidal",
+            // Full tracks come from the official sign-in or from the unofficial mode's own one
+            if crate::tidal::connected(s) || crate::tidal_unofficial::streams(s) {
+                Access::Full
+            } else {
+                Access::No
+            },
+        ),
+        spotify: on(
+            "spotify",
+            if crate::spotify::load_user(s).is_some() {
+                Access::External
+            } else {
+                Access::No
+            },
+        ),
     }
 }
 
@@ -226,7 +256,7 @@ pub(crate) fn access(acc: &ServiceAccess, service: &str) -> Access {
     match service {
         "tidal" => acc.tidal,
         "jamendo" => acc.jamendo,
-        "deezer" => Access::Preview,
+        "deezer" => acc.deezer,
         "spotify" => acc.spotify,
         _ => Access::No,
     }

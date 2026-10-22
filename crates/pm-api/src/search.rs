@@ -99,7 +99,7 @@ pub struct SearchParams {
 pub fn sources_for(s: &NodeState, scope: &str) -> Vec<String> {
     let svcs: Vec<String> = services()
         .iter()
-        .filter(|x| x.unified(s))
+        .filter(|x| s.source_enabled(x.id()) && x.unified(s))
         .map(|x| x.id().to_string())
         .collect();
     match scope {
@@ -109,13 +109,20 @@ pub fn sources_for(s: &NodeState, scope: &str) -> Vec<String> {
             v
         }
         "library" | "pubky" => vec![scope.to_string()],
-        other if services().iter().any(|x| x.id() == other) => vec![other.to_string()],
+        other if services().iter().any(|x| x.id() == other) && s.source_enabled(other) => {
+            vec![other.to_string()]
+        }
         _ => vec!["library".to_string()],
     }
 }
 
 /// Answers by (query, source), with when they were fetched.
 type AnswerCache = Mutex<HashMap<(String, String), (Instant, SourceAnswer)>>;
+
+/// Drop cached answers (a source was switched on or off).
+pub(crate) fn forget_answers() {
+    cache().lock().expect("search cache").clear();
+}
 
 fn cache() -> &'static AnswerCache {
     static C: OnceLock<AnswerCache> = OnceLock::new();

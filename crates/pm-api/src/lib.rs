@@ -26,6 +26,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 }
 
 pub mod backup;
+pub mod dash;
 pub mod deezer;
 pub mod discover;
 pub mod events;
@@ -64,6 +65,7 @@ pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
 pub mod tidal;
+pub mod tidal_unofficial;
 pub mod types;
 pub mod watch;
 
@@ -301,10 +303,22 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/friends/{viewer}", get(discover::friends))
         .route("/sources", get(streaming::list))
         .route("/sources/{source}/search", get(streaming::search))
+        .route(
+            "/sources/{source}/enabled",
+            axum::routing::put(streaming::set_enabled),
+        )
         .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
         .route("/sources/tidal/login", get(tidal::login))
         .route("/sources/tidal/status", get(tidal::status))
+        .route(
+            "/sources/tidal/unofficial",
+            get(tidal_unofficial::get_status).put(tidal_unofficial::put),
+        )
+        .route(
+            "/sources/tidal/unofficial/login",
+            post(tidal_unofficial::login).delete(tidal_unofficial::logout),
+        )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
@@ -442,6 +456,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
         .route("/source/{id}", get(web_ui))
+        .route("/sources/{id}", get(web_ui))
         .route("/settings/{tab}", get(web_ui))
         .route("/home/{section}", get(web_ui))
         .route("/tag/{labels}", get(web_ui))
@@ -2902,6 +2917,265 @@ mod tests {
         assert_eq!(z["transport"], "stopped", "restored queues do not start playing");
     }
 
+    /// TIDAL full tracks (unofficial) against a mock of TIDAL's auth and private API: the device
+    /// sign-in, a BTS stream and a DASH stream read whole, an encrypted track refused, and a
+    /// refused client switching the mode off (playback then falls back to the official path).
+    #[tokio::test]
+    async fn tidal_full_tracks_sign_in_and_stream_from_a_mock() {
+        use base64::Engine;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let b64 = |v: &str| base64::engine::general_purpose::STANDARD.encode(v);
+        let polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mpd = format!(
+            r#"<MPD><Period><AdaptationSet mimeType="audio/mp4"><Representation codecs="flac" audioSamplingRate="96000"><SegmentTemplate initialization="{base}/seg/init" media="{base}/seg/$Number$" startNumber="1"><SegmentTimeline><S d="1" r="1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>"#
+        );
+        let bts = format!(
+            r#"{{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":["{base}/file.flac"]}}"#
+        );
+        let enc = format!(
+            r#"{{"mimeType":"audio/flac","codecs":"flac","encryptionType":"OLD_AES","urls":["{base}/file.flac"]}}"#
+        );
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/device_authorization",
+                post(|body: String| async move {
+                    assert!(body.contains("client_id=dev-id"), "{body}");
+                    Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1}))
+                }),
+            )
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let polls = polls.clone();
+                    move |body: String| {
+                        let polls = polls.clone();
+                        async move {
+                            assert!(body.contains("client_secret=dev-secret"), "{body}");
+                            // The owner approves at the second poll
+                            if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "authorization_pending"})));
+                            }
+                            (StatusCode::OK, Json(serde_json::json!({"access_token": "AT", "refresh_token": "RT", "expires_in": 3600})))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 42, "countryCode": "CH", "sessionId": "sid"})) }),
+            )
+            .route(
+                "/v1/tracks/{id}/playbackinfopostpaywall",
+                get(move |Path(id): Path<String>, q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let (mpd, bts, enc) = (mpd.clone(), bts.clone(), enc.clone());
+                    async move {
+                        assert_eq!(q.get("countryCode").map(String::as_str), Some("CH"));
+                        assert_eq!(q.get("audioquality").map(String::as_str), Some("HI_RES_LOSSLESS"));
+                        let (kind, m) = match id.as_str() {
+                            "1" => ("application/vnd.tidal.bts", bts),
+                            "2" => ("application/dash+xml", mpd),
+                            "3" => ("application/vnd.tidal.bts", enc),
+                            _ => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"userMessage": "client not allowed"}))),
+                        };
+                        (StatusCode::OK, Json(serde_json::json!({"assetPresentation": "FULL", "manifestMimeType": kind, "manifest": b64(&m)})))
+                    }
+                }),
+            )
+            .route("/file.flac", get(move || { let f = flac.clone(); async move { f } }))
+            .route("/seg/{n}", get(|Path(n): Path<String>| async move { format!("[{n}]") }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        {
+            let mut ep = s.tidal.write().unwrap();
+            ep.auth_base = base.clone();
+            ep.v1_base = format!("{base}/v1");
+        }
+        let app = router(s.clone());
+        let (_, st) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(st["enabled"], false, "off by default");
+        assert!(st["warning"].as_str().unwrap().contains("not approved"));
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "no device client yet: {r}");
+        let (_, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "dev-id", "client_secret": "dev-secret"})),
+        )
+        .await;
+        assert_eq!(r["client_from"], "settings");
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["pending"]["user_code"], "ABCDE");
+        assert_eq!(r["pending"]["uri"], "https://link.tidal.com/ABCDE");
+        let mut signed = serde_json::Value::Null;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let (_, r) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+            if r["signed_in"] == true {
+                signed = r;
+                break;
+            }
+        }
+        assert_eq!(signed["user"], "42", "{signed}");
+        assert_eq!(signed["enabled"], true, "signing in switches the mode on");
+        assert!(signed.get("pending").is_none());
+
+        let open = |id: &'static str| {
+            let s = s.clone();
+            tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let ep = s.tidal.read().unwrap().clone();
+                let r = crate::tidal_unofficial::open_blocking(&s.library, &ep, id);
+                crate::tidal_unofficial::record(&s.library, &r);
+                r.map(|o| {
+                    o.map(|mut f| {
+                        let mut b = Vec::new();
+                        f.reader.read_to_end(&mut b).unwrap();
+                        (f.ext, b)
+                    })
+                })
+            })
+        };
+        let (ext, bytes) = open("1").await.unwrap().unwrap().unwrap();
+        assert_eq!(ext, "flac");
+        assert!(
+            bytes.starts_with(b"fLaC") && bytes.len() > 1000,
+            "the whole file through BTS"
+        );
+        let (ext, bytes) = open("2").await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            (ext, String::from_utf8(bytes).unwrap().as_str()),
+            ("m4a", "[init][1][2]"),
+            "DASH: init, then the segments in order"
+        );
+        match open("3").await.unwrap() {
+            Err(crate::tidal_unofficial::FullError::Track(e)) => assert!(e.contains("encrypted"), "{e}"),
+            other => panic!(
+                "an encrypted track is refused, never decrypted: {:?}",
+                other.map(|o| o.map(|x| x.0))
+            ),
+        }
+        let (_, r) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(r["enabled"], true, "one track's trouble leaves the mode on");
+        match open("9").await.unwrap() {
+            Err(crate::tidal_unofficial::FullError::Mode(e)) => {
+                assert!(e.contains("client not allowed"), "{e}")
+            }
+            other => panic!(
+                "a refused client is the mode's failure: {:?}",
+                other.map(|o| o.map(|x| x.0))
+            ),
+        }
+        let (_, r) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(r["enabled"], false, "the mode switched itself off: {r}");
+        assert_eq!(r["health"]["ok"], false);
+        assert_eq!(r["signed_in"], true, "the sign-in is kept for Retry");
+        assert!(
+            open("1").await.unwrap().unwrap().is_none(),
+            "off: the official path plays"
+        );
+        let (_, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert!(r["enabled"] == true && r.get("health").is_none(), "Retry: {r}");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"quality": "best"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// A source switched off on Sources: hidden from search and the play order, kept listed,
+    /// remembered across restarts.
+    #[tokio::test]
+    async fn a_source_switched_off_is_hidden_and_keeps_its_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+        assert!(
+            sources.as_array().unwrap().iter().all(|x| x["enabled"] == true),
+            "{sources}"
+        );
+        for id in ["deezer", "tidal"] {
+            let (st, r) = call(
+                &app,
+                "PUT",
+                &format!("/v1/sources/{id}/enabled"),
+                Some(serde_json::json!({"enabled": false})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{r}");
+            assert_eq!(r["enabled"], false);
+        }
+        let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
+        let deezer = sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "deezer")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            deezer["enabled"], false,
+            "still listed, so it can be switched on again"
+        );
+        let (st, _) = call(&app, "GET", "/v1/sources/deezer/search?q=x", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "an off source does not search");
+        assert!(!crate::search::sources_for(&s, "everywhere").contains(&"deezer".to_string()));
+        assert_eq!(crate::search::sources_for(&s, "deezer"), ["library"]);
+        let (_, po) = call(&app, "GET", "/v1/play-order", None).await;
+        let tidal = po["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "tidal")
+            .unwrap()
+            .clone();
+        assert_eq!(tidal["note"], "turned off on Sources", "{po}");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/nope/enabled",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        // Kept across a restart; switching on brings it back
+        drop(app);
+        drop(s);
+        let s = state(dir.path(), None).await;
+        assert!(!s.source_enabled("deezer") && !s.source_enabled("tidal") && s.source_enabled("jamendo"));
+        let app = router(s.clone());
+        let (_, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/deezer/enabled",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(r["enabled"], true);
+        assert!(crate::search::sources_for(&s, "everywhere").contains(&"deezer".to_string()));
+    }
+
     /// The Internet Archive source against a local mock: search, item
     /// tracks with the best format, and the tracks play through a zone.
     #[tokio::test]
@@ -5018,6 +5292,7 @@ mod tests {
             "/discover",
             "/settings",
             "/settings/backup",
+            "/sources/tidal",
             "/shared/zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o/0035WKVKQDHSM",
         ] {
             let resp = app

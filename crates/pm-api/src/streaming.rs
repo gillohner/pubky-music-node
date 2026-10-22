@@ -59,9 +59,56 @@ pub struct SourceSearch {
     pub limit: Option<u32>,
 }
 
+/// A source as the Sources page lists it: its info and whether it is switched on.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceRow {
+    #[serde(flatten)]
+    pub info: SourceInfo,
+    pub enabled: bool,
+}
+
 /// `GET /v1/sources`.
-pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<SourceInfo>> {
-    Ok(Json(services().iter().map(|svc| svc.info(&s)).collect()))
+pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<SourceRow>> {
+    Ok(Json(
+        services()
+            .iter()
+            .map(|svc| SourceRow {
+                info: svc.info(&s),
+                enabled: s.source_enabled(svc.id()),
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EnabledBody {
+    pub enabled: bool,
+}
+
+/// `PUT /v1/sources/{source}/enabled` `{enabled}`: switch a source on or off. Off hides it
+/// everywhere; its sign-in and settings are kept.
+pub(crate) async fn set_enabled(
+    State(s): State<Arc<NodeState>>,
+    Path(source): Path<String>,
+    Json(b): Json<EnabledBody>,
+) -> ApiResult<SourceRow> {
+    let svc = find(&source)?;
+    s.set_source_enabled(svc.id(), b.enabled)
+        .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::search::forget_answers();
+    Ok(Json(SourceRow {
+        info: svc.info(&s),
+        enabled: b.enabled,
+    }))
+}
+
+/// A source that is switched on, for routes that search or browse it.
+fn find_on(s: &NodeState, id: &str) -> Result<Box<dyn StreamingService>, ApiError> {
+    let svc = find(id)?;
+    if !s.source_enabled(id) {
+        return Err(ApiError::not_found(format!("{id} is turned off on Sources")));
+    }
+    Ok(svc)
 }
 
 /// `GET /v1/sources/{source}/search?q=&limit=`.
@@ -70,7 +117,7 @@ pub(crate) async fn search(
     Path(source): Path<String>,
     Query(q): Query<SourceSearch>,
 ) -> ApiResult<SourceResults> {
-    let svc = find(&source)?;
+    let svc = find_on(&s, &source)?;
     let term = q.q.trim();
     if term.is_empty() {
         return Err(ApiError::bad_request("q is required"));
@@ -83,7 +130,10 @@ pub(crate) async fn search(
 /// Library search companion: every unified service, queried concurrently with a
 /// time budget, hits flagged with the library items that share their identity.
 pub(crate) async fn unified_search(s: &Arc<NodeState>, term: &str, limit: u32) -> Vec<SourceResults> {
-    let svcs: Vec<Box<dyn StreamingService>> = services().into_iter().filter(|x| x.unified(s)).collect();
+    let svcs: Vec<Box<dyn StreamingService>> = services()
+        .into_iter()
+        .filter(|x| s.source_enabled(x.id()) && x.unified(s))
+        .collect();
     let mut out = Vec::new();
     let futs = svcs.iter().map(|svc| {
         let s = s.clone();
