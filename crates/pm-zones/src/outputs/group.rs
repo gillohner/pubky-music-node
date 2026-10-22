@@ -60,7 +60,7 @@ const WARMUP_MS: u64 = 2000;
 pub const NUDGE_EVERY_MS: u64 = 4000;
 /// ...and only when further apart than this, on average over `NUDGE_AVERAGE_MS` (two
 /// squeezelite players in step on one ALSA card: estimates 0-1 ms apart; Wi-Fi adds jitter)...
-pub const NUDGE_DEADBAND_MS: u64 = 10;
+pub const NUDGE_DEADBAND_MS: u64 = 4;
 /// ...and not until the leader has played this much since the (re)start: a player reports
 /// that it started up to a second late, and until then it seems not to be playing.
 const NUDGE_SETTLE_MS: u64 = 3000;
@@ -212,9 +212,9 @@ impl Output for GroupOutput {
         &self.caps
     }
 
-    /// Tight only when every member is the node's own endpoint: those share a clock the group
-    /// corrects against. Anything mixed is loose. Slimproto players are loose until the node
-    /// starts them together (each starts when its own buffer fills). So is
+    /// Tight only when every member is the node's own endpoint, or every member a Slimproto
+    /// player (started on one instant, drift corrected on the players beyond a few ms). Anything
+    /// mixed is loose. So is
     /// an endpoint playing through its system mixer (`cpal`: a phone, a Mac, a Windows PC):
     /// the system adds latency the group cannot see (hundreds of ms over Bluetooth).
     fn sync(&self) -> crate::SyncClass {

@@ -27,7 +27,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("node")
 ap.add_argument("work", type=Path)
 ap.add_argument("--seconds", type=int, default=30)
-ap.add_argument("--max-ms", type=float, default=5.0)
+ap.add_argument("--max-ms", type=float, default=2.0, help="the largest offset allowed after the first 10 s")
+ap.add_argument("--max-start-ms", type=float, default=12.0, help="the largest offset allowed before (two dmix periods)")
 ap.add_argument("--out", type=Path, help="copy the logs and the capture here at the end (a shared folder)")
 a = ap.parse_args()
 work = a.work
@@ -164,12 +165,18 @@ enabled = false
     log("B - A at each click (ms): " + " ".join(f"{o:+.1f}" for o in offs))
     worst = max(abs(o) for o in offs)
     log(f"start {offs[0]:+.2f} ms, end {offs[-1]:+.2f} ms, worst {worst:.2f} ms over {len(offs)} clicks")
+    # The start lands within a period of the card (the mixer here: 256 frames, 5.8 ms); drift
+    # correction then has 10 s to bring the players together.
+    early = max(abs(o) for o in offs[:10])
+    settled = max(abs(o) for o in offs[10:])
     log("the group's own estimate of B - A, each second (ms): " + " ".join(f"{m:+d}" for m in measured))
     nudges = sum(1 for line in open(work / "node.log") if "group: nudged" in line)
     log(f"nudges: {nudges}")
-    if worst > a.max_ms:
-        raise SystemExit(f"FAIL: the players were {worst:.2f} ms apart (limit {a.max_ms} ms)")
-    log(f"PASS: two squeezelite players in one group within {a.max_ms} ms at every click")
+    if early > a.max_start_ms:
+        raise SystemExit(f"FAIL: the players started {early:.2f} ms apart (limit {a.max_start_ms} ms)")
+    if settled > a.max_ms:
+        raise SystemExit(f"FAIL: after 10 s the players were up to {settled:.2f} ms apart (limit {a.max_ms} ms)")
+    log(f"PASS: started within {early:.2f} ms, then within {settled:.2f} ms (limits {a.max_start_ms} and {a.max_ms} ms)")
 
 
 def keep_logs():
