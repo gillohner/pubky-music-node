@@ -202,6 +202,11 @@ jobs:
           mkdir -p music
           docker compose up -d
       - run: python3 -I tools/bundle-check.py deploy/bundle
+      - name: the owner signs up on the bundled homeserver (a test signer stands in for Pubky Ring)
+        run: |
+          export PM_BUNDLED_HS_ADMIN=http://127.0.0.1:6288
+          PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
+          cargo test -p pm-api --test bundled_homeserver
       - if: failure()
         working-directory: deploy/bundle
         run: docker compose ps -a && docker compose logs --no-color --tail 80

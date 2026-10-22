@@ -65,6 +65,11 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   the operator is you; tell anyone you invite.
 - `GET /v1/homeserver/bundled` shows the homeserver as the node sees it: version, key, users,
   disk used, unused invites.
+- **Your account on it:** on first run, "Create your Pubky account on this node's homeserver"
+  (`POST /v1/homeserver/bundled/owner-signup`) shows a Pubky Ring link and QR. The node mints the
+  owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs
+  the node in. Playlists, favourites, Copy to homeserver and Bring files here then use it. "Use an
+  existing homeserver" is the usual Pubky sign-in; moving an existing account here comes later.
 
 The Umbrel app (below) bundles the same homeserver. Install it or Pubky's own "Pubky Homeserver"
 app, not both: both use port 6287.

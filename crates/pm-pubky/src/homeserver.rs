@@ -861,6 +861,26 @@ impl NodeHomeserver {
         let url = flow.authorization_url().to_string();
         Ok(LoginFlow { flow, url })
     }
+
+    /// A sign-up on `homeserver` (z32) with `signup_token`: Pubky Ring creates the account there,
+    /// then approves the node's [`LOGIN_CAPABILITIES`]; poll it like a sign-in.
+    pub fn start_signup(
+        &self,
+        client_id: &str,
+        homeserver: &str,
+        signup_token: &str,
+    ) -> Result<LoginFlow, HomeserverError> {
+        let caps = LOGIN_CAPABILITIES
+            .parse::<pubky::Capabilities>()
+            .map_err(|e| HomeserverError::Transport(e.to_string()))?;
+        let client_id =
+            pubky::ClientId::new(client_id).map_err(|e| HomeserverError::Transport(e.to_string()))?;
+        let hs = PublicKey::try_from(homeserver).map_err(|e| HomeserverError::Key(e.to_string()))?;
+        let kind = pubky::AuthFlowKind::signup(hs, Some(signup_token.to_string()));
+        let flow = self.pubky.start_grant_auth_flow(&caps, kind, client_id)?;
+        let url = flow.authorization_url().to_string();
+        Ok(LoginFlow { flow, url })
+    }
 }
 
 impl LoginFlow {

@@ -151,6 +151,96 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Bundled
     }))
 }
 
+// ---- the owner's account ----
+
+/// Library setting: the signup token minted for the owner, reused while it is unused.
+const OWNER_TOKEN: &str = "homeserver.owner_signup_token";
+
+/// `XXXX-XXXX-XXXX`, Crockford base32.
+pub(crate) fn is_signup_token(t: &str) -> bool {
+    t.len() == 14
+        && t.split('-').count() == 3
+        && t.split('-')
+            .all(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// The owner's signup token: the one minted before if nobody used it, else a new one with
+/// unlimited storage (the owner's library and files live here).
+async fn owner_token(s: &NodeState) -> Result<String, ApiError> {
+    let stored = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(OWNER_TOKEN)?;
+    if let Some(t) = stored {
+        let unused = admin(
+            s,
+            reqwest::Method::GET,
+            "/signup_tokens?state=unused&limit=1000",
+            None,
+        )
+        .await?;
+        let still = unused["items"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|i| i["token"].as_str() == Some(t.as_str())));
+        if still {
+            return Ok(t);
+        }
+    }
+    let v = admin(
+        s,
+        reqwest::Method::POST,
+        "/generate_signup_token",
+        Some(&serde_json::json!({"storage_quota_mb": "unlimited"})),
+    )
+    .await?;
+    let t = v.as_str().unwrap_or_default().to_string();
+    if !is_signup_token(&t) {
+        return Err(unreachable("it did not hand out a signup token"));
+    }
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(OWNER_TOKEN, &t)?;
+    Ok(t)
+}
+
+/// `POST /v1/homeserver/bundled/owner-signup`: "Create your Pubky account on this node's
+/// homeserver". The node mints the owner's signup token (unlimited storage) and starts a sign-up
+/// for Pubky Ring: Ring creates the account on the bundled homeserver and approves the node's
+/// access. Poll `GET /v1/pubky/login` as for a sign-in; the node is then signed in as the owner,
+/// and playlists, favourites and files go to this homeserver.
+pub(crate) async fn owner_signup(State(s): State<Arc<NodeState>>) -> ApiResult<crate::types::LoginStarted> {
+    if let Some(h) = s.sync_handle() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "the node is already signed in as {}: sign out first (Settings › Pubky)",
+                h.z32()
+            ),
+        ));
+    }
+    let info = admin(&s, reqwest::Method::GET, "/info", None).await?;
+    let hs = info["public_key"]
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| unreachable("no public key in /info"))?
+        .to_string();
+    let token = owner_token(&s).await?;
+    let flow = s
+        .homeserver()
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .start_signup("pubky-music-node", &hs, &token)
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let url = flow.url().to_string();
+    *s.login.lock().await = Some(flow);
+    tracing::info!(homeserver = %hs, "owner sign-up on the bundled homeserver started");
+    Ok(Json(crate::types::LoginStarted {
+        qr_svg: crate::qr_svg(&url),
+        url,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +262,7 @@ mod tests {
             (Some(2), Some(1), Some("0.16.2"))
         );
         assert_eq!(st.icann_domain.as_deref(), Some("music.example.org"));
+        assert!(is_signup_token("AB12-CD34-EF56"));
+        assert!(!is_signup_token("AB12CD34EF56") && !is_signup_token("AB12-CD34-EF5/"));
     }
 }

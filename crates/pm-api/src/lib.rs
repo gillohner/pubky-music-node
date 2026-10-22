@@ -445,6 +445,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/countries", get(radio_sources::countries))
         .route("/radio/tags", get(radio_sources::tags))
         .route("/homeserver/bundled", get(bundled::status))
+        .route("/homeserver/bundled/owner-signup", post(bundled::owner_signup))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))
