@@ -299,6 +299,53 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
     }
 }
 
+/// A library artist without a picture: when exactly one service artist of that name has your
+/// albums (the "likely" match), its picture is used, found in the background at most once a
+/// day (STEWARD-FIX-same-artist.md item 4). The page shows it from the next visit on.
+fn find_artist_picture(s: &Arc<NodeState>, n: i64, name: String) {
+    let tried = format!("artist.picture_tried.{n}");
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let now = pm_library::db::now_unix();
+        let last: i64 = lib
+            .get_setting(&tried)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if now - last < 86_400 {
+            return;
+        }
+        let _ = lib.set_setting(&tried, &now.to_string());
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        let q = CandidateQuery {
+            uri: String::new(),
+            kind: "artist".into(),
+            title: name,
+            artist: None,
+            item: Some(format!("lib-{n}")),
+        };
+        let Ok(Json(c)) = candidates(State(s.clone()), axum::extract::Query(q)).await else {
+            return;
+        };
+        if let Some(img) = c
+            .iter()
+            .find(|x| x.likely)
+            .and_then(|x| x.image.clone())
+            .filter(|i| i.starts_with("https://"))
+        {
+            let _ = s
+                .library
+                .lock()
+                .expect("library poisoned")
+                .set_setting(&format!("artist.picture.{n}"), &img);
+            tracing::info!(artist = n, "artist picture from the likely match");
+        }
+    });
+}
+
 /// A version's own page id on a page of `kind`.
 fn page_of(kind: &str, v: &Version) -> Option<String> {
     if v.source == "library" {
@@ -898,15 +945,21 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         artist: None,
         album: None,
         year: None,
-        image: (info.as_ref().is_some_and(|i| i.image)
-            || s.library
+        image: {
+            let matched = s
+                .library
                 .lock()
                 .expect("library poisoned")
                 .get_setting(&format!("artist.picture.{n}"))
                 .ok()
                 .flatten()
-                .is_some())
-        .then(|| format!("/v1/library/artists/{n}/image")),
+                .is_some();
+            let own = info.as_ref().is_some_and(|i| i.image);
+            if !own && !matched {
+                find_artist_picture(s, n, a.name.clone());
+            }
+            (own || matched).then(|| format!("/v1/library/artists/{n}/image"))
+        },
         source: "Your library".into(),
         source_id: "library".into(),
         plays_from: Some(PlaysFrom {

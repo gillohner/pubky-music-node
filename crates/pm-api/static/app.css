@@ -945,3 +945,4 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .genre-pub { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); }
 .to-global { margin: 6px 0 0; }
 .tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }
+.hero .art.monogram { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.88); font-size: 64px; font-weight: 700; letter-spacing: 0.02em; }

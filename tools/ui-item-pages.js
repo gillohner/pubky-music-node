@@ -2,7 +2,9 @@
 //   * feature matrix: every kind × source renders all six sections, the hero actions and the full ⋯ menu;
 //   * click path: search → artist → album → song → Back ×3 lands on the results with query and scroll;
 //   * deep link to an album → Back goes to its section;
-//   * route table: routeFromPath(pathFor(v, arg)) round-trips for every view with a path.
+//   * route table: routeFromPath(pathFor(v, arg)) round-trips for every view with a path;
+//   * direct load: every kind of page id opened fresh (a bookmark, a shared link, a reload) asks
+//     /v1/item and renders, never the Albums skeleton (steward review, 2026-10-22).
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
 //   node tools/ui-item-pages.js <api token> [http://127.0.0.1:7788] [screenshot dir]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -32,14 +34,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (songId) { await p.click('#isongs [data-ssong]'); await waitPage(); pages.push(['library song', new URL(p.url()).pathname]); }
   for (const [name, path] of pages) {
     await p.goto(BASE + path); await waitPage();
-    const sections = await p.$$eval('#isongs, #iversions, #ipubky, #iyours, #iabout', (els) => els.map((e) => e.id));
+    // Song pages have no one-song list; every page has Tags and About
+    const isSong = path.startsWith('/song/');
+    const sections = await p.$$eval('#isongs, #itags, #iabout', (els) => els.map((e) => e.id));
+    const want = isSong ? 2 : 3;
     const hero = await p.$$eval('#iplay, #izone, #ifav, #imore', (els) => els.map((e) => e.id));
     let menu = [];
     const more = await p.$('#imore'); if (more) { await more.click(); await sleep(250); menu = await p.$$eval('.popover.menu .pop-item span', (els) => els.map((e) => e.textContent)); await p.keyboard.press('Escape'); await p.mouse.click(5, 5); }
     const title = await p.textContent('#main h1').catch(() => null);
     const songs = await p.$$eval('#isongs .srow', (els) => els.length).catch(() => 0);
-    const ok = sections.length === 5 && hero.length === 4 && ['Play next', 'Add to queue', 'Copy link'].every((m) => menu.includes(m));
-    console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: "${title}" | sections ${sections.length + 1}/6 | hero ${hero.join(',')} | songs ${songs} | menu: ${menu.join(' · ')}`);
+    const ok = sections.length === want && hero.length === 4 && ['Play next', 'Add to queue', 'Copy link'].every((m) => menu.includes(m));
+    console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: "${title}" | sections ${sections.join(',')} | hero ${hero.join(',')} | songs ${songs} | menu: ${menu.join(' · ')}`);
     if (!ok) errors.push(`${name} misses sections or actions`);
     if (OUT) await p.screenshot({ path: `${OUT}/item-${name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.png`, fullPage: true });
   }
@@ -106,16 +111,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('back with a menu open: closed', !open, '| same page', rp.url() === at);
     if (open || rp.url() !== at) errors.push('back did not just close the menu');
   }
-  // ---- the On Pubky switch is a chip control: styled, aria-pressed, arrow keys ----
-  if (await rp.$('#ipubky [data-scope="all"]')) {
-    const styled = await rp.$eval('#ipubky [data-scope="all"]', (e) => e.classList.contains('chip') && getComputedStyle(e).borderRadius === '999px');
-    await rp.focus('#ipubky [data-scope="all"]'); await rp.keyboard.press('ArrowRight'); await sleep(300);
-    const pressed = await rp.$$eval('#ipubky [data-scope]', (els) => els.map((e) => e.getAttribute('aria-pressed')).join(','));
-    const focused = await rp.evaluate(() => document.activeElement && document.activeElement.dataset.scope);
-    console.log('On Pubky switch: chip', styled, '| after → pressed', pressed, '| focus', focused);
-    if (!styled || pressed !== 'false,true' || focused !== 'this') errors.push('On Pubky switch');
-  }
   await rp.close();
+
+  // ---- direct load: each kind of page id, fresh, as from a bookmark or a reload ----
+  const firstTrack = await p.evaluate(async (t) => { try { const r = await fetch('/v1/library/tracks?limit=1', { headers: { authorization: 'Bearer ' + t } }); const j = await r.json(); return j.tracks[0] && j.tracks[0].id; } catch { return null; } }, TOKEN);
+  const direct = [
+    ...(firstTrack != null ? [`/song/lib-${firstTrack}`] : []),
+    '/song/tidal-534050211', '/song/deezer-3135556', '/song/spotify-4u7EnebtmKWzUH433cf5Qv', '/song/youtube-bSnlKl_PoQU',
+    '/song/isrc-GBUM71029604', '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69',
+    '/album/lib-1', '/album/tidal-199574241', '/album/deezer-302127',
+    '/artist/lib-1', '/artist/deezer-27', '/artist/tidal-64518',
+  ];
+  for (const path of direct) {
+    const dp = await ctx.newPage();
+    dp.on('pageerror', (e) => errors.push(`${path}: page error: ${e.message}`));
+    let asked = false; dp.on('request', (r) => { if (new URL(r.url()).pathname.startsWith('/v1/item/')) asked = true; });
+    await dp.goto(BASE + path);
+    await dp.waitForSelector('#main #iabout, #main .notice', { timeout: 30000 }).catch(() => {});
+    const rendered = !!(await dp.$('#main #iabout, #main .notice'));
+    const title = await dp.textContent('#main h1').catch(() => null);
+    const stayed = new URL(dp.url()).pathname === path;
+    const ok = asked && rendered && stayed;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} direct ${path}: ${asked ? 'asked /v1/item' : 'never asked /v1/item'} | ${rendered ? `"${title}"` : 'not rendered'}${stayed ? '' : ` | moved to ${new URL(dp.url()).pathname}`}`);
+    if (!ok) errors.push(`direct load of ${path}`);
+    await dp.close();
+  }
 
   // ---- route table ----
   const rt = await p.evaluate(() => window.pmRoutes && window.pmRoutes.check());

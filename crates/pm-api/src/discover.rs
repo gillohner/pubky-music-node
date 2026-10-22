@@ -973,6 +973,23 @@ pub(crate) fn page_id(url: &str) -> String {
 /// (`/song/tidal-1`); the kind comes from the page (song → track).
 fn service_page(url: &str) -> Option<(&'static str, String)> {
     let u = url::Url::parse(url).ok()?;
+    // A YouTube video: exactly `https://www.youtube.com/watch?v=<11 characters>`
+    if u.host_str() == Some("www.youtube.com") && u.path() == "/watch" && u.fragment().is_none() {
+        let pairs: Vec<(String, String)> = u
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if let [(k, v)] = pairs.as_slice() {
+            let ok = k == "v"
+                && v.len() == 11
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+            if ok && url == format!("https://www.youtube.com/watch?v={v}") {
+                return Some(("youtube", v.clone()));
+            }
+        }
+        return None;
+    }
     if u.query().is_some() || u.fragment().is_some() {
         return None;
     }
@@ -1021,6 +1038,10 @@ pub(crate) fn url_of_page(kind: &str, id: &str) -> Option<String> {
         "album" => "album",
         _ => "track",
     };
+    if let Some(v) = id.strip_prefix("youtube-") {
+        let url = format!("https://www.youtube.com/watch?v={v}");
+        return (page_id(&url) == id).then_some(url);
+    }
     for (svc, base) in [
         ("tidal-", "https://tidal.com"),
         ("deezer-", "https://www.deezer.com"),
@@ -1891,6 +1912,15 @@ mod page_id_tests {
             Some("https://www.deezer.com/album/55")
         );
         assert_eq!(url_of_page("song", "tidal-1/../x"), None);
+        assert_eq!(
+            page_id("https://www.youtube.com/watch?v=bSnlKl_PoQU"),
+            "youtube-bSnlKl_PoQU"
+        );
+        assert_eq!(
+            url_of_page("song", "youtube-bSnlKl_PoQU").as_deref(),
+            Some("https://www.youtube.com/watch?v=bSnlKl_PoQU")
+        );
+        assert!(page_id("https://www.youtube.com/watch?v=bSnlKl_PoQU&t=1").starts_with("u-"));
         // Anything else keeps the base64 id
         assert!(page_id("https://tidal.com/track/1?x=1").starts_with("u-"));
         assert!(page_id("https://example.org/track/1").starts_with("u-"));
