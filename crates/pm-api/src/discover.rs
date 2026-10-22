@@ -1099,7 +1099,9 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     // limits waited out one request at a time). Past the budget the page answers with what it
     // has ("pending") and the fetch goes on in the background, filling the cache for the next
     // look.
-    let task = {
+    // One fetch per link at a time: a page asked again while its list is on the way answers at once
+    let fresh = in_flight().lock().expect("in flight").insert(uri.clone());
+    let task = fresh.then(|| {
         let (s, uri, it, r, acc, cache_key) = (
             s.clone(),
             uri.clone(),
@@ -1110,12 +1112,21 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         );
         let res = res.clone();
         tokio::spawn(async move {
-            fetch_contents(&s, &uri, &it, album_id, r.as_ref(), &acc, &res, out, &cache_key).await
+            let c = fetch_contents(&s, &uri, &it, album_id, r.as_ref(), &acc, &res, out, &cache_key).await;
+            in_flight().lock().expect("in flight").remove(&uri);
+            c
         })
+    });
+    let done = match task {
+        Some(t) => tokio::time::timeout(CONTENTS_BUDGET, t)
+            .await
+            .ok()
+            .and_then(|r| r.ok()),
+        None => None,
     };
-    let (contents, pending) = match tokio::time::timeout(CONTENTS_BUDGET, task).await {
-        Ok(Ok(c)) => (c, false),
-        _ => (
+    let (contents, pending) = match done {
+        Some(c) => (c, false),
+        None => (
             ItemContents {
                 kind: it.kind.clone(),
                 plays_from: res.plays_from.clone(),
@@ -1133,6 +1144,13 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         contents,
         pending,
     }
+}
+
+/// Links whose contents are being fetched right now.
+fn in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(Default::default)
 }
 
 /// How long a page waits for a service's tracks and albums before answering without them.

@@ -777,6 +777,7 @@ impl StreamingService for Tidal {
             s,
             &format!("/artists/{aid}/relationships/albums"),
             &[("countryCode", country(s))],
+            60,
         )
         .await?;
         let mut albums = album_hits(s, &album_ids.into_iter().take(60).collect::<Vec<_>>()).await?;
@@ -1118,11 +1119,14 @@ fn user_id_of(u: &UserSession) -> Result<String, ApiError> {
     })
 }
 
-/// Resource ids of a paged to-many relationship, following `links.next`.
+/// Resource ids of a paged to-many relationship, following `links.next` until `max` ids (a
+/// big artist has dozens of pages, and TIDAL's rate limit made each one past the first few
+/// wait seconds: an artist page took up to 80 s).
 async fn relationship_ids(
     s: &NodeState,
     path: &str,
     query: &[(&str, String)],
+    max: usize,
 ) -> Result<Vec<String>, ApiError> {
     let mut ids = Vec::new();
     let mut page = get_json(s, path, query).await?;
@@ -1137,11 +1141,15 @@ async fn relationship_ids(
                 })
                 .unwrap_or_default(),
         );
+        if ids.len() >= max {
+            break;
+        }
         let Some(next) = page["links"]["next"].as_str().map(str::to_string) else {
             break;
         };
         page = get_json(s, &next, &[]).await?;
     }
+    ids.truncate(max);
     Ok(ids)
 }
 
@@ -1170,9 +1178,9 @@ pub(crate) async fn artist_top_tracks(
         s,
         &format!("/artists/{artist_id}/relationships/tracks"),
         &[("countryCode", country(s)), ("collapseBy", "FINGERPRINT".into())],
+        limit,
     )
     .await?;
-    let ids: Vec<String> = ids.into_iter().take(limit).collect();
     Ok(track_hits(s, &ids).await?.0)
 }
 
@@ -1337,12 +1345,14 @@ pub(crate) async fn collection(
         &s,
         "/userCollectionTracks/me/relationships/items",
         &[("sort", "-addedAt".into())],
+        usize::MAX,
     )
     .await?;
     let album_ids = relationship_ids(
         &s,
         "/userCollectionAlbums/me/relationships/items",
         &[("sort", "-addedAt".into())],
+        usize::MAX,
     )
     .await?;
     let (mut tracks, _) = track_hits(&s, &track_ids).await?;
@@ -1363,8 +1373,20 @@ pub(crate) async fn collection(
 /// favourites (ISRC where TIDAL has one, else the TIDAL link; ADR 0010).
 pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiResult<ImportReport> {
     signed_in_user(&s)?;
-    let track_ids = relationship_ids(&s, "/userCollectionTracks/me/relationships/items", &[]).await?;
-    let album_ids = relationship_ids(&s, "/userCollectionAlbums/me/relationships/items", &[]).await?;
+    let track_ids = relationship_ids(
+        &s,
+        "/userCollectionTracks/me/relationships/items",
+        &[],
+        usize::MAX,
+    )
+    .await?;
+    let album_ids = relationship_ids(
+        &s,
+        "/userCollectionAlbums/me/relationships/items",
+        &[],
+        usize::MAX,
+    )
+    .await?;
     let (_, docs) = track_hits(&s, &track_ids).await?;
     let mut report = ImportReport::default();
     let lib = s.library.lock().expect("library poisoned");
