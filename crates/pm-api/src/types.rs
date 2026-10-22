@@ -721,6 +721,30 @@ pub struct PubkyStatus {
     /// The sentence to show when `needs_resign`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// A sync running in the background (after a sign-in), or how the last one went.
+    #[serde(default)]
+    pub sync: SyncActivity,
+}
+
+/// The background sync, for "Syncing with your homeserver…" (sign-in shows "Signed in" at once and
+/// syncs after).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncActivity {
+    pub running: bool,
+    /// What it is doing now, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    /// How long the last one took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<SyncReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---- activity and import (integrations) ----

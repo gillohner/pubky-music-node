@@ -44,13 +44,79 @@ pub const WRITES_PER_PASS: usize = 200;
 /// The pause between two passes of a big sync.
 pub const PASS_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// After a sign-in: publish the node record, restore the settings and run the first sync in the
+/// background, with progress in [`crate::state::NodeState::sync_activity`] and the durations in
+/// the log.
+pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<PubkySync>) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let step = |s: &crate::state::NodeState, words: &str| {
+            let mut a = s.sync_activity.lock().expect("sync activity");
+            a.running = true;
+            a.step = Some(words.to_string());
+            if a.started_at.is_none() || a.finished_at.is_some() {
+                a.started_at = Some(pm_library::db::now_unix());
+                a.finished_at = None;
+                a.error = None;
+            }
+        };
+        step(&s, "Telling your other devices where this node is");
+        if let Err(e) = sync.publish_node_for(&s).await {
+            tracing::warn!("publishing the node record failed: {e}");
+        }
+        step(&s, "Bringing your settings back");
+        match sync.restore_settings(&s, true).await {
+            Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("settings restore failed: {e}"),
+        }
+        step(&s, "Syncing your playlists, favourites and tags");
+        let result = sync.sync(&s.library).await;
+        let ms = started.elapsed().as_millis() as u64;
+        {
+            let mut a = s.sync_activity.lock().expect("sync activity");
+            a.running = false;
+            a.step = None;
+            a.finished_at = Some(pm_library::db::now_unix());
+            a.ms = Some(ms);
+            match &result {
+                Ok(r) => {
+                    a.last = Some(r.clone());
+                    a.error = None;
+                }
+                Err(e) => a.error = Some(e.to_string()),
+            }
+        }
+        match result {
+            Ok(r) => {
+                tracing::info!(
+                    ms,
+                    pushed = r.pushed,
+                    pulled = r.pulled,
+                    pending = r.pending,
+                    "pubky sign-in: first sync done"
+                );
+                sync.carry_on(&s, &r);
+            }
+            Err(e) => tracing::warn!(ms, "first sync failed: {e}"),
+        }
+        sync.backup_settings(&s).await;
+        s.notify_library();
+    });
+}
+
 /// What the owner reads when the session cannot reach every folder the node uses.
 pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
 
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
-        let homeserver = NodeHomeserver::new(network)?;
+        Self::connect_with(NodeHomeserver::new(network)?, secret).await
+    }
+
+    /// The same with the node's shared client ([`crate::state::NodeState::homeserver`]).
+    pub async fn connect_with(homeserver: NodeHomeserver, secret: &str) -> Result<Self, HomeserverError> {
         let session = homeserver.restore_session(secret.trim()).await?;
         let z32 = session.public_key().to_string();
         Ok(Self {
@@ -638,22 +704,37 @@ impl PubkySync {
             let Some(found) = heads.0.get(&(false, ns)) else {
                 continue;
             };
-            for (id, head) in found {
-                let wanted = {
-                    let lib = library.lock().expect("library poisoned");
-                    match lib.get_music_post(id)? {
+            // What is new or newer than the node's copy, then fetched 8 at a time
+            let wanted: Vec<(String, v1::Head)> = {
+                let lib = library.lock().expect("library poisoned");
+                let mut w = Vec::new();
+                for (id, head) in found {
+                    let take = match lib.get_music_post(id)? {
                         None => true,
                         Some(row) => head.edited_micros() > row.updated_at.max(row.synced_at.unwrap_or(0)),
+                    };
+                    if take {
+                        w.push((id.clone(), head.clone()));
                     }
-                };
-                if !wanted {
-                    continue;
                 }
-                let bytes = match self
-                    .homeserver
-                    .get_bytes(&self.z32, &head.path, Visibility::Private, Some(&self.session))
-                    .await
-                {
+                w
+            };
+            use futures_util::StreamExt;
+            let this = self;
+            let fetched: Vec<(String, v1::Head, Result<Vec<u8>, HomeserverError>)> =
+                futures_util::stream::iter(wanted)
+                    .map(move |(id, head)| async move {
+                        let r = this
+                            .homeserver
+                            .get_bytes(&this.z32, &head.path, Visibility::Private, Some(&this.session))
+                            .await;
+                        (id, head, r)
+                    })
+                    .buffered(pm_pubky::homeserver::FETCH_AT_ONCE)
+                    .collect()
+                    .await;
+            for (id, head, bytes) in fetched {
+                let bytes = match bytes {
                     Ok(b) => b,
                     Err(e) => {
                         report.errors.push(format!("read {}: {e}", head.path));
@@ -663,23 +744,23 @@ impl PubkySync {
                 let content = if ns == v1::SOCIAL_NAMESPACE {
                     serde_json::from_slice::<pubky_social_specs::PubkySocialPost>(&bytes)
                         .ok()
-                        .and_then(|p| v1::from_social(&p, id, &head.edit_id))
+                        .and_then(|p| v1::from_social(&p, &id, &head.edit_id))
                 } else {
                     serde_json::from_slice::<pubky_music_specs::MusicPost>(&bytes)
                         .ok()
-                        .and_then(|p| v1::from_music(&p, id))
+                        .and_then(|p| v1::from_music(&p, &id))
                 };
                 let Some(content) = content else {
                     continue;
                 };
                 let post = MusicPost::new(content);
-                if let Err(e) = post.validate(Some(id)) {
+                if let Err(e) = post.validate(Some(&id)) {
                     tracing::warn!(path = %head.path, error = %e, "skipping a v1 post the node cannot hold");
                     continue;
                 }
                 let lib = library.lock().expect("library poisoned");
-                store(&lib, &post, id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
-                lib.mark_music_post_synced(id, now_micros())?;
+                store(&lib, &post, &id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
+                lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
             }
         }

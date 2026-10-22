@@ -35,7 +35,8 @@ pub fn parse_link(input: &str) -> Option<(String, Option<String>)> {
 fn homeserver(s: &NodeState) -> Result<NodeHomeserver, ApiError> {
     match s.sync_handle() {
         Some(h) => Ok(h.homeserver().clone()),
-        None => NodeHomeserver::new(s.pubky.network)
+        None => s
+            .homeserver()
             .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string())),
     }
 }

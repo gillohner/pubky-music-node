@@ -544,7 +544,13 @@ async fn restore_locked(
             .and_then(|v| b64().decode(v).ok())
             .and_then(|v| String::from_utf8(v).ok())
         {
-            match crate::sync::PubkySync::connect(s.pubky.network, &secret).await {
+            match crate::sync::PubkySync::connect_with(
+                s.homeserver()
+                    .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?,
+                &secret,
+            )
+            .await
+            {
                 Ok(sync) => {
                     let sync = Arc::new(sync);
                     report

@@ -968,3 +968,98 @@ async fn many_favourites_sync_in_batches() {
         450
     );
 }
+
+/// One Pubky client for the node's lifetime (STEWARD-FIX-pubky-signin-speed.md): the node builds
+/// one client however many calls use it, and a first sync of many objects fetches them in
+/// batches. Prints how long the first sync of 120 favourites and 40 playlists took.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_client_and_a_batched_first_sync() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-test").unwrap())
+        .await
+        .unwrap();
+    let secret = pm_pubky::homeserver::export_session_secret(&session)
+        .await
+        .unwrap();
+
+    // A first node writes what the owner has on their homeserver
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a");
+    {
+        let lib = a.library.lock().unwrap();
+        for i in 0..120u32 {
+            let uri = pm_model::MusicUri::parse(&format!(
+                "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
+            ))
+            .unwrap();
+            lib.add_favourite(
+                &pm_pubky::Favourite::id_for(&uri),
+                &uri.to_url(),
+                1_700_000_000_000_000 + i as i64,
+            )
+            .unwrap();
+        }
+    }
+    let app_a = router(a.clone());
+    for i in 0..40u32 {
+        let (st, _) = call(
+            &app_a,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": format!("Mix {i}"), "uris": ["https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"]})),
+        )
+        .await;
+        assert!(st.is_success());
+    }
+    let sa = Arc::new(PubkySync::from_session(
+        NodeHomeserver::from_pubky(pubky.clone()),
+        session,
+    ));
+    loop {
+        let r = sa.sync(&a.library).await.unwrap();
+        if r.pending == 0 {
+            break;
+        }
+    }
+
+    // A fresh node signs in with that session: one client, however many calls
+    let b = node(dir.path(), "b");
+    let before = pm_pubky::homeserver::clients_built();
+    for _ in 0..10 {
+        b.homeserver().unwrap();
+    }
+    let sync = Arc::new(
+        PubkySync::connect_with(b.homeserver().unwrap(), &secret)
+            .await
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let r = sync.sync(&b.library).await.unwrap();
+    let ms = started.elapsed().as_millis();
+    let (st, _) = call(
+        &router(b.clone()),
+        "GET",
+        &format!("/v1/shared/{}/playlists", sync.z32()),
+        None,
+    )
+    .await;
+    assert!(st.is_success() || st == StatusCode::NOT_FOUND, "{st}");
+    assert_eq!(
+        pm_pubky::homeserver::clients_built() - before,
+        1,
+        "one Pubky client for the node"
+    );
+    assert!(r.pulled >= 160, "{r:?}");
+    eprintln!(
+        "first sync of 120 favourites and 40 playlists: {ms} ms ({} pulled)",
+        r.pulled
+    );
+}

@@ -72,6 +72,10 @@ pub struct NodeSettings {
 pub struct NodeState {
     /// The config file the node was started with (a backup carries it, encrypted).
     config_file: Mutex<Option<PathBuf>>,
+    /// The node's one Pubky client, built on first use and shared by every Pubky call.
+    pubky_client: std::sync::OnceLock<pm_pubky::homeserver::NodeHomeserver>,
+    /// The background sync after a sign-in (or a restore), for the page.
+    pub sync_activity: Mutex<crate::types::SyncActivity>,
     /// What the last scan did (shown when it ends, and in Settings).
     pub last_scan: Mutex<Option<crate::types::LastScan>>,
     pub name: String,
@@ -305,6 +309,8 @@ impl NodeState {
             http: Mutex::new(None),
             scanning: Mutex::new(false),
             config_file: Mutex::new(None),
+            pubky_client: std::sync::OnceLock::new(),
+            sync_activity: Mutex::new(Default::default()),
             last_scan: Mutex::new(None),
         })
     }
@@ -1131,6 +1137,23 @@ impl NodeState {
     /// Tell event listeners that library-side data (tracks, playlists) changed.
     pub fn notify_library(&self) {
         let _ = self.events.send(ApiEvent::LibraryChanged);
+    }
+
+    /// The node's Pubky client: one for its lifetime (one DHT node, one homeserver cache), shared by
+    /// sign-in, session restore, sync, uploads and reads of other people's data.
+    pub fn homeserver(
+        &self,
+    ) -> Result<pm_pubky::homeserver::NodeHomeserver, pm_pubky::homeserver::HomeserverError> {
+        if let Some(h) = self.pubky_client.get() {
+            return Ok(h.clone());
+        }
+        let h = pm_pubky::homeserver::NodeHomeserver::new(self.pubky.network)?;
+        Ok(self.pubky_client.get_or_init(|| h).clone())
+    }
+
+    /// Use this client (tests on the testnet bring their own).
+    pub fn set_homeserver(&self, h: pm_pubky::homeserver::NodeHomeserver) {
+        let _ = self.pubky_client.set(h);
     }
 
     /// The config file the node runs with, when there is one.

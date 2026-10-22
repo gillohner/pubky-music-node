@@ -2034,13 +2034,15 @@ async fn pubky_status(State(s): State<Arc<NodeState>>) -> ApiResult<PubkyStatus>
             .map(|h| h.missing_capabilities())
             .unwrap_or_default(),
         notice: needs_resign.then(|| sync::RESIGN_NOTICE.to_string()),
+        sync: s.sync_activity.lock().expect("sync activity").clone(),
     }))
 }
 
 /// Start a Pubky Ring sign-in: returns the `pubkyauth://` URL to scan or
 /// paste into Pubky Ring. Poll with GET until approved.
 async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginStarted> {
-    let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+    let hs = s
+        .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let flow = hs
         .start_login("pubky-music-node")
@@ -2084,7 +2086,8 @@ async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<Co
             "the node is not signed in to Pubky yet: sign it in once (Settings → Pubky, or `pm-node login`)",
         ));
     };
-    let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+    let hs = s
+        .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let flow = hs
         .start_login_with(
@@ -2207,25 +2210,16 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
                     Err(e) => tracing::warn!(path = %path.display(), "cannot store the session secret: {e}"),
                 }
             }
-            let hs = pm_pubky::homeserver::NodeHomeserver::new(s.pubky.network)
+            let hs = s
+                .homeserver()
                 .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
             let sync = Arc::new(sync::PubkySync::from_session(hs, session));
             let user = sync.z32().to_string();
             s.set_sync(Some(sync.clone()));
-            if let Err(e) = sync.publish_node_for(&s).await {
-                tracing::warn!("publishing the node record failed: {e}");
-            }
-            match sync.restore_settings(&s, true).await {
-                Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver"),
-                Ok(None) => {}
-                Err(e) => tracing::warn!("settings restore failed: {e}"),
-            }
-            match sync.sync(&s.library).await {
-                Ok(r) => sync.carry_on(&s, &r),
-                Err(e) => tracing::warn!("first sync failed: {e}"),
-            }
-            sync.backup_settings(&s).await;
-            s.notify_library();
+            tracing::info!(user = %user, "pubky sign-in: session ready");
+            // "Signed in" now; the node record, settings and the first sync follow in the
+            // background (they took minutes, one request at a time, before the answer)
+            sync::first_sync_in_background(&s, sync.clone());
             Ok(Json(LoginStatus {
                 status: "signed_in".into(),
                 user: Some(user),

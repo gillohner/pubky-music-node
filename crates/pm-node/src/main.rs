@@ -256,7 +256,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     if secret_file.exists() {
         let file = &secret_file;
         match std::fs::read_to_string(file) {
-            Ok(secret) => match pm_api::sync::PubkySync::connect(cfg.pubky.network, &secret).await {
+            Ok(secret) => match pm_api::sync::PubkySync::connect_with(state.homeserver()?, &secret).await {
                 Ok(sync) => {
                     tracing::info!(user = %sync.z32(), "Pubky session restored");
                     let sync = std::sync::Arc::new(sync);

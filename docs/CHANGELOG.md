@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Pubky sign-in is fast** (owner: "pubky sign in is very slow"; STEWARD-FIX-pubky-signin-speed.md). The log of the last sign-in had 957 homeserver lookups after the approval (until about 9 minutes later) and 119 Pubky clients, each with its own DHT node.
+  - **One Pubky client for the node's lifetime,** shared by sign-in, session restore, sync, uploads and reads of other people's data. Its homeserver cache is shared too, so repeated lookups are answered from it.
+  - **"Signed in" right after approval:** the node record, the settings and the first sync now run in the background. Settings › Accounts shows what the sync is doing, then how long it took (or why it failed).
+  - **The first sync reads in batches** (8 at a time), not one request after another: favourites, tags, playlists and reviews.
+  - The log says when the session was ready and how long the first sync took.
+  - **Testnet:** the node builds exactly one client, and a first sync of 120 favourites and 40 playlists takes about 0.1 s.
 - **Settings, rebuilt** (owner: "very cluttered … maybe separate tabs on side"; STEWARD-UX-SETTINGS.md).
   - **Side tabs, one topic each:** Library, Playback, Accounts, Discover, Backup, Import, Appearance, About this node.
   - **Rows, not cards:** each setting is a row with its label and one line of help, and its control on the right. On phones the controls go below, and Settings is a list you tap into, with Back.

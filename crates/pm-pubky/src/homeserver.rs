@@ -44,6 +44,9 @@ pub enum HomeserverError {
     NeedsSession,
 }
 
+/// Reads in flight at once during a sync.
+pub const FETCH_AT_ONCE: usize = 8;
+
 /// Default page size for listings; the homeserver may cap it.
 pub const LIST_LIMIT: u16 = 100;
 
@@ -52,8 +55,20 @@ pub struct NodeHomeserver {
     pubky: Pubky,
 }
 
+/// Pubky clients built in this process: each one starts its own DHT node and keeps its own
+/// homeserver cache, so a node builds one and shares it (STEWARD-FIX-pubky-signin-speed.md).
+static CLIENTS_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many Pubky clients this process has built (tests check it stays at one).
+pub fn clients_built() -> usize {
+    CLIENTS_BUILT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl NodeHomeserver {
+    /// A new Pubky client. A node builds one for its lifetime and clones it: clones share the
+    /// connection pool, the DHT node and the homeserver cache.
     pub fn new(network: Network) -> Result<Self, HomeserverError> {
+        CLIENTS_BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pubky = match network {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
@@ -166,6 +181,7 @@ impl NodeHomeserver {
     ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
         let user = session.public_key();
         let mut out = Vec::new();
+        let mut unknown = Vec::new();
         for path in self
             .list_dir(
                 &user,
@@ -175,18 +191,41 @@ impl NodeHomeserver {
             )
             .await?
         {
-            if let Some((uri, created_at)) = known.get(file_name(&path)) {
-                out.push((path, uri.clone(), *created_at));
-                continue;
+            match known.get(file_name(&path)) {
+                Some((uri, created_at)) => out.push((path, uri.clone(), *created_at)),
+                None => unknown.push(path),
             }
-            let bytes = self
-                .fetch(&user, &path, Visibility::Private, Some(session))
-                .await?;
+        }
+        for (path, bytes) in self
+            .fetch_many(&user, unknown, Visibility::Private, Some(session))
+            .await?
+        {
             if let Some((uri, created_at)) = crate::v1::favourite_from_bookmark(&path, &bytes) {
                 out.push((path, uri, created_at));
             }
         }
         Ok(out)
+    }
+
+    /// Fetch many paths [`FETCH_AT_ONCE`] at a time, results in the order of `paths`: a sync of
+    /// hundreds of objects was one request after another (STEWARD-FIX-pubky-signin-speed.md).
+    async fn fetch_many(
+        &self,
+        user: &PublicKey,
+        paths: Vec<String>,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<(String, Vec<u8>)>, HomeserverError> {
+        use futures_util::StreamExt;
+        let results: Vec<(String, Result<Vec<u8>, HomeserverError>)> = futures_util::stream::iter(paths)
+            .map(|path| async move {
+                let r = self.fetch(user, &path, visibility, session).await;
+                (path, r)
+            })
+            .buffered(FETCH_AT_ONCE)
+            .collect()
+            .await;
+        results.into_iter().map(|(p, r)| r.map(|b| (p, b))).collect()
     }
 
     async fn list_paths(
@@ -271,9 +310,9 @@ impl NodeHomeserver {
     ) -> Result<Vec<(String, MusicPost)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
         let mut out = Vec::new();
-        for path in self.list_posts(&user, visibility, session).await? {
+        let paths = self.list_posts(&user, visibility, session).await?;
+        for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
-            let bytes = self.fetch(&user, &path, visibility, session).await?;
             match MusicPost::try_from_bytes(&bytes, &id) {
                 Ok(Some(post)) => out.push((path, post)),
                 Ok(None) => {}
@@ -294,9 +333,9 @@ impl NodeHomeserver {
         let user = Self::parse_key(user_z32)?;
         let dir = Favourite::dir(visibility);
         let mut out = Vec::new();
-        for path in self.list_dir(&user, &dir, visibility, session).await? {
+        let paths = self.list_dir(&user, &dir, visibility, session).await?;
+        for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
-            let bytes = self.fetch(&user, &path, visibility, session).await?;
             match serde_json::from_slice::<pubky_app_specs::PubkyAppBookmark>(&bytes) {
                 Ok(b) => {
                     if let Some(f) = Favourite::from_bookmark(&id, &b) {
@@ -336,11 +375,8 @@ impl NodeHomeserver {
             self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
                 .await?,
         );
-        for path in paths {
-            if known.contains(file_name(&path)) {
-                continue;
-            }
-            let bytes = self.fetch(&user, &path, Visibility::Public, None).await?;
+        paths.retain(|p| !known.contains(file_name(p)));
+        for (path, bytes) in self.fetch_many(&user, paths, Visibility::Public, None).await? {
             match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
                 Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.push((path, t)),
                 Ok(_) => {}
