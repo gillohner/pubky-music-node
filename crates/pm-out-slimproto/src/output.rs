@@ -22,13 +22,16 @@ pub struct PlayerStatus {
     pub last_event: [u8; 4],
     /// When this report arrived.
     pub at: Option<std::time::Instant>,
+    /// The player has buffered the stream and waits for `strm u` (`STMl`, autostart off).
+    pub loaded: bool,
 }
 
 impl PlayerStatus {
     /// Milliseconds played of the current stream now: the report's, plus the
     /// time since it while the player is running.
     pub fn played_ms(&self) -> u64 {
-        let running = matches!(&self.last_event, b"STMt" | b"STMs" | b"STMr" | b"STMo");
+        // Not STMr: it answers `strm u`, which may start the output only later (start at).
+        let running = matches!(&self.last_event, b"STMt" | b"STMs" | b"STMo");
         let since = match (running, self.at) {
             (true, Some(at)) => at.elapsed().as_millis() as u64,
             _ => 0,
@@ -191,6 +194,9 @@ impl SlimOutput {
         s.jiffies = st.jiffies;
         s.last_event = st.event;
         s.at = Some(std::time::Instant::now());
+        if &st.event == b"STMl" {
+            s.loaded = true;
+        }
     }
 
     pub(crate) fn send(&self, op: &[u8; 4], data: &[u8]) -> Result<(), SinkError> {
@@ -235,13 +241,17 @@ impl Output for SlimOutput {
             0,
             &request,
         );
+        if !self.link.connected() {
+            return Err(SinkError::Unavailable(self.id(), "player disconnected".into()));
+        }
         self.link.reset();
-        self.send(b"strm", &start)?;
+        // `strm s` goes with the first write, so a group can hold the start first.
         Ok(Box::new(SlimSink {
             inner: Some(inner),
             link: self.link.clone(),
             pull: self.pull.clone(),
             start,
+            started: false,
             fmt,
             written: 0,
             base: 0,
@@ -271,8 +281,11 @@ struct SlimSink {
     inner: Option<Box<dyn AudioSink>>,
     link: Arc<Link>,
     pull: Arc<PullOutput>,
-    /// The `strm s` that starts the player on the stream (sent again after a flush).
+    /// The `strm s` that starts the player on the stream (sent again after a flush). Its
+    /// autostart byte is `'0'` once the sink is held.
     start: Vec<u8>,
+    /// `start` was sent for the current stream.
+    started: bool,
     fmt: AudioFormat,
     written: u64,
     /// Frames written before the player's current stream started (it counts from zero).
@@ -342,6 +355,12 @@ impl AudioSink for SlimSink {
         self.fmt
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+        if !self.started {
+            self.link
+                .send(b"strm", &self.start)
+                .map_err(|e| SinkError::Device(format!("start the player's stream: {e}")))?;
+            self.started = true;
+        }
         self.pace()?;
         match self.inner.as_mut() {
             Some(inner) => inner.write(block)?,
@@ -366,9 +385,9 @@ impl AudioSink for SlimSink {
         self.inner = Some(self.pull.open_now(self.fmt)?);
         self.link.reset();
         self.base = self.written;
-        self.link
-            .send(b"strm", &self.start)
-            .map_err(|e| SinkError::Device(format!("restart the player's stream: {e}")))
+        // The next write starts the player on the new stream.
+        self.started = false;
+        Ok(())
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         // End the HTTP stream so the player decodes to the end, then wait until it has played
@@ -391,6 +410,77 @@ impl AudioSink for SlimSink {
     }
     fn frames_written(&self) -> u64 {
         self.written
+    }
+    fn hold(&mut self) -> bool {
+        // Autostart off: the player buffers, reports STMl, and waits for `strm u`.
+        self.start[1] = b'0';
+        true
+    }
+    fn ready(&self) -> bool {
+        self.link.status().loaded
+    }
+    fn start_at(&mut self, at: std::time::Instant) -> Result<(), SinkError> {
+        // `at` on the player's own millisecond clock: its last report's jiffies plus the time
+        // since that report arrived (the network delay of one LAN packet is left out).
+        let st = self.link.status();
+        let jiffies = match st.at {
+            Some(seen) => {
+                let ms = match at.checked_duration_since(seen) {
+                    Some(d) => d.as_millis() as i64,
+                    None => -(seen.duration_since(at).as_millis() as i64),
+                };
+                (st.jiffies as i64 + ms).max(1) as u32
+            }
+            // No report yet: start at once (0 = now).
+            None => 0,
+        };
+        self.link
+            .send(
+                b"strm",
+                &strm(
+                    b'u',
+                    b'0',
+                    self.fmt.bits,
+                    self.fmt.rate_hz,
+                    self.fmt.channels,
+                    0,
+                    jiffies,
+                    "",
+                ),
+            )
+            .map_err(|e| SinkError::Device(format!("start the player: {e}")))
+    }
+    fn nudge(&mut self, frames: i64) -> bool {
+        // Ahead: play `p` ms of silence (not counted as played). Behind: skip `a` ms (counted).
+        let (cmd, ms) = if frames > 0 {
+            (b'p', self.ms(frames as u64))
+        } else {
+            (b'a', self.ms(frames.unsigned_abs()))
+        };
+        if ms == 0 {
+            return true;
+        }
+        let sent = self.link.send(
+            b"strm",
+            &strm(
+                cmd,
+                b'0',
+                self.fmt.bits,
+                self.fmt.rate_hz,
+                self.fmt.channels,
+                0,
+                ms,
+                "",
+            ),
+        );
+        tracing::debug!(cmd = %(cmd as char), ms, ok = sent.is_ok(), "slimproto nudge");
+        sent.is_ok()
+    }
+}
+
+impl SlimSink {
+    fn ms(&self, frames: u64) -> u32 {
+        ((frames * 1000 + self.fmt.rate_hz as u64 / 2) / self.fmt.rate_hz.max(1) as u64) as u32
     }
 }
 
@@ -443,6 +533,12 @@ mod tests {
 
         let fmt = AudioFormat::pcm(48_000, 24, 2);
         let mut sink = out.open(fmt).await.unwrap();
+        // The player is told to fetch with the first write (a group may hold it first).
+        let block = AudioBlock::pcm_i32(fmt, vec![1, -1]);
+        let writer = std::thread::spawn(move || {
+            sink.write(&block).unwrap();
+            drop(sink);
+        });
         let (op, data) = read_frame_server(&mut player).unwrap();
         assert_eq!(&op, b"strm");
         assert_eq!(&data[0..7], b"s1p2421");
@@ -453,17 +549,12 @@ mod tests {
             "GET /v1/outputs/pull/slim-aabbcc001122/stream.pcm?token=t HTTP/1.0\r\n\r\n"
         );
 
-        // The "player" fetches: take the pull stream and read a block.
+        // The "player" fetches: take the pull stream and read the block.
         let mut live = out
             .pull()
             .take_stream(std::time::Duration::from_secs(2))
             .await
             .unwrap();
-        let block = AudioBlock::pcm_i32(fmt, vec![1, -1]);
-        let writer = std::thread::spawn(move || {
-            sink.write(&block).unwrap();
-            drop(sink);
-        });
         let header = live.rx.recv().await.unwrap();
         assert_eq!(&header[0..4], b"RIFF");
         let pcm = live.rx.recv().await.unwrap();

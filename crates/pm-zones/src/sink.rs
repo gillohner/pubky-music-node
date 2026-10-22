@@ -127,6 +127,30 @@ pub trait AudioSink: Send {
     fn members(&self) -> Vec<MemberStatus> {
         Vec::new()
     }
+
+    /// Synced group start (Slimproto): from now on (and after every flush) buffer without
+    /// playing until `start_at`. Call before the first write. False when the sink cannot; it
+    /// then starts as soon as it has audio, as before.
+    fn hold(&mut self) -> bool {
+        false
+    }
+
+    /// A held sink has buffered enough to start on time.
+    fn ready(&self) -> bool {
+        true
+    }
+
+    /// Start a held sink at `at` (the group passes the same instant to every member).
+    fn start_at(&mut self, _at: std::time::Instant) -> Result<(), SinkError> {
+        Ok(())
+    }
+
+    /// Move the playback point now, for drift correction: `frames` > 0 holds it back (the sink
+    /// is ahead), < 0 skips ahead. For sinks whose device queues seconds of audio, where frames
+    /// slipped into the stream would be heard only after that queue. False when not supported.
+    fn nudge(&mut self, _frames: i64) -> bool {
+        false
+    }
 }
 
 /// How closely a zone's speakers stay together (the Zones view says it plainly).

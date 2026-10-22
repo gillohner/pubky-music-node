@@ -81,7 +81,8 @@ jobs:
       - run: npm test
   alsa-loopback:
     # The ALSA hw: output stays bit-perfect: played through the kernel's loopback card and compared byte for byte
-    # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C). The runner's Azure kernel has no sound modules,
+    # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C). Then two squeezelite players on ALSA in one node
+    # group, measured apart at every click (tools/slim-sync-alsa.py). The runner's Azure kernel has no sound modules,
     # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
     # (virtme-ng).
     runs-on: ubuntu-24.04
@@ -96,7 +97,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils qemu-system-x86 busybox-static \
-            linux-image-generic
+            linux-image-generic squeezelite
           kver=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
           sudo apt-get install -y --no-install-recommends "linux-modules-extra-$kver"
           sudo chmod a+r "/boot/vmlinuz-$kver"
@@ -106,10 +107,18 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - run: cargo build -p pm-node --features alsa
-      - name: bit-perfect through snd-aloop
+      - name: bit-perfect through snd-aloop; two squeezelite players in one group
         run: |
-          vng -r "$KVER" --user root -m 2G -- bash -c \
-            "modprobe snd-aloop && aplay -l && python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb"
+          mkdir -p ss-out
+          vng -r "$KVER" --user root -m 2G --rwdir "$PWD/ss-out" -- bash -c "modprobe snd-aloop && aplay -l \
+            && python3 -I tools/alsa-loopback.py target/debug/pm-node /tmp/lb \
+            && python3 -I tools/slim-sync-alsa.py target/debug/pm-node /tmp/ss --seconds 45 --out $PWD/ss-out"
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: slim-sync
+          path: ss-out
+          if-no-files-found: ignore
   slimproto:
     # Slimproto against real squeezelite: bit-exact at 16/44.1 and 24/96, position, pause and play,
     # reconnects (tools/slim-squeezelite.py).

@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Slimproto groups play in sync** (infra item 2; "In sync" again). In a group of Slimproto players, the node now:
+  - holds each player's start, waits until all have buffered, and starts them on one instant on each player's own clock (`strm u`). It does this again after every pause, seek or skip.
+  - corrects drift on the player itself: it holds a player back (`strm p`) or skips it ahead (`strm a`, at most 10 ms at a time) when the players have been more than 10 ms apart for 3 s, judged on a 2 s average. It acts at most every 4 s, and not in the first 3 s after a start, because a player reports its start up to a second late. The old way slipped frames into the stream, and with a player 5 s ahead those corrections were heard 5 s late.
+  - measures every group member at the same instant: a member measured after another's write had waited seemed ahead by the wait.
+  - **Measured in CI** with two squeezelite players on ALSA in one group, recorded together on left and right (`tools/slim-sync-alsa.py`). Simulated players 500 ppm fast and slow stay within 10 ms (unit test).
 - **Songs that aren't identified yet go into playlists and favourites** (mn-infra: Music Assistant failed on every other song of an untagged library, with "check your permissions" and a 500).
   - They're kept on this node only, after the playlist's songs, and never synced.
   - The playlist page lists them under "On this node only", with a line saying why and how to fix it.

@@ -8,6 +8,15 @@
 //!
 //! * **Start alignment**: members with a smaller `fixed_latency_ms` get a
 //!   pre-roll of silence so the first sample becomes audible together.
+//!   When every member can hold its start ([`AudioSink::hold`]: Slimproto
+//!   players), the group writes [`SYNC_START_MS`] of audio, waits until each
+//!   has it buffered, and starts them all on one instant; again after every
+//!   flush (pause, seek, skip).
+//! * Members that queue seconds of audio and can move their own playback
+//!   point ([`AudioSink::nudge`]: Slimproto) are corrected that way instead,
+//!   at most once per [`NUDGE_EVERY_MS`], only beyond [`NUDGE_DEADBAND_MS`]
+//!   for a few seconds, and skipping at most [`NUDGE_SKIP_MAX_MS`] at once:
+//!   a frame slipped into their stream would be heard seconds later.
 //! * **Drift monitoring**: each member's audible position (frames written
 //!   minus frames still queued, minus pre-roll and slips) is compared with
 //!   the leader's and reported through [`AudioSink::members`].
@@ -46,6 +55,32 @@ pub const SLIP_DIVISOR: usize = 1000;
 pub const DEADBAND_MS: u64 = 2;
 /// Audio written before the first correction, so start-up buffer fills settle.
 const WARMUP_MS: u64 = 2000;
+/// Members corrected by nudges: at most once per this much audio each (writes follow playback,
+/// so this is time)...
+pub const NUDGE_EVERY_MS: u64 = 4000;
+/// ...and only when further apart than this, on average over `NUDGE_AVERAGE_MS` (two
+/// squeezelite players in step on one ALSA card: estimates 0-1 ms apart; Wi-Fi adds jitter)...
+pub const NUDGE_DEADBAND_MS: u64 = 10;
+/// ...and not until the leader has played this much since the (re)start: a player reports
+/// that it started up to a second late, and until then it seems not to be playing.
+const NUDGE_SETTLE_MS: u64 = 3000;
+/// ...(position reports come once a second)...
+const NUDGE_AVERAGE_MS: u64 = 2000;
+/// ...and only once it has stayed beyond the deadband on the same side this long (a player's
+/// reports jump by an ALSA period now and then)...
+const NUDGE_PERSIST_MS: u64 = 3000;
+/// ...holding a player back by at most this much at once (a larger gap closes over several)...
+pub const NUDGE_MAX_MS: u64 = 250;
+/// ...and skipping one ahead by at most this: squeezelite skips no more than one device write
+/// (about an ALSA period) and drops the rest of the request.
+pub const NUDGE_SKIP_MAX_MS: u64 = 10;
+/// Held members start once this much audio is written to each.
+pub const SYNC_START_MS: u64 = 500;
+/// How long held members get to buffer it before they are started anyway.
+const SYNC_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// The common start instant is this far after the last member is ready, so every member hears
+/// its start command before it.
+const SYNC_LEAD: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl GroupOutput {
     /// Group `members` (two or more); the first is the leader whose clock
@@ -190,7 +225,10 @@ impl Output for GroupOutput {
             .collect();
         let same = protocols.windows(2).all(|w| w[0] == w[1]);
         let system_mixer = self.members.iter().any(|m| m.id().0.contains("/cpal:"));
-        if same && !system_mixer && protocols.first().map(String::as_str) == Some("net") {
+        if same
+            && !system_mixer
+            && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim"))
+        {
             crate::SyncClass::Tight
         } else {
             crate::SyncClass::Loose
@@ -213,19 +251,32 @@ impl Output for GroupOutput {
         }
         let max_latency = sinks.iter().map(|(_, l, _)| *l).max().unwrap_or(0);
         let mut members = Vec::with_capacity(sinks.len());
-        for (id, latency, sink) in sinks {
+        for (id, latency, mut sink) in sinks {
             let preroll = ms_to_frames(fmt, (max_latency - latency) as u64);
+            // nudge(0) moves nothing; it tells whether the sink corrects itself.
+            let nudges = sink.nudge(0);
             members.push(Member {
+                nudges,
+                drift_avg: None,
+                beyond: None,
                 id,
                 sink,
                 preroll_frames: preroll,
                 inserted: 0,
                 dropped: 0,
+                nudged: 0,
+                last_nudge: None,
             });
         }
+        // Every member holds its start, or none does (a sink that cannot plays as it buffers).
+        let held = members.len() > 1 && members.iter_mut().all(|m| m.sink.hold());
         let mut g = GroupSink {
             fmt,
             members,
+            held,
+            start_pending: held,
+            since_start: 0,
+            nudge_from: ms_to_frames(fmt, NUDGE_SETTLE_MS) as i64,
             written: 0,
             correct: self.drift_correction && fmt.kind == SampleKind::Pcm,
             warmup_frames: ms_to_frames(fmt, WARMUP_MS),
@@ -279,6 +330,16 @@ struct Member {
     /// Frames duplicated / dropped by drift correction.
     inserted: u64,
     dropped: u64,
+    /// Corrected by nudges, not by frames slipped into its stream.
+    nudges: bool,
+    /// Its drift (frames), averaged, and the group's frame count when that was last updated.
+    drift_avg: Option<(f64, u64)>,
+    /// Since when (group frames) and on which side the drift has stayed beyond the deadband.
+    beyond: Option<(u64, bool)>,
+    /// Net frames held back (+) or skipped (-) by nudges, and when the last one went out.
+    nudged: i64,
+    /// The group's frame count at the last nudge.
+    last_nudge: Option<u64>,
 }
 
 impl Member {
@@ -291,13 +352,63 @@ impl Member {
     }
 
     fn slipped(&self) -> i64 {
-        self.inserted as i64 - self.dropped as i64
+        self.inserted as i64 - self.dropped as i64 + self.nudged
+    }
+
+    /// Correct a member that nudges itself: true when it does (then nothing is slipped into its
+    /// stream, whether or not a nudge went out now).
+    fn try_nudge(&mut self, drift: i64, now: u64, fmt: AudioFormat) -> bool {
+        if !self.nudges {
+            return false;
+        }
+        let avg = match self.drift_avg {
+            None => drift as f64,
+            Some((avg, at)) => {
+                let k = now.saturating_sub(at) as f64 / ms_to_frames(fmt, NUDGE_AVERAGE_MS) as f64;
+                avg + (drift as f64 - avg) * k.min(1.0)
+            }
+        };
+        self.drift_avg = Some((avg, now));
+        // How long the drift itself (not just the average) has stayed beyond the deadband.
+        let band = ms_to_frames(fmt, NUDGE_DEADBAND_MS) as i64;
+        self.beyond = match self.beyond {
+            _ if drift.abs() <= band => None,
+            Some((since, ahead)) if ahead == (drift > 0) => Some((since, ahead)),
+            _ => Some((now, drift > 0)),
+        };
+        let persisted = self
+            .beyond
+            .is_some_and(|(since, _)| now.saturating_sub(since) >= ms_to_frames(fmt, NUDGE_PERSIST_MS));
+        let due = self
+            .last_nudge
+            .is_none_or(|at| now.saturating_sub(at) >= ms_to_frames(fmt, NUDGE_EVERY_MS));
+        let by = (avg.round() as i64).clamp(
+            -(ms_to_frames(fmt, NUDGE_SKIP_MAX_MS) as i64),
+            ms_to_frames(fmt, NUDGE_MAX_MS) as i64,
+        );
+        if avg.abs() > band as f64 && persisted && due && self.sink.nudge(by) {
+            tracing::debug!(output = %self.id, drift_frames = drift, average = avg as i64, by, "group: nudged");
+            self.nudged += by;
+            self.last_nudge = Some(now);
+            // The next reports show the result; start afresh.
+            self.drift_avg = None;
+            self.beyond = None;
+        }
+        true
     }
 }
 
 pub struct GroupSink {
     fmt: AudioFormat,
     members: Vec<Member>,
+    /// The members start together on `start_at` (see `SYNC_START_MS`).
+    held: bool,
+    /// Held and not started yet (since opening or the last flush).
+    start_pending: bool,
+    /// Frames written since the last (re)start.
+    since_start: u64,
+    /// Nudges wait until the leader's audible position reaches this (see `NUDGE_SETTLE_MS`).
+    nudge_from: i64,
     written: u64,
     correct: bool,
     warmup_frames: u64,
@@ -341,6 +452,30 @@ fn without_tail(block: &AudioBlock, cut: usize) -> AudioBlock {
 }
 
 impl GroupSink {
+    /// Start held members together once each has `SYNC_START_MS` buffered.
+    fn maybe_start(&mut self) -> Result<(), SinkError> {
+        if !self.start_pending || self.since_start < ms_to_frames(self.fmt, SYNC_START_MS) {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + SYNC_READY_TIMEOUT;
+        while !self.members.iter().all(|m| m.sink.ready()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if let Some(m) = self.members.iter().find(|m| !m.sink.ready()) {
+            tracing::warn!(output = %m.id, "group start: not ready in time; starting anyway");
+        }
+        let at = std::time::Instant::now() + SYNC_LEAD;
+        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+        for m in self.members.iter_mut() {
+            m.sink.start_at(at)?;
+            m.drift_avg = None;
+            m.beyond = None;
+        }
+        self.nudge_from = leader + ms_to_frames(self.fmt, NUDGE_SETTLE_MS) as i64;
+        self.start_pending = false;
+        Ok(())
+    }
+
     fn preroll(&mut self) -> Result<(), SinkError> {
         for m in self.members.iter_mut() {
             if m.preroll_frames == 0 {
@@ -372,14 +507,26 @@ impl AudioSink for GroupSink {
             return Err(SinkError::FloatNotAccepted);
         }
         let frames = block.frames();
-        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+        // Every member's position at one instant, before any write: a write can wait (a
+        // player's pacing), and a member measured after it would seem ahead by the wait.
+        let audible: Vec<i64> = self.members.iter().map(|m| m.audible()).collect();
+        let leader = audible.first().copied().unwrap_or(0);
         let correcting = self.correct && self.written >= self.warmup_frames && frames > 0;
         for (i, m) in self.members.iter_mut().enumerate() {
             if i == 0 || !correcting {
                 m.sink.write(block)?;
                 continue;
             }
-            let drift = m.audible() - leader;
+            let drift = audible[i] - leader;
+            let settled = leader >= self.nudge_from;
+            if m.nudges && !settled {
+                m.sink.write(block)?;
+                continue;
+            }
+            if m.try_nudge(drift, self.written, self.fmt) {
+                m.sink.write(block)?;
+                continue;
+            }
             if drift.abs() <= self.deadband_frames {
                 m.sink.write(block)?;
                 continue;
@@ -398,7 +545,8 @@ impl AudioSink for GroupSink {
             }
         }
         self.written += frames as u64;
-        Ok(())
+        self.since_start += frames as u64;
+        self.maybe_start()
     }
 
     /// The leader's level: the zone paces on it, the others follow through their own writes.
@@ -419,10 +567,24 @@ impl AudioSink for GroupSink {
                 first_err.get_or_insert(e);
             }
         }
+        // Held members wait again; the next writes start them together.
+        self.start_pending = self.held;
+        self.since_start = 0;
+        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+        self.nudge_from = leader + ms_to_frames(self.fmt, NUDGE_SETTLE_MS) as i64;
+        for m in self.members.iter_mut() {
+            m.drift_avg = None;
+            m.beyond = None;
+        }
         first_err.map_or(Ok(()), Err)
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
+        // A track shorter than SYNC_START_MS: start what there is.
+        if self.start_pending {
+            self.since_start = u64::MAX / 2;
+            self.maybe_start()?;
+        }
         let mut first_err = None;
         for m in self.members.iter_mut() {
             if let Err(e) = m.sink.drain() {
@@ -489,7 +651,7 @@ mod tests {
             ]),
             crate::SyncClass::Loose
         );
-        assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Loose);
+        assert_eq!(g(vec![o("slim", "a"), o("slim", "b")]), crate::SyncClass::Tight);
         assert_eq!(g(vec![o("net", "a"), o("slim", "b")]), crate::SyncClass::Loose);
         assert_eq!(
             g(vec![o("upnp", "a"), o("airplay", "b")]),
@@ -671,6 +833,221 @@ mod tests {
         assert!(m.iter().all(|s| s.slipped_frames == 0));
         assert!(m[1].drift_ms >= 14, "{:?}", m[1]);
         assert!(m[2].drift_ms <= -14, "{:?}", m[2]);
+    }
+
+    /// A member that queues seconds of audio and corrects itself (Slimproto): it consumes at
+    /// `ratio` times the shared clock, and a nudge moves its playback point at once.
+    struct NudgeOutput {
+        ratio: f64,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+        moved: Arc<std::sync::atomic::AtomicI64>,
+        caps: OutputCaps,
+    }
+
+    struct NudgeSink {
+        fmt: AudioFormat,
+        ratio: f64,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+        moved: Arc<std::sync::atomic::AtomicI64>,
+    }
+
+    #[async_trait]
+    impl Output for NudgeOutput {
+        fn id(&self) -> OutputId {
+            OutputId::new("slim", &format!("{}", self.ratio))
+        }
+        fn name(&self) -> String {
+            "nudge".into()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.caps
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Ok(Box::new(NudgeSink {
+                fmt,
+                ratio: self.ratio,
+                clock: self.clock.clone(),
+                written: self.written.clone(),
+                moved: self.moved.clone(),
+            }))
+        }
+    }
+
+    impl AudioSink for NudgeSink {
+        fn format(&self) -> AudioFormat {
+            self.fmt
+        }
+        fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+            self.written
+                .fetch_add(block.frames() as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            use std::sync::atomic::Ordering::Relaxed;
+            let played = (self.clock.load(Relaxed) as f64 * self.ratio) as i64 + self.moved.load(Relaxed);
+            BufferLevel {
+                queued_frames: (self.written.load(Relaxed) as i64 - played.max(0)).max(0) as u64,
+                capacity_frames: 1 << 20,
+            }
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn frames_written(&self) -> u64 {
+            self.written.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn nudge(&mut self, frames: i64) -> bool {
+            // Held back (+): it has played that much less; skipped (-): that much more.
+            self.moved.fetch_sub(frames, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// Players that queue seconds ahead are corrected by moving their playback point, never by
+    /// frames slipped into their stream (heard only seconds later). 500 ppm fast and slow over
+    /// two minutes: they end within the deadband of the leader, and their streams are the
+    /// leader's, frame for frame.
+    #[tokio::test]
+    async fn queueing_members_are_nudged_not_slipped() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let lead = ClockOutput::new("lead", 1.0, &clock);
+        let member = |ratio| {
+            Arc::new(NudgeOutput {
+                ratio,
+                clock: clock.clone(),
+                written: Arc::default(),
+                moved: Arc::default(),
+                caps: OutputCaps::unlimited(),
+            })
+        };
+        let (fast, slow) = (member(1.0005), member(0.9995));
+        let g = GroupOutput::new("sync", vec![lead.clone(), fast.clone(), slow.clone()]).unwrap();
+        let fmt = AudioFormat::pcm(48_000, 24, 2);
+        let mut sink = g.open(fmt).await.unwrap();
+        let block = AudioBlock::pcm_i32(fmt, (0..960).map(|i| i * 1000).collect());
+        // They queue five seconds ahead of the shared clock; two minutes (blocks of 10 ms), so
+        // 500 ppm crosses the deadband twice.
+        for n in 1..=12_000u64 {
+            sink.write(&block).unwrap();
+            clock.store(
+                (n * 480).saturating_sub(240_000),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let m = sink.members();
+        use std::sync::atomic::Ordering::Relaxed;
+        let lead_written = lead.written.load(Relaxed);
+        for (s, out) in m[1..].iter().zip([&fast, &slow]) {
+            assert_eq!(
+                out.written.load(Relaxed),
+                lead_written,
+                "nothing slipped into {s:?}"
+            );
+            assert!(s.drift_ms.abs() <= (NUDGE_DEADBAND_MS + 2) as i64, "{s:?}");
+        }
+        // 500 ppm of the 112 s played after settling is 2690 frames, held back for the fast one
+        // and skipped for the slow one, less what is still inside the deadband (up to 480).
+        assert!((2100..=2800).contains(&m[1].slipped_frames), "{:?}", m[1]);
+        assert!((-2800..=-2100).contains(&m[2].slipped_frames), "{:?}", m[2]);
+    }
+
+    /// A sink that can hold its start; records the instants it was started at.
+    struct HoldOutput(Arc<Mutex<Vec<std::time::Instant>>>, OutputCaps, &'static str);
+    struct HoldSink(Arc<Mutex<Vec<std::time::Instant>>>, AudioFormat, u64);
+    use std::sync::Mutex;
+
+    #[async_trait]
+    impl Output for HoldOutput {
+        fn id(&self) -> OutputId {
+            OutputId::new("slim", self.2)
+        }
+        fn name(&self) -> String {
+            self.2.into()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.1
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Ok(Box::new(HoldSink(self.0.clone(), fmt, 0)))
+        }
+    }
+
+    impl AudioSink for HoldSink {
+        fn format(&self) -> AudioFormat {
+            self.1
+        }
+        fn write(&mut self, b: &AudioBlock) -> Result<(), SinkError> {
+            self.2 += b.frames() as u64;
+            Ok(())
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            BufferLevel {
+                queued_frames: 0,
+                capacity_frames: 1,
+            }
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn frames_written(&self) -> u64 {
+            self.2
+        }
+        fn hold(&mut self) -> bool {
+            true
+        }
+        fn start_at(&mut self, at: std::time::Instant) -> Result<(), SinkError> {
+            self.0.lock().unwrap().push(at);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn held_members_start_together_and_again_after_a_flush() {
+        let (a, b) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let caps = OutputCaps::unlimited();
+        let g = GroupOutput::new(
+            "held",
+            vec![
+                Arc::new(HoldOutput(a.clone(), caps.clone(), "a")),
+                Arc::new(HoldOutput(b.clone(), caps, "b")),
+            ],
+        )
+        .unwrap();
+        let fmt = AudioFormat::pcm(48_000, 16, 2);
+        let mut sink = g.open(fmt).await.unwrap();
+        let block = AudioBlock::pcm_i32(fmt, vec![0; 4800 * 2]); // 100 ms
+        for _ in 0..4 {
+            sink.write(&block).unwrap();
+        }
+        assert!(
+            a.lock().unwrap().is_empty(),
+            "not before {SYNC_START_MS} ms are written"
+        );
+        sink.write(&block).unwrap();
+        assert_eq!(a.lock().unwrap().len(), 1);
+        assert_eq!(*a.lock().unwrap(), *b.lock().unwrap(), "one instant for both");
+        for _ in 0..10 {
+            sink.write(&block).unwrap();
+        }
+        assert_eq!(a.lock().unwrap().len(), 1, "started once");
+        sink.flush().unwrap();
+        for _ in 0..5 {
+            sink.write(&block).unwrap();
+        }
+        assert_eq!(
+            a.lock().unwrap().len(),
+            2,
+            "held again after a flush, started again"
+        );
+        assert_eq!(*a.lock().unwrap(), *b.lock().unwrap());
     }
 
     #[test]
