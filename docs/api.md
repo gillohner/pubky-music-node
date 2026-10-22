@@ -56,7 +56,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/albums/{id}/versions`, `/v1/library/tracks/{id}/versions` | | `[{source, id, label, url, uri?}]`: the same album (by UPC) or track (by ISRC) on TIDAL, cached a week; empty when unknown |
 | GET | `/v1/sources/tidal/stream/{id}` | | the track's HLS segments as one `audio/mp4` body for browsers (`X-Tidal-Presentation: FULL\|PREVIEW`); sign-in required |
 | GET | `/v1/sources/spotify/login` | | Spotify sign-in URL (Authorization Code + PKCE); the app must list `<public_url>/spotify/callback` |
-| GET | `/v1/sources/spotify/status` | | `{configured, signed_in, user_id?, display_name?, country?, product?, redirect_uri, requested_scopes}` |
+| GET | `/v1/sources/spotify/status` | | `{configured, signed_in, user_id?, display_name?, country?, product?, redirect_uri, requested_scopes, app_from?, client_id?}`; `redirect_uri` is what the app must list (the return page for an app without its secret), `app_from` is `config` or `settings` |
+| PUT | `/v1/sources/spotify/app` | `{client_id}` | The guided setup: your Spotify app's client ID (32 hex digits; empty forgets it). A new app signs out of Spotify. 409 when `[spotify]` is set in the node config. Returns the status |
 | DELETE | `/v1/sources/spotify/session` | | sign out |
 | GET | `/v1/sources/spotify/collection` | | saved albums and tracks as hits (ISRC/UPC, library matches) |
 | POST | `/v1/sources/spotify/collection/import` | | saved tracks (by ISRC) and albums as favourites |
@@ -163,6 +164,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/{source}/search` | `?q=&limit=` | `{source, items: [{id, title, creator?, year?, downloads?, image?, kind: item\|track, url}]}` |
 | GET | `/v1/sources/tidal/login` | | `{url}`: TIDAL's sign-in page (OAuth 2 + PKCE, scopes incl. `playback`); the browser comes back to `/tidal/callback` (no token needed there), which stores the user's tokens and redirects to `/?tidal=signed_in` |
 | GET / PUT | `/v1/sources/tidal/unofficial` | PUT `{enabled?, quality?: max\|high, client_id?, client_secret?}` | Full tracks (unofficial): `{enabled, signed_in, user?, quality, pending?: {user_code, uri, expires_at}, health?: {ok, detail, at}, client_from?: settings\|config, warning}`; an empty `client_id` forgets the one set here; `enabled: true` after a failure is the retry |
+| GET | `/v1/sources/qobuz/unofficial` | | Qobuz (unofficial-only): `{enabled, signed_in, user?, plan?, hires, quality, health?, app_from?, app_id?, warning}` (the secret never comes back) |
+| PUT | `/v1/sources/qobuz/unofficial` | `{enabled?, quality?: max\|cd, app_id?, app_secret?}` | Switch it on or off (on again is Try again), the quality, the owner's app (an empty `app_id` forgets it) |
+| POST | `/v1/sources/qobuz/unofficial/login` | `{email, password}` | Signs in once; the node keeps only Qobuz's session token. 403 for an account without a streaming plan |
+| DELETE | `/v1/sources/qobuz/unofficial/login` | | Forgets the session |
+| GET | `/v1/sources/qobuz/stream/{id}` | | The track as FLAC for browsers, relayed by the node |
 | POST / DELETE | `/v1/sources/tidal/unofficial/login` | | POST starts the device sign-in (the code to enter at link.tidal.com, in `pending`; the node waits for the approval); DELETE forgets the session |
 | GET / DELETE | `/v1/sources/tidal/status` (DELETE `…/session`) | | `{configured, signed_in, user_id?, country?, scope?, expires_at?, redirect_uri, requested_scopes, access_tier?, playback_limit?}` (`playback_limit` such as `FULL_REQUIRES_HIGHER_ACCESS_TIER` means TIDAL serves previews to this app's tier); DELETE forgets the tokens |
 | GET | `/v1/sources/tidal/collection` (POST `…/import`) | | `{tracks, albums}` of the signed-in user's TIDAL collection as source hits; POST favourites them on the node (`{imported, skipped}`; ISRC where TIDAL has one, else the TIDAL link) |
