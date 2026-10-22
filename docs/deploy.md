@@ -65,6 +65,12 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   the operator is you; tell anyone you invite.
 - `GET /v1/homeserver/bundled` shows the homeserver as the node sees it: version, key, users,
   disk used, unused invites.
+- **People:** Settings › People (`/v1/people`) invites someone and picks what they get:
+  - **Homeserver only:** a Pubky account here with a storage quota.
+  - **Homeserver + music:** the same, plus this node's music service.
+  - **Music only:** someone whose account is elsewhere, added by their public key.
+
+  A homeserver invite is a Pubky Ring link and QR (`direct_signup`, which needs a recent Ring; older ones can type the code). Per person you set the quota, turn their homeserver account off (that blocks writes; they can still read and delete) and take away music access.
 - **Your account on it:** on first run, "Create your Pubky account on this node's homeserver"
   (`POST /v1/homeserver/bundled/owner-signup`) shows a Pubky Ring link and QR. The node mints the
   owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs

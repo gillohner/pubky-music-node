@@ -46,6 +46,7 @@ pub mod listenbrainz;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
+pub mod people;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -446,6 +447,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/tags", get(radio_sources::tags))
         .route("/homeserver/bundled", get(bundled::status))
         .route("/homeserver/bundled/owner-signup", post(bundled::owner_signup))
+        .route("/people", get(people::list))
+        .route("/people/invites", post(people::invite))
+        .route(
+            "/people/invites/{id}",
+            axum::routing::delete(people::forget_invite),
+        )
+        .route("/people/{key}", axum::routing::patch(people::change))
         .route("/pubky", get(pubky_status))
         .route("/pubky/sync", post(pubky_sync))
         .route("/pubky/login", post(pubky_login_start).get(pubky_login_poll))

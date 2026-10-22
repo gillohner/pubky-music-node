@@ -129,8 +129,169 @@ async fn the_owner_signs_up_on_the_bundled_homeserver() {
     // The node names users in the `pubky<z32>` display form
     assert_eq!(done["user"].as_str(), Some(format!("pubky{owner}").as_str()));
     let (_, info) = call(&app, "GET", "/v1/homeserver/bundled").await;
-    assert_eq!(info["users"].as_u64(), Some(users_before + 1));
+    // At least the owner more (the other test signs people up at the same time)
+    assert!(info["users"].as_u64().unwrap() > users_before, "{info}");
     // Signed in now: a second owner sign-up is refused
     let (st, _) = call(&app, "POST", "/v1/homeserver/bundled/owner-signup").await;
     assert_eq!(st, StatusCode::CONFLICT);
+}
+
+async fn call_json(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invites_become_people_with_quotas_and_access() {
+    let Some(ep) = bundled() else {
+        eprintln!("skipped: set PM_BUNDLED_HS_ADMIN and PM_BUNDLED_HS_PASSWORD");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    s.set_bundled_homeserver(ep);
+    let app = router(s.clone());
+    let pubky = Pubky::new().unwrap();
+
+    // Homeserver + music, 100 MB
+    let (st, inv) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "homeserver_music", "name": "Sam", "storage_quota_mb": 100}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{inv}");
+    let link = inv["url"].as_str().unwrap().to_string();
+    assert!(link.starts_with("pubkyauth://direct_signup?hs="), "{link}");
+    assert!(inv["qr_svg"].as_str().unwrap().starts_with("<svg"));
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    assert_eq!(people["invites"].as_array().unwrap().len(), 1);
+
+    // "Pubky Ring" scans it: the account is created on the bundled homeserver
+    let sam = pubky.signer(Keypair::random());
+    sam.handle_deeplink(&link).await.expect("direct signup");
+    let sam_key = sam.public_key().z32();
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    assert_eq!(people["invites"].as_array().unwrap().len(), 0, "{people}");
+    let p = &people["people"][0];
+    assert_eq!(
+        (p["key"].as_str(), p["access"].as_str(), p["name"].as_str()),
+        (Some(sam_key.as_str()), Some("homeserver_music"), Some("Sam"))
+    );
+    assert_eq!(p["storage_quota_mb"], 100);
+    assert!(pm_api::people::may_use_music(&s, &sam_key));
+
+    // Homeserver only: no music
+    let (_, inv) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "homeserver"}),
+    )
+    .await;
+    let kim = pubky.signer(Keypair::random());
+    kim.handle_deeplink(inv["url"].as_str().unwrap()).await.unwrap();
+    let kim_key = kim.public_key().z32();
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    assert_eq!(people["people"].as_array().unwrap().len(), 2);
+    assert!(
+        !pm_api::people::may_use_music(&s, &kim_key),
+        "a homeserver-only account can't use the music service"
+    );
+
+    // Turning Sam's homeserver account off blocks writes; on again, they work
+    let session = sam
+        .signin(pubky::ClientId::new("pm-test").unwrap())
+        .await
+        .unwrap();
+    let put = |body: &'static str| {
+        let st = session.storage();
+        async move { st.put("/pub/pm-test/hello.txt", body).await }
+    };
+    put("one").await.expect("writes while enabled");
+    let (st, _) = call_json(
+        &app,
+        "PATCH",
+        &format!("/v1/people/{sam_key}"),
+        serde_json::json!({"homeserver_enabled": false}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(put("two").await.is_err(), "a disabled account can't write");
+    call_json(
+        &app,
+        "PATCH",
+        &format!("/v1/people/{sam_key}"),
+        serde_json::json!({"homeserver_enabled": true}),
+    )
+    .await;
+    put("three").await.expect("writes again");
+
+    // Quota and music access
+    let (st, _) = call_json(
+        &app,
+        "PATCH",
+        &format!("/v1/people/{sam_key}"),
+        serde_json::json!({"storage_quota_mb": "unlimited", "music": false}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    let p = people["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == sam_key.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (p["storage_quota_mb"].as_str(), p["music_enabled"].as_bool()),
+        (Some("unlimited"), Some(false))
+    );
+    assert!(!pm_api::people::may_use_music(&s, &sam_key));
+
+    // Music only, by key; bad keys refused
+    let other = Keypair::random().public_key().z32();
+    let (st, _) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "music", "key": format!("pubky{other}")}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(pm_api::people::may_use_music(&s, &other));
+    let (st, _) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "music", "key": "nope"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = call_json(
+        &app,
+        "PATCH",
+        &format!("/v1/people/{other}"),
+        serde_json::json!({"storage_quota_mb": 5}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no quota for an account elsewhere");
 }
