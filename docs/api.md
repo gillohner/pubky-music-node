@@ -56,7 +56,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/albums/{id}/versions`, `/v1/library/tracks/{id}/versions` | | `[{source, id, label, url, uri?}]`: the same album (by UPC) or track (by ISRC) on TIDAL, cached a week; empty when unknown |
 | GET | `/v1/sources/tidal/stream/{id}` | | the track's HLS segments as one `audio/mp4` body for browsers (`X-Tidal-Presentation: FULL\|PREVIEW`); sign-in required |
 | GET | `/v1/sources/spotify/login` | | Spotify sign-in URL (Authorization Code + PKCE); the app must list `<public_url>/spotify/callback` |
-| GET | `/v1/sources/spotify/status` | | `{configured, signed_in, user_id?, display_name?, country?, product?, redirect_uri, requested_scopes}` |
+| GET | `/v1/sources/spotify/status` | | `{configured, signed_in, user_id?, display_name?, country?, product?, redirect_uri, requested_scopes, app_from?, client_id?}`; `redirect_uri` is what the app must list (the return page for an app without its secret), `app_from` is `config` or `settings` |
+| PUT | `/v1/sources/spotify/app` | `{client_id}` | The guided setup: your Spotify app's client ID (32 hex digits; empty forgets it). A new app signs out of Spotify. 409 when `[spotify]` is set in the node config. Returns the status |
 | DELETE | `/v1/sources/spotify/session` | | sign out |
 | GET | `/v1/sources/spotify/collection` | | saved albums and tracks as hits (ISRC/UPC, library matches) |
 | POST | `/v1/sources/spotify/collection/import` | | saved tracks (by ISRC) and albums as favourites |

@@ -8,9 +8,9 @@
 //     every query parameter to the node's callback named in state, http(s) only;
 //   * /v1/oauth2/token refuses any client secret (Authorization header or client_secret) and
 //     checks the code, the verifier against the challenge, and the redirect.
-// The node must be built with PM_PROJECT_TIDAL_CLIENT_ID=ci-project-app and started with
-// [auth] return_page = http://127.0.0.1:<port>/callback and PM_TIDAL_{AUTH,LOGIN,API}_BASE
-// pointing here (see .github/workflows/ci.yml).
+// The node runs with an app id and no secret (`[tidal] client_id = "ci-project-app"`, as a build
+// with PM_PROJECT_TIDAL_CLIENT_ID would), [auth] return_page = http://127.0.0.1:<port>/callback
+// and PM_TIDAL_{AUTH,LOGIN,API}_BASE pointing here (see .github/workflows/ci.yml).
 //   node tools/ui-tidal-login.js [node URL, default http://127.0.0.1:7791] [mock port, default 7811]
 const http = require('http');
 const crypto = require('crypto');
@@ -73,13 +73,17 @@ const server = http.createServer((req, res) => {
   const status = async () => (await fetch(NODE + '/v1/sources/tidal/status')).json();
   const before = await status();
   check(before.configured && !before.signed_in, 'a node with an empty config offers TIDAL (the project app) and is not signed in');
-  await p.goto(NODE + '/source/tidal');
+  await p.goto(NODE + '/sources/tidal');
   const btn = await p.waitForSelector('#tidalin', { timeout: 15000 }).catch(() => null);
   check(!!btn, 'Sources › TIDAL shows "Connect TIDAL"');
   if (btn) {
+    // The page tidies ?tidal=… away at once, so watch the navigations rather than the final URL
+    const landed = [];
+    p.on('framenavigated', (f) => { if (f === p.mainFrame()) landed.push(f.url()); });
     await btn.click();
-    await p.waitForURL((u) => u.toString().startsWith(NODE) && /tidal=/.test(u.toString()), { timeout: 20000 }).catch(() => null);
-    check(/tidal=signed_in/.test(p.url()), `back on the node, signed in (${p.url().replace(NODE, '')})`);
+    for (let i = 0; i < 40 && !landed.some((u) => u.startsWith(NODE) && /tidal=/.test(u)); i++) await p.waitForTimeout(500);
+    const back = landed.find((u) => u.startsWith(NODE) && /tidal=/.test(u)) || p.url();
+    check(/tidal=signed_in/.test(back), `back on the node, signed in (${back.replace(NODE, '')})`);
   }
   check(seen.authorize === 1 && seen.callback === 1, 'the browser went TIDAL › return page › node');
   check(seen.token.length >= 1 && seen.token.every((t) => !t.auth && !t.secret), 'no client secret was ever sent');

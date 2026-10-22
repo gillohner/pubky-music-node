@@ -299,8 +299,20 @@ jobs:
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
+      - name: no client secret, private key or keystore in the repository or the binary
+        run: python3 -I tools/secret-scan.py --binary target/debug/pm-node
+      - name: TIDAL sign-in with an app and no secret, through the return page (mock TIDAL)
+        run: |
+          mkdir -p /tmp/tl/data /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
+          (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
+            nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:7791/v1/info >/dev/null && break; sleep 1; done
+          node $GITHUB_WORKSPACE/tools/ui-tidal-login.js http://127.0.0.1:7791 7811
       - if: failure()
-        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true
+        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true; tail -30 /tmp/tl/node.log || true
 
   speed:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
