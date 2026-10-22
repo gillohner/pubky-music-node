@@ -296,6 +296,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     pm_api::backup::start_schedule(&state);
     let _announced = announce(cfg, &state);
+    let _renderers = renderers(cfg, &state);
     pm_api::serve(state, &cfg.api.listen).await
 }
 
@@ -346,6 +347,19 @@ fn announce(cfg: &NodeConfig, state: &pm_api::NodeState) -> Option<pm_discovery:
         return None;
     }
     Some(pm_discovery::Advertiser::start(state.announcement(addr.port())))
+}
+
+/// The zones as UPnP/DLNA renderers (`[renderer] enabled`); announced over SSDP unless the API
+/// listens on loopback only.
+fn renderers(
+    cfg: &NodeConfig,
+    state: &std::sync::Arc<pm_api::NodeState>,
+) -> Option<pm_renderer::ssdp::Advertiser> {
+    if !cfg.renderer.enabled {
+        return None;
+    }
+    let addr: std::net::SocketAddr = cfg.api.listen.parse().ok()?;
+    state.start_renderer(addr.port(), !addr.ip().is_loopback())
 }
 
 fn session_secret_path(cfg: &NodeConfig) -> PathBuf {

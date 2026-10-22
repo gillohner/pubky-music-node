@@ -95,6 +95,8 @@ pub struct NodeState {
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
     airplay: std::sync::atomic::AtomicBool,
+    /// The zones as UPnP/DLNA MediaRenderers, once `start_renderer` ran.
+    pub renderer: std::sync::OnceLock<Arc<pm_renderer::Renderer>>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -258,6 +260,7 @@ impl NodeState {
             sonos: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
+            renderer: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -670,6 +673,27 @@ impl NodeState {
 
     /// Start the Slimproto server (players connect to us) and the UDP
     /// discovery responder. Call from inside the tokio runtime. Each connecting player becomes an output with a
+    /// Offer every zone as a UPnP/DLNA MediaRenderer (`pm-renderer`): SSDP on the LAN, the
+    /// device and control routes on the API port (merged by `router`, no token). Call from
+    /// inside the runtime, before building the router. The advertiser lives as long as the
+    /// returned handle.
+    pub fn start_renderer(
+        self: &Arc<Self>,
+        api_port: u16,
+        announce: bool,
+    ) -> Option<pm_renderer::ssdp::Advertiser> {
+        let host = crate::renderer::ZoneRenderers::new(self);
+        let r = pm_renderer::Renderer::new(host, &self.node_id, env!("CARGO_PKG_VERSION"));
+        r.spawn_notifier();
+        let _ = self.renderer.set(r.clone());
+        tracing::info!(zones = r.zones().len(), "zones offered as UPnP/DLNA renderers");
+        if announce {
+            pm_renderer::ssdp::start(r, api_port)
+        } else {
+            None
+        }
+    }
+
     /// zone; its pull stream is registered for the HTTP route.
     pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {

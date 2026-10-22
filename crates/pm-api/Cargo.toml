@@ -11,6 +11,7 @@ qrcode = { version = "0.14", default-features = false }
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-discovery = { workspace = true }
+pm-renderer = { workspace = true }
 pm-remote = { workspace = true }
 uuid = { workspace = true }
 pm-audio = { workspace = true }

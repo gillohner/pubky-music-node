@@ -20,6 +20,7 @@ members = [
     "crates/pm-remote",
     "crates/pm-out-snapcast",
     "crates/pm-out-airplay",
+    "crates/pm-renderer",
     "crates/pubky-music-specs",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
@@ -51,6 +52,7 @@ pm-out-snapcast = { path = "crates/pm-out-snapcast" }
 pm-out-airplay = { path = "crates/pm-out-airplay" }
 pm-discovery = { path = "crates/pm-discovery" }
 pm-remote = { path = "crates/pm-remote" }
+pm-renderer = { path = "crates/pm-renderer" }
 
 anyhow = "1.0"
 async-trait = "0.1"

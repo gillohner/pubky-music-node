@@ -27,6 +27,21 @@ pub struct NodeConfig {
     pub jamendo: JamendoConfig,
     /// Remote access over iroh (ADR 0013).
     pub remote: RemoteConfig,
+    /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
+    /// BubbleUPnP can play to it). No token, like any renderer.
+    pub renderer: RendererConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RendererConfig {
+    pub enabled: bool,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,
@@ -141,6 +156,7 @@ impl Default for NodeConfig {
             acoustid: AcoustIdConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
+            renderer: RendererConfig::default(),
         }
     }
 }

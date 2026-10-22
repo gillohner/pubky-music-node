@@ -302,8 +302,9 @@ impl Engine {
         };
         let at = c.paused_at_ms.take().unwrap_or(0);
         if let Err(e) = c.source.seek_ms(at) {
-            self.fail(format!("resume: {e}"));
-            return;
+            // A live or forward-only stream (internet radio, a controller's HTTP flow): carry on
+            // from where it is; only the audio buffered at the pause is skipped.
+            tracing::info!(zone = %self.id, "resume without seeking back ({e})");
         }
         c.base_ms = at;
         c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
@@ -313,6 +314,7 @@ impl Engine {
     }
 
     fn seek(&mut self, ms: u64) {
+        let before = self.position_ms();
         let Some(c) = self.current.as_mut() else {
             return;
         };
@@ -327,7 +329,12 @@ impl Engine {
             }
         }
         if let Err(e) = c.source.seek_ms(ms) {
-            self.fail(format!("seek: {e}"));
+            // A stream that cannot seek keeps playing from where it is; the caller hears why.
+            tracing::info!(zone = %self.id, "seek not possible: {e}");
+            c.base_ms = before;
+            c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
+            self.dirty = true;
+            self.emit(ZoneEvent::Error(format!("this stream cannot seek ({e})")));
             return;
         }
         c.base_ms = ms;

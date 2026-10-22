@@ -3642,6 +3642,7 @@ dependencies = [
  "pm-out-upnp",
  "pm-pubky",
  "pm-remote",
+ "pm-renderer",
  "pm-zones",
  "pubky 0.16.2",
  "pubky-app-specs",
@@ -3788,6 +3789,7 @@ dependencies = [
  "pm-out-net",
  "pm-pubky",
  "pm-remote",
+ "pm-renderer",
  "pm-zones",
  "qrcode",
  "serde",
@@ -3930,6 +3932,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pm-renderer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "blake3",
+ "http-body-util",
+ "if-addrs 0.15.0",
+ "quick-xml",
+ "socket2",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

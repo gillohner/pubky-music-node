@@ -1,0 +1,22 @@
+[package]
+name = "pm-renderer"
+description = "Zones as UPnP/DLNA MediaRenderers: SSDP, AVTransport, RenderingControl, ConnectionManager, GENA events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+blake3 = { workspace = true }
+if-addrs = "0.15"
+quick-xml = "0.42"
+socket2 = "0.6"
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tower = "0.5"
+http-body-util = "0.1"

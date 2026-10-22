@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Every zone is a UPnP/DLNA renderer** (`crates/pm-renderer`; `[renderer] enabled`, on by default). Music Assistant's DLNA provider, Home Assistant's DLNA renderer integration, BubbleUPnP and other UPnP controllers find the zones on the LAN and play to them.
+  - Each zone is announced over SSDP as a standard MediaRenderer, with AVTransport, RenderingControl, ConnectionManager and events.
+  - Tested with the real Music Assistant 2.10.5, both ways it streams: one continuous flow, and track by track with "next track" handed over in advance. Play, pause, resume, seek, next and the end of the queue all work, and MA's titles show.
+  - A zone offers volume only if its output has hardware volume.
+  - Fixed on the way: a zone stopped with an error when resuming or seeking a stream that cannot seek (a controller's stream, internet radio). It now resumes from where the stream is, and a seek it cannot do keeps playing.
+  - `docs/MUSIC-ASSISTANT.md` explains how MA uses the node, as a source and as players.
 - **Music Assistant can use the node as a music source** (OpenSubsonic; tested with the real Music Assistant 2.10.5). It adds the node with a username and the API token, then imports artists, albums and tracks, searches, shows cover art and creates playlists. Fixed on our side:
   - `search3` with an empty query ignored `songOffset`, `albumOffset` and `artistOffset`. Clients that page through the whole library got the first page again and again; Music Assistant never finished importing.
   - `getAlbumInfo2` answered in `albumInfo2`; the Subsonic API says `albumInfo`. Music Assistant's track import stopped at the first track with an album.

@@ -14,6 +14,7 @@ pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod audius;
+pub mod renderer;
 
 /// "1 album", "2 albums".
 pub(crate) fn plural(n: u64, one: &str) -> String {
@@ -413,7 +414,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/mb/ws/2/{*path}", get(mbproxy::forward))
                 .with_state(state.clone()),
         )
-        .merge(subsonic::router(state))
+        .merge(subsonic::router(state.clone()))
+        // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`).
+        .merge(state.renderer.get().map(|r| r.router()).unwrap_or_default())
 }
 
 /// Bind and serve until the task is cancelled.
