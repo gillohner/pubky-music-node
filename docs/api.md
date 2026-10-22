@@ -156,6 +156,13 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT | `/v1/radio/stations` | PUT: a `Station` | saved stations (node-local settings); PUT adds or updates by id/url |
 | DELETE | `/v1/radio/stations/{id}` | | remaining stations; 404 when unknown |
 | POST | `/v1/radio/play` | `{zone, station}` | replaces the zone's queue with the stream and plays it |
+| GET | `/v1/podcasts/search` | `?q=&limit=` | `{shows: [{id, title, author?, description?, image?, feed, links: [{site, uri}], subscribed}]}`: Pinakes first (one per show, with its pages on other apps), then Apple's iTunes Search; `id` is `feed:<base64url of the feed>` |
+| GET / POST | `/v1/podcasts/subscriptions` | POST `{feed}`: a feed URL or a search `id` | subscriptions `{subscriptions: [{id, url, title, author?, image?, episodes, unplayed, latest?, refreshed}]}`; POST fetches the feed (422 when it is not an RSS podcast feed) |
+| GET / DELETE | `/v1/podcasts/subscriptions/{id}` | | the show and its episodes, newest first (`items: [{id, title, url, mime?, published?, duration_ms?, image?, description?, feed_id, feed_title, position_ms, played}]`); DELETE unsubscribes |
+| GET | `/v1/podcasts/new` | `?limit=` | `{episodes}`: the newest unplayed episodes across subscriptions (a Home row) |
+| POST | `/v1/podcasts/refresh` | | fetches every feed now (they also refresh every 6 hours) |
+| POST | `/v1/podcasts/play` | `{zone, episode, restart?}` | replaces the zone's queue with the episode and plays it from the saved position (unless `restart`) |
+| PUT | `/v1/podcasts/progress/{episode}` | `{position_ms?, played?}` | marks an episode played or unplayed, or sets its position |
 | GET | `/v1/radio/curated` | | `{stations}`: SomaFM's channels (ids `somafm:<channel>`, cached an hour), then Radio Paradise's (`rp:<n>`; FLAC except Serenity) |
 | GET | `/v1/radio/countries` | `?limit=` | `{items: [{name, code, stations}]}` from radio-browser.info, most stations first; use `code` or `name` with `/v1/radio/search?country=` |
 | GET | `/v1/radio/tags` | `?limit=` | `{items: [{name, stations}]}`: the most used station tags (genres, moods, languages) |

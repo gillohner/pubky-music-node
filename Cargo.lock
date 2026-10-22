@@ -3649,6 +3649,7 @@ dependencies = [
  "pubky-music-specs",
  "pubky-social-specs",
  "qrcode",
+ "quick-xml",
  "rand 0.8.8",
  "reqwest",
  "serde",

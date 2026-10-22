@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Podcasts** (`podcasts`, owner-approved list §6.2): search through Pinakes, which keeps the Podcast Index key on its side so the node never has it, with Apple's iTunes Search as the keyless fallback. Subscribe from search or by RSS URL. Episodes play on any zone and resume where you left off; the position is recorded while a zone plays one, and an episode counts as played past 95 %. `/v1/podcasts/new` lists the newest unplayed episodes across subscriptions, for a Home row. Feeds refresh every 6 hours. Podcasts joins `/v1/sources`, ready for its own tab. Checked live: found Hardcore History through Pinakes with its feed, subscribed (13 episodes), played one, stopped, and resumed from 8 s.
 - **A song page plays its own source, and says what Play will do** (owner: Play on a Deezer page failed with "the node answered 404" while the page claimed TIDAL; STEWARD-UX-INSTANCES items 8 and 9).
   - The 404 came from Deezer itself: it doesn't offer that track in the node's country (no preview), and the page queued it anyway.
   - The node now makes one decision that sets both the song Play queues and the eyebrow: the page's own source whenever it can play anything (a Deezer page plays its 30 s preview). Otherwise it falls back to your Play from order and says why ("Song on Deezer · Deezer doesn't offer it in this country · plays from TIDAL here").

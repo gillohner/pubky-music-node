@@ -46,6 +46,7 @@ pub mod opensubsonic;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
+pub mod podcasts;
 pub mod radio;
 pub mod radio_sources;
 pub mod remote;
@@ -381,6 +382,22 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/stations", get(radio::saved).put(radio::save))
         .route("/radio/stations/{id}", axum::routing::delete(radio::remove))
         .route("/radio/play", post(radio::play))
+        .route("/podcasts/search", get(podcasts::search))
+        .route(
+            "/podcasts/subscriptions",
+            get(podcasts::subscriptions).post(podcasts::subscribe),
+        )
+        .route(
+            "/podcasts/subscriptions/{id}",
+            get(podcasts::subscription).delete(podcasts::unsubscribe),
+        )
+        .route("/podcasts/new", get(podcasts::newest))
+        .route("/podcasts/refresh", post(podcasts::refresh_route))
+        .route("/podcasts/play", post(podcasts::play))
+        .route(
+            "/podcasts/progress/{id}",
+            axum::routing::put(podcasts::set_progress),
+        )
         .route("/radio/curated", get(radio_sources::curated_route))
         .route("/radio/countries", get(radio_sources::countries))
         .route("/radio/tags", get(radio_sources::tags))
