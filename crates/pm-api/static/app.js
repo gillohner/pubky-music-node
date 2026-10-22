@@ -281,9 +281,16 @@
     state.browserIndex = i;
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
-    audio.play().catch((e) => {
+    state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
+    audio.play().catch(async (e) => {
       if (e.name === 'AbortError') return;
-      toast(e.name === 'NotSupportedError' ? `“${it.title || 'This song'}” can't play here: its source sent no audio this browser can play. Try another version on the song's page.` : `Playback: ${e.message}`, 'error');
+      if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
+      // Ask what came back: a busy node or a proxy in front of it can answer with an error page
+      // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
+      let why = 'its source sent no audio this browser can play';
+      try { const r = await fetch(audio.src, { headers: { range: 'bytes=0-1' } }); const ct = r.headers.get('content-type') || ''; if (!r.ok) why = `the node answered ${r.status}${r.status >= 500 ? ' (busy or not reachable just now)' : ''}`; else if (!/^audio\/|octet-stream|mpegurl|video\/mp2t/.test(ct)) why = `the node sent ${ct.split(';')[0] || 'something'} instead of audio`; } catch { why = 'the node did not answer'; }
+      if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
+      toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
     mediaSessionUpdate(it);
@@ -306,6 +313,15 @@
     audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
   }
   audio.addEventListener('ended', () => browserPlay(state.browserIndex + 1));
+  // A stream that breaks off mid-song (a dropped connection) picks up where it was, once
+  audio.addEventListener('error', () => {
+    const i = state.browserIndex; const at = audio.currentTime;
+    if (i < 0 || !audio.src || !(at > 0)) return;
+    state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
+    if (state.midRetry.n >= 1) return;
+    state.midRetry.n++;
+    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+  });
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());

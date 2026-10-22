@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **A library song that fails to start says why and tries again** (STEWARD-UX-INSTANCES item 0). On the NAS a library FLAC wouldn't play during a big copy: the copy filled the uplink and the proxy in front of the node answered with an error page, which the browser reports as "no supported source". Copies are paced now (above). The page also asks what came back ("the node answered 503 (busy or not reachable just now)"), retries once, and a stream that breaks off mid-song resumes where it was. `tools/ui-playback.js` (CI) plays a library FLAC in the browser and checks the retry after a busy answer.
 - **Fix my files' tags** (owner: "a writer that fixes this"). Settings › Library › Check my files lists, file by file, what the node knows that the file doesn't say yet:
   - each artist on their own (`ARTISTS`, one value per artist, with MusicBrainz artist ids when known);
   - the MusicBrainz song and album of a confirmed match.
