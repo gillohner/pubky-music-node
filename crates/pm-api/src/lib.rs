@@ -218,6 +218,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/playlists/{id}/items", post(playlists::add_items))
         .route(
+            "/playlists/{id}/local/{index}",
+            axum::routing::delete(playlists::remove_local),
+        )
+        .route(
             "/playlists/{id}/items/{index}",
             axum::routing::delete(playlists::remove_item),
         )

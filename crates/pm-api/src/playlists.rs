@@ -96,26 +96,82 @@ fn summary(row: &MusicPostRow, p: &Playlist) -> PlaylistSummary {
     }
 }
 
-/// Canonical URLs for library tracks; a track without a canonical identity
-/// cannot go into social data (constraint 4).
-fn uris_for_tracks(lib: &Library, ids: &[i64]) -> Result<Vec<String>, ApiError> {
-    let mut out = Vec::with_capacity(ids.len());
+/// Library tracks as playlist items, and the ids of those without a canonical identity: those
+/// stay in the playlist on this node only (constraint 4: never in social data).
+pub(crate) fn split_tracks(lib: &Library, ids: &[i64]) -> Result<(Vec<PlaylistItem>, Vec<i64>), ApiError> {
+    let mut items = Vec::with_capacity(ids.len());
+    let mut local = Vec::new();
     for id in ids {
         let t = lib
             .get_track(TrackId(*id))?
             .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-        let uri = t.publishable_uri().ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "“{}” is not matched to a song yet: press the ? next to it and pick which song it is",
-                    t.title
-                ),
-            )
-        })?;
-        out.push(uri.to_url());
+        match t.publishable_uri() {
+            Some(u) => items.push(PlaylistItem::new(u)),
+            None => local.push(*id),
+        }
     }
-    Ok(out)
+    Ok((items, local))
+}
+
+// ---- songs kept on this node only (mn-infra: Music Assistant could not add an untagged song) ----
+
+fn local_key(id: &str) -> String {
+    format!("playlist.local.{id}")
+}
+
+/// A playlist's node-only songs (library ids), in order.
+pub(crate) fn local_ids(lib: &Library, id: &str) -> Vec<i64> {
+    lib.get_setting(&local_key(id))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_local_ids(lib: &Library, id: &str, ids: &[i64]) -> Result<(), ApiError> {
+    if ids.is_empty() {
+        lib.delete_setting(&local_key(id))?;
+    } else {
+        lib.set_setting(
+            &local_key(id),
+            &serde_json::to_string(ids).expect("ids serialize"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Node-only songs identified since join the playlist proper (published with the next sync).
+pub(crate) fn promote_local(lib: &Library, id: &str) -> Result<(), ApiError> {
+    let ids = local_ids(lib, id);
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut keep = Vec::new();
+    let mut add = Vec::new();
+    for n in &ids {
+        if let Some(t) = lib.get_track(TrackId(*n))? {
+            match t.publishable_uri() {
+                Some(u) => add.push(PlaylistItem::new(u)),
+                None => keep.push(*n),
+            }
+        }
+    }
+    if !add.is_empty() {
+        let (row, mut p) = load(lib, id)?;
+        p.items.extend(add);
+        save_edit(lib, id, p, &row)?;
+    }
+    if keep.len() != ids.len() {
+        set_local_ids(lib, id, &keep)?;
+    }
+    Ok(())
+}
+
+fn local_tracks(lib: &Library, id: &str) -> Vec<Track> {
+    local_ids(lib, id)
+        .into_iter()
+        .filter_map(|n| lib.get_track(TrackId(n)).ok().flatten())
+        .collect()
 }
 
 fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
@@ -135,10 +191,14 @@ fn resolve(lib: &Library, item: &PlaylistItem) -> Option<Track> {
 
 fn detail(lib: &Library, row: &MusicPostRow, p: &Playlist) -> PlaylistDetail {
     let tracks = p.items.iter().map(|it| resolve(lib, it)).collect();
+    let local_tracks = local_tracks(lib, &row.id);
+    let mut summary = summary(row, p);
+    summary.items += local_tracks.len();
     PlaylistDetail {
-        summary: summary(row, p),
+        summary,
         playlist: p.clone(),
         tracks,
+        local_tracks,
     }
 }
 
@@ -169,7 +229,9 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Playl
     let mut out = Vec::new();
     for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
         if let Ok((row, p)) = load(&lib, &row.id) {
-            out.push(summary(&row, &p));
+            let mut sm = summary(&row, &p);
+            sm.items += local_ids(&lib, &row.id).len();
+            out.push(sm);
         }
     }
     Ok(Json(out))
@@ -184,15 +246,15 @@ pub(crate) async fn create(
     for (it, src) in items.iter_mut().zip(&body.sources) {
         it.source = src.clone();
     }
-    for u in uris_for_tracks(&lib, &body.track_ids)? {
-        items.push(PlaylistItem::new(&MusicUri::parse(&u).expect("canonical")));
-    }
+    let (more, local) = split_tracks(&lib, &body.track_ids)?;
+    items.extend(more);
     let playlist = Playlist::new(body.name, body.description, body.image, items);
     let post = MusicPost::new(MusicContent::Playlist(playlist));
     let id = post.create_id();
     post.validate(Some(&id))
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     store(&lib, &post, &id, Visibility::Private)?;
+    set_local_ids(&lib, &id, &local)?;
     let (row, p) = load(&lib, &id)?;
     let d = detail(&lib, &row, &p);
     drop(lib);
@@ -253,13 +315,22 @@ pub(crate) async fn from_queue(
     let lib = s.library.lock().expect("library poisoned");
     let mut items = Vec::with_capacity(entries.len());
     let mut skipped = Vec::new();
+    let mut local = Vec::new();
     for (uri, label) in &entries {
         match canonical_for_queue_uri(&lib, uri) {
             Some(m) => items.push(PlaylistItem::new(&m)),
-            None => skipped.push(label.clone()),
+            // A library song not identified yet stays in the playlist on this node
+            None => match uri
+                .strip_prefix(crate::sources::TRACK_SCHEME)
+                .and_then(|r| r.parse::<i64>().ok())
+                .filter(|n| lib.get_track(TrackId(*n)).ok().flatten().is_some())
+            {
+                Some(n) => local.push(n),
+                None => skipped.push(label.clone()),
+            },
         }
     }
-    if items.is_empty() {
+    if items.is_empty() && local.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
@@ -276,6 +347,7 @@ pub(crate) async fn from_queue(
     post.validate(Some(&id))
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     store(&lib, &post, &id, Visibility::Private)?;
+    set_local_ids(&lib, &id, &local)?;
     let (row, p) = load(&lib, &id)?;
     let d = detail(&lib, &row, &p);
     drop(lib);
@@ -288,6 +360,7 @@ pub(crate) async fn get(
     Path(id): Path<String>,
 ) -> ApiResult<PlaylistDetail> {
     let lib = s.library.lock().expect("library poisoned");
+    promote_local(&lib, &id)?;
     let (row, p) = load(&lib, &id)?;
     Ok(Json(detail(&lib, &row, &p)))
 }
@@ -337,15 +410,23 @@ pub(crate) async fn add_items(
     let lib = s.library.lock().expect("library poisoned");
     let (row, mut p) = load(&lib, &id)?;
     let mut items = parse_uris(&body.uris)?;
-    for u in uris_for_tracks(&lib, &body.track_ids)? {
-        items.push(PlaylistItem::new(&MusicUri::parse(&u).expect("canonical")));
-    }
-    if items.is_empty() {
+    let (more, local) = split_tracks(&lib, &body.track_ids)?;
+    items.extend(more);
+    if items.is_empty() && local.is_empty() {
         return Err(ApiError::bad_request("nothing to add"));
     }
-    let at = body.at.unwrap_or(p.items.len()).min(p.items.len());
-    p.items.splice(at..at, items);
-    let d = save_edit(&lib, &id, p, &row)?;
+    if !local.is_empty() {
+        let mut ids = local_ids(&lib, &id);
+        ids.extend(local);
+        set_local_ids(&lib, &id, &ids)?;
+    }
+    let d = if items.is_empty() {
+        detail(&lib, &row, &p)
+    } else {
+        let at = body.at.unwrap_or(p.items.len()).min(p.items.len());
+        p.items.splice(at..at, items);
+        save_edit(&lib, &id, p, &row)?
+    };
     drop(lib);
     s.notify_library();
     Ok(Json(d))
@@ -362,6 +443,25 @@ pub(crate) async fn remove_item(
     }
     p.items.remove(index);
     let d = save_edit(&lib, &id, p, &row)?;
+    drop(lib);
+    s.notify_library();
+    Ok(Json(d))
+}
+
+/// `DELETE /v1/playlists/{id}/local/{index}`: take a node-only song out of the playlist.
+pub(crate) async fn remove_local(
+    State(s): State<Arc<NodeState>>,
+    Path((id, index)): Path<(String, usize)>,
+) -> ApiResult<PlaylistDetail> {
+    let lib = s.library.lock().expect("library poisoned");
+    let (row, p) = load(&lib, &id)?;
+    let mut ids = local_ids(&lib, &id);
+    if index >= ids.len() {
+        return Err(ApiError::not_found(format!("no node-only song {index}")));
+    }
+    ids.remove(index);
+    set_local_ids(&lib, &id, &ids)?;
+    let d = detail(&lib, &row, &p);
     drop(lib);
     s.notify_library();
     Ok(Json(d))
@@ -446,6 +546,7 @@ pub(crate) async fn delete(
     let lib = s.library.lock().expect("library poisoned");
     load(&lib, &id)?;
     lib.delete_music_post(&id, now_micros())?;
+    set_local_ids(&lib, &id, &[])?;
     drop(lib);
     s.notify_library();
     Ok(StatusCode::NO_CONTENT)
@@ -473,6 +574,10 @@ pub(crate) async fn play(
             None => missing.push(r.view.uri),
         }
     }
+    // The node-only songs after them
+    for t in local_tracks(&s.library.lock().expect("library poisoned"), &id) {
+        items.push(local_queue_item(&t));
+    }
     if items.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -490,6 +595,30 @@ pub(crate) async fn play(
         zone.play_index(0);
     }
     Ok(Json(PlayedPlaylist { queued, missing }))
+}
+
+/// A library song as a queue item.
+pub(crate) fn local_queue_item(t: &Track) -> pm_zones::QueueItem {
+    pm_zones::QueueItem {
+        id: 0,
+        uri: format!(
+            "{}{}",
+            crate::sources::TRACK_SCHEME,
+            t.id.map(|i| i.0).unwrap_or_default()
+        ),
+        title: Some(t.title.clone()),
+        artist: Some(
+            t.artists
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .filter(|a| !a.is_empty()),
+        album: t.album.as_ref().map(|a| a.title.clone()),
+        duration_ms: t.duration_ms,
+        image: None,
+    }
 }
 
 /// A queue item for a playlist entry that is a directly streamable service

@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-22
 
+- **Songs that aren't identified yet go into playlists and favourites** (mn-infra: Music Assistant failed on every other song of an untagged library, with "check your permissions" and a 500).
+  - They're kept on this node only, after the playlist's songs, and never synced.
+  - The playlist page lists them under "On this node only", with a line saying why and how to fix it.
+  - Once identified ("Which song is this?" or the background identify), they join the playlist and favourites for real and sync.
+  - Works the same through Subsonic (`updatePlaylist`, `createPlaylist`, `star`) and the web UI; adding no longer stops at "Which song is this?".
+  - Subsonic `songIndexToRemove` now counts positions in the list the client was given. Before, a playlist with songs missing from the library removed the wrong one.
 - **Repeat and shuffle in the player bar** (UX review #1).
   - Repeat cycles off → the whole queue → this song. It's per zone, and "This browser" keeps its own choice.
   - Shuffle mixes what comes next; the playing song stays.

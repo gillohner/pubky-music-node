@@ -91,6 +91,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET / PUT / DELETE | `/v1/playlists/{id}` | PUT: `{name?, description?, image?, uris?}` | `PlaylistDetail` (items + resolved library tracks) |
 | POST | `/v1/playlists/{id}/items` | `{uris?, track_ids?, at?}` | `PlaylistDetail`; 422 for a track without a canonical identity |
 | DELETE | `/v1/playlists/{id}/items/{index}` | | `PlaylistDetail` |
+| DELETE | `/v1/playlists/{id}/local/{index}` | | take a node-only song out (`PlaylistDetail.local_tracks`: library songs without a MusicBrainz id or ISRC, kept after the items on this node only, never synced; they join the items once identified) |
 | POST | `/v1/playlists/{id}/play` (entries that are Internet Archive file URLs stream directly; other unresolved entries are reported as `missing`) | `{zone, replace?}` | `{queued, missing}` |
 | GET | `/v1/playlists/{id}/play-from` | | `{order: {order, services}, own_order, items: [{index, uri, title, artist, plays_from, pin, pin_unavailable, sources: [{service, name, url, label, mode, available, chosen}], reason, connect, track_id, stream_uri}]}`: where each song plays from (ADR 0015) |
 | PUT | `/v1/playlists/{id}/items/{index}/source` | `{service, uri?}`, or `{service: null}` for Auto | the playlist; pins the song to a source |
@@ -104,7 +105,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | PUT | `/v1/playlists/{id}/order` | `{order: [service…]}` or `{order: null}` | the playlist; its own play order, or the node's |
 | GET/PUT | `/v1/play-order` | `{order: [service…]}` | `{order, services: [{id, name, connected, note}]}`: the node's global play order (`library`, `tidal`, `spotify`) |
 | GET | `/v1/favourites` | | `{tracks, albums, artists, other: [url], uris: [url]}`: hearts joined to the library (ADR 0010) |
-| PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`; 422 when the object has no MusicBrainz id or ISRC |
+| PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`. A library song without a MusicBrainz id or ISRC is a favourite on this node only (`uri` is `track:<id>`; never synced) until it's identified. An album or artist without an id answers 422 |
 | DELETE | `/v1/favourites` | `?uri=` or `?track_id=` / `?album_id=` / `?artist_id=` | `{uri, favourite: false}` |
 | GET | `/v1/tags` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, tags: [{uri, label, created_at, synced}]}`: my tags (ADR 0011) |
 | PUT | `/v1/tags` | `{uri|track_id|album_id|artist_id, label}` | `{uri, label, tagged: true}`; label trimmed and lowercased, 1–20 chars; 422 without a canonical identity |

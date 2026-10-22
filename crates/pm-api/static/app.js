@@ -667,7 +667,7 @@
     const fav = t ? isFav(t) : pageUri ? state.favUris.has(pageUri) : false;
     box.innerHTML = `<div class="np-pubky-row">${target || t ? `<button class="btn ${fav ? 'primary' : 'ghost'}" id="npfav" aria-pressed="${fav}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'In favourites' : 'Add to favourites'}</button>` : ''}${songPage ? `<button class="btn ghost" id="nppage">${icon('compass')} Song page: versions, reviews, On Pubky</button>` : ''}</div>`
       + (target ? `<div class="np-tags"><span class="eyebrow">Your tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button></span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>` : (t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>' : ''));
-    const fb = $('#npfav'); if (fb) fb.onclick = async () => { try { const tt = t && !trackHasId(t) ? await whichSong(t) : t; if (t && !tt) return; await setFavourite(tt ? { track_id: tt.id } : target, !fav); fillNpPubky(it); } catch (e) { toast(e.message, 'error'); } };
+    const fb = $('#npfav'); if (fb) fb.onclick = async () => { try { await setFavourite(t ? { track_id: t.id } : target, !fav); fillNpPubky(it); } catch (e) { toast(e.message, 'error'); } };
     const pb = $('#nppage'); if (pb) pb.onclick = () => { toggleNowPlaying(); setView('item', { kind: 'song', id: songPage }); };
     $$('[data-np-tag]', box).forEach((b) => b.onclick = () => { toggleNowPlaying(); setView('tag', b.dataset.npTag); });
     const ta = $('#nptagadd'); if (ta) ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
@@ -1012,7 +1012,7 @@
   });
 
   // ---- templates -----------------------------------------------------------
-  const isFav = (t) => { const c = t.canonical; const uri = Array.isArray(c) ? c[0] : c; const url = uri && typeof uri === 'object' ? canonicalUrl(uri) : null; return url ? state.favUris.has(url) : false; };
+  const isFav = (t) => { if (t.id != null && state.favUris.has(`track:${t.id}`)) return true; const c = t.canonical; const uri = Array.isArray(c) ? c[0] : c; const url = uri && typeof uri === 'object' ? canonicalUrl(uri) : null; return url ? state.favUris.has(url) : false; };
   const canonicalUrl = (u) => {
     if (!u) return null;
     // The node's shape: { kind: 'recording', mbid } (fresh-eyes review: every library track
@@ -1053,16 +1053,6 @@
     const pick = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
     if (pick == null) return null;
     try { const done = await api('POST', `/library/suggestions/${pick}/accept`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
-  };
-  const ensureIdentified = async (tracks) => {
-    const out = [];
-    for (const t of tracks) {
-      if (!t || trackHasId(t)) { out.push(t); continue; }
-      const done = await whichSong(t);
-      if (!done) return null;
-      out.push(done);
-    }
-    return out;
   };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
@@ -1114,7 +1104,6 @@
       else if (act === 'more') trackMenu(btn, [tracks[i]]);
       else if (act === 'fav') {
         const on = btn.classList.contains('on');
-        if (!on && !trackHasId(tracks[i])) { const t = await whichSong(tracks[i]); if (!t) return; tracks[i] = t; const mark = row && $('.idmark', row); if (mark) mark.remove(); }
         try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
         catch (er) { toast(er.message, 'error'); }
       }
@@ -1183,8 +1172,9 @@
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
   };
   const addToPlaylist = async (playlistId, tracks, uris) => {
-    if (!uris) { tracks = await ensureIdentified(tracks); if (!tracks) return; }
-    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast(n === 1 ? 'Added to playlist' : `${countOf(n, 'tracks')} added to playlist`); }
+    // Songs not identified yet go in too, kept on this node until they are
+    const localN = uris ? 0 : tracks.filter((t) => t && !trackHasId(t)).length;
+    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? 'Added to playlist' : `${countOf(n, 'tracks')} added to playlist`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} stay`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
@@ -1200,7 +1190,7 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { const t = trackHasId(single) ? single : await whichSong(single); if (!t) return; await setFavourite({ track_id: t.id }, !isFav(t)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     const seeds = tracks.filter((t) => t && trackHasId(t));
     let versionItems = [];
@@ -1224,7 +1214,7 @@
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
       { title: 'Add to playlist' },
       ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
-      { label: 'New playlist…', icon: 'plus', run: async () => { tracks = await ensureIdentified(tracks); if (!tracks) return; const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
+      { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
     ];
     showMenu(anchor, items);
   };
@@ -1531,8 +1521,9 @@
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
 
   const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
+  // A song not identified yet is a favourite on this node only until "Which song is this?"
   const setFavourite = async (ref, on) => {
-    if (on) await api('PUT', '/favourites', ref);
+    if (on) { const r = await api('PUT', '/favourites', ref); if (r && /^track:/.test(r.uri || '')) toast('Favourited on this node. It goes to your homeserver once you pick which song it is (the ? on its row).'); }
     else await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
     await loadFavourites();
     toast(on ? 'Added to favourites' : 'Removed from favourites');
@@ -1972,7 +1963,8 @@
             if (r) return { ...base, no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || it.uri, id: idOf(it.uri) };
             return { no: k + 1, title: pfPending ? 'Loading…' : itemName({ title: null, site: null }), pending: pfPending, page: it.uri, id: idOf(it.uri) };
           });
-          const total = songs.reduce((a, t) => a + (t.duration_ms || 0), 0);
+          const localSongs = (d.local_tracks || []).map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
+          const total = [...songs, ...localSongs].reduce((a, t) => a + (t.duration_ms || 0), 0);
           const empty = (t) => `<p class="muted small">${t}</p>`;
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
@@ -1980,9 +1972,10 @@
           const summaryBar = pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songs.length} song${songs.length === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const ownOrder = pf && pf.own_order;
           const orderText = pf ? pf.order.order.map(srcName).join(' › ') : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero"><div class="art placeholder" style="background:hsl(${hue(d.summary.name)} 35% 28%);border-radius:12px"></div><div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${songs.length} song${songs.length === 1 ? '' : 's'}${total ? ' · ' + mins(total) : ''}</p>
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero"><div class="art placeholder" style="background:hsl(${hue(d.summary.name)} 35% 28%);border-radius:12px"></div><div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songs.length + localSongs.length, 'songs')}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + (pf ? `<section class="section" id="plorder"><div class="section-head"><h3>Play from</h3><span class="muted small">${ownOrder ? 'this playlist’s own order' : 'your node’s order (Settings)'}</span></div><p class="muted small">Each song plays from the first source here that has it. A pinned song keeps its own source.</p>${orderList(pf.order)}<label class="check small" style="margin-top:10px"><input type="checkbox" id="plownorder" ${ownOrder ? '' : 'checked'}> Use my node’s order</label></section>` : '')
             + `<section class="section" id="plpubky"><div class="section-head"><h3>On Pubky</h3>${d.summary.visibility === 'public' ? '<span class="pill ok">shared</span>' : ''}</div>${d.summary.visibility === 'public'
               ? `<p class="muted small">${d.summary.synced ? 'Shared: anyone with the link can open it and play it from their own services. Your pins go along as suggestions.' : 'Shared on the next sync with your homeserver.'}</p>${state.pubkyUser ? `<div class="toolbar"><code class="sharelink">${esc(`pubky://${state.pubkyUser.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`)}</code><button class="btn sm" id="plcopylink">${icon('external')} Copy link</button><button class="btn sm ghost" id="plunshare">Make private</button></div>` : `<div class="toolbar"><button class="btn sm ghost" id="plunshare">Make private</button></div>`}`
@@ -1991,8 +1984,10 @@
             + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
           bindSongRows($('#plsongs'), songs, {});
+          if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
+          $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
           const playable = (list) => list.filter((t) => !t.unavailable);
-          const playAll = (shuffle, anchorEl) => { const list = playable(songs); return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl); };
+          const playAll = (shuffle, anchorEl) => { const list = [...playable(songs), ...localSongs]; return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl); };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           $('#plshuffle').onclick = (e) => playAll(true, e.currentTarget);
           $('#plzone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; renderZoneName(); renderBar(); if (isBrowser()) playAll(false); else playPlaylist(d.summary.id); } }))]);
@@ -2206,7 +2201,7 @@
             api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
-          const favKey = pg.uri; const fav = !!(favKey && state.favUris && state.favUris.has(favKey));
+          const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`))));
           const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
           const pf = pg.plays_from;
           const where = pf ? (pf.service === 'library' ? 'your library' : (SERVICE_NAMES[pf.service] || pf.service) + (pf.mode === 'preview' ? ' (previews)' : '')) : null;
@@ -2262,7 +2257,6 @@
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
           $('#ifav').onclick = async () => {
             // A file not matched yet: "Which song is this?" first, then the heart
-            if (!fav && target.track_id != null) { try { const t = await api('GET', `/library/tracks/${target.track_id}`); if (!trackHasId(t) && !(await whichSong(t))) return; } catch { /* the heart says why */ } }
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri });

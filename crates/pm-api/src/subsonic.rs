@@ -445,20 +445,40 @@ fn playlist_rows(lib: &Library) -> Result<Vec<(MusicPostRow, Playlist)>, SubErr>
     Ok(out)
 }
 
-fn playlist_tracks(lib: &Library, p: &Playlist) -> Vec<Track> {
-    p.items
+/// Where a Subsonic playlist entry comes from: the synced item at that index, or the node-only
+/// song at that index (after the items). Clients remove entries by their position in this list.
+#[derive(Clone, Copy)]
+enum Entry {
+    Item(usize),
+    Local(usize),
+}
+
+fn playlist_entries(lib: &Library, row_id: &str, p: &Playlist) -> Vec<(Entry, Track)> {
+    let mut out: Vec<(Entry, Track)> = p
+        .items
         .iter()
-        .filter_map(|it| {
+        .enumerate()
+        .filter_map(|(i, it)| {
             MusicUri::parse(&it.uri)
                 .ok()
                 .and_then(|m| lib.tracks_by_canonical(&m).ok())
                 .and_then(|v| v.into_iter().next())
+                .map(|t| (Entry::Item(i), t))
         })
-        .collect()
+        .collect();
+    for (k, n) in playlists::local_ids(lib, row_id).into_iter().enumerate() {
+        if let Ok(Some(t)) = lib.get_track(TrackId(n)) {
+            out.push((Entry::Local(k), t));
+        }
+    }
+    out
 }
 
 fn playlist_json(lib: &Library, row: &MusicPostRow, p: &Playlist, with_entries: bool) -> Value {
-    let tracks = playlist_tracks(lib, p);
+    let tracks: Vec<Track> = playlist_entries(lib, &row.id, p)
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
     let duration: u64 = tracks.iter().filter_map(|t| t.duration_ms).sum::<u64>() / 1000;
     let mut m = json!({
         "id": format!("pl-{}", row.id),
@@ -485,29 +505,19 @@ fn load_playlist(lib: &Library, id: &str) -> Result<(MusicPostRow, Playlist), Su
         .ok_or_else(|| SubErr::not_found("Playlist not found"))
 }
 
-fn items_for_song_ids(lib: &Library, ids: &[String]) -> Result<Vec<PlaylistItem>, SubErr> {
-    let mut items = Vec::new();
+/// Songs as playlist items, and the ones not identified yet (kept on this node only).
+fn items_for_song_ids(lib: &Library, ids: &[String]) -> Result<(Vec<PlaylistItem>, Vec<i64>), SubErr> {
+    let mut nums = Vec::with_capacity(ids.len());
     for sid in ids {
         let id: i64 = sid
             .parse()
             .map_err(|_| SubErr::new(10, format!("bad song id {sid}")))?;
-        let t = lib
-            .get_track(TrackId(id))?
-            .ok_or_else(|| SubErr::not_found(format!("Song {sid} not found")))?;
-        match t.publishable_uri() {
-            Some(u) => items.push(PlaylistItem::new(u)),
-            None => {
-                return Err(SubErr::new(
-                    70,
-                    format!(
-                        "“{}” has no MusicBrainz id or ISRC yet, so it cannot go into a playlist",
-                        t.title
-                    ),
-                ))
-            }
+        if lib.get_track(TrackId(id))?.is_none() {
+            return Err(SubErr::not_found(format!("Song {sid} not found")));
         }
+        nums.push(id);
     }
-    Ok(items)
+    playlists::split_tracks(lib, &nums).map_err(|e| SubErr::new(0, e.message))
 }
 
 fn save_playlist(lib: &Library, id: &str, mut p: Playlist, visibility: Visibility) -> Result<(), SubErr> {
@@ -1037,13 +1047,8 @@ async fn dispatch(
             {
                 let lib = s.library.lock().expect("library poisoned");
                 for r in &refs {
-                    let uri =
-                        crate::favourites::canonical_for(&lib, r).map_err(|e| SubErr::new(70, e.message))?;
-                    if method == "star" {
-                        crate::favourites::add(&lib, uri)?;
-                    } else {
-                        lib.remove_favourite(&uri.to_url())?;
-                    }
+                    crate::favourites::set(&lib, r, method == "star")
+                        .map_err(|e| SubErr::new(70, e.message))?;
                 }
             }
             s.notify_library();
@@ -1195,17 +1200,21 @@ async fn dispatch(
         }
         "getPlaylist" => {
             let lib = s.library.lock().expect("library poisoned");
-            let (row, pl) = load_playlist(&lib, &want(p, "id")?)?;
+            let id = want(p, "id")?;
+            let pid = id.strip_prefix("pl-").unwrap_or(&id).to_string();
+            let _ = playlists::promote_local(&lib, &pid);
+            let (row, pl) = load_playlist(&lib, &id)?;
             m.insert("playlist".into(), playlist_json(&lib, &row, &pl, true));
         }
         "createPlaylist" => {
             let lib = s.library.lock().expect("library poisoned");
             let songs = multi(p, "songId");
-            let items = items_for_song_ids(&lib, &songs)?;
+            let (items, local) = items_for_song_ids(&lib, &songs)?;
             if let Some(pid) = p.get("playlistId") {
                 // Subsonic semantics: createPlaylist with playlistId replaces the item list.
                 let (row, mut pl) = load_playlist(&lib, pid)?;
                 pl.items = items;
+                playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
                 if let Some(n) = p.get("name") {
                     pl.name = n.clone();
                 }
@@ -1220,6 +1229,7 @@ async fn dispatch(
                 post.validate(Some(&id))
                     .map_err(|e| SubErr::new(0, e.to_string()))?;
                 store(&lib, &post, &id, Visibility::Private)?;
+                playlists::set_local_ids(&lib, &id, &local).map_err(|e| SubErr::new(0, e.message))?;
                 let (row, pl) = load_playlist(&lib, &id)?;
                 m.insert("playlist".into(), playlist_json(&lib, &row, &pl, true));
             }
@@ -1235,18 +1245,38 @@ async fn dispatch(
             if let Some(c) = p.get("comment") {
                 pl.description = Some(c.clone()).filter(|c| !c.trim().is_empty());
             }
-            let mut remove: Vec<usize> = multi(p, "songIndexToRemove")
+            // Positions are in the list the client was given (items found here, then the
+            // node-only songs), not in the stored item list
+            let entries = playlist_entries(&lib, &row.id, &pl);
+            let mut drop_items: Vec<usize> = Vec::new();
+            let mut drop_local: Vec<usize> = Vec::new();
+            for i in multi(p, "songIndexToRemove")
                 .iter()
-                .filter_map(|i| i.parse().ok())
-                .collect();
-            remove.sort_unstable_by(|a, b| b.cmp(a));
-            for i in remove {
-                if i < pl.items.len() {
-                    pl.items.remove(i);
+                .filter_map(|i| i.parse::<usize>().ok())
+            {
+                match entries.get(i).map(|(e, _)| *e) {
+                    Some(Entry::Item(k)) => drop_items.push(k),
+                    Some(Entry::Local(k)) => drop_local.push(k),
+                    None => {}
                 }
             }
-            pl.items
-                .extend(items_for_song_ids(&lib, &multi(p, "songIdToAdd"))?);
+            drop_items.sort_unstable_by(|a, b| b.cmp(a));
+            drop_items.dedup();
+            for k in drop_items {
+                pl.items.remove(k);
+            }
+            let mut local = playlists::local_ids(&lib, &row.id);
+            drop_local.sort_unstable_by(|a, b| b.cmp(a));
+            drop_local.dedup();
+            for k in drop_local {
+                if k < local.len() {
+                    local.remove(k);
+                }
+            }
+            let (add, add_local) = items_for_song_ids(&lib, &multi(p, "songIdToAdd"))?;
+            pl.items.extend(add);
+            local.extend(add_local);
+            playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
             save_playlist(&lib, &row.id, pl, Visibility::Private)?;
             drop(lib);
             s.notify_library();
@@ -1255,6 +1285,7 @@ async fn dispatch(
             let lib = s.library.lock().expect("library poisoned");
             let (row, _) = load_playlist(&lib, &want(p, "id")?)?;
             lib.delete_music_post(&row.id, playlists::now_micros())?;
+            let _ = playlists::set_local_ids(&lib, &row.id, &[]);
             drop(lib);
             s.notify_library();
         }

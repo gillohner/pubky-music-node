@@ -517,6 +517,10 @@ pub struct PlaylistDetail {
     pub playlist: Playlist,
     /// One entry per item: the library track that matches its canonical URL, if any.
     pub tracks: Vec<Option<Track>>,
+    /// Library songs without a MusicBrainz id or ISRC yet, kept in this playlist on this node
+    /// only (after the items; never synced). They join the playlist once identified.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_tracks: Vec<Track>,
 }
 
 /// What a network scan found, to explain why a device is (not) an output.

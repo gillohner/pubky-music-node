@@ -262,7 +262,8 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     assert_eq!(h["content-type"], "image/jpeg");
     assert_eq!(art, vec![0xff, 0xd8, 1, 2, 3]);
 
-    // Playlists: create with the tagged song; the untagged one is refused with a clear message.
+    // Playlists: create with the tagged song; the untagged one is kept on this node only
+    // (Music Assistant failed on every other song of an untagged library).
     let r = call(
         &app,
         &format!("/rest/createPlaylist?name=Favourites&songId={get_lucky}&{auth}"),
@@ -278,8 +279,71 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         &format!("/rest/updatePlaylist?playlistId={pl_id}&songIdToAdd={instant_crush}&{auth}"),
     )
     .await;
-    assert_eq!(r["status"], "failed");
-    assert!(r["error"]["message"].as_str().unwrap().contains("MusicBrainz"));
+    assert_eq!(r["status"], "ok", "{r}");
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl_id}&{auth}")).await;
+    let titles: Vec<&str> = r["playlist"]["entry"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Get Lucky", "Instant Crush"], "{r}");
+    // The homeserver never sees it: the synced item list has only the tagged song
+    let (_, _, body) = get(&app, &format!("/v1/playlists/{}?token=pw", &pl_id[3..]), None).await;
+    let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 1, "{d}");
+    assert_eq!(d["local_tracks"][0]["title"], "Instant Crush");
+    // Stars work for it too, and it is listed as starred
+    let r = call(&app, &format!("/rest/star?id={instant_crush}&{auth}")).await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let r = call(&app, &format!("/rest/getStarred2?{auth}")).await;
+    assert!(
+        r["starred2"]["song"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["title"] == "Instant Crush"),
+        "{r}"
+    );
+    // Once identified it joins the playlist (and favourites) for real
+    s.library
+        .lock()
+        .unwrap()
+        .set_identity(
+            instant_crush.parse().unwrap(),
+            &pm_model::MusicUri::Isrc {
+                isrc: pm_model::Isrc::parse("USQX91300105").unwrap(),
+            },
+            pm_model::Confidence::ConfirmedByUser,
+            None,
+        )
+        .unwrap();
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl_id}&{auth}")).await;
+    assert_eq!(r["playlist"]["entry"].as_array().unwrap().len(), 2, "{r}");
+    let (_, _, body) = get(&app, &format!("/v1/playlists/{}?token=pw", &pl_id[3..]), None).await;
+    let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 2, "{d}");
+    assert!(d.get("local_tracks").is_none(), "{d}");
+    let (_, _, body) = get(&app, "/v1/favourites?token=pw", None).await;
+    let f: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        f["uris"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u == "https://musicbrainz.org/isrc/USQX91300105"),
+        "{f}"
+    );
+    // Removing by the client's position removes that song
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl_id}&songIndexToRemove=1&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl_id}&{auth}")).await;
+    assert_eq!(r["playlist"]["entry"][0]["title"], "Get Lucky");
+    assert_eq!(r["playlist"]["entry"].as_array().unwrap().len(), 1, "{r}");
     let r = call(
         &app,
         &format!("/rest/updatePlaylist?playlistId={pl_id}&name=Faves&comment=best&{auth}"),
@@ -315,8 +379,19 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let (st, _, body) = get(&app, "/v1/activity?token=pw", None).await;
     assert_eq!(st, StatusCode::OK);
     let acts: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(acts.as_array().unwrap().len(), 1);
-    assert_eq!(acts[0]["track"]["title"], "Get Lucky");
+    // Both are identified by now (Instant Crush above); an untagged one is still ignored
+    assert_eq!(acts.as_array().unwrap().len(), 2, "{acts}");
+    let r = call(&app, &format!("/rest/search3?query=Blue%20Monday&{auth}")).await;
+    let blue = r["searchResult3"]["song"][0]["id"].as_str().unwrap().to_string();
+    call(&app, &format!("/rest/scrobble?id={blue}&submission=true&{auth}")).await;
+    let (_, _, body) = get(&app, "/v1/activity?token=pw", None).await;
+    let acts: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(acts.as_array().unwrap().len(), 2, "{acts}");
+    assert!(acts
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["track"]["title"] == "Get Lucky"));
 
     // byYear honours the range (both fixtures are from 2013).
     let r = call(

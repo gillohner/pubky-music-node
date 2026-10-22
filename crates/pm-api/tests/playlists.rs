@@ -188,16 +188,25 @@ async fn playlist_lifecycle() {
     assert!(pl["tracks"][0].is_null());
     assert_eq!(pl["tracks"][1]["id"], tagged);
 
-    // An untagged track cannot enter social data.
-    let (st, err) = call(
+    // An untagged track never enters social data: it stays in the playlist on this node only
+    let (st, pl) = call(
         &app,
         "POST",
         &format!("/v1/playlists/{id}/items"),
         Some(serde_json::json!({"track_ids": [untagged]})),
     )
     .await;
-    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
-    assert!(err["error"].as_str().unwrap().contains("not matched to a song"));
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    assert_eq!(
+        pl["playlist"]["items"].as_array().unwrap().len(),
+        2,
+        "not in the synced items"
+    );
+    assert_eq!(pl["local_tracks"][0]["id"], untagged);
+    assert_eq!(pl["summary"]["items"], 3);
+    let (st, pl) = call(&app, "DELETE", &format!("/v1/playlists/{id}/local/0"), None).await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    assert!(pl.get("local_tracks").is_none(), "{pl}");
     // Bad URIs are rejected; `music:` especially.
     let (st, _) = call(
         &app,
@@ -308,7 +317,22 @@ async fn playlist_lifecycle() {
             Some(serde_json::json!({"track_id": u["id"]})),
         )
         .await;
-        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+        // Kept as a favourite on this node only, never synced
+        assert_eq!(st, StatusCode::OK, "{e}");
+        assert_eq!(e["uri"], format!("track:{}", u["id"]));
+        let (_, all) = call(&app, "GET", "/v1/favourites", None).await;
+        assert!(
+            all["uris"].as_array().unwrap().iter().any(|x| *x == e["uri"]),
+            "{all}"
+        );
+        let (st, _) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/favourites?track_id={}", u["id"]),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
     }
     let (st, _) = call(
         &app,
