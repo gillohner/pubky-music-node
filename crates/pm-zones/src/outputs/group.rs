@@ -59,8 +59,9 @@ const WARMUP_MS: u64 = 2000;
 /// so this is time)...
 pub const NUDGE_EVERY_MS: u64 = 4000;
 /// ...and only when further apart than this, on average over `NUDGE_AVERAGE_MS` (two
-/// squeezelite players in step on one ALSA card: estimates 0-1 ms apart; Wi-Fi adds jitter)...
-pub const NUDGE_DEADBAND_MS: u64 = 4;
+/// squeezelite players in step on one ALSA card: estimates 0-1 ms apart; Wi-Fi adds jitter;
+/// at 4 ms, CI once saw two players stay 4.2 ms apart uncorrected)...
+pub const NUDGE_DEADBAND_MS: u64 = 2;
 /// ...and not until the leader has played this much since the (re)start: a player reports
 /// that it started up to a second late, and until then it seems not to be playing.
 const NUDGE_SETTLE_MS: u64 = 3000;
