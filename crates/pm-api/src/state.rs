@@ -74,6 +74,8 @@ pub struct NodeState {
     config_file: Mutex<Option<PathBuf>>,
     /// The node's one Pubky client, built on first use and shared by every Pubky call.
     pubky_client: std::sync::OnceLock<pm_pubky::homeserver::NodeHomeserver>,
+    /// The homeserver bundled with the node (deploy/bundle), managed through its admin API.
+    bundled_homeserver: std::sync::OnceLock<crate::bundled::AdminEndpoint>,
     /// The background sync after a sign-in (or a restore), for the page.
     pub sync_activity: Mutex<crate::types::SyncActivity>,
     /// What the last scan did (shown when it ends, and in Settings).
@@ -372,6 +374,7 @@ impl NodeState {
             scanning: Mutex::new(false),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
+            bundled_homeserver: std::sync::OnceLock::new(),
             sync_activity: Mutex::new(Default::default()),
             last_scan: Mutex::new(None),
         })
@@ -1242,6 +1245,15 @@ impl NodeState {
     /// The config file the node runs with, when there is one.
     pub fn config_file(&self) -> Option<PathBuf> {
         self.config_file.lock().expect("config file lock").clone()
+    }
+
+    /// Set once at start when the node runs with a bundled homeserver.
+    pub fn set_bundled_homeserver(&self, ep: crate::bundled::AdminEndpoint) {
+        let _ = self.bundled_homeserver.set(ep);
+    }
+
+    pub fn bundled_homeserver(&self) -> Option<&crate::bundled::AdminEndpoint> {
+        self.bundled_homeserver.get()
     }
 
     pub fn set_config_file(&self, path: Option<PathBuf>) {

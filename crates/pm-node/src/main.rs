@@ -297,6 +297,13 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             Err(e) => tracing::warn!(file = %file.display(), "cannot read session secret: {e}"),
         }
     }
+    if let Some(ep) = pm_api::bundled::AdminEndpoint::new(
+        &env_or("PM_HOMESERVER_ADMIN_URL", &cfg.homeserver.admin_url),
+        &env_or("PM_HOMESERVER_ADMIN_PASSWORD", &cfg.homeserver.admin_password),
+    ) {
+        tracing::info!(admin = %ep.url, "bundled homeserver");
+        state.set_bundled_homeserver(ep);
+    }
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     pm_api::backup::start_schedule(&state);
     pm_api::podcasts::spawn_background(&state);

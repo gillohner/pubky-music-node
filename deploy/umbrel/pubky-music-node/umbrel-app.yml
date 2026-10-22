@@ -30,6 +30,8 @@ gallery: []
 path: /
 defaultUsername: ""
 defaultPassword: ""
+# APP_PASSWORD: the bundled homeserver's admin and database password.
+deterministicPassword: true
 releaseNotes: >-
   Zones overview, queue tools (shuffle, save as playlist, transfer between
   zones, library radio, sleep timer), lyrics with follow-along, Focus by file

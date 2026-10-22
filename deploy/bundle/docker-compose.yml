@@ -1,0 +1,140 @@
+# Pubky Music Node with its own Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md, docs/deploy.md).
+#
+#   ./setup.sh            # once: writes .env with generated passwords (never printed)
+#   docker compose up -d
+#   docker compose --profile dashboard --profile tunnel up -d   # optional parts
+#
+# The homeserver half follows Pubky's own Umbrel app (github.com/pubky/umbrel-app-store,
+# pubky-homeserver/docker-compose.yml, MIT): PostgreSQL, the one-shot config wrapper that renders
+# the homeserver's config.toml, the homeserver, and optionally the homeserver-dashboard and
+# cloudflared. Every image is pinned by version and digest.
+#
+# Exposure: only the homeserver's Pubky TLS port (6287) and the music node (7788) listen on the
+# network. The homeserver's HTTP port (6286, for a tunnel or reverse proxy) and its admin API
+# (6288) are bound to 127.0.0.1, where only the node, cloudflared and a local proxy reach them.
+# The node runs on the host network so it can find speakers (UPnP, Cast, AirPlay, Squeezebox).
+name: pubky-music
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:ff4ccc02b97e0ebb6b328ef9ff92522f95586f83be6801896b615088defc8ad2
+    restart: unless-stopped
+    stop_grace_period: 1m
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?run ./setup.sh first}
+      POSTGRES_DB: pubky_homeserver
+    volumes:
+      - ${POSTGRES_DATA:-postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pubky -d pubky_homeserver"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Renders /data/config.toml on first start (token-required signups, the database, the admin
+  # password) and on every start points the published address at the domain, if one is set.
+  homeserver-config:
+    image: synonymsoft/homeserver-umbrel-config-wrapper:v0.0.8@sha256:23d2ba85fa07e61a9d87550179910d85a03cd49b6532b62c584d9b4e8ba2eb14
+    restart: on-failure
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?run ./setup.sh first}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}
+      # The address the homeserver publishes for Pubky clients (phones with Pubky Ring): this
+      # machine's LAN address by default, so Ring on the same network can sign up.
+      PUBLIC_IP: ${PUBLIC_IP:-}
+      # A public HTTPS hostname for the homeserver (a Cloudflare tunnel or your own reverse proxy
+      # on 443). Empty = LAN only.
+      CLOUDFLARE_DOMAIN: ${HOMESERVER_DOMAIN:-}
+    volumes:
+      - ${HOMESERVER_DATA:-homeserver}:/data
+      - cloudflare:/etc/pubky-cloudflare
+
+  homeserver:
+    image: synonymsoft/homeserver:v0.16.2@sha256:b357fecec481a37c8af40a7ed70562871a587ecb5bfd251a6e95330f1e61c7df
+    restart: unless-stopped
+    # The homeserver shuts down cleanly on SIGINT.
+    stop_signal: SIGINT
+    stop_grace_period: 1m
+    command: ["homeserver", "--data-dir", "/data"]
+    volumes:
+      # Users' files live under /data/data/files: point HOMESERVER_DATA at the big disk.
+      - ${HOMESERVER_DATA:-homeserver}:/data
+    ports:
+      - "6287:6287"
+      - "127.0.0.1:6286:6286"
+      - "127.0.0.1:6288:6288"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      homeserver-config:
+        condition: service_completed_successfully
+    healthcheck:
+      # 127.0.0.1, not localhost: busybox nc tries ::1 first and the homeserver listens on IPv4.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6288 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  music:
+    image: ${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}:${PM_TAG:-edge}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PM_LISTEN: "0.0.0.0:7788"
+      PM_PUBLIC_URL: ${PM_PUBLIC_URL:-}
+      PM_TOKEN: ${PM_TOKEN:?run ./setup.sh first}
+      PM_CONTACT: ${PM_CONTACT:-}
+      PM_NAME: ${PM_NAME:-Pubky Music}
+      PM_FOLDERS: "/music"
+      PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
+      PM_HOMESERVER_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}
+      RUST_LOG: "info"
+    volumes:
+      - music-node:/data
+      - ${MUSIC_DIR:-./music}:/music:ro
+    depends_on:
+      homeserver:
+        condition: service_healthy
+
+  # Pubky's admin UI for the homeserver (users, invites, files). Asks for ADMIN_PASSWORD.
+  dashboard:
+    profiles: ["dashboard"]
+    image: synonymsoft/homeserver-dashboard:v0.1.32@sha256:416da0438af1246b35aeb1f7ec2520e29791e0479b46e78d64fe3cfe151e5d05
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      ADMIN_BASE_URL: http://homeserver:6288
+      CLIENT_BASE_URL: http://homeserver:6286
+      ADMIN_TOKEN: ${ADMIN_PASSWORD:?run ./setup.sh first}
+      ADMIN_PASSWORD_MANAGED: "true"
+      DASHBOARD_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}
+      PORT: 8812
+      HOSTNAME: "0.0.0.0"
+    volumes:
+      - ${HOMESERVER_DATA:-homeserver}:/app/homeserver-data
+    ports:
+      - "${DASHBOARD_BIND:-127.0.0.1}:8812:8812"
+    depends_on:
+      homeserver:
+        condition: service_healthy
+
+  # Cloudflare Tunnel (a token from Cloudflare Zero Trust → Networks → Tunnels). In the tunnel's
+  # public hostnames, send the music hostname to http://localhost:7788 and HOMESERVER_DOMAIN to
+  # http://localhost:6286. Only HTTP crosses a tunnel; Pubky clients then use HTTPS via the domain.
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:2026.5.2@sha256:12ff5c6992a9863db4da270746af7c244bcaee49353039af8104268a18d6c4f0
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env for the tunnel profile}
+
+volumes:
+  postgres:
+  homeserver:
+  music-node:
+  cloudflare:

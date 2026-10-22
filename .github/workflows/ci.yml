@@ -179,6 +179,32 @@ jobs:
       - run: python3 -I tools/abs-source.py target/debug/pm-node /tmp/abs-src "$(command -v ffmpeg)" /tmp/abs
       - if: failure()
         run: tail -50 /tmp/abs/node.log /tmp/abs/abs.log
+  bundle:
+    # deploy/bundle: the node with its own Pubky homeserver (pinned pubky-homeserver image,
+    # PostgreSQL, the config wrapper), up with docker compose; tools/bundle-check.py checks the
+    # node manages it, what listens where, and that no generated password reaches a log.
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p pm-node
+      - name: the node's CI image
+        run: |
+          cp target/debug/pm-node deploy/docker/entrypoint.sh deploy/bundle/ci/
+          docker build -q -t pubky-music-node:ci deploy/bundle/ci
+      - name: docker compose up
+        working-directory: deploy/bundle
+        run: |
+          ./setup.sh
+          sed -i 's/^PM_TAG=.*/PM_TAG=ci/' .env && echo PM_IMAGE=pubky-music-node >> .env
+          mkdir -p music
+          docker compose up -d
+      - run: python3 -I tools/bundle-check.py deploy/bundle
+      - if: failure()
+        working-directory: deploy/bundle
+        run: docker compose ps -a && docker compose logs --no-color --tail 80
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

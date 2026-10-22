@@ -28,6 +28,47 @@ docker run -d --name pm -p 7788:7788 --device /dev/snd \
 curl -H 'Authorization: Bearer change-me' http://localhost:7788/v1/info
 ```
 
+## With its own Pubky homeserver (bundled)
+
+`deploy/bundle/` runs the node together with a Pubky homeserver, so your playlists, favourites and
+files (Copy to homeserver, Bring files here) live on your own machine instead of a shared public
+homeserver. It follows Pubky's own Umbrel app: PostgreSQL, pubky-homeserver (v0.16.2) with its
+config wrapper, and optionally Pubky's homeserver dashboard and a Cloudflare tunnel. Every image is
+pinned by version and digest.
+
+```sh
+cd deploy/bundle
+./setup.sh          # once: writes .env with generated passwords (never printed) and your LAN address
+# set MUSIC_DIR in .env to your music folder
+docker compose up -d
+docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http://127.0.0.1:8812
+```
+
+- **What listens where:** the node on 7788, and the homeserver's Pubky TLS port 6287 (Pubky apps,
+  Pubky Ring) on the network. The homeserver's admin API (6288) and plain HTTP port (6286) are
+  bound to 127.0.0.1: only the node, a tunnel and a local reverse proxy reach them. The node runs
+  on the host network to find speakers.
+- **Passwords:** `.env` holds the database password, the homeserver admin password (also the
+  dashboard's login) and the node's API token. `setup.sh` generates them and never prints them;
+  the node never logs or returns the admin password.
+- **Storage:** users' files are under the homeserver's data volume. Set `HOMESERVER_DATA` to a
+  folder on the big disk (e.g. `/mnt/tank/pubky-homeserver`) before the first start. Quotas are
+  per user.
+- **Reachable from outside:** set `HOMESERVER_DOMAIN` to a public hostname and either run the
+  `tunnel` profile with `CLOUDFLARE_TUNNEL_TOKEN` (send that hostname to `http://localhost:6286`
+  and a second one to the node at `http://localhost:7788` in the tunnel's settings), or put your
+  own reverse proxy (Caddy) on 443 in front of 6286. The homeserver then publishes the domain on
+  443, and Pubky clients use HTTPS through it. Without a domain the homeserver publishes the LAN
+  address, so Pubky Ring on the same network can sign up.
+- **What the operator can see:** whoever runs the homeserver can read every account's files,
+  including `/priv` (it is access-controlled, not encrypted from the operator). That is fine when
+  the operator is you; tell anyone you invite.
+- `GET /v1/homeserver/bundled` shows the homeserver as the node sees it: version, key, users,
+  disk used, unused invites.
+
+The Umbrel app (below) bundles the same homeserver. Install it or Pubky's own "Pubky Homeserver"
+app, not both: both use port 6287.
+
 ## TrueNAS SCALE
 
 `deploy/truenas/docker-compose.yaml` is a ready custom app: Apps → Discover Apps → ⋮ → *Install

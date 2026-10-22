@@ -30,6 +30,33 @@ pub struct NodeConfig {
     /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
     /// BubbleUPnP can play to it). No token, like any renderer.
     pub renderer: RendererConfig,
+    /// The Pubky homeserver bundled with the node (deploy/bundle); `PM_HOMESERVER_ADMIN_URL` and
+    /// `PM_HOMESERVER_ADMIN_PASSWORD` override.
+    pub homeserver: HomeserverConfig,
+}
+
+/// The bundled homeserver's admin API. Empty = no bundled homeserver.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct HomeserverConfig {
+    pub admin_url: String,
+    pub admin_password: String,
+}
+
+impl std::fmt::Debug for HomeserverConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HomeserverConfig")
+            .field("admin_url", &self.admin_url)
+            .field(
+                "admin_password",
+                &if self.admin_password.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -174,6 +201,7 @@ impl Default for NodeConfig {
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
             renderer: RendererConfig::default(),
+            homeserver: HomeserverConfig::default(),
         }
     }
 }

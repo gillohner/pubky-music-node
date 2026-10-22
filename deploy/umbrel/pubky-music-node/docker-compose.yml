@@ -4,6 +4,61 @@ version: "3.7"
 # Pubky Music controller on another machine cannot pass Umbrel's web login),
 # so there is no app_proxy in front of it. Keep APP_PUBKY_MUSIC_TOKEN secret.
 services:
+  # The bundled Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md), as in Pubky's own Umbrel app
+  # (github.com/pubky/umbrel-app-store, pubky-homeserver, MIT). Its admin API is reached by the
+  # node on this app's network only and is not published. Install this app or Pubky's
+  # "Pubky Homeserver" app, not both: both publish the homeserver's Pubky TLS port 6287.
+  postgres:
+    image: postgres:17-alpine@sha256:ff4ccc02b97e0ebb6b328ef9ff92522f95586f83be6801896b615088defc8ad2
+    restart: on-failure
+    stop_grace_period: 1m
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${APP_PASSWORD}
+      POSTGRES_DB: pubky_homeserver
+    volumes:
+      - ${APP_DATA_DIR}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pubky -d pubky_homeserver"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  homeserver-config:
+    image: synonymsoft/homeserver-umbrel-config-wrapper:v0.0.8@sha256:23d2ba85fa07e61a9d87550179910d85a03cd49b6532b62c584d9b4e8ba2eb14
+    restart: on-failure
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${APP_PASSWORD}
+      ADMIN_PASSWORD: ${APP_PASSWORD}
+      DEVICE_DOMAIN_NAME: ${DEVICE_DOMAIN_NAME:-}
+      PUBLIC_IP: ${PUBLIC_IP:-}
+    volumes:
+      - ${APP_DATA_DIR}/homeserver:/data
+      - ${APP_DATA_DIR}/cloudflare:/etc/pubky-cloudflare
+
+  homeserver:
+    image: synonymsoft/homeserver:v0.16.2@sha256:b357fecec481a37c8af40a7ed70562871a587ecb5bfd251a6e95330f1e61c7df
+    restart: on-failure
+    stop_signal: SIGINT
+    stop_grace_period: 1m
+    command: ["homeserver", "--data-dir", "/data"]
+    volumes:
+      - ${APP_DATA_DIR}/homeserver:/data
+    ports:
+      - "6287:6287"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      homeserver-config:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6288 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
   node:
     # Version tags come from `git tag v0.1.0` (release.yml); for a test install use
     # ghcr.io/gillohner/pubky-music-node:edge, published by running the workflow by hand.
@@ -18,6 +73,8 @@ services:
       PM_CONTACT: "${APP_PUBKY_MUSIC_CONTACT:-}"
       PM_FOLDERS: "/music"
       PM_NAME: "Umbrel"
+      PM_HOMESERVER_ADMIN_URL: "http://homeserver:6288"
+      PM_HOMESERVER_ADMIN_PASSWORD: "${APP_PASSWORD}"
       RUST_LOG: "info"
     volumes:
       - ${APP_DATA_DIR}/data:/data
@@ -28,3 +85,6 @@ services:
       - /dev/snd:/dev/snd
     group_add:
       - audio
+    depends_on:
+      homeserver:
+        condition: service_healthy
