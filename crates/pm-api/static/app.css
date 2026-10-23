@@ -1074,3 +1074,10 @@ body.kiosk .main { padding: 0; }
 @media (max-width: 720px) { .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; } }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
 @media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
+/* One way back: the breadcrumb on wide screens, the back link on phones (UX review) */
+@media (min-width: 721px) { .pagebar > .dupback { display: none; } }
+@media (max-width: 720px) { .pagebar .crumbs { display: none; } }
+.stickyhead { position: sticky; z-index: 15; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-sizing: border-box; height: 52px; margin: -24px -24px -28px; padding: 0 24px; top: -24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.stickyhead[hidden] { display: none; }
+.stickyhead strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .stickyhead { height: 46px; margin: -18px -14px -28px; padding: 0 14px; top: -18px; } }

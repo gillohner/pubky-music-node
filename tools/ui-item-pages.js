@@ -74,7 +74,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const back3 = (await p.textContent('#main .back')).trim();
     console.log('click path:', steps.join(' → '));
     console.log('back labels:', [back1, back2, back3].join(' | '));
-    for (let k = 0; k < 3; k++) { await p.click('#main .back'); await sleep(2500); }
+    // Back, or on wide screens the breadcrumb standing in for it
+    for (let k = 0; k < 3; k++) { await p.click('#main .back:not(.dupback), #main [data-as-back]'); await sleep(2500); }
     await sleep(2500);
     const end = new URL(p.url()); const scroll1 = await p.evaluate(() => document.querySelector('#main').scrollTop); const q = await p.inputValue('#search');
     console.log('after Back ×3:', end.pathname + end.search, '| query', q, '| scroll when left', scrollLeft, '→ restored', scroll1);
@@ -85,7 +86,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ---- deep link: Back goes to the parent (album → its artist, else the section) ----
   const dl = await ctx.newPage(); await dl.goto(BASE + '/album/lib-1'); await dl.waitForSelector('#main #iabout', { timeout: 20000 }).catch(() => {});
   const crumb = await dl.$$eval('#main .crumbs li', (e) => e.map((x) => x.textContent.trim())).catch(() => []);
-  const label = (await dl.textContent('#main .back')).trim(); await dl.click('#main .back'); await sleep(1500);
+  const label = (await dl.textContent('#main .back')).trim(); await dl.click('#main .back:not(.dupback), #main [data-as-back]'); await sleep(1500);
   const landed = new URL(dl.url()).pathname;
   console.log('deep link back:', label, '→', landed, '| breadcrumb', crumb.join(' › '));
   if (crumb.length >= 2 ? !landed.startsWith('/artist/') : landed !== '/albums') errors.push(`deep-link Back went to ${landed}`);
