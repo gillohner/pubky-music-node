@@ -36,6 +36,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE | `/v1/zones/{id}/queue` | | 204 (stops and clears) |
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
+| POST | `/v1/zones/{id}/announce` | `{uri?, chime?, volume_percent?, title?}` | Play a clip (an http(s) URL or a file path; TTS from Home Assistant) instead of the music, after an optional chime, at its own volume on outputs with hardware volume; then back to the same track and position, playing or paused as before, the queue and volume as they were: `{resumes, volume_applied, restores_volume?, items}`; 409 while one is playing |
 | POST | `/v1/zones/{id}/volume` (absolute dB requests are capped at the zone's `max_volume_db` from its DSP settings) | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
 | GET / PUT | `/v1/zones/{id}/sleep` | PUT: `{seconds}` or `{seconds: null}` | `{ends_at_ms?, remaining_ms?}`; sleep timer: the zone pauses when it fires; one timer per zone, a new PUT replaces it |
 | POST | `/v1/zones/{id}/transfer` | `{to}` | the target's `ZoneState`; moves the queue, the playing item and its position, repeat and radio to zone `to` (paused stays paused); the source ends up stopped and empty; 400 for an empty queue or the same zone |
