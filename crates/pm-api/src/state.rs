@@ -427,6 +427,17 @@ impl NodeState {
     pub fn create_zone(self: &Arc<Self>, name: &str, output: Arc<dyn Output>) -> Arc<Zone> {
         let zone = self.zones.create(name, output);
         self.restore_queue(&zone);
+        // The zone's crossfade (`PUT /v1/zones/{id}/crossfade`), kept across restarts
+        if let Ok(Some(ms)) = self
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(&crossfade_key(zone.id()))
+        {
+            if let Ok(ms) = ms.parse::<u64>() {
+                zone.set_crossfade_ms(ms);
+            }
+        }
         let events = self.events.clone();
         let library = self.library.clone();
         let key = queue_key(zone.id());
@@ -1360,6 +1371,11 @@ impl NodeState {
 }
 
 const CONTACT_KEY: &str = "node.contact";
+
+/// Where a zone's crossfade length (ms) is kept.
+pub fn crossfade_key(zone: &ZoneId) -> String {
+    format!("crossfade/{}", zone.0)
+}
 
 fn queue_key(id: &ZoneId) -> String {
     format!("queue.{}", id.0)

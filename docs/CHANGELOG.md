@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Crossfade per zone** (compare-music-assistant #11), off by default. `PUT /v1/zones/{id}/crossfade {seconds}` (up to 12 s) fades each track into the next with an equal-power curve; the next track then carries on from where the mix left it. Songs of the same album stay gapless, and there's no fade across a format change. While it fades, the signal path shows a `crossfade` stage (Enhanced), so a crossfading zone is never labelled bit-perfect.
 - **CI:** main's own CI runs again after a merge. The pull_request run started by the merged branch's last push got `main` as its ref and, sharing main's concurrency group, cancelled main's run; the group is now keyed by event and PR branch.
 - **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
   - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.

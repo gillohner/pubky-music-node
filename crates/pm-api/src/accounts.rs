@@ -210,7 +210,7 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     // Playing on a zone the owner allows: its queue, transport, volume and the like
     if let Some(rest) = path.strip_prefix("/zones/") {
         let (zone, what) = rest.split_once('/').unwrap_or((rest, ""));
-        if what.is_empty() || what.starts_with("dsp") {
+        if what.is_empty() || what.starts_with("dsp") || what == "crossfade" {
             return Some("only the owner adds, removes or tunes zones");
         }
         return zone_refusal(s, zone);

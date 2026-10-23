@@ -204,6 +204,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
+        .route("/zones/{id}/crossfade", axum::routing::put(crossfade))
         .route("/zones/{id}/shuffle", post(shuffle_queue))
         .route("/zones/{id}/transfer", post(transfer))
         .route("/zones/{id}/sleep", get(sleep_get).put(sleep_set))
@@ -1496,6 +1497,38 @@ async fn radio(
 ) -> Result<StatusCode, ApiError> {
     let zone = zone_of(&s, &id)?;
     zone.set_radio(body.on);
+    settle(&zone).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SetCrossfade {
+    /// Seconds, 0 (off) to 12.
+    seconds: f64,
+}
+
+/// `PUT /v1/zones/{id}/crossfade {seconds}`: fade each track into the next (0 = off). Songs of
+/// the same album following each other stay gapless.
+async fn crossfade(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetCrossfade>,
+) -> Result<StatusCode, ApiError> {
+    let zone = zone_of(&s, &id)?;
+    if !(0.0..=12.0).contains(&body.seconds) {
+        return Err(ApiError::bad_request("crossfade is 0 to 12 seconds"));
+    }
+    let ms = (body.seconds * 1000.0).round() as u64;
+    let key = state::crossfade_key(zone.id());
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        if ms == 0 {
+            lib.delete_setting(&key)?;
+        } else {
+            lib.set_setting(&key, &ms.to_string())?;
+        }
+    }
+    zone.set_crossfade_ms(ms);
     settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
 }
