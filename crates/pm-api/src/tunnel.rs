@@ -26,6 +26,15 @@ use std::time::Duration;
 const MUSIC_HOST: &str = "tunnel.music_hostname";
 pub const RESTART_COMMAND: &str = "docker compose up -d --force-recreate homeserver-config homeserver";
 
+/// How to restart the homeserver on installs other than the compose bundle (`PM_TUNNEL_RESTART_HINT`,
+/// plain words: the Umbrel app says to restart the app); then no command is shown.
+fn restart_hint() -> Option<String> {
+    std::env::var("PM_TUNNEL_RESTART_HINT")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
 fn dir(s: &NodeState) -> Result<PathBuf, ApiError> {
     s.tunnel_dir().map(Path::to_path_buf).ok_or_else(|| {
         ApiError::new(
@@ -106,6 +115,9 @@ pub struct TunnelStatus {
     /// The homeserver still has to be restarted to publish the domain: run `restart_command`.
     pub restart_needed: bool,
     pub restart_command: Option<String>,
+    /// The same in plain words, on installs where a command doesn't fit (Umbrel).
+    #[serde(default)]
+    pub restart_hint: Option<String>,
     /// `https://<homeserver_domain>/` answers as a Pubky homeserver.
     pub homeserver_reachable: Option<bool>,
     /// `https://<music_hostname>/` reaches this node.
@@ -175,7 +187,8 @@ pub(crate) async fn status(
         music_hostname: music,
         published,
         restart_needed,
-        restart_command: restart_needed.then(|| RESTART_COMMAND.to_string()),
+        restart_command: (restart_needed && restart_hint().is_none()).then(|| RESTART_COMMAND.to_string()),
+        restart_hint: restart_needed.then(restart_hint).flatten(),
         homeserver_reachable,
         music_reachable,
     }))

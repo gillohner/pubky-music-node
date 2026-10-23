@@ -230,7 +230,7 @@ jobs:
     # PostgreSQL, the config wrapper), up with docker compose; tools/bundle-check.py checks the
     # node manages it, what listens where, and that no generated password reaches a log.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -257,9 +257,23 @@ jobs:
           export PM_BUNDLED_HS_FILES=$PWD/deploy/bundle/hsdata/data/files
           PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
           cargo test -p pm-api --test bundled_homeserver
+      - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
+        run: |
+          (cd deploy/bundle && docker compose down)
+          U=$RUNNER_TEMP/umbrel
+          mkdir -p $U/root/data/storage
+          # umbrelOS copies the package to app-data/<app-id> and drops the placeholders
+          cp -r deploy/umbrel/pubky-music-node $U/app && find $U/app -name .gitkeep -delete
+          printf 'services:\n  node:\n    image: pubky-music-node:ci\n    devices: !reset []\n' > $U/ci.yml
+          export APP_DATA_DIR=$U/app UMBREL_ROOT=$U/root DEVICE_DOMAIN_NAME=umbrel.local
+          export APP_SEED=$(openssl rand -hex 32) APP_PASSWORD=$(openssl rand -hex 32)
+          docker compose -p pubky-music-node -f $U/app/docker-compose.yml -f $U/ci.yml up -d
+          python3 -I tools/umbrel-check.py pubky-music-node "$APP_SEED" "$APP_PASSWORD" "$APP_DATA_DIR"
       - if: failure()
         working-directory: deploy/bundle
-        run: docker compose ps -a && docker compose logs --no-color --tail 80
+        run: |
+          docker compose ps -a && docker compose logs --no-color --tail 80
+          docker compose -p pubky-music-node ps -a; docker compose -p pubky-music-node logs --no-color --tail 80 || true
   webdav:
     # A WebDAV share as a library root against a real WebDAV server (WsgiDAV, pinned), with a
     # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).

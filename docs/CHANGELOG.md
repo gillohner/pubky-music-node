@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-24
 
+- **The bundled homeserver on Umbrel and on bare metal** (STEWARD-BUNDLED-HOMESERVER.md, step 1 finished).
+  - **Umbrel:** `deploy/umbrel/` is now a community app store. The app runs the node on the host network (speaker discovery), with the homeserver's HTTP and admin ports on 127.0.0.1 only, the Cloudflare tunnel from Settings › Remote access (cloudflared starts once a token is saved), and the homeserver's files mounted read-only. Data moved under `data/` as umbrelOS expects (the app was never installable before: its image tag didn't exist; it now pins an `edge` build by digest). Umbrel's linter passes; CI starts the app with Umbrel's variables (`tools/umbrel-check.py`).
+  - **Bare metal:** `deploy/bare-metal/` has systemd units for the homeserver (stops on SIGINT, retries a failed first publish), the node and cloudflared, a homeserver config template and `apply-tunnel-domain.sh`, which publishes the tunnel's hostname before the homeserver starts. Steps in docs/deploy.md. Checked against the real homeserver 0.16.2 and PostgreSQL 18.
+  - `GET /v1/remote/tunnel` adds `restart_hint`: Umbrel and bare-metal installs say how to restart in their own words.
 - **Better song matches** (second review #5, #6). "Which song is this?" and Review matches rank MusicBrainz's answers by what the file says:
   - **Title:** a match must have the file's title. Songs that only mention it in a longer title are no longer offered (the review found an offensive one).
   - **Album:** the release named like the file's album is picked and ranked first. Otherwise a studio release is picked over a live album, bootleg or compilation, which rank lower.

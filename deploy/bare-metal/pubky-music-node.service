@@ -1,0 +1,24 @@
+# Pubky Music Node next to its own homeserver, on bare metal (docs/deploy.md).
+[Unit]
+Description=Pubky Music Node
+Wants=network-online.target pubky-homeserver.service
+After=network-online.target pubky-homeserver.service sound.target
+
+[Service]
+User=pubky-music
+Group=pubky-music
+# audio: the DAC; pubky: read the homeserver's files (its music is a library folder)
+SupplementaryGroups=audio pubky
+ExecStart=/usr/local/bin/pm-node -c /etc/pubky-music/node.toml serve
+# How Settings › Remote access tells you to restart the homeserver after a tunnel change
+Environment=PM_TUNNEL_RESTART_HINT="On the machine: sudo systemctl restart pubky-homeserver"
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/pubky-music
+
+[Install]
+WantedBy=multi-user.target
