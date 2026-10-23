@@ -22,6 +22,10 @@ silently cannot connect.
    the status bar covered the node's menu and search. The content view is
    padded by the bars' (and the keyboard's) insets, on the UI's background
    (dark or light with the system, like the web UI's theme-color).
+8. A crash report readable without adb (tools/release/android/CrashReport.kt): an
+   Application class installs the handler before any activity or native library
+   loads; the player's notification gets a monochrome status-bar icon (an adaptive
+   launcher icon there crashes some phones).
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -79,8 +83,11 @@ existing = proguard.read_text() if proguard.exists() else ""
 if rule not in existing:
     existing = existing.rstrip("\n") + "\n\n# rustls-platform-verifier (called over JNI)\n" + rule + "\n"
 player = "-keep class **.PlayerService { public static void start(...); public static void stop(...); }"
+crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMusicApp { *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
+if crash.split("\n")[0] not in existing:
+    existing = existing.rstrip("\n") + "\n\n# The crash report (Application class; share() is called over JNI)\n" + crash + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -197,7 +204,33 @@ if "pubky-music: insets" not in atext:
 """
     activity.write_text(atext)
 
+# 8. the crash report: its Application class, and the player notification's icon
+crash_kt = (Path(__file__).parent / "android" / "CrashReport.kt").read_text()
+crash_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", crash_kt, count=1, flags=re.M)
+if n != 1:
+    die("CrashReport.kt has no package line")
+(activities[0].parent / "CrashReport.kt").write_text(crash_kt)
+mtext = manifest.read_text()
+if ".PubkyMusicApp" not in mtext:
+    m = re.search(r"<application\b[^>]*>", mtext, re.S)
+    if not m:
+        die(f"no <application> in {manifest}")
+    if "android:name=" in m.group(0):
+        die(f"the template's <application> already names a class: {m.group(0)[:120]}")
+    mtext = mtext[: m.start()] + m.group(0).replace("<application", '<application\n        android:name=".PubkyMusicApp"', 1) + mtext[m.end():]
+    manifest.write_text(mtext)
+drawable = app / "src" / "main" / "res" / "drawable"
+drawable.mkdir(parents=True, exist_ok=True)
+(drawable / "ic_stat_pubky_music.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<!-- tools/release/android-patch.py: the player notification's status-bar icon (a note). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M12,3v10.55A4,4 0,1 0,14 17V7h4V3h-6z" />
+</vector>
+""")
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets added"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added"
 )

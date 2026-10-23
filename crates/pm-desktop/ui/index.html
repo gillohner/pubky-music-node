@@ -11,6 +11,17 @@
     <svg class="logo" viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#1e1e24"/><circle cx="128" cy="128" r="70" fill="none" stroke="#785adc" stroke-width="18"/><circle cx="128" cy="128" r="18" fill="#785adc"/></svg>
     <h1>Pubky Music</h1>
 
+    <section id="crash" hidden>
+      <h2>Pubky Music closed unexpectedly last time</h2>
+      <p class="small">It wrote down what happened. Copy or share this with whoever helps you; nothing was sent anywhere.</p>
+      <pre id="crash-text" class="crash" tabindex="0"></pre>
+      <div class="row">
+        <button id="crash-copy" class="primary">Copy</button>
+        <button id="crash-share" class="secondary">Share</button>
+      </div>
+      <button id="crash-go" class="link" type="button">Continue</button>
+    </section>
+
     <section id="saved" hidden>
       <p id="saved-msg">Connecting…</p>
       <div class="row">

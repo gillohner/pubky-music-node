@@ -219,10 +219,18 @@ jobs:
   android-emulator:
     # The phone as a zone (tools/android-endpoint.py): the signed release APK
     # on an x86_64 emulator connects to a node on the runner, plays a track
-    # through AAudio in real time, and keeps playing in the background.
+    # through AAudio in real time, keeps playing in the background, reconnects
+    # after a restart, and shows a crash report after a crash. Android 11, 13,
+    # 14 and 15 (permissions and foreground services changed in 13 and 14). An
+    # arm64 emulator needs KVM on an arm64 runner, which GitHub's do not offer.
+    name: android-emulator (API ${{ matrix.api }})
     needs: [android, binaries]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [30, 33, 34, 35]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
@@ -245,7 +253,7 @@ jobs:
           # No sound card on the runner: the emulator's audio is consumed in real time and dropped.
           QEMU_AUDIO_DRV: none
         with:
-          api-level: 34
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
@@ -254,7 +262,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: android-emulator
+          name: android-emulator-api${{ matrix.api }}
           path: |
             /tmp/ae/*.png
             /tmp/ae/*.txt

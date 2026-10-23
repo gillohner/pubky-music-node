@@ -11,6 +11,21 @@
 //! the two meet through raw pointers.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TLS_READY: AtomicBool = AtomicBool::new(false);
+
+/// Waits (at most 5 s) for [`init_tls`] to have run on the UI thread, so the first handshake
+/// never finds the verifier missing (it panics then).
+pub async fn tls_ready() {
+    for _ in 0..100 {
+        if TLS_READY.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tracing::warn!("the TLS verifier is still not ready after 5 s");
+}
 
 /// Initialise the platform verifier from the webview's activity. Runs on
 /// the activity's thread, long before anyone can press "Sign in".
@@ -21,11 +36,13 @@ pub fn init_tls(window: &tauri::WebviewWindow) {
             let raw_ctx = activity.as_raw() as *mut c_void;
             // SAFETY: both pointers belong to the live JNI frame of this
             // callback, on this thread.
-            if unsafe { init_verifier(raw_env, raw_ctx) } {
+            let ok = crate::crash::guarded("the TLS verifier", || unsafe { init_verifier(raw_env, raw_ctx) });
+            if ok == Some(true) {
                 tracing::info!("TLS platform verifier ready");
             } else {
                 tracing::error!("TLS platform verifier failed to initialise; Pubky Ring sign-in will fail");
             }
+            TLS_READY.store(true, Ordering::Release);
         });
     });
     if let Err(e) = scheduled {
@@ -66,7 +83,12 @@ impl MulticastLock {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let scheduled = window.with_webview(move |wv| {
             wv.jni_handle().exec(move |env, activity, _webview| {
-                match take_lock(env, activity) {
+                let taken = crate::crash::guarded("the Wi-Fi multicast lock", || take_lock(env, activity));
+                let taken = taken.unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_clear();
+                }
+                match taken {
                     Ok(lock) => {
                         if let Ok(mut held) = LOCK.lock() {
                             *held = Some(lock);
@@ -148,7 +170,9 @@ pub fn start_player_service(app: &tauri::AppHandle, text: String) {
     };
     let scheduled = window.with_webview(move |wv| {
         wv.jni_handle().exec(move |env, activity, _webview| {
-            match start_service(env, activity, &text) {
+            let started = crate::crash::guarded("the player service", || start_service(env, activity, &text))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            match started {
                 Ok(()) => tracing::info!("player service started"),
                 Err(e) => {
                     // A Java exception stays pending until cleared.
@@ -204,6 +228,71 @@ fn start_service(
     env.call_static_method(
         &cls,
         "start",
+        "(Landroid/app/Activity;Ljava/lang/String;)V",
+        &[JValue::Object(activity), JValue::Object(&jtext)],
+    )?;
+    Ok(())
+}
+
+/// The share sheet for the crash report (`CrashReport.share`, tools/release/android/CrashReport.kt).
+pub fn share_text(app: &tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri::Manager;
+    let window = app.get_webview_window(crate::MAIN).ok_or("no window")?;
+    window
+        .with_webview(move |wv| {
+            wv.jni_handle().exec(move |env, activity, _webview| {
+                let r = crate::crash::guarded("sharing the crash report", || {
+                    call_static(env, activity, "CrashReport", "share", &text)
+                });
+                if !matches!(r, Some(Ok(()))) {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_describe();
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!("could not open the share sheet");
+                }
+            });
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// `<package>.<class>.<method>(Activity, String)`, loaded through the app's class loader.
+fn call_static(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    class: &str,
+    method: &str,
+    text: &str,
+) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let full = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.{class}"),
+        None => class.to_string(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let target = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let target = JClass::from(target);
+    let jtext = env.new_string(text)?;
+    env.call_static_method(
+        &target,
+        method,
         "(Landroid/app/Activity;Ljava/lang/String;)V",
         &[JValue::Object(activity), JValue::Object(&jtext)],
     )?;

@@ -40,16 +40,26 @@ class PlayerService : Service() {
         val open = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_IMMUTABLE)
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
         val n = Notification.Builder(this, CHANNEL)
-            .setSmallIcon(applicationInfo.icon)
+            // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
+            // phones refuse as a small icon ("Bad notification for startForeground", a crash).
+            .setSmallIcon(R.drawable.ic_stat_pubky_music)
             .setContentTitle("Pubky Music")
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else {
-            startForeground(1, n)
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else {
+                startForeground(1, n)
+            }
+        } catch (e: Exception) {
+            // Refused (a missing permission, a background start, a system that wants more):
+            // no background playback, but the app carries on.
+            CrashReport.write(this, "The player service could not start", android.util.Log.getStackTraceString(e))
+            stopSelf()
+            return START_NOT_STICKY
         }
         hold()
         return START_NOT_STICKY
@@ -103,7 +113,11 @@ class PlayerService : Service() {
                 activity.requestPermissions(arrayOf(NOTIFY), 7)
             }
             val i = Intent(activity, PlayerService::class.java).putExtra(EXTRA_TEXT, text)
-            activity.startForegroundService(i)
+            try {
+                activity.startForegroundService(i)
+            } catch (e: Exception) {
+                CrashReport.write(activity, "The player service was refused", android.util.Log.getStackTraceString(e))
+            }
         }
 
         @JvmStatic

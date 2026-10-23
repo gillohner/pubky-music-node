@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **The Android app: a crash report, and fixes for crashes on real phones** (owner: "just crashes on launch"; STEWARD-FIX-android-crash.md).
+  - **A crash report without adb.** An uncaught Java exception, a Rust panic, and (Android 11+) the system's own record of why the app last stopped, a native crash or a freeze included with its trace, are written to the app's files. They are also logged under `PubkyMusic`. On the next launch the app says "Pubky Music closed unexpectedly last time" and shows the report with Copy and Share. It reconnects only after Continue, so a crash while reconnecting cannot loop. Nothing is sent anywhere.
+  - **Fixed: the player notification's icon.** It was the launcher icon, an adaptive icon, which some phones refuse as a notification icon ("Bad notification for startForeground"), crashing the app when it started the player after reconnecting to a saved node. It is now a monochrome icon.
+  - **Fixed: a refused foreground service no longer crashes the app.** Starting the player service, and its `startForeground`, are caught; the app carries on without background playback and the report says why.
+  - **Fixed: steps on Android's main thread can't take the app down.** The in-app player's start, the TLS verifier's set-up, the Wi-Fi multicast lock and the player service run guarded, so a panic there becomes a report, not an abort. Connecting waits for the TLS verifier to be ready before the first handshake.
+  - **Checked and fine:** the arm64 library is 16 KB page-aligned in the APK and needs only system libraries (API 26, AAudio).
+  - **CI:** the emulator test now runs on Android 11, 13, 14 and 15. On 13+ it installs without granting anything and refuses notifications. It restarts the app with the node saved and checks the reconnect and the player service, then makes the app crash and checks the report on the next launch.
 - **Fixes from the second first-use review:**
   - Hearting an album or artist MusicBrainz doesn't know no longer fails. It's kept on this node and published once identified, like songs.
   - Playlists can be renamed and given a description (⋯ › Rename…, and Description › Add one).

@@ -11,6 +11,7 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod crash;
 mod node;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
@@ -159,6 +160,27 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     Ok(())
 }
 
+/// The crash report from last time, for the connect page (`crash.rs`).
+#[tauri::command]
+fn crash_report() -> Option<String> {
+    crash::read()
+}
+
+#[tauri::command]
+fn crash_dismiss() {
+    crash::clear();
+}
+
+/// The system share sheet (Android); elsewhere the page copies the text itself.
+#[tauri::command]
+#[allow(unused_variables)]
+fn crash_share(app: AppHandle, text: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    return android::share_text(&app, text);
+    #[cfg(not(target_os = "android"))]
+    Err("copy the report instead".into())
+}
+
 #[derive(Serialize)]
 struct Saved {
     node_url: String,
@@ -182,6 +204,9 @@ async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String
 /// Reach the node: at its address; else, on the LAN under its id (it may have a new address); else
 /// through the iroh tunnel when its record carries a key (away from home).
 async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Settings, node::Info), String> {
+    // TLS (an https node, the iroh relays, pkarr) needs the platform verifier, set up on the UI thread
+    #[cfg(target_os = "android")]
+    android::tls_ready().await;
     s.via.clear();
     let msg = match node::probe(&s).await {
         Ok(info) => {
@@ -285,6 +310,8 @@ fn qr_svg(data: &str) -> String {
 /// node record gives the address and token.
 #[tauri::command]
 async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    android::tls_ready().await;
     let hs =
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
     let flow = hs
@@ -330,6 +357,7 @@ fn forget(state: State<'_, AppState>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crash::install_hook();
     // WebKitGTK's DMA-BUF renderer crashes the web process on some Linux
     // GPU stacks (NVIDIA, some Wayland compositors); the software path is
     // reliable and fast enough for this UI. An explicit setting wins.
@@ -361,9 +389,15 @@ pub fn run() {
             discover_nodes,
             ring_connect,
             open_ring,
-            forget
+            forget,
+            crash_report,
+            crash_dismiss,
+            crash_share
         ])
         .setup(|app| {
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                crash::set_dir(dir);
+            }
             let path = app.path().app_config_dir()?.join("node.json");
             // PM_NODE/PM_TOKEN for scripts, then this app's file, then the
             // wry shell's file from before.
@@ -373,7 +407,7 @@ pub fn run() {
                 .or_else(|| settings::load(&path))
                 .or_else(|| settings::legacy_path().and_then(|p| settings::load(&p)));
             #[cfg(any(desktop, target_os = "android"))]
-            let player_port = player::start();
+            let player_port = crash::guarded("the in-app player", player::start).flatten();
             #[cfg(not(any(desktop, target_os = "android")))]
             let player_port = None;
             let shared = Arc::new(Mutex::new(initial.clone()));

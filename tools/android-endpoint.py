@@ -13,6 +13,14 @@ app registers itself under. This script forwards a host port to the phone's
 player with `adb forward` and registers that instead; the registration call
 itself is the desktop app's, tested there.
 
+Then, as a phone does on later days:
+- on Android 13+ the app is installed without granting anything, and the notification
+  permission is refused, as a cautious owner would;
+- the app is stopped and started again: it reconnects to the saved node by itself and its
+  player service starts again (the path a first-launch test never takes);
+- the app is made to crash (`am crash`): on the next launch it shows the crash report
+  ("closed unexpectedly", tools/release/android/CrashReport.kt), and Continue carries on.
+
 Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
 """
 import json
@@ -115,6 +123,21 @@ def check_status_bar():
     log(f"the node's menu (y={top}) is below the status bar (y<{max(bars)})")
 
 
+def refuse_notifications():
+    """Android 13+ asks for the notification permission when the player service starts: refuse it."""
+    def prompt():
+        return next((n for n in ui_nodes() if re.search(r'text="(Don.t allow|Don’t allow|Deny)"', n)), None)
+
+    try:
+        node = until("the notification prompt", prompt, timeout=30, every=2)
+    except RuntimeError:
+        log("no notification prompt showed")
+        return
+    x, y = center(node)
+    adb("shell", "input", "tap", str(x), str(y))
+    log("notifications refused")
+
+
 def zone_state(zid):
     return api("GET", f"/v1/zones/{zid}")
 
@@ -186,7 +209,10 @@ def run(node):
     track = until("the scan", tracks)[0]
     log(f"node up, track {track['id']}")
 
-    log(adb("install", "-r", "-g", apk).strip())
+    sdk = int(adb("shell", "getprop", "ro.build.version.sdk").strip() or 0)
+    log(f"Android API {sdk}")
+    # Android 13+: nothing granted up front; the notification prompt is refused below
+    log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
     adb("logcat", "-c")
     lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
                           stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
@@ -206,6 +232,8 @@ def run(node):
 
         until("the node's page in the app", node_page, timeout=90, every=3)
         log("the node's page is showing in the app")
+        if sdk >= 33:
+            refuse_notifications()
         check_status_bar()
         shot("2a-light")
         adb("shell", "cmd", "uimode", "night", "yes")  # the bars and the page follow to dark
@@ -245,7 +273,35 @@ def run(node):
         assert tr == "playing" and 0.8 < rate < 1.2, f"background: {rate:.2f}x ({tr})"
         shot("3-background")
         api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
-        log("PASS: the phone is a zone, plays in real time, and keeps playing in the background")
+        log("the phone is a zone, plays in real time, and keeps playing in the background")
+
+        # Started again with the node saved: it reconnects and the service starts again
+        adb("shell", "am", "force-stop", PKG)
+        (out / "logcat.txt").write_text("")
+        adb("logcat", "-c")
+        adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+        until("the node's page after a restart", node_page, timeout=90, every=3)
+        until("the player service after a restart", lambda: "player service started" in logcat(), timeout=90)
+        shot("4-restarted")
+        log("restarted: reconnected to the saved node, player service started")
+
+        # A crash: the next launch shows the report, and Continue carries on
+        crashed = subprocess.run(["adb", "shell", "am", "crash", PKG], capture_output=True, text=True, timeout=60)
+        if crashed.returncode != 0 or "Unknown command" in crashed.stdout + crashed.stderr:
+            log(f"crash report check skipped: `am crash` is not available here ({crashed.stderr.strip()})")
+        else:
+            time.sleep(3)
+            adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+            until("the crash report", lambda: any("closed unexpectedly" in n for n in ui_nodes()), timeout=60, every=2)
+            shot("5-crash-report")
+            report = adb("shell", "run-as", PKG, "cat", "files/crash-report.txt", check=False)
+            (out / "crash-report.txt").write_text(report)
+            assert "Java exception" in report or "crashed" in report, f"the report says: {report[:300]!r}"
+            log("the crash report shows on the next launch: " + report.splitlines()[0][:120] if report else "(empty)")
+            tap(lambda n: 'text="Continue"' in n, "Continue")
+            until("the node's page after the report", node_page, timeout=90, every=3)
+            log("Continue reconnects to the node")
+        log("PASS: the phone is a zone, plays in real time and in the background, survives a restart, and reports a crash")
     finally:
         lc.terminate()
 

@@ -127,5 +127,23 @@
     }
   };
 
-  invoke('saved').then((s) => (s ? reconnect(s.node_url) : connectView())).catch(fail);
+  const start = () => invoke('saved').then((s) => (s ? reconnect(s.node_url) : connectView())).catch(fail);
+
+  // A crash last time: show its report first, and reconnect only after Continue, so a crash on
+  // reconnecting cannot loop (src/crash.rs).
+  function showCrash(text) {
+    $('crash-text').textContent = text;
+    show('crash');
+    const copy = async () => {
+      try { await navigator.clipboard.writeText(text); $('crash-copy').textContent = 'Copied'; return; } catch (e) { /* older WebViews */ }
+      const r = document.createRange(); r.selectNodeContents($('crash-text'));
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      try { document.execCommand('copy'); $('crash-copy').textContent = 'Copied'; } catch (e) { $('crash-copy').textContent = 'Selected: copy it'; }
+    };
+    $('crash-copy').onclick = copy;
+    $('crash-share').onclick = () => invoke('crash_share', { text }).catch(copy);
+    $('crash-go').onclick = async () => { try { await invoke('crash_dismiss'); } catch (e) { /* carry on */ } show('crash', false); start(); };
+  }
+
+  invoke('crash_report').then((t) => (t ? showCrash(t) : start())).catch(start);
 })();
