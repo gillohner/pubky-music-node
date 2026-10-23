@@ -141,6 +141,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/home/{section}` | `?window&limit` | one Home section (`trending-songs`, `trending-albums`, `trending-artists`, `following`, `tags`, `concerts`, `podcasts`, `yours`, `new`; `tag?labels=a,b`): `{section, items, tags, note?, needs?: pubky\|location\|contact, error?}`; cached 60 s |
 | GET / PUT | `/v1/home/layout` | PUT: `{order, hidden}` (row ids) | which Home rows show and in which order; kept on the node and in the homeserver settings copy |
 | GET / POST | `/v1/smart` | POST: `{name, rules: [{field, op, value, to?}], matches: all\|any, sort, limit}` | smart playlists; `field` is `genre`, `artist`, `year`, `favourite`, `plays`, `last_played` or `tag` (your Pubky tags); `sort` is `random`, `most_played`, `least_recent`, `newest` or `title` |
+| | (smart playlist rules may also carry `seeds: [{kind: track\|artist\|album\|genre, id, label?}]` (the pool is then what the library finds similar to them), `minutes` (stop at that length, after sorting) and `exclude: {artists?, genres?, tracks?, played_within_days?}`) | | |
 | POST | `/v1/smart/preview` | the rules | `{matched, tracks}` without saving |
 | PUT / DELETE | `/v1/smart/{id}` | PUT: as POST | change or remove one |
 | GET | `/v1/smart/{id}/tracks` | | `{playlist, matched, tracks}`: its songs right now |
