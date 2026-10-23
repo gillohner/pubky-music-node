@@ -1147,6 +1147,7 @@
   // Back from TIDAL's sign-in page.
   { const p = new URLSearchParams(location.search); const j = p.get('jamendo'); if (j) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (j === 'signed_in') toast('Jamendo signed in'); else toast('Jamendo sign-in failed: ' + (p.get('message') || j), 'error'); }, 300); } }
   { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast('TIDAL signed in'); setView('sources', { source: 'tidal' }); } else toast('TIDAL sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
+  { const p = new URLSearchParams(location.search); const t = p.get('lastfm'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast(`Last.fm connected${p.get('user') ? ' · ' + p.get('user') : ''}`); setView('settings', 'accounts'); } else toast('Last.fm sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
   if (window.matchMedia && matchMedia('(max-width: 600px)').matches) search.placeholder = 'Search music';
@@ -3118,6 +3119,7 @@
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
+            + (kind === 'artist' && target.artist_id != null ? '<div id="isimilar-slot"></div>' : '')
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tags need this ${kind} to be known first (a MusicBrainz id).`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
@@ -3134,6 +3136,14 @@
           api('GET', `/item/${kind}/${encodeURIComponent(id)}/extras`).then((ex) => {
             if (state.view !== 'item' || state.viewArg.id !== id) return;
             pg.related = ex.related || []; pg.concerts = ex.concerts || [];
+            const ss = $('#isimilar-slot'); if (ss) (async () => {
+              let sim; try { sim = await api('GET', `/library/artists/${target.artist_id}/similar`); } catch { sim = null; }
+              if (!ss.isConnected) return;
+              if (!sim || !sim.artists || !sim.artists.length) { ss.remove(); return; }
+              ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar artists</h3><span class="muted small">from Last.fm</span></div><div class="chips">${sim.artists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div></section>`;
+              $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
+              $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
+            })();
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             const rs = $('#irelated-slot'); if (rs) { rs.outerHTML = (pg.related && pg.related.length ? `<section class="section" id="irelated"><div class="section-head"><h3>People who tagged this also tagged</h3></div>${itemTileGrid(pg.related.map(asTile), 'album')}</section>` : ''); }
             if (pg.related.length) bindHome($('#irelated'), { items: pg.related, tags: [] });
@@ -3337,6 +3347,7 @@
               + (pk.user ? block('Tag your whole library', 'One public tag on every identified song, so the music index matches your songs across services (goes out with the next sync).', `<div class="toolbar"><input class="input" id="bulklabel" value="library" aria-label="Tag label"><button class="btn" id="bulktag">${icon('plus')} Tag every song</button></div><div id="bulkout" class="muted small"></div>`) : '')
             ) : row('Pubky', 'Pubky is not set up on this node.', ''))
             + group('ListenBrainz', block('', '', '<div id="lbcard"><div id="lbbody"><div class="skeleton" style="height:80px"></div></div></div>'))
+            + group('Last.fm', block('', '', '<div id="lfcard"><div id="lfbody"><div class="skeleton" style="height:80px"></div></div></div>'))
             + group('Streaming services', row('TIDAL, Spotify, Deezer, Jamendo, your own servers', 'Sign in to them on Sources.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
           const discover = group('Contact', block('Your email or website', 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it. It goes only to them, and turns on what people on Pubky play.', `<div class="toolbar"><input class="input" id="contact" placeholder="you@example.org or https://your.site" value="${esc(ns.contact)}" aria-label="Your email or website"><button class="btn primary" id="contactsave">Save</button><span class="pill ${ns.discovery ? 'ok' : 'warn'}">${ns.discovery ? 'Discover on' : 'Discover off'}</span></div>`))
             + group('Concerts', block('Your city', 'For concerts near you on Home. Looked up once on OpenStreetMap; it stays on this node.', '<div class="toolbar"><input class="input" id="loccity" placeholder="City" aria-label="Your city"><button class="btn" id="locsave">Save</button><button class="btn ghost" id="locclear">Clear</button><span class="muted small" id="loccur"></span></div>'));
@@ -3457,6 +3468,30 @@
           $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
           $('#rooncheck').onclick = () => roonRun(true);
           $('#roongo').onclick = () => roonRun(false);
+          const loadLf = async () => {
+            const box = $('#lfbody'); if (!box) return;
+            let lf; try { lf = await api('GET', '/lastfm'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+            const appRow = lf.app_from === 'config' ? '<p class="muted small">This node’s Last.fm app is set in its config.</p>' : lf.configured ? `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" id="lfappforget">Forget</button></p>` : '';
+            if (!lf.configured) {
+              box.innerHTML = `<p class="muted small">Send what you play to Last.fm and see similar artists on artist pages. Last.fm gives each app its own key: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">create one</a> (any name; no callback needed), then paste its API key and shared secret. Both stay on this node; the secret only signs requests here.</p><form class="row" id="lfapp"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" style="flex:1;min-width:160px" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" style="flex:1;min-width:160px" required><button class="btn" type="submit">Save</button></form>`;
+              $('#lfapp').onsubmit = async (e) => { e.preventDefault(); const f = new FormData($('#lfapp')); try { await api('PUT', '/lastfm', { api_key: String(f.get('key') || '').trim(), api_secret: String(f.get('secret') || '').trim() }); toast('Last.fm app saved'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
+              return;
+            }
+            if (!lf.connected) {
+              box.innerHTML = appRow + `<div class="toolbar"><button class="btn primary" id="lfin">Connect Last.fm</button><span class="muted small">Opens Last.fm’s permission page; it comes back here.</span></div>`;
+              $('#lfin').onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
+            } else {
+              box.innerHTML = `<div class="toolbar"><span class="pill ok account">Connected · ${esc(lf.user || '')}</span>${lf.pending ? `<span class="pill warn" title="Last.fm did not take them yet; they go with the next play">${lf.pending} waiting</span>` : ''}</div>`
+                + (lf.problem ? `<div class="notice warn" role="status">${esc(lf.problem)}<div class="actions"><button class="btn sm" id="lfin">Sign in again</button></div></div>` : '')
+                + `<label class="check small"><input type="checkbox" id="lfsubmit" ${lf.submit ? 'checked' : ''}> Send what I play here</label>`
+                + `<div class="toolbar" style="margin-top:8px"><button class="btn sm ghost" id="lfout">Disconnect</button></div>` + appRow;
+              $('#lfsubmit').onchange = async (e) => { try { await api('PUT', '/lastfm', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to Last.fm' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); } };
+              $('#lfout').onclick = async () => { try { await api('DELETE', '/lastfm'); toast('Last.fm disconnected'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
+              const li = $('#lfin'); if (li) li.onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
+            }
+            const lg = $('#lfappforget'); if (lg) lg.onclick = async () => { try { await api('PUT', '/lastfm', { api_key: '' }); toast('Last.fm app forgotten'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
+          };
+          loadLf();
           const loadLb = async () => {
             const box = $('#lbbody'); if (!box) return;
             let lb; try { lb = await api('GET', '/listenbrainz'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }

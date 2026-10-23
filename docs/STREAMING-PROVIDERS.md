@@ -71,6 +71,7 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 ## Not offered, and why (STEWARD-PLAN step 5)
 
+- **Last.fm (scrobbling, similar artists):** official API with the owner's own API key and shared secret (Settings › Accounts › Last.fm, or `[lastfm]`, `PM_LASTFM_API_*`); the node ships no key and the secret never leaves it. Plays count like ListenBrainz's (half the track or four minutes; now-playing at the start), wait when Last.fm can't take them, and the session key is a secret in backups. Similar artists show on artist pages, matched to the library.
 - **Sign-in fallback:** when the browser can't reach the node after TIDAL's or Spotify's sign-in page (another network, an app that only allows loopback redirects), "Landed on a page that didn't load?" under the Connect button takes the address that page landed on, and the node finishes the sign-in from it (`POST /v1/sources/{tidal,spotify}/callback {url}`).
 - **Needs approval first:** Qobuz (requested by email), SoundCloud's official API (access is by application). Both have unofficial modes above instead.
 - **Apple Music:** needs a paid developer account, and MusicKit plays in the browser only, never on the node's outputs.

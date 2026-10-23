@@ -25,6 +25,7 @@ pub struct NodeConfig {
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
+    pub lastfm: LastfmConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
     /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
@@ -200,6 +201,27 @@ pub struct AcoustIdConfig {
     pub api_key: String,
 }
 
+/// Last.fm: the owner's own API key and shared secret (last.fm/api/account/create); Settings
+/// override them. `PM_LASTFM_API_KEY` / `PM_LASTFM_API_SECRET` as well. The secret never ships.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LastfmConfig {
+    pub api_key: String,
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for LastfmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastfmConfig")
+            .field("api_key", &self.api_key)
+            .field(
+                "api_secret",
+                &if self.api_secret.is_empty() { "" } else { "<set>" },
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct SpotifyConfig {
@@ -303,6 +325,7 @@ impl Default for NodeConfig {
             qobuz: QobuzConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
+            lastfm: LastfmConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
             youtube: YoutubeConfig::default(),
