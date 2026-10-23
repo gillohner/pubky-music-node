@@ -349,7 +349,7 @@ impl Default for LibraryConfig {
 }
 
 /// Network endpoints (`pm-endpoint`) this node plays to.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OutputsConfig {
     /// Endpoint addresses (`host:port`) to connect to at start, besides discovery.
@@ -371,6 +371,32 @@ pub struct OutputsConfig {
     pub airplay: bool,
     /// Discover BluOS players (Bluesound, NAD; mDNS `_musc._tcp`) and offer them as outputs.
     pub bluos: bool,
+    /// MPD servers to offer as outputs: `host`, `host:port` or `password@host:port` (port 6600
+    /// by default). MPD isn't discovered.
+    pub mpd: Vec<String>,
+}
+
+impl std::fmt::Debug for OutputsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // MPD entries may carry a password (`password@host:port`): only the address shows
+        let mpd: Vec<&str> = self
+            .mpd
+            .iter()
+            .map(|e| e.rsplit_once('@').map_or(e.as_str(), |(_, a)| a))
+            .collect();
+        f.debug_struct("OutputsConfig")
+            .field("endpoints", &self.endpoints)
+            .field("discover", &self.discover)
+            .field("discover_ms", &self.discover_ms)
+            .field("upnp", &self.upnp)
+            .field("slimproto_port", &self.slimproto_port)
+            .field("cast", &self.cast)
+            .field("snapcast", &self.snapcast)
+            .field("airplay", &self.airplay)
+            .field("bluos", &self.bluos)
+            .field("mpd", &mpd)
+            .finish()
+    }
 }
 
 impl Default for OutputsConfig {
@@ -385,6 +411,7 @@ impl Default for OutputsConfig {
             snapcast: String::new(),
             airplay: true,
             bluos: true,
+            mpd: Vec::new(),
         }
     }
 }
@@ -488,6 +515,18 @@ mod tests {
         assert_eq!(took, vec!["tidal", "contact"]);
         assert_eq!(cfg.tidal.client_secret, "old-secret");
         assert_eq!(cfg.spotify.client_id, "mine", "this node's own key wins");
+    }
+
+    #[test]
+    fn mpd_servers_parse_and_their_passwords_stay_out_of_debug() {
+        let cfg: NodeConfig =
+            toml::from_str("[outputs]\nmpd = [\"s3cret@10.0.0.9:6600\", \"music.local\"]\n").unwrap();
+        assert_eq!(cfg.outputs.mpd.len(), 2);
+        let shown = format!("{:?}", cfg.outputs);
+        assert!(
+            !shown.contains("s3cret") && shown.contains("10.0.0.9:6600"),
+            "{shown}"
+        );
     }
 
     #[test]

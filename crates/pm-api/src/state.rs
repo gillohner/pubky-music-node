@@ -109,6 +109,8 @@ pub struct NodeState {
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
     airplay: std::sync::atomic::AtomicBool,
+    /// MPD servers to play to (`[outputs] mpd`).
+    mpd: Mutex<Vec<pm_out_mpd::Server>>,
     /// Offer BluOS players (`[outputs] bluos`).
     bluos: std::sync::atomic::AtomicBool,
     /// BluOS players by output id: a zone of them only is a BluOS group.
@@ -355,6 +357,7 @@ impl NodeState {
             heos: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
+            mpd: Default::default(),
             bluos: Default::default(),
             bluos_players: Default::default(),
             renderer: Default::default(),
@@ -1119,6 +1122,65 @@ impl NodeState {
         self.airplay.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The MPD servers to offer as outputs (`[outputs] mpd`: `host`, `host:port` or
+    /// `password@host:port`); entries that don't parse are logged and skipped.
+    pub fn set_mpd(&self, entries: &[String]) {
+        let servers = entries
+            .iter()
+            .filter_map(|e| {
+                let s = pm_out_mpd::Server::parse(e);
+                if s.is_none() {
+                    tracing::warn!(
+                        "[outputs] mpd: can't read one entry (host, host:port or password@host:port)"
+                    );
+                }
+                s
+            })
+            .collect();
+        *self.mpd.lock().expect("mpd lock") = servers;
+    }
+
+    /// The configured MPD servers that answer, as outputs with zones. Blocking.
+    pub fn discover_mpd(self: &Arc<Self>) -> Vec<OutputId> {
+        let servers = self.mpd.lock().expect("mpd lock").clone();
+        let mut new = Vec::new();
+        for server in servers {
+            let name = format!(
+                "mpd-{}",
+                server
+                    .address()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(40)
+                    .collect::<String>()
+            );
+            let pull = self.pull_output(&name);
+            let out = Arc::new(pm_out_mpd::MpdOutput::new(
+                server.clone(),
+                pull,
+                self.pull_url(&name),
+            ));
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            match pm_out_mpd::Client::connect(&server) {
+                Ok(c) => {
+                    tracing::info!(server = %server.address(), version = %c.version, output = %id, "MPD server")
+                }
+                Err(e) => {
+                    tracing::info!(server = %server.address(), "MPD server not reachable now: {e}");
+                    continue;
+                }
+            }
+            let zone_name = out.name();
+            self.outputs.register(out.clone());
+            self.create_zone(&zone_name, out);
+            new.push(id);
+        }
+        new
+    }
+
     pub fn set_bluos(&self, on: bool) {
         self.bluos.store(on, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1233,6 +1295,7 @@ impl NodeState {
         new.extend(self.discover_snapcast());
         new.extend(self.discover_airplay(std::time::Duration::from_millis(1500)));
         new.extend(self.discover_bluos(std::time::Duration::from_millis(1500)));
+        new.extend(self.discover_mpd());
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;
         };

@@ -3665,6 +3665,7 @@ dependencies = [
  "pm-out-airplay",
  "pm-out-bluos",
  "pm-out-cast",
+ "pm-out-mpd",
  "pm-out-net",
  "pm-out-slimproto",
  "pm-out-snapcast",
@@ -3885,6 +3886,18 @@ dependencies = [
  "pm-model",
  "pm-zones",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "pm-out-mpd"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pm-model",
+ "pm-zones",
+ "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 
