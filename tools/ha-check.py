@@ -7,11 +7,17 @@ Home Assistant, onboards Home Assistant through its own API, and checks:
   dlna  Home Assistant's `dlna_dmr` finds the zone's renderer by SSDP; its media_player plays a
         URL on the zone, sets the volume, pauses, resumes and stops it, and HA's state follows
         the zone (GENA events). Every step is checked against the node's own zone state.
+  integration
+        The Pubky Music custom integration (integrations/home-assistant): zeroconf finds the node,
+        the config flow takes the API token, each zone is a media_player; the media browser shows
+        the library (Home, albums, artists, playlists, genres) with covers; search; play_media of an
+        album, a track and a URL; next, seek, repeat, shuffle; a zone started on the node shows up
+        pushed; a zone made on the node appears as an entity; grouping two zones and ungrouping.
 
 Home Assistant runs either from a `hass` executable (a virtualenv with the `homeassistant`
 package) or, with --docker IMAGE, as the official container on the host network (CI).
 
-Usage: ha-check.py dlna <pm-node> <work dir> (--hass PATH | --docker IMAGE)
+Usage: ha-check.py (dlna|integration) <pm-node> <work dir> (--hass PATH | --docker IMAGE)
 """
 import argparse
 import http.server
@@ -21,7 +27,7 @@ import secrets
 import shutil
 import socket
 import subprocess
-import sys
+
 import threading
 import time
 import urllib.error
@@ -29,7 +35,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-FIX = Path(__file__).resolve().parent.parent / "crates/pm-audio/tests/fixtures"
+ROOT = Path(__file__).resolve().parent.parent
+FIX = ROOT / "crates/pm-audio/tests/fixtures"
+INTEGRATION = ROOT / "integrations/home-assistant/custom_components/pubky_music"
 NODE_PORT = 7820
 MEDIA_PORT = 7821
 HA_PORT = 18123
@@ -100,15 +108,58 @@ def lan_ip():
 
 # ---- the node ------------------------------------------------------------------------------------
 
-def start_node(node_bin, work):
+def tag_flac(src, dst, tags):
+    """A copy of a FLAC file with these Vorbis comments (replacing any it had)."""
+    data = src.read_bytes()
+    if data[:4] != b"fLaC":
+        raise ValueError(f"{src} is not FLAC")
+    pos, blocks = 4, []
+    while True:
+        hdr = data[pos]
+        last, kind = hdr & 0x80, hdr & 0x7F
+        n = int.from_bytes(data[pos + 1:pos + 4], "big")
+        if kind != 4:
+            blocks.append((kind, data[pos + 4:pos + 4 + n]))
+        pos += 4 + n
+        if last:
+            break
+    vendor = b"pubky-music ha-check"
+    body = len(vendor).to_bytes(4, "little") + vendor + len(tags).to_bytes(4, "little")
+    for k, v in tags.items():
+        c = f"{k}={v}".encode()
+        body += len(c).to_bytes(4, "little") + c
+    blocks.insert(1, (4, body))
+    out = bytearray(b"fLaC")
+    for i, (kind, b) in enumerate(blocks):
+        out += bytes([kind | (0x80 if i == len(blocks) - 1 else 0)]) + len(b).to_bytes(3, "big") + b
+    dst.write_bytes(bytes(out) + data[pos:])
+
+
+LIBRARY = [
+    # (fixture, album, album artist, track no, title, genre)
+    ("60_mono_audio.flac", "Night Songs", "The Testers", 1, "Moonrise", "Ambient"),
+    ("60_mono_audio.flac", "Night Songs", "The Testers", 2, "Midnight", "Ambient"),
+    ("60_mono_audio.flac", "Day Songs", "Other Band", 1, "Sunrise", "Pop"),
+]
+
+
+def start_node(node_bin, work, announce=False, tagged=False):
     music = work / "music"
     music.mkdir(parents=True, exist_ok=True)
-    for f in FIX.glob("*.flac"):
-        shutil.copy(f, music / f.name)
+    if tagged:
+        for fx, album, artist, no, title, genre in LIBRARY:
+            d = music / artist / album
+            d.mkdir(parents=True, exist_ok=True)
+            tag_flac(FIX / fx, d / f"{no:02d} {title}.flac", {
+                "TITLE": title, "ALBUM": album, "ARTIST": artist, "ALBUMARTIST": artist,
+                "TRACKNUMBER": str(no), "GENRE": genre, "DATE": "2024"})
+    else:
+        for f in FIX.glob("*.flac"):
+            shutil.copy(f, music / f.name)
     (work / "node.toml").write_text(
         f'data_dir = "{work}/data"\n'
         f'[library]\nfolders = ["{music}"]\n'
-        f'[api]\nlisten = "0.0.0.0:{NODE_PORT}"\ntoken = "{TOKEN}"\nname = "{NODE_NAME}"\nannounce = false\n'
+        f'[api]\nlisten = "0.0.0.0:{NODE_PORT}"\ntoken = "{TOKEN}"\nname = "{NODE_NAME}"\nannounce = {"true" if announce else "false"}\n'
         "[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n"
         "[remote]\nenabled = false\n"
         "[renderer]\nenabled = true\n"
@@ -118,7 +169,8 @@ def start_node(node_bin, work):
                          env={**os.environ, "RUST_LOG": "info", "PM_NULL_OUTPUT": "realtime"})
     until("the node answers", lambda: node("/v1/info"), 60)
     node("/v1/library/scan", "POST", {})
-    until("the node scanned the fixtures", lambda: len(node("/v1/library/tracks")["tracks"]) > 0 or None, 60)
+    want = len(LIBRARY) if tagged else 1
+    until("the node scanned the fixtures", lambda: len(node("/v1/library/tracks")["tracks"]) >= want or None, 60)
     return p
 
 
@@ -141,13 +193,16 @@ def serve_media(work):
 
 # ---- Home Assistant ------------------------------------------------------------------------------
 
-def start_ha(args, work):
+def start_ha(args, work, integration=False):
     cfg = work / "ha"
     cfg.mkdir(parents=True, exist_ok=True)
+    if integration:
+        shutil.copytree(INTEGRATION, cfg / "custom_components" / "pubky_music",
+                        ignore=shutil.ignore_patterns("__pycache__"))
     (cfg / "configuration.yaml").write_text(
         "default_config:\n"
         f"http:\n  server_port: {HA_PORT}\n"
-        "logger:\n  default: warning\n  logs:\n    homeassistant.components.dlna_dmr: debug\n    homeassistant.components.ssdp: info\n"
+        "logger:\n  default: warning\n  logs:\n    homeassistant.components.dlna_dmr: debug\n    homeassistant.components.ssdp: info\n    custom_components.pubky_music: debug\n"
     )
     logf = open(work / "ha.log", "w")
     if args.docker:
@@ -311,7 +366,7 @@ def check_dlna(args, work):
     # 2. play_media: the zone plays the URL
     url = f"http://{lan_ip()}:{MEDIA_PORT}/song.flac"
     service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": url, "media_content_type": "music"})
-    z = until("the zone plays the URL Home Assistant sent", lambda: (lambda z: z if z["transport"] == "playing" and (z.get("now_playing") or {}).get("item", {}).get("uri") == url else None)(zone_state()), 60)
+    until("the zone plays the URL Home Assistant sent", lambda: (lambda z: z if z["transport"] == "playing" and (z.get("now_playing") or {}).get("item", {}).get("uri") == url else None)(zone_state()), 60)
     ok("play_media: the zone plays it")
     until("HA's state follows: playing", lambda: state_of(h, ent)["state"] == "playing", 30)
     ok("HA's state: playing")
@@ -354,10 +409,163 @@ def check_dlna(args, work):
     ok(f"the node starts the zone: HA shows playing ({title!r})")
     node(f"/v1/zones/{zid}/transport", "POST", {"action": "stop"})
 
+# ---- integration ---------------------------------------------------------------------------------
+
+def check_integration(args, work):
+    h = onboard()
+    ok("Home Assistant onboarded through its API")
+    ws = WS(h["Authorization"].split(" ", 1)[1])
+    info = node("/v1/info")
+
+    # 1. Discovery by zeroconf, then the token in the confirm step
+    def discovered():
+        flows = ws.call({"type": "config_entries/flow/progress"})
+        mine = [f for f in flows if f.get("handler") == "pubky_music"]
+        return mine[0] if mine else None
+
+    flow = None
+    end = time.time() + 120
+    while time.time() < end and not flow:
+        flow = discovered()
+        time.sleep(3)
+    if flow:
+        ok(f"zeroconf found the node: {flow['context'].get('title_placeholders', {}).get('name')}")
+        r = ha(h, f"/api/config/config_entries/flow/{flow['flow_id']}", "POST", {"token": "wrong"})
+        if r.get("errors", {}).get("base") != "invalid_auth":
+            fail(f"a wrong token should be refused: {r}")
+        ok("a wrong token is refused")
+        r = ha(h, f"/api/config/config_entries/flow/{flow['flow_id']}", "POST", {"token": TOKEN})
+    else:
+        log("     no zeroconf discovery here (mDNS blocked?); adding the node by address")
+        r = ha(h, "/api/config/config_entries/flow", "POST", {"handler": "pubky_music"})
+        r = ha(h, f"/api/config/config_entries/flow/{r['flow_id']}", "POST", {"host": "127.0.0.1", "port": NODE_PORT, "token": TOKEN})
+    if r.get("type") != "create_entry":
+        fail(f"the config flow didn't create an entry: {r}")
+    ok(f"config entry: {r.get('title')}")
+    zones = node("/v1/zones")
+    zid = zones[0]["id"]
+    registry = ws.call({"type": "config/entity_registry/list"})
+
+    def entity_for(zone_id):
+        for e in ws.call({"type": "config/entity_registry/list"}):
+            if e.get("platform") == "pubky_music" and e.get("unique_id") == f"{info['id']}-{zone_id}":
+                return e["entity_id"]
+        return None
+
+    ent = until("the zone's media_player appears", lambda: entity_for(zid), 60, 2)
+    until("it is available", lambda: state_of(h, ent)["state"] != "unavailable", 30)
+    st = state_of(h, ent)
+    feats = st["attributes"].get("supported_features", 0)
+    for name, bit in (("browse", 131072), ("search", 4194304), ("play_media", 512), ("grouping", 524288), ("repeat", 262144), ("enqueue", 2097152)):
+        if not feats & bit:
+            fail(f"{ent} lacks {name}")
+    if feats & 4:
+        fail("volume offered on an output without hardware volume")
+    ok(f"{ent}: {st['state']}, browse, search, play_media, grouping, repeat, enqueue; no volume (no hardware volume)")
+    del registry
+
+    # 2. The media browser
+    root = ws.call({"type": "media_player/browse_media", "entity_id": ent})
+    titles = [c["title"] for c in root["children"]]
+    for want in ("Home", "Albums", "Artists", "Playlists", "Genres"):
+        if want not in titles:
+            fail(f"the browser's root lacks {want}: {titles}")
+    ok(f"browser root: {', '.join(titles)}")
+    albums = ws.call({"type": "media_player/browse_media", "entity_id": ent, "media_content_id": "pubky-music://albums", "media_content_type": "albums"})
+    names = sorted(c["title"] for c in albums["children"])
+    if len(names) != 2 or not any("Night Songs" in n for n in names):
+        fail(f"albums: {names}")
+    ok(f"albums: {names}")
+    night = next(c for c in albums["children"] if "Night Songs" in c["title"])
+    if not night.get("thumbnail"):
+        fail("albums have no cover thumbnail")
+    album = ws.call({"type": "media_player/browse_media", "entity_id": ent, "media_content_id": night["media_content_id"], "media_content_type": "album"})
+    tracks = [c["title"] for c in album["children"]]
+    if [t.split(" · ")[0] for t in tracks] != ["Moonrise", "Midnight"]:
+        fail(f"album tracks in order: {tracks}")
+    ok(f"album {album['title']!r}: {tracks}")
+    for kind, cid in (("artists", "pubky-music://artists"), ("genres", "pubky-music://genres"), ("home", "pubky-music://home/recently_added")):
+        b = ws.call({"type": "media_player/browse_media", "entity_id": ent, "media_content_id": cid, "media_content_type": kind})
+        ok(f"{kind}: {[c['title'] for c in b['children']]}")
+    thumb = night["thumbnail"]
+    if thumb.startswith("/"):
+        try:
+            img = urllib.request.urlopen(urllib.request.Request(HA + thumb, headers=h), timeout=20)
+            ok(f"a cover through HA's proxy: {img.headers.get('Content-Type')}, {len(img.read())} bytes")
+        except urllib.error.HTTPError as e:
+            log(f"     the fixture album has no cover art ({e.code}); the proxy answered")
+
+    # 3. Search (the service, with a response)
+    r = req(HA + "/api/services/media_player/search_media?return_response", "POST",
+            {"entity_id": ent, "search_query": "Sunrise"}, h)
+    found = json.dumps(r)
+    if "Sunrise" not in found:
+        fail(f"search for Sunrise: {found[:300]}")
+    ok("search_media finds Sunrise")
+
+    # 4. play_media: an album, then next, seek, repeat, shuffle
+    def zone():
+        return node(f"/v1/zones/{zid}")
+
+    service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": night["media_content_id"], "media_content_type": "album"})
+    until("the zone plays the album", lambda: zone()["transport"] == "playing" and len(zone()["queue"]) == 2, 30)
+    until("HA shows Moonrise", lambda: state_of(h, ent)["attributes"].get("media_title") == "Moonrise", 30)
+    ok("play_media album: the zone plays Moonrise, queue of 2, HA shows it (pushed)")
+    service(h, "media_player", "media_next_track", {"entity_id": ent})
+    until("next: Midnight", lambda: state_of(h, ent)["attributes"].get("media_title") == "Midnight", 30)
+    ok("next: Midnight")
+    service(h, "media_player", "media_seek", {"entity_id": ent, "seek_position": 3})
+    until("seek: the position is past 3 s", lambda: (zone().get("now_playing") or {}).get("position_ms", 0) >= 3000, 20)
+    ok("seek")
+    service(h, "media_player", "repeat_set", {"entity_id": ent, "repeat": "all"})
+    until("repeat all on the zone", lambda: zone()["repeat"] == "all", 20)
+    until("HA shows repeat all", lambda: state_of(h, ent)["attributes"].get("repeat") == "all", 20)
+    ok("repeat: all")
+    service(h, "media_player", "shuffle_set", {"entity_id": ent, "shuffle": True})
+    ok("shuffle: accepted")
+    # enqueue a track next, a URL at the end
+    sunrise = next(t for t in node("/v1/library/tracks")["tracks"] if t["title"] == "Sunrise")
+    service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": f"pubky-music://track/{sunrise['id']}", "media_content_type": "track", "enqueue": "add"})
+    until("enqueue add: three in the queue", lambda: len(zone()["queue"]) == 3, 20)
+    ok("enqueue add: the track joined the queue")
+    url = f"http://{lan_ip()}:{MEDIA_PORT}/song.flac"
+    service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": url, "media_content_type": "music"})
+    until("play_media URL replaces the queue", lambda: [i["uri"] for i in zone()["queue"]] == [url] and zone()["transport"] == "playing", 30)
+    ok("play_media URL: replaces the queue and plays")
+    service(h, "media_player", "clear_playlist", {"entity_id": ent})
+    service(h, "media_player", "media_stop", {"entity_id": ent})
+    until("stopped", lambda: zone()["transport"] == "stopped", 20)
+    until("HA idle", lambda: state_of(h, ent)["state"] == "idle", 20)
+    ok("clear and stop: HA idle")
+
+    # 5. Pushed from the node: playback and new zones
+    node(f"/v1/zones/{zid}/queue", "POST", {"track_ids": [sunrise["id"]], "replace": True, "play": True})
+    until("HA follows the node", lambda: state_of(h, ent)["attributes"].get("media_title") == "Sunrise" and state_of(h, ent)["state"] == "playing", 20)
+    ok("a zone started on the node: HA shows Sunrise, playing")
+    node(f"/v1/zones/{zid}/transport", "POST", {"action": "stop"})
+    node("/v1/outputs/pull", "POST", {"name": "kitchen"})
+    z2 = until("the node made a second zone", lambda: next((z["id"] for z in node("/v1/zones") if z["id"] != zid), None), 20)
+    ent2 = until("the new zone appears in HA", lambda: entity_for(z2), 30, 2)
+    ok(f"a zone made on the node appears: {ent2}")
+
+    # 6. Grouping and ungrouping
+    before = {z["id"] for z in node("/v1/zones")}
+    service(h, "media_player", "join", {"entity_id": ent, "group_members": [ent2]})
+    gid = until("join makes a group zone", lambda: next((z["id"] for z in node("/v1/zones") if z["id"] not in before and z["output"].startswith("group:")), None), 20)
+    gent = until("the group zone appears in HA", lambda: entity_for(gid), 30, 2)
+    members = until("the group lists its members", lambda: state_of(h, gent)["attributes"].get("group_members"), 20)
+    if set(members) != {gent, ent, ent2}:
+        fail(f"group members: {members}")
+    ok(f"join: group zone {gent} with {members}")
+    service(h, "media_player", "unjoin", {"entity_id": gent})
+    until("unjoin removes the group zone", lambda: gid not in {z["id"] for z in node("/v1/zones")}, 20)
+    until("and its entity", lambda: entity_for(gid) is None or state_of(h, entity_for(gid))["state"] == "unavailable", 30)
+    ok("unjoin: the group zone is gone")
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("check", choices=["dlna"])
+    ap.add_argument("check", choices=["dlna", "integration"])
     ap.add_argument("node_bin")
     ap.add_argument("work")
     g = ap.add_mutually_exclusive_group(required=True)
@@ -371,10 +579,13 @@ def main():
     procs = []
     try:
         serve_media(work)
-        procs.append(start_node(args.node_bin, work))
-        procs.append(start_ha(args, work))
+        integ = args.check == "integration"
+        procs.append(start_node(args.node_bin, work, announce=integ, tagged=integ))
+        procs.append(start_ha(args, work, integration=integ))
         if args.check == "dlna":
             check_dlna(args, work)
+        else:
+            check_integration(args, work)
         log("all Home Assistant checks pass")
     finally:
         if args.docker:

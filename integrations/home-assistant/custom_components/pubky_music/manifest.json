@@ -1,0 +1,19 @@
+{
+  "domain": "pubky_music",
+  "name": "Pubky Music",
+  "codeowners": ["@gillohner"],
+  "config_flow": true,
+  "dependencies": ["media_source"],
+  "documentation": "https://github.com/gillohner/pubky-music-node/tree/main/integrations/home-assistant",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/gillohner/pubky-music-node/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_pubky-music._tcp.local.",
+      "properties": { "role": "node" }
+    }
+  ]
+}

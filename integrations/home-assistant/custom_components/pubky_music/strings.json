@@ -1,0 +1,39 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Connect a Pubky Music node",
+        "description": "The node's address and port (as in its web UI) and its API token (Settings › Node, or `[api] token` in node.toml).",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Pubky Music node found",
+        "description": "Add {name} at {host}? Enter its API token (Settings › Node, or `[api] token` in node.toml).",
+        "data": {
+          "token": "API token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "New API token",
+        "description": "The node refused the token. Enter its current API token.",
+        "data": {
+          "token": "API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't reach the node at that address.",
+      "invalid_auth": "The node refused the API token."
+    },
+    "abort": {
+      "already_configured": "This node is already set up.",
+      "not_a_node": "That is a Pubky Music endpoint, not a node.",
+      "reauth_successful": "The new token works."
+    }
+  }
+}
