@@ -1628,8 +1628,17 @@ pub(crate) async fn on_pubky_for(s: &NodeState, uri: &str) -> Option<OnPubky> {
         uri: uri.to_string(),
         indexed: true,
         taggers: view.distinct_taggers() as u64,
+        faces: faces_of(&view),
         tags,
     })
+}
+
+/// The first few people behind each label of a resource (the faces on its tag chips).
+fn faces_of(view: &pm_pubky::nexus::ResourceView) -> std::collections::BTreeMap<String, Vec<String>> {
+    view.tags
+        .iter()
+        .map(|t| (t.label.clone(), t.taggers.iter().take(6).cloned().collect()))
+        .collect()
 }
 
 /// A row for a link nobody describes yet: its service, never the URL as a name.
@@ -1860,6 +1869,7 @@ pub(crate) async fn on_pubky(
                 uri: url,
                 indexed: true,
                 taggers: view.distinct_taggers() as u64,
+                faces: faces_of(&view),
                 tags,
             }))
         }
@@ -1868,6 +1878,7 @@ pub(crate) async fn on_pubky(
             indexed: false,
             tags: Vec::new(),
             taggers: 0,
+            faces: Default::default(),
         })),
         Err(e) => Err(upstream(e)),
     }

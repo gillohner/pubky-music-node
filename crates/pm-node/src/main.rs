@@ -354,6 +354,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         state.set_homeserver_files_dir(PathBuf::from(files_dir.trim()));
     }
     pm_api::storage::spawn_autosave(&state);
+    pm_api::webdav::spawn_rescans(&state);
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     state.set_return_page(&cfg.auth.return_page);
     // Tests point TIDAL at a mock (tools/ui-tidal-login.js); never needed in use

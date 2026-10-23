@@ -979,3 +979,66 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .to-global { margin: 6px 0 0; }
 .tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }
 .hero .art.monogram { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.88); font-size: 64px; font-weight: 700; letter-spacing: 0.02em; }
+/* People on tags: faces of who tagged, stacked */
+.faces { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 2px 4px; cursor: pointer; color: var(--muted); font: inherit; border-radius: 999px; }
+.faces:hover { background: var(--surface-2); color: var(--fg); }
+.facestack { display: inline-flex; }
+.facestack .face + .face { margin-left: -7px; }
+.face { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 2px solid var(--bg); flex: none; }
+.face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
+.faces-line { gap: 8px; }
+.hero.person .blurb { max-width: 60ch; }
+/* Phones (UX review #2): a bottom bar (Home, Search, Library, Queue) and a one-row mini player
+   above it (cover and title, play/pause, zone); the full transport lives in Now playing */
+.bottomnav { display: none; }
+.np-transport { display: none; }
+@media (max-width: 720px) {
+  .shell { grid-template-rows: minmax(0, 1fr) auto auto; grid-template-areas: "content" "player" "bnav"; }
+  .bottomnav { grid-area: bnav; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
+  .bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
+  .bnav .ic { width: 22px; height: 22px; }
+  .bnav.on { color: var(--accent-strong); }
+  .bnav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .player { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto; align-items: center; min-height: 64px; padding: 6px 10px; gap: 8px; }
+  .player-center { grid-column: auto; order: 0; }
+  .player-center .seek { display: none; }
+  .player-center .transport > :not(#toggle) { display: none; }
+  .player-right .quality, .player-right .jobchip .jc-text { display: none; }
+  .player .np-art { width: 44px; height: 44px; }
+  body.np-open .player { display: none; }
+  .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+  .np-transport .icon-btn { width: 44px; height: 44px; }
+  .np-transport .icon-btn.play { width: 56px; height: 56px; }
+  /* Now playing fills the screen down to the bottom bar; seek and transport right under the title */
+  body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
+  .np-meta { display: flex; flex-direction: column; }
+  .np-meta .np-progress { order: 1; }
+  .np-meta .np-transport { order: 2; margin-bottom: 14px; }
+  .np-meta .np-pubky { order: 3; }
+  .np-meta .path { order: 4; }
+  .np-meta > :not(.np-progress):not(.np-transport):not(.np-pubky):not(.path) { order: 0; }
+}
+/* Menus as a bottom sheet on phones; the playlist picker */
+.popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
+.picker { max-height: 50vh; overflow: auto; margin: 10px 0; }
+.picker .list-row { width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: var(--fg); cursor: pointer; }
+.picker .list-row:first-child { border-top: 0; }
+.picker .list-row:hover { background: var(--surface-2); }
+/* Search: one scrolling row of sources on phones */
+@media (max-width: 720px) {
+  .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; }
+  .scopechips::-webkit-scrollbar { display: none; }
+  .scopechips .chip { flex: none; }
+}
+/* Library list controls: one compact row */
+.listbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 14px; }
+.listbar select.input { width: auto; padding: 4px 8px; font-size: 13px; height: auto; margin-left: 4px; }
+.azbar { display: flex; flex-wrap: wrap; gap: 2px; }
+.az { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; min-width: 22px; height: 26px; border-radius: 6px; cursor: pointer; }
+.az:hover { background: var(--surface-2); color: var(--fg); }
+.az.on { background: var(--accent-soft); color: var(--accent-strong); }
+@media (max-width: 720px) { .azbar { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; } }
+/* Playlist art: a 2×2 mosaic of its album covers */
+.art.mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 0; }
+.art.mosaic img { position: static; width: 100%; height: 100%; object-fit: cover; }
+.art.pl-thumb { width: 44px; height: 44px; flex: none; border-radius: 6px; font-size: 13px; }

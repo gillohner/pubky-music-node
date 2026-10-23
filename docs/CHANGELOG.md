@@ -2,8 +2,24 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-23
+
+- **Playlists have real art** (UX review #8): the first four album covers of their songs as a 2×2 mosaic, one cover when there's only one, else their initials on a gradient. This applies in the list, on the page and on shared playlists; there are no more empty colour squares. `PlaylistSummary.covers` lists them.
+- **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
+  - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.
+  - **Menus:** "Add to playlist…" opens one picker (find, New playlist, recent first) instead of listing every playlist. A song's menu also has Favourite, Start radio (on a node zone) and Go to song page. "Go to album" no longer appears on that album's own page. On phones menus open as a sheet from the bottom, and a long-press (or right-click) on a song row opens its menu.
+  - **Search:** a Top result appears only when it really matches the words you typed; otherwise "No exact match. The closest results are below." Groups come in the order Artists, Albums, Songs (six, then "See all"), Playlists. On phones the source chips are one scrolling row.
+  - **The browser's queue survives a reload,** streamed songs included (only library songs did). It also keeps the song in the bar and where it was, ready to play on. Up next and the queue show no "0:00" for songs whose length isn't known.
+  - **Albums and Artists:** sort (name, artist, year, recently added; artists by name, most albums, recently added), a Favourites toggle for albums, and an A–Z jump on long lists. The choice is remembered in this browser.
+- **People on Pubky** (owner: "use nexus to fetch avatar of people and profile for tags"; STEWARD-UX-PEOPLE.md).
+  - **Faces on tags:** every tag chip on an item page shows who tagged it (up to three faces, then "+N"), and "N people tagged this" shows their faces. Tapping either lists them, marked "you" or "you follow", each opening their page.
+  - **`/person/<key>` pages:** avatar, name, bio, status and links from the person's own pubky.app profile (through Nexus, else straight from their homeserver), "follows you" and the counts. Below: the tags they use on music, what they tagged recently (Pinakes), and the playlists they share. Pasting a Pubky key into search opens their page.
+  - **Follow** writes the standard `/pub/pubky.app/follows/<key>` on your homeserver, the one their other Pubky apps already read. The node never writes a profile of its own.
+  - Profiles are fetched in one Nexus call per page and kept an hour; avatars are kept on the node a day, so browsers never ask Nexus. API: `GET /v1/profiles?ids=`, `GET /v1/profiles/<key>`, `GET /v1/profiles/<key>/avatar`, `PUT`/`DELETE /v1/profiles/<key>/follow`.
+
 ## 2026-10-22
 
+- **WebDAV shares are library folders** (Nextcloud, ownCloud, a NAS; owner-approved list §6.4). Settings › Library › WebDAV shares takes the folder's address and a user and password. The node scans the share like a folder, fetching only each song's tags with range requests, and plays songs from the share in any zone or the browser; nothing is copied. Shares are read again every 6 hours or with Rescan. Removing one takes its songs out of the library and leaves the files alone. The password stays in the node. In `pm-library` this adds `tags::probe_and_read_from` (the same probe on any seekable source) and `Scanner::scan_remote` (a scan over a listing), as agreed with the node agent. Tested in CI against a real WebDAV server (WsgiDAV): a wrong password refused, both songs scanned, a zone playing to the end, a byte-identical browser stream, a deleted file gone after a rescan, the share removed with its songs.
 - **Radio, podcasts, Plex and Audiobookshelf respect the Sources on/off switch.** While one is off, its own routes answer 404 "… is turned off on Sources", as search and items already did. Its settings stay readable, so the tab can show or clear a connection. Podcast feed refreshes, podcast positions and Audiobookshelf progress reports pause.
 - **Adding music, and saving without a "Sync now"** (STEWARD-BUNDLED-HOMESERVER.md §7, the plumbing; the UI is the node agent's).
   - **Upload files from the browser:** resumable, a file at a time in 4 MiB chunks; a wrong offset answers with the one to resume from. Content the homeserver already has is not sent again when the page gives its BLAKE3.

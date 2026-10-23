@@ -541,6 +541,9 @@ pub struct PlaylistSummary {
     pub visibility: String,
     /// Pushed to the homeserver since the last edit.
     pub synced: bool,
+    /// Up to four distinct album covers of its songs in the library: the playlist's mosaic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1385,6 +1388,9 @@ pub struct OnPubky {
     pub tags: Vec<(String, u64)>,
     /// Distinct people across all labels (from the paged tagger lists).
     pub taggers: u64,
+    /// Who used each label (raw z32 ids, the first few): the faces on a tag chip.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub faces: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

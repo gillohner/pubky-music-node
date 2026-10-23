@@ -213,6 +213,20 @@ jobs:
       - if: failure()
         working-directory: deploy/bundle
         run: docker compose ps -a && docker compose logs --no-color --tail 80
+  webdav:
+    # A WebDAV share as a library root against a real WebDAV server (WsgiDAV, pinned), with a
+    # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 -m venv /tmp/dav && /tmp/dav/bin/pip install -q wsgidav==4.3.3 cheroot==11.1.2
+      - run: cargo build -p pm-node
+      - run: python3 -I tools/webdav-source.py target/debug/pm-node /tmp/dav/bin/wsgidav /tmp/webdav
+      - if: failure()
+        run: tail -50 /tmp/webdav/node.log /tmp/webdav/dav.log
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04

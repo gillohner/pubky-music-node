@@ -111,10 +111,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Settings carries the Subsonic jukebox zone picker.
   w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(900);
   if (!w.document.querySelector('#jukeboxzone')) errors.push('no jukebox zone picker in Settings');
-  // Track ⋯ menu opens with playlist entries.
+  // Track ⋯ menu opens with "Add to playlist…" (one picker, not every playlist; UX review #3).
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
   const more = w.document.querySelector('.track [data-act="more"]');
-  if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('New playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
+  if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('Add to playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
   // Discover: the chart tabs render; with a contact set the rows carry site badges and a details menu.
   // Home replaces Discover: its sections render (each on its own).
   w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);

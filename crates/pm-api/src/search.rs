@@ -414,7 +414,7 @@ pub(crate) fn hash_tags(q: &str) -> Vec<String> {
         .collect()
 }
 
-fn card_hit(c: &pm_pubky::pinakes::Card) -> Option<SearchHit> {
+pub(crate) fn card_hit(c: &pm_pubky::pinakes::Card) -> Option<SearchHit> {
     if !c.is_ok() {
         return None;
     }

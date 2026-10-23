@@ -93,7 +93,30 @@ fn summary(row: &MusicPostRow, p: &Playlist) -> PlaylistSummary {
         updated_at: p.updated_at,
         visibility: row.visibility.clone(),
         synced: row.synced_at.is_some_and(|s| s >= row.updated_at),
+        covers: Vec::new(),
     }
+}
+
+/// The first four distinct album covers among a playlist's songs in the library (its mosaic).
+fn covers(lib: &Library, row_id: &str, p: &Playlist) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let albums = p
+        .items
+        .iter()
+        .take(60)
+        .filter_map(|it| resolve(lib, it))
+        .chain(local_tracks(lib, row_id))
+        .filter_map(|t| t.album.and_then(|a| a.id));
+    for a in albums {
+        let u = format!("/v1/library/albums/{a}/cover");
+        if !out.contains(&u) {
+            out.push(u);
+            if out.len() == 4 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Library tracks as playlist items, and the ids of those without a canonical identity: those
@@ -194,6 +217,7 @@ fn detail(lib: &Library, row: &MusicPostRow, p: &Playlist) -> PlaylistDetail {
     let local_tracks = local_tracks(lib, &row.id);
     let mut summary = summary(row, p);
     summary.items += local_tracks.len();
+    summary.covers = covers(lib, &row.id, p);
     PlaylistDetail {
         summary,
         playlist: p.clone(),
@@ -231,6 +255,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Playl
         if let Ok((row, p)) = load(&lib, &row.id) {
             let mut sm = summary(&row, &p);
             sm.items += local_ids(&lib, &row.id).len();
+            sm.covers = covers(&lib, &row.id, &p);
             out.push(sm);
         }
     }
