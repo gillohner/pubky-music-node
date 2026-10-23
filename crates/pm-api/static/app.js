@@ -1256,6 +1256,32 @@
     const line = $('[data-taggers]', box.closest('section') || box);
     if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
+  // Settings › Library › Add a WebDAV share: the folder's address, user and password; the node
+  // checks it, keeps it and scans it (POST /library/webdav).
+  const webdavDialog = () => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>Add a WebDAV share</h2><p class="muted">A music folder on Nextcloud, ownCloud or a NAS. The node reads it over the network and plays from it; nothing is copied.</p>
+      <label class="field"><span>Folder address</span><input class="input" id="wdurl" placeholder="https://cloud.example.org/remote.php/dav/files/me/Music/" autocomplete="off"></label>
+      <label class="field"><span>User name</span><input class="input" id="wduser" autocomplete="username"></label>
+      <label class="field"><span>Password or app password</span><input class="input" id="wdpass" type="password" autocomplete="current-password"></label>
+      <label class="field"><span>Name (optional)</span><input class="input" id="wdname" placeholder="NAS"></label>
+      <p class="muted small" id="wdmsg"></p><div class="toolbar"><button class="btn primary" id="wdadd">Add share</button><button class="btn ghost" data-wdclose>Cancel</button></div>`;
+    document.body.appendChild(d);
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack, added) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(added || null); };
+    transients.push(tr); pushTransient();
+    $('[data-wdclose]', d).onclick = () => done();
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    $('#wdadd', d).onclick = async () => {
+      const b = $('#wdadd', d); b.disabled = true; $('#wdmsg', d).innerHTML = '<span class="spin"></span> Checking the share…';
+      try {
+        const sh = await api('POST', '/library/webdav', { url: $('#wdurl', d).value.trim(), user: $('#wduser', d).value.trim(), password: $('#wdpass', d).value, name: $('#wdname', d).value.trim() || undefined });
+        done(false, sh);
+      } catch (e) { b.disabled = false; $('#wdmsg', d).textContent = e.message; }
+    };
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    $('#wdurl', d).focus();
+  });
   // "Link another source…": candidates with what tells them apart and the evidence (same
   // length, ISRC, your album); a different artist's recording is never offered as the same.
   const linkSourceDialog = (pg, kind, id, matchRef) => new Promise((resolve) => {
@@ -2730,6 +2756,7 @@
           const info = await api('GET', '/info'); state.info = info;
           const outs = await api('GET', '/outputs');
           const folders = await api('GET', '/library/folders').catch(() => []);
+          const shares = await api('GET', '/library/webdav').catch(() => []);
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           if (state.view !== 'settings') return;
@@ -2748,6 +2775,8 @@
             (folders.length ? folders.map(([fp, present]) => row(`<code class="path">${esc(fp)}</code>`, present ? '' : 'Not found on this computer', `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`)).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
             + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
             + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
+            + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
+              + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`))
             + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
             + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then how it sounds (AcoustID), with the folder as the album. Unsure matches wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
           state.devOutputs = !!ns.dev_outputs;
@@ -2813,6 +2842,9 @@
           const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
           const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
+          $('#wdopen').onclick = async () => { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); render(); } };
+          $$('[data-wd-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/webdav/${b.dataset.wdScan}/scan`); toast('Reading the share again'); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
           $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
           $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'tracks')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
           renderIdentify();

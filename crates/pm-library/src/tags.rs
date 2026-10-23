@@ -158,7 +158,70 @@ fn probe_symphonia(path: &Path, ext: &str) -> Result<(FileProbe, TagSet)> {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    probe_media(path, ext, Box::new(file), &|| id3::Tag::read_from_path(path))
+}
+
+/// A file the scanner reads from somewhere other than the local disk (a WebDAV share):
+/// seekable, with a known length. Tags sit at the start (and ID3 in WAV/AIFF at a known
+/// chunk), so a ranged reader fetches only those parts.
+pub trait RemoteRead: std::io::Read + std::io::Seek + Send + Sync {
+    fn byte_len(&self) -> Option<u64>;
+}
+
+struct RemoteSource(Box<dyn RemoteRead>);
+
+impl std::io::Read for RemoteSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Seek for RemoteSource {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl symphonia::core::io::MediaSource for RemoteSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        self.0.byte_len()
+    }
+}
+
+/// [`probe_and_read`] for a remote file: `name` gives the extension (and names it in errors);
+/// `open` opens it, once for the probe and once more for an ID3 tag. DSD files are local only.
+pub fn probe_and_read_from(
+    name: &Path,
+    open: &dyn Fn() -> std::io::Result<Box<dyn RemoteRead>>,
+) -> Result<(FileProbe, TagSet)> {
+    let ext = extension(name).ok_or_else(|| LibraryError::Unsupported(name.to_path_buf()))?;
+    if !matches!(
+        ext.as_str(),
+        "flac" | "m4a" | "alac" | "wav" | "wave" | "aif" | "aiff" | "mp3" | "ogg" | "oga"
+    ) {
+        return Err(LibraryError::Unsupported(name.to_path_buf()));
+    }
+    let src = open().map_err(|e| LibraryError::Io {
+        path: name.to_path_buf(),
+        source: e,
+    })?;
+    probe_media(name, &ext, Box::new(RemoteSource(src)), &|| {
+        let r = open().map_err(id3::Error::from)?;
+        id3::Tag::read_from2(r)
+    })
+}
+
+/// The probe itself, on any media source; `id3` reads the file's ID3 tag (WAV, AIFF, MP3).
+fn probe_media(
+    path: &Path,
+    ext: &str,
+    source: Box<dyn symphonia::core::io::MediaSource>,
+    id3: &dyn Fn() -> std::result::Result<id3::Tag, id3::Error>,
+) -> Result<(FileProbe, TagSet)> {
+    let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
     hint.with_extension(ext);
     let bad = |reason: String| LibraryError::Probe {
@@ -236,7 +299,7 @@ fn probe_symphonia(path: &Path, ext: &str) -> Result<(FileProbe, TagSet)> {
 
     // WAV/AIFF/MP3: the ID3v2 tag is authoritative for identifiers.
     if matches!(container.as_str(), "wav" | "aiff" | "mp3") {
-        match id3::Tag::read_from_path(path) {
+        match id3() {
             Ok(t) => tags.merge_from(from_id3(&t)),
             Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => {}
             Err(e) => tracing::warn!(path = %path.display(), "unreadable ID3 chunk: {e}"),
