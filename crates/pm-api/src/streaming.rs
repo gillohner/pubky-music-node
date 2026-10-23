@@ -26,7 +26,42 @@ pub trait StreamingService: Send + Sync {
     async fn artist(&self, _s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
         Err(ApiError::not_found(format!("no artist {id} on this source")))
     }
+    /// What the source can do, declared (docs/compare-music-assistant.md, "port these" #14), so
+    /// the app shows only that: a subset of [`FEATURES`].
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play"]
+    }
+    /// How settled the source is: one of [`STAGES`].
+    fn stage(&self) -> &'static str {
+        "stable"
+    }
 }
+
+/// Every feature a source may declare:
+/// - `search`: its own search (the scoped search and the Sources tab);
+/// - `play`: its tracks play on zones or in the browser;
+/// - `connect`: plays on the service's own devices, not through the node (Spotify Connect);
+/// - `artists`: artist pages;
+/// - `library`: the signed-in user's collection or likes, with an import as favourites;
+/// - `playlists`: the user's playlists, with an import as Pubky playlists;
+/// - `downloads`: files the user owns can be downloaded into the library;
+/// - `lyrics`: lyrics for its tracks;
+/// - `scrobble`: plays are reported back to the service.
+pub const FEATURES: &[&str] = &[
+    "search",
+    "play",
+    "connect",
+    "artists",
+    "library",
+    "playlists",
+    "downloads",
+    "lyrics",
+    "scrobble",
+];
+
+/// `stable` (an official API we expect to keep working), `beta` (new, or an API still moving) and
+/// `unofficial` (a private API the service has not approved; it can stop working at any time).
+pub const STAGES: &[&str] = &["stable", "beta", "unofficial"];
 
 /// The built-in services, in display order.
 pub fn services() -> Vec<Box<dyn StreamingService>> {
@@ -70,6 +105,21 @@ pub struct SourceRow {
     #[serde(flatten)]
     pub info: SourceInfo,
     pub enabled: bool,
+    /// What it can do, from [`FEATURES`]; the app shows only these.
+    pub features: Vec<&'static str>,
+    /// One of [`STAGES`].
+    pub stage: &'static str,
+}
+
+impl SourceRow {
+    pub(crate) fn of(svc: &dyn StreamingService, s: &NodeState, enabled: bool) -> Self {
+        Self {
+            info: svc.info(s),
+            enabled,
+            features: svc.features().to_vec(),
+            stage: svc.stage(),
+        }
+    }
 }
 
 /// `GET /v1/sources`.
@@ -77,10 +127,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Sourc
     Ok(Json(
         services()
             .iter()
-            .map(|svc| SourceRow {
-                info: svc.info(&s),
-                enabled: s.source_enabled(svc.id()),
-            })
+            .map(|svc| SourceRow::of(svc.as_ref(), &s, s.source_enabled(svc.id())))
             .collect(),
     ))
 }
@@ -101,10 +148,7 @@ pub(crate) async fn set_enabled(
     s.set_source_enabled(svc.id(), b.enabled)
         .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::search::forget_answers();
-    Ok(Json(SourceRow {
-        info: svc.info(&s),
-        enabled: b.enabled,
-    }))
+    Ok(Json(SourceRow::of(svc.as_ref(), &s, b.enabled)))
 }
 
 /// For a source's own routes: 404 "… is turned off on Sources" while it is off.

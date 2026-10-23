@@ -223,6 +223,10 @@ impl StreamingService for Deezer {
         true
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "artists"]
+    }
+
     fn info(&self, _s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),
