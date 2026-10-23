@@ -185,6 +185,8 @@ Open Sources › TIDAL › Connect TIDAL.
   in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
   entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer portal is not
   a device client and won't work there).
+- **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
+  you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
   always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one
