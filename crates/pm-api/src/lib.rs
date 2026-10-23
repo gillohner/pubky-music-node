@@ -44,6 +44,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod listenbrainz;
+pub mod lrclib;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
@@ -204,6 +205,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/lyrics", get(lrclib::get))
         .route("/library/tracks/{id}/versions", get(track_versions))
         .route("/library/albums/{id}/versions", get(album_versions))
         .route("/backup", get(backup::get_backup).post(backup::post_backup))
@@ -1682,7 +1684,22 @@ pub(crate) async fn album_versions(
 
 /// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
 async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Lyrics> {
-    let found = s.library.lock().expect("library poisoned").lyrics(TrackId(id))?;
+    let (found, track) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (lib.lyrics(TrackId(id))?, lib.get_track(TrackId(id))?)
+    };
+    // None in the file or beside it: LRCLIB, by title, artist, album and length
+    let found = match (found, track) {
+        (Some(f), _) => Some(f),
+        (None, Some(t)) => {
+            let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+            let album = t.album.as_ref().map(|a| a.title.clone());
+            lrclib::find(&s, &t.title, &artist, album.as_deref(), t.duration_ms)
+                .await
+                .map(|(text, _)| (text, "lrclib".to_string()))
+        }
+        _ => None,
+    };
     let Some((text, source)) = found else {
         return Err(ApiError::not_found(format!("no lyrics for track {id}")));
     };
@@ -6433,6 +6450,70 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         let (_, list) = call(&app, "GET", "/v1/smart", None).await;
         assert!(list.as_array().unwrap().is_empty());
+    }
+
+    /// Lyrics from LRCLIB for a streamed song and for a library song without its own; a song
+    /// LRCLIB doesn't know answers 404 and is asked about once.
+    #[tokio::test]
+    async fn lyrics_come_from_lrclib_when_the_files_have_none() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a2 = asked.clone();
+        let mock = Router::new().route(
+            "/api/get",
+            get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                a2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if q.get("track_name").map(String::as_str) == Some("Known Song") {
+                        (StatusCode::OK, Json(serde_json::json!({"syncedLyrics": "[00:01.00]First\n[00:03.50]Second", "plainLyrics": "First\nSecond"})))
+                    } else {
+                        (StatusCode::NOT_FOUND, Json(serde_json::json!({"message": "not found"})))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        crate::lrclib::set_base(&format!("http://127.0.0.1:{port}"));
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(
+                dir.path().join("k.flac"),
+                "Known Song",
+                "Someone",
+            ))
+            .unwrap()
+            .0
+        };
+        let app = router(s.clone());
+        let (st, l) = call(
+            &app,
+            "GET",
+            "/v1/lyrics?title=Known%20Song&artist=Someone&duration_ms=200000",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(
+            (l["source"].as_str(), l["synced"].as_bool()),
+            (Some("lrclib"), Some(true))
+        );
+        assert_eq!(l["lines"][1]["ms"], 3500);
+        let (st, l) = call(&app, "GET", &format!("/v1/library/tracks/{tid}/lyrics"), None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(l["source"], "lrclib");
+        let (st, _) = call(&app, "GET", "/v1/lyrics?title=Nothing&artist=Nobody", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let before = asked.load(std::sync::atomic::Ordering::SeqCst);
+        call(&app, "GET", "/v1/lyrics?title=Nothing&artist=Nobody", None).await;
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a none is kept too"
+        );
     }
 
     /// One search, streamed per source: the library answers first, a slow

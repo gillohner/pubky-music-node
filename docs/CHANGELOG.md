@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Lyrics for streamed songs** (UX review, next tier). Now playing shows lyrics from LRCLIB (lrclib.net) for TIDAL, Deezer and other streamed songs, and for library songs whose files carry none. Synced lines follow the song, with a ±0.5 s nudge, and lyrics from LRCLIB are credited. Answers are kept a week, a "none" too. The node asks only when it has a contact set, like MusicBrainz and Pinakes. API: `GET /v1/lyrics?title&artist&album&duration_ms`; `/v1/library/tracks/{id}/lyrics` falls back to it.
+- **The sleep timer is in the zone menu** too (it was only in Now playing).
 - **Smart playlists** (UX review #9). Playlists › New smart playlist chooses songs by rules over your library and your own Pubky tags, all or any of them.
   - Rules: genre, artist, year range, favourite, times played, last played (in or not in the last N days), and your Pubky tag.
   - Order: random (new each time), most played, longest unplayed, newest or title, up to N songs. A live preview shows how many match while you edit.

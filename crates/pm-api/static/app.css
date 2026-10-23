@@ -1048,3 +1048,4 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .smartedit .field { display: grid; gap: 4px; margin-bottom: 12px; }
 .smrule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
 .smrule select.input, .smrule input.input, .smartedit p select.input, .smartedit .toolbar select.input { width: auto; padding: 5px 8px; font-size: 13px; height: auto; }
+.lyric-nudge { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; vertical-align: middle; }

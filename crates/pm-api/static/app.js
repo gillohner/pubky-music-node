@@ -685,7 +685,10 @@
       <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>`).join('');
+      </button>`).join('')
+      // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
+      + `<div class="pop-title">This zone</div><button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+    const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
       closePop(); renderZoneName(); renderBar(); refreshQueue();
@@ -901,21 +904,26 @@
     const box = $('#nplyrics'); if (!box) return;
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    const off = state.lyricsOffset || 0;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
   };
+  // Library songs: their own lyrics, else LRCLIB (the node decides); streamed songs: LRCLIB by title
+  const lyricsKey = (it) => { const id = trackIdOf(it); return id != null ? `t${id}` : it && it.title && it.artist ? `s${it.uri || ''}|${it.title}|${it.artist}` : null; };
   const loadLyrics = async (it) => {
-    const id = trackIdOf(it);
-    if (id == null) { renderLyrics(null); return; }
-    if (state.lyrics.has(id)) { renderLyrics(state.lyrics.get(id)); return; }
+    const key = lyricsKey(it); const id = trackIdOf(it);
+    if (!key || (it && it.stream && /^https?:/.test(it.uri || '') && it.album === 'Internet radio')) { renderLyrics(null); return; }
+    if (state.lyrics.has(key)) { renderLyrics(state.lyrics.get(key)); return; }
     let l = null;
-    try { l = await api('GET', `/library/tracks/${id}/lyrics`); } catch { l = null; }
-    state.lyrics.set(id, l);
-    if (trackIdOf(currentNowPlayingItem()) === id) renderLyrics(l);
+    try { l = id != null ? await api('GET', `/library/tracks/${id}/lyrics`) : await api('GET', `/lyrics?${new URLSearchParams({ title: it.title, artist: String(it.artist).split(/,| & /)[0], ...(it.album ? { album: it.album } : {}), ...(it.duration_ms ? { duration_ms: String(it.duration_ms) } : {}) })}`); } catch { l = null; }
+    state.lyrics.set(key, l);
+    if (lyricsKey(currentNowPlayingItem()) === key) { state.lyricsOffset = 0; renderLyrics(l); }
   };
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-lnudge]'); if (!b) return; state.lyricsOffset = (state.lyricsOffset || 0) + Number(b.dataset.lnudge); const it = currentNowPlayingItem(); const l = state.lyrics.get(lyricsKey(it)); if (l) renderLyrics(l); });
   const currentNowPlayingItem = () => { const z = currentZone(); return z && z.now_playing ? z.now_playing.item : null; };
   const followLyrics = (positionMs) => {
     const lines = $$('#nplyrics .lyric-line[data-ms]'); if (!lines.length) return;
-    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= positionMs) cur = ln; else break; }
+    const at = positionMs - (state.lyricsOffset || 0);
+    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= at) cur = ln; else break; }
     for (const ln of lines) ln.classList.toggle('on', ln === cur);
     if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* jsdom */ } }
   };
