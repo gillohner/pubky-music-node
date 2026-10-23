@@ -1293,6 +1293,13 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
             .collect()
     };
+    // BluOS players only (Bluesound, NAD): BluOS groups them itself (pm_out_bluos)
+    let bluos: Vec<Arc<pm_out_bluos::BluosOutput>> = {
+        let map = s.bluos_players.lock().expect("bluos lock");
+        ids.iter()
+            .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
+            .collect()
+    };
     if members.len() > 1 && heos.len() == ids.len() {
         let renderers: Vec<pm_out_upnp::Renderer> = heos.iter().map(|o| o.renderer().clone()).collect();
         let ok = tokio::task::spawn_blocking(move || {
@@ -1310,6 +1317,10 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
         let mut sonos = sonos;
         let lead = sonos.remove(0);
         Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+    } else if bluos.len() == ids.len() {
+        let mut bluos = bluos;
+        let lead = bluos.remove(0);
+        Arc::new(pm_out_bluos::BluosGroup::new(body.name.trim(), lead, bluos))
     } else if heos.len() == ids.len() {
         let mut heos = heos;
         let lead = heos.remove(0);

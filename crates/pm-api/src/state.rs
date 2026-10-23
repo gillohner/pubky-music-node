@@ -109,6 +109,10 @@ pub struct NodeState {
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
     airplay: std::sync::atomic::AtomicBool,
+    /// Offer BluOS players (`[outputs] bluos`).
+    bluos: std::sync::atomic::AtomicBool,
+    /// BluOS players by output id: a zone of them only is a BluOS group.
+    pub bluos_players: Mutex<HashMap<OutputId, Arc<pm_out_bluos::BluosOutput>>>,
     /// The zones as UPnP/DLNA MediaRenderers, once `start_renderer` ran.
     pub renderer: std::sync::OnceLock<Arc<pm_renderer::Renderer>>,
     pub version: String,
@@ -351,6 +355,8 @@ impl NodeState {
             heos: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
+            bluos: Default::default(),
+            bluos_players: Default::default(),
             renderer: Default::default(),
             name: settings.name,
             version: settings.version,
@@ -1113,6 +1119,48 @@ impl NodeState {
         self.airplay.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub fn set_bluos(&self, on: bool) {
+        self.bluos.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// BluOS players (Bluesound, NAD) found over mDNS as outputs with zones, each playing its own
+    /// pull stream. Blocking.
+    pub fn discover_bluos(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
+        if !self.bluos.load(std::sync::atomic::Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut new = Vec::new();
+        for p in pm_out_bluos::discover(timeout) {
+            let name = format!(
+                "bluos-{}",
+                p.id.chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(32)
+                    .collect::<String>()
+            );
+            let pull = self.pull_output(&name);
+            let out = Arc::new(pm_out_bluos::BluosOutput::new(
+                p.clone(),
+                pull,
+                self.pull_url(&name),
+            ));
+            let id = out.id();
+            if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            tracing::info!(player = %p.name, output = %id, "BluOS player");
+            self.bluos_players
+                .lock()
+                .expect("bluos lock")
+                .insert(id.clone(), out.clone());
+            let zone_name = out.name();
+            self.outputs.register(out.clone());
+            self.create_zone(&zone_name, out);
+            new.push(id);
+        }
+        new
+    }
+
     /// AirPlay 1 receivers found over mDNS as outputs with zones; ones the node cannot play to (they
     /// require encryption) are logged and skipped. Blocking.
     pub fn discover_airplay(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
@@ -1184,6 +1232,7 @@ impl NodeState {
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         new.extend(self.discover_snapcast());
         new.extend(self.discover_airplay(std::time::Duration::from_millis(1500)));
+        new.extend(self.discover_bluos(std::time::Duration::from_millis(1500)));
         let Some(f) = self.discover.lock().expect("discover lock").clone() else {
             return new;
         };

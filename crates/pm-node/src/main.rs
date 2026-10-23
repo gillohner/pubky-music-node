@@ -270,12 +270,14 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         state.set_snapcast(Some(cfg.outputs.snapcast.trim().to_string()));
     }
     state.set_airplay(cfg.outputs.airplay);
+    state.set_bluos(cfg.outputs.bluos);
     {
         let st = state.clone();
         let found = tokio::task::spawn_blocking(move || {
             let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
             found.extend(st.discover_snapcast());
             found.extend(st.discover_airplay(std::time::Duration::from_millis(1500)));
+            found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
             found.extend(st.restore_upnp_addresses());
             found.extend(st.restore_endpoint_addresses());
             found

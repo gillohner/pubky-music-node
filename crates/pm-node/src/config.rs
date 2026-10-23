@@ -369,6 +369,8 @@ pub struct OutputsConfig {
     pub snapcast: String,
     /// Discover AirPlay 1 receivers (mDNS `_raop._tcp`) and offer them as outputs.
     pub airplay: bool,
+    /// Discover BluOS players (Bluesound, NAD; mDNS `_musc._tcp`) and offer them as outputs.
+    pub bluos: bool,
 }
 
 impl Default for OutputsConfig {
@@ -382,6 +384,7 @@ impl Default for OutputsConfig {
             cast: true,
             snapcast: String::new(),
             airplay: true,
+            bluos: true,
         }
     }
 }

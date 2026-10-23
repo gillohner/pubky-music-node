@@ -13,6 +13,8 @@ A zone's `output` id starts with its protocol, which says what kind of device it
 | `upnp:` | a DLNA renderer or smart TV, or a Sonos player (`GET /v1/outputs`: name and caps) | TV / speaker |
 | `sonos-group:` | Sonos players grouped Sonos's own way | speakers |
 | `heos-group:` | HEOS players (Denon, Marantz) grouped HEOS's own way | speakers |
+| `bluos:` | a BluOS player (Bluesound, NAD), found over mDNS; it fetches the zone's stream | speaker |
+| `bluos-group:` | BluOS players grouped BluOS's own way (the first leads) | speakers |
 | `cast:` | Chromecast, Google TV, Nest speaker; names ending "(Cast group)" are Cast groups | cast |
 | `airplay:` | an AirPlay receiver | AirPlay |
 | `snapcast:` | a Snapcast group of players | speakers |

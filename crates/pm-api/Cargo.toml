@@ -24,6 +24,7 @@ pm-out-slimproto = { workspace = true }
 pm-out-cast = { workspace = true }
 pm-out-snapcast = { workspace = true }
 pm-out-airplay = { workspace = true }
+pm-out-bluos = { workspace = true }
 pm-out-net = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
