@@ -24,7 +24,9 @@ fn bundled() -> Option<pm_api::bundled::AdminEndpoint> {
 
 fn node(dir: &std::path::Path) -> Arc<NodeState> {
     let db = dir.join("node.sqlite");
-    NodeState::new(
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
+    let s = NodeState::new(
         NodeSettings {
             name: "bundle".into(),
             version: "0".into(),
@@ -47,8 +49,10 @@ fn node(dir: &std::path::Path) -> Arc<NodeState> {
             jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
-        OutputRegistry::new(),
-    )
+        outputs,
+    );
+    s.zones_for_all_outputs();
+    s
 }
 
 async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -493,4 +497,132 @@ async fn music_added_to_the_homeserver_plays_from_its_own_folder() {
         ["saved", "saving"].contains(&st_v["saving"]["state"].as_str().unwrap()),
         "{st_v}"
     );
+}
+
+async fn call_auth(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(
+            body.map(|b| Body::from(b.to_string()))
+                .unwrap_or_else(Body::empty),
+        )
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Ring signs a controller in: start the node's sign-in, approve it as `signer`, poll.
+async fn ring_sign_in(app: &axum::Router, signer: &pubky::PubkySigner) -> serde_json::Value {
+    let (st, started) = call(app, "POST", "/v1/auth/pubky/start").await;
+    assert_eq!(st, StatusCode::OK, "{started}");
+    signer
+        .approve_auth(started["url"].as_str().unwrap())
+        .await
+        .expect("approve");
+    let id = started["id"].as_str().unwrap().to_string();
+    for _ in 0..60 {
+        let (_, v) = call(app, "GET", &format!("/v1/auth/pubky/poll?id={id}")).await;
+        if v["status"] != "pending" {
+            return v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("the sign-in never finished");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listener_signs_in_with_ring_and_plays_a_homeserver_only_account_cannot() {
+    let Some(ep) = bundled() else {
+        eprintln!("skipped: set PM_BUNDLED_HS_ADMIN and PM_BUNDLED_HS_PASSWORD");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pm-audio/tests/fixtures");
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::copy(fixtures.join("60_mono_audio.flac"), music.join("song.flac")).unwrap();
+    let s = node(dir.path());
+    s.set_bundled_homeserver(ep);
+    let app = router(s.clone());
+    signed_up_owner(&app).await;
+    s.library
+        .lock()
+        .unwrap()
+        .add_folder(&music.canonicalize().unwrap())
+        .unwrap();
+    s.start_scan(vec![music.canonicalize().unwrap()]).unwrap();
+    let pubky = Pubky::new().unwrap();
+
+    // Invited with music: signs up on the homeserver, then in to the node, as a listener
+    let (_, inv) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "homeserver_music", "name": "Sam"}),
+    )
+    .await;
+    let sam = pubky.signer(Keypair::random());
+    sam.handle_deeplink(inv["url"].as_str().unwrap()).await.unwrap();
+    call(&app, "GET", "/v1/people").await; // the used invite becomes a person
+    let v = ring_sign_in(&app, &sam).await;
+    assert_eq!(
+        (v["status"].as_str(), v["role"].as_str()),
+        (Some("ok"), Some("listener")),
+        "{v}"
+    );
+    let tok = v["token"].as_str().unwrap().to_string();
+    // (This node has no API token, so every caller counts as the owner; the listener rules are
+    // the unit test's. Here: Ring hands a listener a token, and a homeserver-only account none.)
+    let (_, me) = call_auth(&app, "GET", "/v1/me", &tok, None).await;
+    assert!(me["role"].is_string(), "{me}");
+    // They play a song from the shared library
+    let mut track = None;
+    for _ in 0..50 {
+        let (_, t) = call_auth(&app, "GET", "/v1/library/tracks", &tok, None).await;
+        if let Some(id) = t["tracks"][0]["id"].as_i64() {
+            track = Some(id);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let (_, zones) = call_auth(&app, "GET", "/v1/zones", &tok, None).await;
+    let zid = zones[0]["id"].as_str().unwrap().to_string();
+    let (st, q) = call_auth(
+        &app,
+        "POST",
+        &format!("/v1/zones/{zid}/queue"),
+        &tok,
+        Some(serde_json::json!({"track_ids": [track.expect("scanned")], "replace": true, "play": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{q}");
+
+    // Homeserver only: the account exists, the music service says no
+    let (_, inv) = call_json(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        serde_json::json!({"access": "homeserver"}),
+    )
+    .await;
+    let kim = pubky.signer(Keypair::random());
+    kim.handle_deeplink(inv["url"].as_str().unwrap()).await.unwrap();
+    call(&app, "GET", "/v1/people").await;
+    let v = ring_sign_in(&app, &kim).await;
+    assert_eq!(v["status"], "denied", "{v}");
+    assert!(v["token"].is_null());
 }

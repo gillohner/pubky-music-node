@@ -103,6 +103,8 @@ pub struct NodeState {
     stream_secret: [u8; 32],
     /// Sonos players by output id, so a zone of Sonos players only groups them the Sonos way.
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// HEOS players (Denon, Marantz) among the renderers: a zone of them only is a HEOS group.
+    pub heos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
@@ -189,6 +191,8 @@ pub struct NodeState {
     pub plex: crate::plex::Shared,
     /// WebDAV shares that are library roots, shared with the audio thread.
     pub webdav: crate::webdav::Shared,
+    /// Google Drive and OneDrive folders that are library roots, shared with the audio thread.
+    pub drives: crate::drives::Shared,
     /// The user's Audiobookshelf, shared with the audio thread.
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -291,6 +295,10 @@ impl NodeState {
         let webdav: crate::webdav::Shared = Arc::new(std::sync::RwLock::new(crate::webdav::load(
             &library.lock().expect("library poisoned"),
         )));
+        let drives: crate::drives::Shared = Arc::new(std::sync::RwLock::new(crate::drives::load(
+            &library.lock().expect("library poisoned"),
+            Default::default(),
+        )));
         let audiobookshelf: crate::audiobookshelf::Shared = Arc::new(std::sync::RwLock::new(
             crate::audiobookshelf::load(&library.lock().expect("library poisoned")),
         ));
@@ -305,6 +313,7 @@ impl NodeState {
             plex.clone(),
             audiobookshelf.clone(),
             webdav.clone(),
+            drives.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
         let sources_off =
@@ -339,6 +348,7 @@ impl NodeState {
             remote_id: Default::default(),
             stream_secret,
             sonos: Default::default(),
+            heos: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
             renderer: Default::default(),
@@ -384,6 +394,7 @@ impl NodeState {
             plex,
             audiobookshelf,
             webdav,
+            drives,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
                 api_key: acoustid_key,
@@ -890,6 +901,12 @@ impl NodeState {
                 .with_describe(self.describe_for_renderers()),
         );
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        if pm_out_upnp::heos::is_heos(&r) {
+            self.heos
+                .lock()
+                .expect("heos lock")
+                .insert(id.clone(), out.clone());
+        }
         if pm_out_upnp::sonos::is_sonos(&r) {
             self.sonos
                 .lock()
@@ -1306,6 +1323,14 @@ impl NodeState {
 
     pub fn tunnel_dir(&self) -> Option<&std::path::Path> {
         self.tunnel_dir.get().map(PathBuf::as_path)
+    }
+
+    /// The Google Drive and OneDrive apps from the config (or the build's project apps).
+    pub fn set_drive_apps(
+        &self,
+        apps: std::collections::HashMap<crate::drives::Provider, crate::drives::App>,
+    ) {
+        self.drives.write().expect("drives").apps = apps;
     }
 
     /// Set once at start with the bundled homeserver's files folder (`PM_HOMESERVER_FILES_DIR`).

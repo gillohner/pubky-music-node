@@ -43,6 +43,35 @@ pub struct NodeConfig {
     /// The Pubky homeserver bundled with the node (deploy/bundle); `PM_HOMESERVER_ADMIN_URL` and
     /// `PM_HOMESERVER_ADMIN_PASSWORD` override.
     pub homeserver: HomeserverConfig,
+    /// Google Drive and OneDrive apps for library folders on them (public client ids; a
+    /// `google_client_secret` only for a node's own Google app). Empty = the build's project
+    /// apps, or none.
+    pub drives: DrivesConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct DrivesConfig {
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub onedrive_client_id: String,
+}
+
+impl std::fmt::Debug for DrivesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DrivesConfig")
+            .field("google_client_id", &self.google_client_id)
+            .field(
+                "google_client_secret",
+                &if self.google_client_secret.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .field("onedrive_client_id", &self.onedrive_client_id)
+            .finish()
+    }
 }
 
 /// The bundled homeserver's admin API. Empty = no bundled homeserver.
@@ -304,6 +333,7 @@ impl Default for NodeConfig {
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
             auth: AuthConfig::default(),
+            drives: DrivesConfig::default(),
         }
     }
 }
