@@ -541,6 +541,9 @@ pub struct PlaylistSummary {
     pub visibility: String,
     /// Pushed to the homeserver since the last edit.
     pub synced: bool,
+    /// Up to four distinct album covers of its songs in the library: the playlist's mosaic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

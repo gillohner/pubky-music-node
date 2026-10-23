@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Playlists have real art** (UX review #8): the first four album covers of their songs as a 2×2 mosaic, one cover when there's only one, else their initials on a gradient. This applies in the list, on the page and on shared playlists; there are no more empty colour squares. `PlaylistSummary.covers` lists them.
 - **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
   - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.
   - **Menus:** "Add to playlist…" opens one picker (find, New playlist, recent first) instead of listing every playlist. A song's menu also has Favourite, Start radio (on a node zone) and Go to song page. "Go to album" no longer appears on that album's own page. On phones menus open as a sheet from the bottom, and a long-press (or right-click) on a song row opens its menu.

@@ -1038,3 +1038,7 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .az:hover { background: var(--surface-2); color: var(--fg); }
 .az.on { background: var(--accent-soft); color: var(--accent-strong); }
 @media (max-width: 720px) { .azbar { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; } }
+/* Playlist art: a 2×2 mosaic of its album covers */
+.art.mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 0; }
+.art.mosaic img { position: static; width: 100%; height: 100%; object-fit: cover; }
+.art.pl-thumb { width: 44px; height: 44px; flex: none; border-radius: 6px; font-size: 13px; }
