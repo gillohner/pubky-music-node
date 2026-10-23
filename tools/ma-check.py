@@ -10,7 +10,9 @@ official Music Assistant container on the host network, then through MA's own AP
 - plays the track to that player (`player_queues/play_media`): the node's zone plays MA's stream of
   the node's own track, and MA's player shows it playing.
 
-Usage: ma-check.py <pm-node> <work dir> <image>   (e.g. ghcr.io/music-assistant/server:2.10.7)
+Usage: ma-check.py <pm-node> <work dir> <image or mass>
+  <image>: the official container on the host network (CI), e.g. ghcr.io/music-assistant/server:2.10.7
+  <mass>:  a `mass` executable (a virtualenv with the music-assistant package), run on this machine
 """
 import json
 import os
@@ -131,11 +133,16 @@ class MusicAssistant:
     def __init__(self, image, work):
         data = work / "ma-data"
         data.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
         self.log = open(work / "ma.log", "w")
-        subprocess.run(["docker", "run", "-d", "--name", CONTAINER, "--network", "host", "-v", f"{data}:/data", image],
-                       check=True, capture_output=True)
-        self.logs = subprocess.Popen(["docker", "logs", "-f", CONTAINER], stdout=self.log, stderr=subprocess.STDOUT)
+        self.local = Path(image).is_file()
+        if self.local:
+            self.logs = subprocess.Popen([image, "--data-dir", str(data), "--log-level", "debug"],
+                                         stdout=self.log, stderr=subprocess.STDOUT)
+        else:
+            subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
+            subprocess.run(["docker", "run", "-d", "--name", CONTAINER, "--network", "host", "-v", f"{data}:/data",
+                            "-e", "LOG_LEVEL=debug", image], check=True, capture_output=True)
+            self.logs = subprocess.Popen(["docker", "logs", "-f", CONTAINER], stdout=self.log, stderr=subprocess.STDOUT)
         until("Music Assistant answers", lambda: req(MA + "/info", timeout=5), 300, 3)
         info = req(MA + "/info")
         ok(f"Music Assistant {info.get('server_version')} is up")
@@ -185,7 +192,8 @@ class MusicAssistant:
         fail(f"MA's {domain} setup did not finish: {step}")
 
     def stop(self):
-        subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
+        if not self.local:
+            subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
         self.logs.terminate()
 
 
@@ -233,11 +241,20 @@ def main():
         def player():
             for p in ma.api("players/all") or []:
                 name = p.get("display_name") or p.get("name") or ""
-                if p.get("provider", "").startswith("dlna") and zone["name"] in name and p.get("available", True):
+                # MA 2.10 wraps protocol players (DLNA here) in a "universal player" per device
+                prov = p.get("provider", "")
+                if (prov.startswith("dlna") or prov.startswith("universal")) and zone["name"] in name \
+                        and p.get("available", True):
                     return p
             return None
 
-        pl = until("MA's DLNA provider finds the zone's renderer", player, 180, 3)
+        try:
+            pl = until("MA's DLNA provider finds the zone's renderer", player, int(os.environ.get("MA_PLAYER_WAIT", "180")), 3)
+        except SystemExit:
+            for p in ma.api("players/all") or []:
+                log(f"     MA player: {p.get('player_id')} name={p.get('name')!r} provider={p.get('provider')} "
+                    f"available={p.get('available')} enabled={p.get('enabled')}")
+            raise
         ok(f"player: {pl.get('display_name') or pl.get('name')} ({pl['player_id']})")
 
         # 3. Play the node's track to the node's zone, through MA
