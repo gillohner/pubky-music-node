@@ -274,6 +274,12 @@ async fn guests_add_songs_in_their_section_within_the_limits() {
         .map(|w| (w["title"].as_str().unwrap(), w["by"].as_str().unwrap()))
         .collect();
     assert_eq!(waiting, [("Song C", "Ann"), ("Song D", "Ben"), ("Song E", "Ann")]);
+    assert_eq!(
+        v["waiting"][0]["track_id"],
+        id("Song C"),
+        "library songs keep their id: {v}"
+    );
+    assert_eq!(v["playing"]["track_id"], id("Song A"), "{v}");
     assert_eq!(v["waiting_left"], 0);
 
     // Ann has 2 waiting: refused on the node

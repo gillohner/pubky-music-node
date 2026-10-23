@@ -348,7 +348,10 @@ pub struct GuestView {
 }
 
 fn cover_of(s: &NodeState, uri: &str) -> Option<String> {
-    let tid = uri.strip_prefix("library:track:")?.parse::<i64>().ok()?;
+    let tid = uri
+        .strip_prefix(crate::sources::TRACK_SCHEME)?
+        .parse::<i64>()
+        .ok()?;
     let album = s
         .library
         .lock()
@@ -362,7 +365,10 @@ fn cover_of(s: &NodeState, uri: &str) -> Option<String> {
 
 fn song_of(s: &NodeState, it: &pm_zones::QueueItem) -> Song {
     Song {
-        track_id: it.uri.strip_prefix("library:track:").and_then(|t| t.parse().ok()),
+        track_id: it
+            .uri
+            .strip_prefix(crate::sources::TRACK_SCHEME)
+            .and_then(|t| t.parse().ok()),
         title: it.title.clone().unwrap_or_else(|| "Unknown song".into()),
         artist: it.artist.clone().unwrap_or_default(),
         cover: cover_of(s, &it.uri).or_else(|| it.image.clone()),
