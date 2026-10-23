@@ -25,6 +25,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
     }
 }
 
+pub mod accounts;
 pub mod add_music;
 pub mod audiobookshelf;
 pub mod backup;
@@ -559,6 +560,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav", get(webdav::list).post(webdav::add))
         .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
+        .route("/me", get(accounts::me))
+        .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(
@@ -658,13 +662,30 @@ async fn auth(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
-    if !token_ok(&state, &headers, &query) {
+    // The owner's API token, or a listener's personal one (accounts.rs)
+    let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    };
+    if caller.role == accounts::Role::Listener {
+        if let Some(why) = accounts::listener_refusal(&state, req.method(), req.uri().path()) {
+            return accounts::refused(why).into_response();
+        }
     }
+    req.extensions_mut().insert(caller);
     next.run(req).await
+}
+
+/// The request's bearer token (or `?token=`, for WebSocket upgrades).
+fn bearer(headers: &HeaderMap, query: &std::collections::HashMap<String, String>) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| query.get("token").cloned())
 }
 
 /// The request carries the API token (or the node has none).
@@ -2477,6 +2498,7 @@ async fn controller_login_poll(
             status: "expired".into(),
             token: None,
             user: None,
+            role: None,
         }));
     };
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
@@ -2485,6 +2507,7 @@ async fn controller_login_poll(
             status: "expired".into(),
             token: None,
             user: None,
+            role: None,
         }));
     }
     match flow.poll().await {
@@ -2492,17 +2515,30 @@ async fn controller_login_poll(
             status: "pending".into(),
             token: None,
             user: None,
+            role: None,
         })),
         Ok(Some(session)) => {
             logins.remove(&id);
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
+                // A listener in People with music access gets a personal token
+                if people::may_use_music(&s, &who) {
+                    let token = accounts::mint(&s, &who)?;
+                    tracing::info!(%who, "listener signed in with Pubky Ring");
+                    return Ok(Json(ControllerLoginStatus {
+                        status: "ok".into(),
+                        token: Some(token),
+                        user: Some(who),
+                        role: Some("listener".into()),
+                    }));
+                }
                 tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
                 return Ok(Json(ControllerLoginStatus {
                     status: "denied".into(),
                     token: None,
                     user: Some(who),
+                    role: None,
                 }));
             }
             tracing::info!(%who, "controller signed in with Pubky Ring");
@@ -2510,6 +2546,7 @@ async fn controller_login_poll(
                 status: "ok".into(),
                 token: s.token.clone(),
                 user: Some(who),
+                role: Some("owner".into()),
             }))
         }
         Err(e) => {
@@ -4280,6 +4317,93 @@ mod tests {
         assert!(!v.to_string().contains("KEY1"));
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
         assert!(srcs.to_string().contains("Your audiobooks at"), "{srcs}");
+    }
+
+    #[tokio::test]
+    async fn listeners_get_the_library_and_their_zones_not_the_owners_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string()).unwrap();
+        let tok = accounts::mint(&s, key).unwrap();
+        let send = |method: &'static str, uri: String, token: String, body: Option<serde_json::Value>| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let b = r.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let (_, me) = send("GET", "/v1/me".into(), tok.clone(), None).await;
+        assert_eq!(
+            (me["role"].as_str(), me["key"].as_str()),
+            (Some("listener"), Some(key))
+        );
+        let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK, "the shared library");
+        for (m, p) in [
+            ("GET", "/v1/people"),
+            ("PUT", "/v1/node/settings"),
+            ("POST", "/v1/library/folders"),
+            ("POST", "/v1/zones"),
+            ("POST", "/v1/playlists"),
+            ("GET", "/v1/sources/plex/server"),
+        ] {
+            let (st, v) = send(m, p.into(), tok.clone(), Some(serde_json::json!({}))).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{m} {p}: {v}");
+            assert!(v.to_string().contains("Not for listeners"), "{v}");
+        }
+        // Playing on a zone: yes, until the owner limits listeners to another zone
+        let (_, zones) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{v}");
+        let (st, _) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": ["elsewhere"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "a zone the owner kept back");
+        // Music access taken away: the token stops at once; a made-up token never works
+        s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": false, "added_at": 1}]}).to_string()).unwrap();
+        let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = send("GET", "/v1/library/tracks".into(), "pml_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // The owner's token is the owner
+        let (_, me) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(me["role"], "owner");
     }
 
     #[tokio::test]

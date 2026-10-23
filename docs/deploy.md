@@ -94,6 +94,7 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   homeserver's files read-only and plays them from there, so there is no second copy. Saving
   playlists, favourites and tags to the homeserver is automatic; `GET /v1/storage` is the status
   line.
+- **Signing in per person:** everyone signs in to the node's web app with Pubky Ring. The owner gets the node's API token, as before; apps and integrations keep using it. Someone in People with music access gets a personal token: the shared library, search, sources, and playing on the zones you open to listeners (`/v1/people/zones`; all by default). Settings, People, the homeserver and the library's folders stay yours. Taking someone's music access away stops their token at once. Their own playlists and favourites (on their own homeserver) come next.
 - **Your account on it:** on first run, "Create your Pubky account on this node's homeserver"
   (`POST /v1/homeserver/bundled/owner-signup`) shows a Pubky Ring link and QR. The node mints the
   owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs

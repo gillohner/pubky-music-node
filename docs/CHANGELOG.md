@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Accounts per person on the node** (STEWARD-BUNDLED-HOMESERVER.md, step 3).
+  - **Signing in:** everyone signs in with Pubky Ring as before. The owner gets the API token (apps and integrations keep it); someone in People with music access now gets a **personal token**, kept only as its hash, instead of "denied".
+  - **What a listener gets:** the shared library, search, sources, and playing on the zones the owner opens to them (`/v1/people/zones`; all by default).
+  - **What stays the owner's:** settings, People, the homeserver, source sign-ins, library folders, uploads and backups (403 "Not for listeners").
+  - **Taking access away:** turning a person's music access off stops their token at once; `DELETE /v1/me/token` signs one device out; People shows signed-in devices per person.
+  - **Not yet:** listeners' own playlists and favourites (on their own homeserver) come with the node agent's per-person sync. Until then a listener's writes to them are refused.
+  - **Tested** against pubky-homeserver 0.16.2: a "homeserver + music" invitee signs up through Ring, signs in, and plays a song; a "homeserver only" invitee is refused.
 - **HEOS groups:** a zone of HEOS players (Denon, Marantz) is now a HEOS group, kept in sync by HEOS itself (`heos-group:`, "In sync"). It uses HEOS's published CLI on port 1255: `set_group` when the zone starts, ended when it stops. The leader plays over UPnP as before. If the CLI doesn't know every member, the zone is an ordinary node group.
 - **gPodder sync for podcasts:** a gPodder account (gpodder.net, opodsync, or Nextcloud's gpoddersync app) keeps subscriptions and listening positions in step with a phone app such as AntennaPod. Set it with `PUT /v1/podcasts/gpodder {kind?, server, username, password, device?}`; the first sync checks the sign-in, and the account is kept only if it works. The node then syncs every 15 minutes, or on `POST /v1/podcasts/gpodder/sync`. Subscriptions sync both ways. A newer position from either side wins, and 95% or more counts as played. The password stays on the node.
 - **More album covers:** an album with no cover in its files, its folder or the Cover Art Archive now gets one from Apple's iTunes Search API (official, no key). A result counts only if its album title and artist both match; bracketed parts such as "(Remastered)" are ignored. "Various Artists" albums are not looked up. Like the archive, a miss is remembered for a week.
