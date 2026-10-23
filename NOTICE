@@ -10,3 +10,5 @@ header:
 - crates/pm-library/src/scan.rs: the disc-folder names (CD1, Disc 2, Vol. 3)
   and "Various Artists" for albums without an album artist
   (music_assistant/helpers/util.py, providers/filesystem_local).
+- crates/pm-api/src/art.rs: covers from Apple's iTunes Search API as the
+  fallback after the Cover Art Archive (providers/itunes_artwork).

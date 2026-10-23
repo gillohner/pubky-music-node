@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **More album covers:** an album with no cover in its files, its folder or the Cover Art Archive now gets one from Apple's iTunes Search API (official, no key). A result counts only if its album title and artist both match; bracketed parts such as "(Remastered)" are ignored. "Various Artists" albums are not looked up. Like the archive, a miss is remembered for a week.
 - **Albums stay whole:**
   - An album whose files carry no album artist, and whose songs are by different artists, now shows as one album by "Various Artists". It used to split into one album per artist. A compilation flag or MusicBrainz release type says the same.
   - An album without an album artist whose songs feature guests ("Daft Punk feat. Pharrell Williams") stays the main artist's.

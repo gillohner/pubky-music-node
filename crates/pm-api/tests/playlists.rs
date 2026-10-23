@@ -1595,3 +1595,140 @@ async fn roon_exports_move_over_with_a_report() {
     let (st, _) = upload(&app, "/v1/import/roon?file=x.csv", b"Foo,Bar\n1,2\n".to_vec()).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+/// An album with no MusicBrainz ids gets its cover from Apple's iTunes Search API, but only
+/// from a result whose title and artist match (mocked here), once, then from the art dir.
+#[tokio::test]
+async fn album_cover_falls_back_to_itunes_on_an_exact_match() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let searches = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}");
+    let (n, b) = (searches.clone(), base.clone());
+    let mock = axum::Router::new()
+        .route(
+            "/search",
+            axum::routing::get(
+                move |axum::extract::Query(q): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    let b = b.clone();
+                    async move {
+                        assert_eq!(q["entity"], "album");
+                        assert_eq!(q["term"], "Daft Punk Homework");
+                        axum::Json(serde_json::json!({"resultCount": 2, "results": [
+                            {"collectionName": "Homework", "artistName": "Someone Else",
+                             "artworkUrl100": format!("{b}/img/wrong/100x100bb.jpg")},
+                            {"collectionName": "Homework (Remastered)", "artistName": "Daft Punk",
+                             "artworkUrl100": format!("{b}/img/right/100x100bb.jpg")}]}))
+                    }
+                },
+            ),
+        )
+        .route(
+            "/img/{which}/{size}",
+            axum::routing::get(
+                |axum::extract::Path((which, size)): axum::extract::Path<(String, String)>| async move {
+                    assert_eq!(which, "right", "only the matching result is fetched");
+                    assert_eq!(size, "600x600bb.jpg");
+                    ([("content-type", "image/jpeg")], b"\xff\xd8itunes".to_vec())
+                },
+            ),
+        );
+    tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    pm_api::art::set_itunes_base(&base);
+
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let path = music.join("01.wav");
+    {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..2205 {
+            w.write_sample((i % 50) as i16).unwrap();
+            w.write_sample(-((i % 50) as i16)).unwrap();
+        }
+        w.finalize().unwrap();
+        let mut t = id3::Tag::new();
+        t.set_title("Da Funk");
+        t.set_artist("Daft Punk");
+        t.set_album("Homework");
+        t.write_to_path(&path, id3::Version::Id3v24).unwrap();
+    }
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, albums) = call(&app, "GET", "/v1/library/albums", None).await;
+    let id = albums
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == "Homework")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    for round in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/library/albums/{id}/cover"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "round {round}");
+        assert_eq!(resp.headers()["content-type"], "image/jpeg");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"\xff\xd8itunes");
+    }
+    assert_eq!(
+        searches.load(Ordering::SeqCst),
+        1,
+        "asked once, then served from the art dir"
+    );
+    assert_eq!(
+        s.library.lock().unwrap().album_art(id).unwrap().unwrap().source,
+        "itunes"
+    );
+}
