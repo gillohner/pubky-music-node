@@ -26,6 +26,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 }
 
 pub mod add_music;
+pub mod announce;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bandcamp;
@@ -198,6 +199,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::delete(remove_item).put(move_item),
         )
         .route("/zones/{id}/transport", post(transport))
+        .route("/zones/{id}/announce", post(announce::announce))
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
@@ -1398,6 +1400,7 @@ async fn volume(
     // A zone's volume limit (DSP settings) caps absolute requests.
     let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
     zone.set_volume(cap_volume(body.volume, limit)).await?;
+    announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -8649,6 +8652,224 @@ exec sleep 300
         assert_eq!(z["transport"], "stopped", "{z}");
         // The live item refuses to open while librespot isn't piping
         assert!(librespot::open_live().is_err());
+    }
+
+    /// Announcements: a chime and a clip play instead of the music, then the zone goes back to the
+    /// same track at the same position, playing or paused as it was, with the queue as it was.
+    #[tokio::test]
+    async fn an_announcement_interrupts_and_the_zone_comes_back() {
+        use pm_zones::outputs::NullOutput;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/song.flac",
+            get({
+                let f = flac.clone();
+                move || {
+                    let f = f.clone();
+                    async move { f }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        // A zone on a real-time null output, so positions mean something
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let lib = Library::open(&db).unwrap();
+        let outputs = OutputRegistry::new();
+        outputs.register(Arc::new(NullOutput::realtime()));
+        let s = NodeState::new(
+            NodeSettings {
+                name: "test".into(),
+                version: "0".into(),
+                db_path: db,
+                scan_folders: vec![dir.path().join("music")],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            lib,
+            outputs,
+        );
+        *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
+        s.zones_for_all_outputs();
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let zone = |app: &Router| {
+            let app = app.clone();
+            let zid = zid.clone();
+            async move { call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1 }
+        };
+        // Two songs, the first playing for a while
+        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+            {"uri": format!("{base}/song.flac"), "title": "A", "artist": "Band"},
+            {"uri": format!("{base}/song.flac"), "title": "B", "artist": "Band"}], "replace": true, "play": true}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let mut z = serde_json::Value::Null;
+        for _ in 0..60 {
+            z = zone(&app).await;
+            if z["transport"] == "playing" && z["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= 1200 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let saved = z["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(saved >= 1200, "{z}");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "needs a uri or a chime");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": "ftp://x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // The announcement: a chime, then the clip
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(
+                serde_json::json!({"uri": format!("{base}/song.flac"), "chime": true, "volume_percent": 60}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(
+            (
+                a["resumes"].clone(),
+                a["items"].clone(),
+                a["volume_applied"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!(2),
+                serde_json::json!(false)
+            ),
+            "no hardware volume on a null output: {a}"
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"chime": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "one at a time");
+        let mut seen_chime = false;
+        let mut seen_clip = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen_chime |= t == "Chime";
+            seen_clip |= t == "Announcement";
+            if seen_clip && t != "Announcement" && t != "Chime" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            seen_chime && seen_clip,
+            "chime {seen_chime}, clip {seen_clip}: {z}"
+        );
+        // Back on A, near where it was, playing; the queue as before
+        let mut back = serde_json::Value::Null;
+        for _ in 0..40 {
+            back = zone(&app).await;
+            if back["now_playing"]["item"]["title"] == "A"
+                && back["transport"] == "playing"
+                && back["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= saved
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(back["now_playing"]["item"]["title"], "A", "{back}");
+        assert_eq!(back["transport"], "playing");
+        let pos = back["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(
+            pos >= saved && pos < saved + 2500,
+            "position {pos} vs saved {saved}"
+        );
+        assert_eq!(
+            back["queue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["title"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        // Paused before: paused again after
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "pause"})),
+        )
+        .await;
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": format!("{base}/song.flac"), "title": "Doorbell"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        let mut seen = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen |= t == "Doorbell";
+            if seen && t != "Doorbell" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(seen, "{z}");
+        for _ in 0..30 {
+            back = zone(&app).await;
+            if back["transport"] == "paused" && back["now_playing"]["item"]["title"] == "A" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            (
+                back["transport"].clone(),
+                back["now_playing"]["item"]["title"].clone()
+            ),
+            (serde_json::json!("paused"), serde_json::json!("A")),
+            "{back}"
+        );
+        assert_eq!(back["queue"].as_array().unwrap().len(), 2);
+        // The chime file is a WAV in the data dir
+        assert!(s.data_dir().join("announce/chime.wav").is_file());
     }
 
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release

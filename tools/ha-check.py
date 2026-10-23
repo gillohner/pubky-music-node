@@ -456,7 +456,7 @@ def check_integration(args, work):
     until("it is available", lambda: state_of(h, ent)["state"] != "unavailable", 30)
     st = state_of(h, ent)
     feats = st["attributes"].get("supported_features", 0)
-    for name, bit in (("browse", 131072), ("search", 4194304), ("play_media", 512), ("grouping", 524288), ("repeat", 262144), ("enqueue", 2097152)):
+    for name, bit in (("browse", 131072), ("search", 4194304), ("play_media", 512), ("grouping", 524288), ("repeat", 262144), ("enqueue", 2097152), ("announce", 1048576)):
         if not feats & bit:
             fail(f"{ent} lacks {name}")
     if feats & 4:
@@ -532,6 +532,14 @@ def check_integration(args, work):
     service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": url, "media_content_type": "music"})
     until("play_media URL replaces the queue", lambda: [i["uri"] for i in zone()["queue"]] == [url] and zone()["transport"] == "playing", 30)
     ok("play_media URL: replaces the queue and plays")
+    # announce: the clip plays instead of the music, then the zone comes back to the same track
+    service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": night["media_content_id"], "media_content_type": "album"})
+    until("the album plays again", lambda: zone()["transport"] == "playing" and (zone().get("now_playing") or {}).get("position_ms", 0) >= 1000, 30)
+    first = (zone().get("now_playing") or {}).get("item", {}).get("title")
+    service(h, "media_player", "play_media", {"entity_id": ent, "media_content_id": url, "media_content_type": "music", "announce": True, "extra": {"chime": True}})
+    until("the announcement plays", lambda: (zone().get("now_playing") or {}).get("item", {}).get("title") in ("Chime", "Announcement"), 20)
+    until("the zone comes back to the song", lambda: (lambda z: z["transport"] == "playing" and (z.get("now_playing") or {}).get("item", {}).get("title") == first and (z.get("now_playing") or {}).get("position_ms", 0) >= 1000)(zone()), 60)
+    ok(f"announce: the clip played, then back to {first!r} where it was")
     service(h, "media_player", "clear_playlist", {"entity_id": ent})
     service(h, "media_player", "media_stop", {"entity_id": ent})
     until("stopped", lambda: zone()["transport"] == "stopped", 20)
