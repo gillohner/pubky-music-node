@@ -236,6 +236,10 @@ impl StreamingService for Jamendo {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "library"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),

@@ -8651,6 +8651,49 @@ exec sleep 300
         assert!(librespot::open_live().is_err());
     }
 
+    /// Every source declares what it can do and a stage; the Sources list carries both.
+    #[tokio::test]
+    async fn sources_declare_their_features_and_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, rows) = call(&app, "GET", "/v1/sources", None).await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), streaming::services().len());
+        for r in rows {
+            let feats = r["features"].as_array().unwrap();
+            assert!(!feats.is_empty(), "{} declares nothing", r["id"]);
+            for f in feats {
+                assert!(
+                    streaming::FEATURES.contains(&f.as_str().unwrap()),
+                    "{}: unknown feature {f}",
+                    r["id"]
+                );
+            }
+            assert!(
+                streaming::STAGES.contains(&r["stage"].as_str().unwrap()),
+                "{}: stage {}",
+                r["id"],
+                r["stage"]
+            );
+        }
+        let by = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+        assert_eq!(by("qobuz")["stage"], "unofficial");
+        assert_eq!(by("tidal")["stage"], "stable");
+        assert!(by("spotify")["features"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("connect")));
+        assert!(!by("spotify")["features"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("play")));
+        assert!(by("bandcamp")["features"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("downloads")));
+    }
+
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release
     /// only when its checksum matches, and a zone then plays a video through it.
     #[cfg(target_os = "linux")]

@@ -944,6 +944,10 @@ impl StreamingService for Podcasts {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let n = feeds(s).len();
         SourceInfo {
