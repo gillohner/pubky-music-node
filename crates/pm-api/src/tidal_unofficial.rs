@@ -30,6 +30,8 @@ pub const CLIENT_KEY: &str = "tidal.unofficial_client";
 const SCOPE: &str = "r_usr w_usr w_sub";
 /// What the page says before the mode is switched on.
 pub const WARNING: &str = "This uses TIDAL's private API, which TIDAL has not approved for other apps. It can stop working at any time, and TIDAL could act on the account. It needs a paid TIDAL plan.";
+/// TIDAL's answer when the client comes from its developer portal, in plain words.
+pub const NOT_A_DEVICE_CLIENT: &str = "This client can't use the code sign-in. Apps from TIDAL's developer portal are not device clients; enter a TIDAL device client instead.";
 
 fn v1_base(s: &NodeState) -> String {
     s.tidal
@@ -361,15 +363,18 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<Unoffici
     let status = resp.status();
     let v: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
+        let detail = v["error_description"]
+            .as_str()
+            .or(v["error"].as_str())
+            .unwrap_or("");
+        // An app from TIDAL's developer portal is not a device client: TIDAL answers 400
+        // "Client is not a Limited Input Device client" to the device-code request.
+        if detail.to_ascii_lowercase().contains("limited input device") {
+            return Err(ApiError::bad_request(NOT_A_DEVICE_CLIENT));
+        }
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
-            format!(
-                "TIDAL refused the sign-in ({status}): {}",
-                v["error_description"]
-                    .as_str()
-                    .or(v["error"].as_str())
-                    .unwrap_or("")
-            ),
+            format!("TIDAL refused the sign-in ({status}): {detail}"),
         ));
     }
     let uri = v["verificationUriComplete"]

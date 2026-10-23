@@ -176,7 +176,8 @@ Open Sources › TIDAL › Connect TIDAL.
 - **Spotify:** Spotify allows no shared app, so you make your own free one once. Sources › Spotify walks you through
   it and takes only the client ID.
 - **TIDAL full tracks (unofficial):** off by default. The node has no built-in device client; you enter a TIDAL device
-  client id and secret you are allowed to use under Sources › TIDAL › Full tracks.
+  client id and secret you are allowed to use under Sources › TIDAL › Full tracks (an app from TIDAL's developer
+  portal is not a device client and won't work there).
 - **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
   always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps; add your
