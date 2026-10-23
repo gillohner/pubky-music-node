@@ -107,9 +107,13 @@ class PlayerService : Service() {
         @JvmStatic
         fun start(activity: Activity, text: String) {
             // Android 13+: without this the service still runs, but its notification is hidden.
+            // Asked once: someone who said no is not asked again on every launch.
+            val prefs = activity.getSharedPreferences("pubky-music", Context.MODE_PRIVATE)
             if (Build.VERSION.SDK_INT >= 33 &&
-                activity.checkSelfPermission(NOTIFY) != PackageManager.PERMISSION_GRANTED
+                activity.checkSelfPermission(NOTIFY) != PackageManager.PERMISSION_GRANTED &&
+                !prefs.getBoolean("asked-notifications", false)
             ) {
+                prefs.edit().putBoolean("asked-notifications", true).apply()
                 activity.requestPermissions(arrayOf(NOTIFY), 7)
             }
             val i = Intent(activity, PlayerService::class.java).putExtra(EXTRA_TEXT, text)

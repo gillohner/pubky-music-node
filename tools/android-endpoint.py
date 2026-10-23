@@ -80,10 +80,23 @@ def logcat():
     return (out / "logcat.txt").read_text(errors="replace") if (out / "logcat.txt").exists() else ""
 
 
+PROMPT = re.compile(r'text="(Don.t allow|Deny)"')
+
+
 def ui_nodes():
-    adb("shell", "uiautomator", "dump", "/sdcard/ui.xml")
-    xml = adb("exec-out", "cat", "/sdcard/ui.xml")
-    return re.findall(r"<node [^>]*>", xml)
+    """The screen's nodes; Android 13+'s notification prompt, whenever it shows, is refused."""
+    for _ in range(3):
+        adb("shell", "uiautomator", "dump", "/sdcard/ui.xml")
+        xml = adb("exec-out", "cat", "/sdcard/ui.xml")
+        nodes = re.findall(r"<node [^>]*>", xml)
+        prompt = next((n for n in nodes if PROMPT.search(n)), None)
+        if not prompt:
+            return nodes
+        x, y = center(prompt)
+        adb("shell", "input", "tap", str(x), str(y))
+        log("notifications refused")
+        time.sleep(1)
+    return nodes
 
 
 def center(node):
@@ -121,21 +134,6 @@ def check_status_bar():
     top = int(re.search(r'bounds="\[\d+,(\d+)\]', menu).group(1))
     assert top >= max(bars), f"the status bar (to y={max(bars)}) covers the node's menu (top y={top})"
     log(f"the node's menu (y={top}) is below the status bar (y<{max(bars)})")
-
-
-def refuse_notifications():
-    """Android 13+ asks for the notification permission when the player service starts: refuse it."""
-    def prompt():
-        return next((n for n in ui_nodes() if re.search(r'text="(Don.t allow|Don’t allow|Deny)"', n)), None)
-
-    try:
-        node = until("the notification prompt", prompt, timeout=30, every=2)
-    except RuntimeError:
-        log("no notification prompt showed")
-        return
-    x, y = center(node)
-    adb("shell", "input", "tap", str(x), str(y))
-    log("notifications refused")
 
 
 def zone_state(zid):
@@ -219,7 +217,8 @@ def run(node):
     try:
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
         tap(lambda n: "connect by address" in n, "“Or connect by address”")
-        tap(lambda n: 'resource-id="url"' in n or ("EditText" in n and "7788" in n), "the address field")
+        # The address field is the page's first text field (its id and hint differ between WebViews)
+        tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
         adb("shell", "input", "text", "10.0.2.2:7788")
         adb("shell", "input", "keyevent", "66")
         shot("1-connecting")
@@ -232,8 +231,6 @@ def run(node):
 
         until("the node's page in the app", node_page, timeout=90, every=3)
         log("the node's page is showing in the app")
-        if sdk >= 33:
-            refuse_notifications()
         check_status_bar()
         shot("2a-light")
         adb("shell", "cmd", "uimode", "night", "yes")  # the bars and the page follow to dark
@@ -294,10 +291,11 @@ def run(node):
             adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
             until("the crash report", lambda: any("closed unexpectedly" in n for n in ui_nodes()), timeout=60, every=2)
             shot("5-crash-report")
-            report = adb("shell", "run-as", PKG, "cat", "files/crash-report.txt", check=False)
+            # A release build cannot be read with run-as: read the report off the screen
+            report = "\n".join(re.findall(r'text="([^"]*)"', "\n".join(ui_nodes())))
             (out / "crash-report.txt").write_text(report)
-            assert "Java exception" in report or "crashed" in report, f"the report says: {report[:300]!r}"
-            log("the crash report shows on the next launch: " + report.splitlines()[0][:120] if report else "(empty)")
+            assert "Java exception" in report or "crashed" in report, f"the report says: {report[:400]!r}"
+            log("the crash report shows on the next launch")
             tap(lambda n: 'text="Continue"' in n, "Continue")
             until("the node's page after the report", node_page, timeout=90, every=3)
             log("Continue reconnects to the node")
