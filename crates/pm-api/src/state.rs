@@ -103,6 +103,8 @@ pub struct NodeState {
     stream_secret: [u8; 32],
     /// Sonos players by output id, so a zone of Sonos players only groups them the Sonos way.
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// HEOS players (Denon, Marantz) among the renderers: a zone of them only is a HEOS group.
+    pub heos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
@@ -339,6 +341,7 @@ impl NodeState {
             remote_id: Default::default(),
             stream_secret,
             sonos: Default::default(),
+            heos: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
             renderer: Default::default(),
@@ -888,6 +891,12 @@ impl NodeState {
                 .with_describe(self.describe_for_renderers()),
         );
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        if pm_out_upnp::heos::is_heos(&r) {
+            self.heos
+                .lock()
+                .expect("heos lock")
+                .insert(id.clone(), out.clone());
+        }
         if pm_out_upnp::sonos::is_sonos(&r) {
             self.sonos
                 .lock()

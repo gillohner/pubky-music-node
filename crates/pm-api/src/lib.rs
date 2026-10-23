@@ -1240,12 +1240,35 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
             .collect()
     };
+    // HEOS players only (Denon, Marantz) whose CLI knows them all: HEOS groups them itself
+    // (pm_out_upnp::heos).
+    let mut heos: Vec<Arc<pm_out_upnp::UpnpOutput>> = {
+        let map = s.heos.lock().expect("heos lock");
+        ids.iter()
+            .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
+            .collect()
+    };
+    if members.len() > 1 && heos.len() == ids.len() {
+        let renderers: Vec<pm_out_upnp::Renderer> = heos.iter().map(|o| o.renderer().clone()).collect();
+        let ok = tokio::task::spawn_blocking(move || {
+            pm_out_upnp::heos::can_group(&renderers, pm_out_upnp::heos::CLI_PORT)
+        })
+        .await
+        .unwrap_or(false);
+        if !ok {
+            heos.clear();
+        }
+    }
     let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
         members.remove(0)
     } else if sonos.len() == ids.len() {
         let mut sonos = sonos;
         let lead = sonos.remove(0);
         Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+    } else if heos.len() == ids.len() {
+        let mut heos = heos;
+        let lead = heos.remove(0);
+        Arc::new(pm_out_upnp::heos::HeosGroup::new(body.name.trim(), lead, heos))
     } else {
         Arc::new(
             pm_zones::outputs::GroupOutput::new(body.name.trim(), members)

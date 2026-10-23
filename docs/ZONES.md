@@ -12,6 +12,7 @@ A zone's `output` id starts with its protocol, which says what kind of device it
 | `net:` | a `pm-endpoint` (a Pi, the desktop app's built-in player: "this computer") | speaker / computer |
 | `upnp:` | a DLNA renderer or smart TV, or a Sonos player (`GET /v1/outputs`: name and caps) | TV / speaker |
 | `sonos-group:` | Sonos players grouped Sonos's own way | speakers |
+| `heos-group:` | HEOS players (Denon, Marantz) grouped HEOS's own way | speakers |
 | `cast:` | Chromecast, Google TV, Nest speaker; names ending "(Cast group)" are Cast groups | cast |
 | `airplay:` | an AirPlay receiver | AirPlay |
 | `snapcast:` | a Snapcast group of players | speakers |
@@ -31,13 +32,14 @@ Every zone state has `sync`:
 | `sync` | Meaning | Label |
 | :-- | :-- | :-- |
 | `single` | one device | nothing |
-| `tight` | sample-accurate: the node's own endpoints on `hw:` DACs (ADR 0009), Slimproto players (started on one instant, kept within a few ms), a Snapcast group, a Sonos group, a Cast group | "In sync" |
+| `tight` | sample-accurate: the node's own endpoints on `hw:` DACs (ADR 0009), Slimproto players (started on one instant, kept within a few ms), a Snapcast group, a Sonos group, a HEOS group, a Cast group | "In sync" |
 | `loose` | started together, may drift by a fraction of a second: mixed protocols; AirPlay 1, DLNA and single Cast devices together; any endpoint on a system mixer (`…/cpal:…`: a phone, a Mac, a Windows PC), whose latency the node cannot see | "Loosely synced" |
 
 ## Actions
 
 - **Group:** `POST /v1/zones {name, outputs: [ids]}`.
   - A zone of Sonos players only becomes a Sonos group (`sonos-group:`, tight).
+  - A zone of HEOS players only becomes a HEOS group (`heos-group:`, tight). The node asks the first player's HEOS CLI (TCP 1255) whether it knows them all, and makes a node group otherwise. The leader plays over UPnP, and HEOS plays its source on the others. The HEOS group ends when the zone stops.
   - Anything else becomes a node group (`group:`), tight or loose as above.
 - **Ungroup:** `DELETE /v1/zones/{id}` on the group zone; its members' own zones remain.
 - **Volume:**

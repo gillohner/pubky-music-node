@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **HEOS groups:** a zone of HEOS players (Denon, Marantz) is now a HEOS group, kept in sync by HEOS itself (`heos-group:`, "In sync"). It uses HEOS's published CLI on port 1255: `set_group` when the zone starts, ended when it stops. The leader plays over UPnP as before. If the CLI doesn't know every member, the zone is an ordinary node group.
 - **gPodder sync for podcasts:** a gPodder account (gpodder.net, opodsync, or Nextcloud's gpoddersync app) keeps subscriptions and listening positions in step with a phone app such as AntennaPod. Set it with `PUT /v1/podcasts/gpodder {kind?, server, username, password, device?}`; the first sync checks the sign-in, and the account is kept only if it works. The node then syncs every 15 minutes, or on `POST /v1/podcasts/gpodder/sync`. Subscriptions sync both ways. A newer position from either side wins, and 95% or more counts as played. The password stays on the node.
 - **More album covers:** an album with no cover in its files, its folder or the Cover Art Archive now gets one from Apple's iTunes Search API (official, no key). A result counts only if its album title and artist both match; bracketed parts such as "(Remastered)" are ignored. "Various Artists" albums are not looked up. Like the archive, a miss is remembered for a week.
 - **Albums stay whole:**
