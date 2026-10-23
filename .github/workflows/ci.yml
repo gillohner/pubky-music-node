@@ -84,9 +84,10 @@ jobs:
     # (tools/alsa-loopback.py; docs/HARDWARE-TEST-PROMPT.md §C). Then two squeezelite players on ALSA in one node
     # group, measured apart at every click (tools/slim-sync-alsa.py). The runner's Azure kernel has no sound modules,
     # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
-    # (virtme-ng).
+    # (virtme-ng). A hung guest fails the job after 20 minutes instead of holding the run (it takes 4-5).
     runs-on: ubuntu-24.04
     needs: check
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
