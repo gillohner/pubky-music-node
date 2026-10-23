@@ -22,6 +22,12 @@ RUN set -eu; \
 WORKDIR /src
 COPY . .
 ENV CARGO_INCREMENTAL=0
+# Built-in apps and the masked TIDAL device client, compiled in by crates/pm-api/build.rs (build stage only)
+ARG PM_PROJECT_TIDAL_CLIENT_ID
+ARG PM_PROJECT_JAMENDO_CLIENT_ID
+ARG PM_PROJECT_ACOUSTID_KEY
+ARG PM_TIDAL_DEVICE_CLIENT_ID
+ARG PM_TIDAL_DEVICE_CLIENT_SECRET
 RUN set -eu; \
     if [ "$TARGETARCH" = "arm64" ] && [ "$(dpkg --print-architecture)" != "arm64" ]; then \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
