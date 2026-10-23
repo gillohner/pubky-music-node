@@ -59,6 +59,9 @@ pub struct BackupCounts {
     pub folders: u64,
 }
 
+/// The id of "Unknown artist", the songs without any artist ([`Library::unknown_artist`]).
+pub const UNKNOWN_ARTIST_ID: i64 = 0;
+
 /// An artist as the browse views list them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistSummary {
@@ -718,6 +721,37 @@ impl Library {
 
     pub fn get_artist(&self, id: i64) -> Result<Option<ArtistSummary>> {
         Ok(self.list_artists()?.into_iter().find(|a| a.id == id))
+    }
+
+    /// Songs with no artist at all, shown as "Unknown artist" (second review: they were in no
+    /// artist's list). `None` when every song has one.
+    pub fn unknown_artist(&self) -> Result<Option<ArtistSummary>> {
+        let conn = self.lock();
+        let (tracks, albums): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT t.album_id) FROM tracks t
+             WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((tracks > 0).then(|| ArtistSummary {
+            id: UNKNOWN_ARTIST_ID,
+            name: "Unknown artist".into(),
+            mbid: None,
+            albums: albums as u64,
+            tracks: tracks as u64,
+        }))
+    }
+
+    /// The songs behind [`Library::unknown_artist`], by album then track number.
+    pub fn tracks_without_artist(&self) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) ORDER BY al.title, t.disc_no, t.track_no, t.title"
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map([], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
     }
 
     /// Albums an artist appears on, by year then title.
@@ -2638,6 +2672,27 @@ mod tests {
         assert_eq!((f.label.as_str(), f.dsd, f.hi_res), ("DSD128", true, false));
         let f = describe_format(1, "mp3", "pcm", 44_100, 16);
         assert_eq!((f.label.as_str(), f.lossless), ("MP3", false));
+    }
+
+    #[test]
+    fn songs_without_an_artist_are_unknown_artist() {
+        let lib = Library::open_in_memory().unwrap();
+        assert!(lib.unknown_artist().unwrap().is_none());
+        lib.upsert_track(&sample_track("/music/a.flac", "With")).unwrap();
+        let mut bare = sample_track("/music/b.flac", "Without");
+        bare.artists.clear();
+        lib.upsert_track(&bare).unwrap();
+        let u = lib.unknown_artist().unwrap().expect("one song without an artist");
+        assert_eq!((u.id, u.tracks, u.albums), (UNKNOWN_ARTIST_ID, 1, 1));
+        let t = lib.tracks_without_artist().unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].title, "Without");
+        // The shared list stays the real artists only
+        assert!(lib
+            .list_artists()
+            .unwrap()
+            .iter()
+            .all(|a| a.id != UNKNOWN_ARTIST_ID));
     }
 
     #[test]

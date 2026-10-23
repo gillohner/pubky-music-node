@@ -70,6 +70,7 @@
   const bareKey = (k) => String(k || '').replace(/^pubky:?\/*/i, '').replace(/^pk:/i, '');
   const shortKey = (k) => { const b = bareKey(k); return b.length > 20 ? `${b.slice(0, 6)}…${b.slice(-10)}` : b; };
   const keyHtml = (k) => `<span class="pkey"><code title="${esc(bareKey(k))}">${esc(shortKey(k))}</code><button class="icon-btn sm" data-copykey="${esc(bareKey(k))}" title="Copy the whole key" aria-label="Copy the whole key">${icon('copy')}</button></span>`;
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-addmusic]'); if (!b) return; e.preventDefault(); setView('add-music'); });
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-copykey]'); if (!b) return; e.preventDefault(); e.stopPropagation(); const k = b.dataset.copykey; (navigator.clipboard ? navigator.clipboard.writeText(k) : Promise.reject()).then(() => toast('Key copied')).catch(() => toast(k)); }, true);
   const artists = (t) => (t.artists || []).map((a) => a.name).join(', ');
   const hue = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
@@ -173,6 +174,81 @@
     return json;
   };
 
+
+  // ---- Library › Add music (STEWARD-BUNDLED-HOMESERVER.md §7): upload files, copy a folder, or use a folder in place ----
+  // Uploads go one file at a time in 4 MiB chunks; a file's upload id is kept in this browser so a
+  // reload or a dropped connection carries on where it stopped.
+  const AUDIO_EXT = /\.(flac|mp3|m4a|mp4|aac|alac|ogg|oga|opus|wav|aiff?|wv|ape|dsf|dff|mka|wma)$/i;
+  const up = { files: [], running: false };
+  const upKey = (f) => `pm.up.${f.name}|${f.size}|${f.lastModified}`;
+  const upGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const upSet = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* no storage: no resume */ } };
+  const upTotals = () => { const t = { n: up.files.length, done: 0, failed: 0, bytes: 0, sent: 0 }; for (const u of up.files) { t.bytes += u.file.size; t.sent += u.done; if (u.state === 'stored' || u.state === 'already') t.done += 1; if (u.state === 'failed') t.failed += 1; } return t; };
+  const drawUploads = () => {
+    const box = $('#upbox'); if (!box || !up.files.length) { if (box) box.innerHTML = ''; return; }
+    const t = upTotals(); const pct = t.bytes ? Math.round((100 * t.sent) / t.bytes) : 100;
+    const word = { waiting: 'waiting', sending: 'sending', stored: 'added', already: 'already there', failed: 'failed' };
+    const recent = up.files.slice(-30).reverse();
+    box.innerHTML = `<div class="jobbar"><span style="width:${pct}%"></span></div><p class="small" role="status">${up.running ? 'Uploading' : 'Uploaded'} ${t.done} of ${countOf(t.n, 'files')} · ${fmtBytes(t.sent)} of ${fmtBytes(t.bytes)}${t.failed ? ` · ${t.failed} failed` : ''}</p>`
+      + `<ul class="uplist">${recent.map((u) => `<li><span class="grow">${esc(u.rel || u.file.name)}</span><span class="muted small ${u.state === 'failed' ? 'joberr' : ''}" title="${esc(u.error || '')}">${u.state === 'sending' ? `${Math.round((100 * u.done) / (u.file.size || 1))}%` : word[u.state]}</span></li>`).join('')}</ul>`
+      + (up.files.length > 30 ? `<p class="muted small">and ${countOf(up.files.length - 30, 'more files')}</p>` : '')
+      + (!up.running ? '<button class="btn ghost sm" id="upclear">Clear the list</button>' : '');
+    const c = $('#upclear', box); if (c) c.onclick = () => { up.files = []; drawUploads(); };
+  };
+  const sendOne = async (u) => {
+    const f = u.file; const key = upKey(f);
+    let id = upGet(key); let offset = 0; let chunk = 4 * 1024 * 1024;
+    if (id) { try { const st = await api('GET', `/library/uploads/${id}`); if (st.state === 'stored') { u.done = f.size; u.state = 'stored'; upSet(key, null); return; } if (st.state === 'receiving') offset = st.offset || 0; else id = null; } catch { id = null; } }
+    if (!id) {
+      const r = await api('POST', '/library/uploads', { name: f.name, size: f.size, relative_path: u.rel || undefined });
+      if (r.already) { u.done = f.size; u.state = 'already'; return; }
+      id = r.id; offset = r.offset || 0; chunk = r.chunk_size || chunk; upSet(key, id);
+    }
+    for (;;) {
+      const res = await fetch(`/v1/library/uploads/${encodeURIComponent(id)}?offset=${offset}`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: f.slice(offset, offset + chunk) });
+      const j = await res.json().catch(() => ({}));
+      if (res.status === 409 && j.offset != null) { offset = j.offset; continue; }
+      if (!res.ok) throw new Error(humanError(j.error || `the node answered ${res.status}`, '/library/uploads'));
+      offset = j.offset; u.done = Math.min(offset, f.size); drawUploads();
+      if (j.state === 'failed') throw new Error(j.error || 'the homeserver did not take it');
+      if (j.state === 'stored' || j.state === 'storing' || offset >= f.size) break;
+    }
+    u.state = 'stored'; upSet(key, null);
+  };
+  const runUploads = async () => {
+    if (up.running) return; up.running = true; drawUploads();
+    for (;;) {
+      const u = up.files.find((x) => x.state === 'waiting'); if (!u) break;
+      u.state = 'sending'; drawUploads();
+      try { await sendOne(u); } catch (e) { u.state = 'failed'; u.error = e.message; }
+      drawUploads();
+    }
+    up.running = false; drawUploads();
+    const t = upTotals(); toast(t.failed ? `${countOf(t.done, 'files')} added, ${t.failed} failed` : `${countOf(t.done, 'files')} added to your library`, t.failed ? 'error' : undefined);
+  };
+  const addUploads = (files) => {
+    const list = [...files].filter((f) => f.size > 0 && AUDIO_EXT.test(f.name));
+    const skipped = files.length - list.length;
+    for (const f of list) if (!up.files.some((x) => x.file.name === f.name && x.file.size === f.size && x.rel === (f.webkitRelativePath || f.relPath || '') && x.state !== 'failed')) up.files.push({ file: f, rel: f.webkitRelativePath || f.relPath || '', done: 0, state: 'waiting', error: null });
+    if (skipped) toast(`${countOf(skipped, 'files')} left out: only music files are added`);
+    if (list.length) runUploads(); else drawUploads();
+  };
+  // Dropped folders: walk them (webkitGetAsEntry), keeping each file's path inside the folder
+  const filesFromDrop = async (dt) => {
+    const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+    if (!entries.length) return [...(dt.files || [])];
+    const out = [];
+    const walk = async (e, path) => {
+      if (e.isFile) { const f = await new Promise((res, rej) => e.file(res, rej)).catch(() => null); if (f) { f.relPath = path + f.name; out.push(f); } return; }
+      if (!e.isDirectory) return;
+      const rd = e.createReader(); let batch;
+      do { batch = await new Promise((res) => rd.readEntries(res, () => res([]))); for (const c of batch) await walk(c, `${path}${e.name}/`); } while (batch.length);
+    };
+    for (const e of entries) await walk(e, '');
+    return out;
+  };
+  window.addEventListener('beforeunload', (e) => { if (up.running) { e.preventDefault(); e.returnValue = ''; } });
+
   // A small dialog with a few choices; resolves to the picked value, or null (Esc, Cancel).
   // With `field` ({label, value}) it shows a text field and resolves to {value, text}.
   const choiceDialog = ({ title, text, choices, field }) => new Promise((resolve) => {
@@ -255,7 +331,7 @@
   // A running files job (copy or bring) is a compact chip in the player bar; tapping it shows the
   // details with Cancel. Opened menus stay on top of it (overlap brief: no floating card).
   const fjob = { id: null, p: null, timer: null };
-  const jobTitle = (p) => (p.kind === 'bring'
+  const jobTitle = (p) => (p.kind === 'import' ? (p.finished ? (p.cancelled ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
     ? (p.finished ? (p.cancelled ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
     : (p.finished ? (p.cancelled ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
   const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (p.finished ? 100 : 0));
@@ -422,7 +498,13 @@
   // The Null output is for developers: hidden unless switched on in About this node (it stays
   // listed while it is the zone in use)
   const devOutput = (id) => /^null/.test(String(id || ''));
-  const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => state.devOutputs || !devOutput(z.output) || z.id === state.zone)];
+  // Who is using the page (#46): the owner, or a listener with their own Ring sign-in, who plays
+  // the shared library on the zones the owner opened and has nothing of the owner's
+  const isListener = () => !!(state.me && state.me.role === 'listener');
+  const isOwner = () => !isListener();
+  const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
+  const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
+  const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z))];
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
@@ -844,7 +926,7 @@
     let t = null; if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } }
     const pageUri = songPage && !/^lib-/.test(songPage) ? uriOf('song', songPage) : null;
     const target = t ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
-    let tags = []; if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
+    let tags = []; if (target && isOwner()) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
     if (!$('#nppubky')) return;
     const fav = t ? isFav(t) : pageUri ? state.favUris.has(pageUri) : false;
     box.innerHTML = `<div class="np-pubky-row">${target || t ? `<button class="btn ${fav ? 'primary' : 'ghost'}" id="npfav" aria-pressed="${fav}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'In favourites' : 'Add to favourites'}</button>` : ''}${songPage ? `<button class="btn ghost" id="nppage">${icon('compass')} Song page: sources, versions, tags</button>` : ''}</div>`
@@ -1005,8 +1087,8 @@
   };
   const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
-  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify'];
-  const VIEW_LABELS = { home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
+  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music'];
+  const VIEW_LABELS = { 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
@@ -1109,6 +1191,7 @@
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
+    if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
@@ -1481,7 +1564,9 @@
   document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); more.click(); });
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
+  const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   const showMenu = (anchor, items) => {
+    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) return; }
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
     $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(items[Number(b.dataset.mi)].run()).finally(popTransient); });
@@ -1966,7 +2051,7 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
-  const pubkyUser = async () => { if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
+  const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   const RESIGN_TEXT = 'This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.';
   const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span><button class="btn sm primary" data-resign>Sign in again</button></div>` : '';
@@ -2237,7 +2322,7 @@
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
           const shown = sorted;
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
-          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums') : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); render(); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); render(); };
@@ -2337,7 +2422,7 @@
           const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
           if (state.view !== 'tracks') return;
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
-          main.innerHTML = pageHead('Tracks', total, (total > 12 ? filterBox('Filter tracks') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No tracks yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Tracks', total, (total > 12 ? filterBox('Filter tracks') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No tracks yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           const box = $('#tracklist');
           if (box) {
             const shown = []; lists.all = shown;
@@ -2572,9 +2657,11 @@
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
           const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
-          const summaryBar = pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songs.length} song${songs.length === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
+          // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
+          const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songs.length} song${songs.length === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const ownOrder = pf && pf.own_order;
-          const orderText = pf ? pf.order.order.map(srcName).join(' › ') : '';
+          // Only what can play here: services not connected aren't part of the answer (second review #16)
+          const orderText = pf ? pf.order.order.filter((k) => { const sv = (pf.order.services || []).find((x) => x.id === k); return !sv || sv.connected; }).map(srcName).join(' › ') || 'Your library' : '';
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songs.length + localSongs.length, 'songs')}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
@@ -3087,7 +3174,7 @@
           const linkRef = pg.link && pg.link !== songRef.uri ? { uri: pg.link } : null;
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
-          const [myTags, linkTags, myReview] = await Promise.all([
+          const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
             api('GET', `/tags?${refQs(songRef)}`).then((r) => r.tags).catch(() => null),
             linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
             api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
@@ -3119,6 +3206,7 @@
           const parent = kind === 'song' && pg.album && pg.album.id ? { kind: 'album', ...pg.album } : kind !== 'artist' && pg.artist && pg.artist.id ? { kind: 'artist', ...pg.artist } : null;
           const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id ? ['album', pg.album] : null].filter(Boolean);
           const crumbBar = crumbs.length ? `<nav class="crumbs" aria-label="Breadcrumb"><ol>${crumbs.map(([k, l]) => `<li><button class="lnk" data-crumb-kind="${k}" data-crumb-id="${esc(l.id)}">${esc(l.name)}</button></li>`).join('')}<li aria-current="page">${esc(state.itemTitle || '')}</li></ol></nav>` : '';
+          if (isListener()) pg.about = pg.about.filter((f) => f.label !== 'File');
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
@@ -3130,7 +3218,7 @@
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'artist' && target.artist_id != null ? '<div id="isimilar-slot"></div>' : '')
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tags need this ${kind} to be known first (a MusicBrainz id).`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -3273,7 +3361,7 @@
           break;
         }
         case 'zones': {
-          const outs = state.outputs || (state.outputs = await api('GET', '/outputs').catch(() => []));
+          const outs = isListener() ? [] : state.outputs || (state.outputs = await api('GET', '/outputs').catch(() => []));
           if (state.view !== 'zones') return;
           const capsOf = (z) => (outs.find((o) => o.id === z.output) || {}).caps || null;
           const zs = zoneList();
@@ -3306,7 +3394,75 @@
           $('#zgroup').onclick = () => setView('settings', 'playback');
           break;
         }
+        case 'add-music': {
+          const [st, folders] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/library/folders').catch(() => [])]);
+          if (state.view !== 'add-music') return;
+          const hs = (st && st.homeserver) || { mode: 'none' };
+          const onHs = hs.mode !== 'none' && st.saving && st.saving.state !== 'signed_out';
+          const where = hs.mode === 'bundled' ? 'this node’s Pubky homeserver' : 'your Pubky homeserver';
+          const room = hs.quota_mb && hs.quota_mb !== 'unlimited' && hs.used_bytes != null ? ` ${fmtBytes(hs.used_bytes)} of ${fmtBytes(hs.quota_mb * 1e6)} used.` : '';
+          const needHs = `<p class="muted small">Needs a Pubky homeserver to keep the files on. <button class="lnk" data-goto-accounts>Sign in or create an account</button> first.</p>`;
+          const flist = (folders || []).map((f) => (Array.isArray(f) ? f[0] : f.path || f)).filter(Boolean);
+          main.innerHTML = backBtn('albums', 'Albums') + pageHead('Add music', null)
+            + `<p class="muted">Three ways in. Wherever the files are, they’re one library: albums, search and playback don’t change.</p>`
+            + `<section class="section card addm" aria-labelledby="addup"><div class="section-head"><h3 id="addup">${icon('upload')} Upload files</h3></div>`
+            + `<p class="muted small">From this ${matchMedia('(pointer: coarse)').matches ? 'device' : 'computer'} to ${where}, kept privately (never public), then added to your library.${room} A cut connection carries on where it stopped.</p>`
+            + (onHs ? `<div class="dropzone" id="updrop" tabindex="0" role="button" aria-label="Drop music files or folders here, or press Enter to choose files">${icon('upload')}<p><strong>Drop music files or whole folders here</strong></p><p class="muted small">FLAC, MP3, AAC, ALAC, Ogg, Opus, WAV, AIFF, DSD…</p><div class="row-btns"><button class="btn primary" id="uppick">Choose files</button><button class="btn" id="uppickdir">Choose a folder</button></div><input type="file" id="upfiles" multiple accept="audio/*,.flac,.dsf,.dff,.ape,.wv,.mka" hidden><input type="file" id="updir" webkitdirectory multiple hidden></div><div id="upbox"></div>` : needHs)
+            + `</section>`
+            + `<section class="section card addm" aria-labelledby="addcopy"><div class="section-head"><h3 id="addcopy">${icon('copy')} Copy from a folder</h3></div>`
+            + `<p class="muted small">A folder on the node’s machine or a mounted share (a USB disk, a NAS): its music files are copied to ${where} once, as a job you can follow and stop. Files already there are skipped.</p>`
+            + (onHs ? `<form class="toolbar" id="impform"><label class="sr-only" for="imppath">Folder to copy</label><input class="input" id="imppath" placeholder="/mnt/usb/Music" autocomplete="off" spellcheck="false"><button class="btn primary" id="impgo">Check</button></form><div id="impplan"></div>` : needHs)
+            + `</section>`
+            + `<section class="section card addm" aria-labelledby="addfolder"><div class="section-head"><h3 id="addfolder">${icon('disc')} Use a folder in place</h3></div>`
+            + `<p class="muted small">Play files where they are: a folder on the node’s machine, a mounted NAS share. Nothing is copied; the folder is watched for new music.</p>`
+            + (flist.length ? `<ul class="uplist">${flist.map((p) => `<li><code class="path">${esc(p)}</code></li>`).join('')}</ul>` : '')
+            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library</button>.</p></section>`;
+          $('[data-back]', main).onclick = () => goBack('albums');
+          $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
+          $$('[data-goto-library]', main).forEach((b) => b.onclick = () => setView('settings', 'library'));
+          const drop = $('#updrop');
+          if (drop) {
+            $('#uppick').onclick = (e) => { e.stopPropagation(); $('#upfiles').click(); };
+            $('#uppickdir').onclick = (e) => { e.stopPropagation(); $('#updir').click(); };
+            drop.onkeydown = (e) => { if (e.key === 'Enter' && e.target === drop) $('#upfiles').click(); };
+            $('#upfiles').onchange = (e) => { addUploads(e.target.files); e.target.value = ''; };
+            $('#updir').onchange = (e) => { addUploads(e.target.files); e.target.value = ''; };
+            drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+            drop.ondragleave = () => drop.classList.remove('over');
+            drop.ondrop = async (e) => { e.preventDefault(); drop.classList.remove('over'); addUploads(await filesFromDrop(e.dataTransfer)); };
+            drawUploads();
+          }
+          const imp = $('#impform');
+          if (imp) imp.onsubmit = async (e) => {
+            e.preventDefault(); const path = $('#imppath').value.trim(); if (!path) return;
+            const box = $('#impplan'); box.innerHTML = '<p class="small" role="status"><span class="spin"></span> Looking at the folder…</p>';
+            let plan; try { plan = await api('POST', '/library/imports', { path, dry_run: true }); } catch (er) { box.innerHTML = `<p class="small joberr">${esc(er.message)}</p>`; return; }
+            if (!plan.total) { box.innerHTML = '<p class="small">No music files in that folder.</p>'; return; }
+            box.innerHTML = `<p class="small">${countOf(plan.total, 'music files')}, ${fmtBytes(plan.bytes_total)}. Files already on your homeserver are skipped while it runs.</p><div class="row-btns"><button class="btn primary" id="impstart">Copy them</button></div>`;
+            $('#impstart').onclick = async () => { try { const j = await api('POST', '/library/imports', { path }); watchJob(j.id); box.innerHTML = '<p class="small">Copying. Follow it in the job chip by the player; you can leave this page.</p>'; } catch (er) { toast(er.message, 'error'); } };
+          };
+          $('#fipform').onsubmit = async (e) => {
+            e.preventDefault(); const path = $('#fippath').value.trim(); if (!path) return;
+            try { const r = await api('POST', '/library/folders', { path }); toast(r.scan_started ? 'Folder added: reading your files' : 'Folder added'); watchScan({ scanning: true }); render(); } catch (er) { toast(er.message, 'error'); }
+          };
+          break;
+        }
         case 'settings': {
+          if (isListener()) {
+            const me = state.me; const info = state.info || await api('GET', '/info');
+            const [who] = await loadProfiles([me.key]);
+            const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+            const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+            const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
+            const zonesText = me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            main.innerHTML = pageHead('Settings', null)
+              + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), '<button class="btn" id="lsignout">Sign out of this device</button>')
+                + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+            $('#lsignout').onclick = async () => { try { await api('DELETE', '/me/token'); } catch { /* signed out either way */ } state.token = ''; try { localStorage.removeItem('pm.token'); } catch { /* no storage */ } location.reload(); };
+            break;
+          }
           const info = await api('GET', '/info'); state.info = info;
           const outs = await api('GET', '/outputs');
           const folders = await api('GET', '/library/folders').catch(() => []);
@@ -3343,7 +3499,7 @@
           const playback = group('Play from', block('Where songs play from', 'The first source here that has a song plays it. A playlist can have its own order; a pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>')
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
             + group('Speakers and outputs', block('', 'What this node can play to, found on your network.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
-              + block('Add a renderer by address', 'For a UPnP renderer the network scan does not find: its IP, its description URL, or for a Linn: IP MAC serial.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
+              + block('Add a renderer by address', 'For a UPnP speaker or streamer the network scan doesn’t find: its IP address or its description URL. For a Linn: its IP address, MAC address and serial number, with spaces between.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
               + block('Group outputs', 'Pick two or more outputs to play as one zone; the first one checked leads. They are kept in time sample by sample.', `<div class="chips" id="groupouts">${outs.filter((o) => o.caps.groupable !== false).map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>`))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
@@ -3694,7 +3850,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {
@@ -3752,8 +3908,12 @@
       state.info = await api('GET', '/info');
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}`);
       watchScan(state.info);
-      loadFavourites().catch(() => {});
-      api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
+      try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+      document.body.classList.toggle('listener', isListener());
+      if (isOwner()) {
+        loadFavourites().catch(() => {});
+        api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
+      } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);

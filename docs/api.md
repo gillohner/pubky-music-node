@@ -78,7 +78,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
 | POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |
-| GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
+| GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts). Songs without any artist come last as "Unknown artist" with id `0`; its page is `/v1/item/artist/lib-0` (every such song). Subsonic and the other lists leave it out |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
 | GET | `/v1/library/artists/{id}/similar` | | `{artists: [{name, mbid?, url, score, library_artist_id?}], note?}` from Last.fm's `artist.getSimilar` (by MusicBrainz id, else by name), each matched to this library; `note` says why there is nothing (`not configured` without a Last.fm app) |

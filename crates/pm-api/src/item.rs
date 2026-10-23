@@ -918,14 +918,33 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
 }
 
 async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
+    let unknown = n == pm_library::UNKNOWN_ARTIST_ID;
     let (a, albums, tracks) = {
         let lib = s.library.lock().expect("library poisoned");
-        let a = lib
-            .get_artist(n)?
-            .ok_or_else(|| ApiError::not_found(format!("no artist {n}")))?;
-        (a, lib.artist_albums(n)?, lib.artist_tracks(n)?)
+        if unknown {
+            let a = lib
+                .unknown_artist()?
+                .ok_or_else(|| ApiError::not_found("every song has an artist"))?;
+            let tracks = lib.tracks_without_artist()?;
+            let mut albums: Vec<pm_model::Album> = Vec::new();
+            for al in tracks.iter().filter_map(|t| t.album.clone()) {
+                if !albums.iter().any(|x| x.id == al.id) {
+                    albums.push(al);
+                }
+            }
+            (a, albums, tracks)
+        } else {
+            let a = lib
+                .get_artist(n)?
+                .ok_or_else(|| ApiError::not_found(format!("no artist {n}")))?;
+            (a, lib.artist_albums(n)?, lib.artist_tracks(n)?)
+        }
     };
-    let info = crate::artist_info::artist_info(s, n).await.ok();
+    let info = if unknown {
+        None
+    } else {
+        crate::artist_info::artist_info(s, n).await.ok()
+    };
     let canonical = a.mbid.map(|m| format!("https://musicbrainz.org/artist/{m}"));
     let on_pubky = match &canonical {
         Some(u) => crate::discover::on_pubky_for(s, u).await,
@@ -958,7 +977,12 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
             }
         }
     }
-    let songs: Vec<ItemTrack> = tracks.iter().take(10).map(library_row).collect();
+    // An artist's top ten; every song for "Unknown artist", which is just a list
+    let songs: Vec<ItemTrack> = tracks
+        .iter()
+        .take(if unknown { 1000 } else { 10 })
+        .map(library_row)
+        .collect();
     Ok(ItemPage {
         kind: "artist".into(),
         id: format!("lib-{n}"),
@@ -978,7 +1002,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 .flatten()
                 .is_some();
             let own = info.as_ref().is_some_and(|i| i.image);
-            if !own && !matched {
+            if !own && !matched && !unknown {
                 find_artist_picture(s, n, a.name.clone());
             }
             (own || matched).then(|| format!("/v1/library/artists/{n}/image"))

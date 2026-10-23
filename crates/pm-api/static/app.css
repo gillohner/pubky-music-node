@@ -1086,3 +1086,24 @@ body.kiosk .main { padding: 0; }
 .track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(.idmark) > .idmark { flex: none; }
+/* A listener (#46) plays the shared library; the owner's favourites, playlists, tags and settings aren't theirs */
+body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
+body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
+body.listener .bnav[data-bnav="home"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
+body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
+body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
+/* Library › Add music */
+.addm { padding: 18px 20px; }
+.addm h3 { display: flex; align-items: center; gap: 8px; }
+.dropzone { display: grid; justify-items: center; gap: 6px; padding: 26px 16px; border: 2px dashed var(--line-strong); border-radius: 14px; text-align: center; transition: background .12s, border-color .12s; }
+.dropzone p { margin: 0; }
+.dropzone > .ic { width: 28px; height: 28px; color: var(--muted); }
+.dropzone.over, .dropzone:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); outline: none; }
+.uplist { list-style: none; margin: 10px 0; padding: 0; max-height: 280px; overflow: auto; }
+.uplist li { display: flex; gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; min-width: 0; }
+.uplist li .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#upbox { margin-top: 12px; }
+.chip-sk { width: 96px; color: transparent; border-color: transparent; }
+.chip-sk::before { content: "\00a0"; }
+#impplan:not(:empty) { margin-top: 10px; }
+#impplan .row-btns { margin-top: 8px; }

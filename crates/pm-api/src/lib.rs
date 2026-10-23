@@ -1960,7 +1960,11 @@ async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -
 }
 
 async fn artists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::ArtistSummary>> {
-    Ok(Json(s.library.lock().expect("library poisoned").list_artists()?))
+    let lib = s.library.lock().expect("library poisoned");
+    let mut all = lib.list_artists()?;
+    // Songs without any artist, as "Unknown artist" at the end (its page is `/artist/lib-0`)
+    all.extend(lib.unknown_artist()?);
+    Ok(Json(all))
 }
 
 async fn artist(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<ArtistDetail> {
