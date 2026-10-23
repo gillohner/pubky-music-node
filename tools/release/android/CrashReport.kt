@@ -31,7 +31,7 @@ class PubkyMusicApp : Application() {
 object CrashReport {
     const val FILE = "crash-report.txt"
     private const val TAG = "PubkyMusic"
-    private const val MAX_TRACE = 64 * 1024
+    private const val MAX_TRACE = 16 * 1024
 
     @JvmStatic
     fun install(context: Context) {

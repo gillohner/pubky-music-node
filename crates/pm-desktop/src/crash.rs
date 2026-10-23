@@ -57,17 +57,50 @@ pub fn install_hook() {
     }));
 }
 
-/// The last report, if there is one.
+/// The most of the report the page shows.
+const MAX: usize = 64_000;
+
+/// The last report, if there is one: its newest entries, each from its title (`== …`), up to
+/// [`MAX`] bytes; an entry longer than that keeps its beginning.
 pub fn read() -> Option<String> {
     let t = std::fs::read_to_string(path()?).ok()?;
     let t = t.trim();
-    // Keep the newest part of a long file
-    let t = if t.len() > 64_000 {
-        &t[t.len() - 64_000..]
-    } else {
-        t
-    };
-    (!t.is_empty()).then(|| t.to_string())
+    if t.is_empty() {
+        return None;
+    }
+    Some(trim_entries(t, MAX))
+}
+
+fn trim_entries(t: &str, max: usize) -> String {
+    let starts: Vec<usize> = t
+        .match_indices("== ")
+        .filter(|(i, _)| *i == 0 || t.as_bytes()[i - 1] == b'\n')
+        .map(|(i, _)| i)
+        .collect();
+    if t.len() <= max || starts.is_empty() {
+        return cut(t, max).to_string();
+    }
+    // From the newest entry back, while they fit
+    let mut from = *starts.last().expect("one");
+    for &s in starts.iter().rev().skip(1) {
+        if t.len() - s > max {
+            break;
+        }
+        from = s;
+    }
+    cut(&t[from..], max).to_string()
+}
+
+/// At most `max` bytes, on a character boundary.
+fn cut(t: &str, max: usize) -> &str {
+    if t.len() <= max {
+        return t;
+    }
+    let mut end = max;
+    while !t.is_char_boundary(end) {
+        end -= 1;
+    }
+    &t[..end]
 }
 
 pub fn clear() {
@@ -105,6 +138,11 @@ mod tests {
         assert!(text.contains("boom on purpose"), "{text}");
         clear();
         assert!(read().is_none());
+        // A long report keeps whole newest entries, from their titles
+        let long = format!("== old: a\n{}\n== new: b\n{}", "x".repeat(100), "y".repeat(50));
+        assert!(trim_entries(&long, 80).starts_with("== new: b"));
+        let huge = format!("== one: c\n{}", "z".repeat(200));
+        assert!(trim_entries(&huge, 50).starts_with("== one: c"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
