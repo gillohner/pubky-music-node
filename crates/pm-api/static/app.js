@@ -1429,7 +1429,7 @@
   const srcState = (x) => {
     if (!x.enabled) return { cls: 'off', label: 'Turned off', long: 'Turned off.' };
     const st = String(x.status || '');
-    if (st === 'ready' || st === 'signed in') return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : 'Ready.' };
+    if (st === 'ready' || /^signed in\b/.test(st)) return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : st === 'ready' ? 'Ready.' : st.charAt(0).toUpperCase() + st.slice(1) + '.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
     if (/^browser\b/.test(st)) return { cls: 'ok', label: 'Ready', long: `Plays in This browser, in YouTube\u2019s own player${/zones/.test(st) ? ', and on the speakers through yt-dlp' : ''}.${/search/.test(st) ? ' Search uses your YouTube Data API key.' : ''}` };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
@@ -2235,6 +2235,7 @@
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2326,6 +2327,48 @@
             const qo = $('#qbout'); if (qo) qo.onclick = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
           };
           fillQobuz();
+          const slo = $('#spotsoloist');
+          const fillSoloist = async () => {
+            if (!slo || !slo.isConnected) return;
+            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; return; }
+            if (!slo.isConnected) return;
+            const b = u.soloist;
+            const rows = [row('Spotify Soloist', esc(u.note), `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
+            if (!u.supported) rows.push('<div class="notice">Spotify Soloist runs on Linux and macOS only, so this node can’t start it.</div>');
+            else {
+              if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="slretry">Try again</button></div></div>`);
+              if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
+              const stateText = !u.running ? (u.enabled ? 'Not running.' : 'Off.') : u.paired === false ? `Running as “${esc(u.device_name)}”. Nobody has picked it yet: open a Spotify app on this network, choose this device from the device picker and press play.` : u.paired ? `Running as “${esc(u.device_name)}”, paired with a Spotify account.` : `Starting as “${esc(u.device_name)}”…`;
+              rows.push(row('Status', stateText, u.running ? '<span class="pill ok">Running</span><button class="btn ghost sm" id="slrestart">Restart</button>' : u.enabled ? '<span class="pill">Waiting</span>' : '<span class="pill">Off</span>'));
+              if (u.running && u.now && u.now.title) {
+                const n = u.now; const who = [n.artists.join(', '), n.album].filter(Boolean).join(' · ');
+                rows.push(row(n.status === 'paused' ? 'Paused' : n.status === 'playing' ? 'Playing on this machine' : 'Loaded', `${esc(n.title)}${who ? ' · ' + esc(who) : ''}${n.volume != null ? ` · volume ${n.volume}` : ''}`, `<button class="btn ghost sm" id="slprev" aria-label="Previous">${icon('prev')}</button><button class="btn sm" id="sltoggle">${n.status === 'playing' ? 'Pause' : 'Play'}</button><button class="btn ghost sm" id="slnext" aria-label="Next">${icon('next')}</button>`));
+              }
+              rows.push(`<form class="set-row set-block" id="slkey"><div class="set-label"><div class="set-name">Your Soloist API key</div>${help('Each person makes their own key, with a Spotify Premium account, at developer.spotify.com › Dashboard › Spotify Soloist API Key (accept Spotify’s terms, then Generate). The node keeps it like a sign-in and never shows it again. Soloist takes the key only on its command line, so other users of this machine can see it while Soloist runs.')}</div><div class="set-body"><div class="toolbar">${u.key_set ? `<span class="pill ok">Saved</span><button type="button" class="btn ghost sm" id="slkeychange">Change</button><button type="button" class="btn ghost sm" id="slkeyforget">Forget</button>` : ''}<input class="input" name="key" type="password" placeholder="Soloist API key" autocomplete="off" spellcheck="false" aria-label="Spotify Soloist API key" ${u.key_set ? 'hidden' : 'required'}><button class="btn" type="submit" ${u.key_set ? 'hidden' : ''}>Save</button></div></div></form>`);
+              rows.push(`<form class="set-row set-block" id="sldev"><div class="set-label"><div class="set-name">Device</div>${help('The name Spotify apps show for this machine, and, with PipeWire, which output Soloist uses (a node name or id; empty means the system default).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" placeholder="Device name" maxlength="64" autocomplete="off" aria-label="Spotify Connect device name" value="${esc(u.device_name)}"><input class="input" name="pw" placeholder="PipeWire output (optional)" autocomplete="off" spellcheck="false" aria-label="PipeWire output" value="${esc(u.pipewire_device || '')}"><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(b
+                ? row('Soloist', `${esc(b.version ? b.version : 'Found')}: ${b.from === 'downloaded' ? `downloaded by this node${u.downloaded_at ? ' on ' + new Date(u.downloaded_at * 1000).toLocaleDateString() : ''}` : b.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(b.path)}</code>). Spotify’s builds stop working 90 days after they were made.`, b.from === 'downloaded' ? '<button class="btn ghost sm" id="slupdate">Update</button><button class="btn ghost sm" id="slremove">Remove</button>' : '')
+                : row('Soloist', u.can_download ? 'The node downloads Spotify’s build for this machine from Spotify’s own servers, when you ask. Spotify publishes no checksums; the node checks that the download runs. By using it you accept Spotify’s Terms and Conditions of Use.' : 'Spotify offers no build for this machine here. Install Soloist yourself and point <code>[spotify] soloist</code> in the node config at it, then reload this page.', u.can_download ? '<button class="btn primary sm" id="slget">Download Soloist</button>' : ''));
+            }
+            slo.innerHTML = group('Play on this machine', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/soloist', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#slon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Spotify Soloist is on' : 'Spotify Soloist is off');
+            const sr = $('#slretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Starting Spotify Soloist again');
+            const srs = $('#slrestart'); if (srs) srs.onclick = () => put({ enabled: true }, 'Restarting Spotify Soloist');
+            const kf = $('#slkey'); if (kf) kf.onsubmit = (e) => { e.preventDefault(); put({ api_key: String(new FormData(kf).get('key') || '').trim() }, 'Soloist API key saved'); };
+            const kc = $('#slkeychange'); if (kc) kc.onclick = () => { kf.querySelectorAll('[hidden]').forEach((x) => { x.hidden = false; }); kc.hidden = true; kf.querySelector('input').focus(); };
+            const kg = $('#slkeyforget'); if (kg) kg.onclick = () => put({ api_key: '' }, 'Soloist API key forgotten');
+            const df = $('#sldev'); if (df) df.onsubmit = (e) => { e.preventDefault(); const f = new FormData(df); put({ device_name: String(f.get('name') || '').trim(), pipewire_device: String(f.get('pw') || '').trim() }, 'Device saved'); };
+            const get = async (btn, msg) => { btn.disabled = true; btn.textContent = 'Downloading…'; try { await api('POST', '/sources/spotify/soloist/binary'); toast(msg); } catch (er) { toast(er.message, 'error'); } render(); };
+            const sg = $('#slget'); if (sg) sg.onclick = () => get(sg, 'Soloist downloaded');
+            const su = $('#slupdate'); if (su) su.onclick = () => get(su, 'Soloist updated');
+            const sv = $('#slremove'); if (sv) sv.onclick = async () => { try { await api('DELETE', '/sources/spotify/soloist/binary'); toast('Soloist removed'); } catch (er) { toast(er.message, 'error'); } render(); };
+            const ctl = async (command) => { try { await api('POST', '/sources/spotify/soloist/control', { command }); } catch (er) { toast(er.message, 'error'); } render(); };
+            const st = $('#sltoggle'); if (st) st.onclick = () => ctl(u.now && u.now.status === 'playing' ? 'pause' : 'play');
+            const sp = $('#slprev'); if (sp) sp.onclick = () => ctl('prev');
+            const sn = $('#slnext'); if (sn) sn.onclick = () => ctl('next');
+          };
+          fillSoloist();
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;

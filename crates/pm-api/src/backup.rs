@@ -47,6 +47,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("qobuz.unofficial", "Qobuz"),
     ("qobuz.app", "the Qobuz app"),
     ("spotify.user", "Spotify"),
+    ("spotify.soloist_key", "your Spotify Soloist API key"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
     ("opensubsonic.server", "your Subsonic server"),
