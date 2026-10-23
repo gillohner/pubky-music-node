@@ -63,6 +63,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod shared;
+pub mod soloist;
 pub mod sources;
 pub mod spotify;
 pub mod state;
@@ -357,6 +358,15 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/youtube/unofficial/ytdlp",
             post(ytdlp::install).delete(ytdlp::uninstall),
         )
+        .route(
+            "/sources/spotify/soloist",
+            get(soloist::get_status).put(soloist::put),
+        )
+        .route(
+            "/sources/spotify/soloist/binary",
+            post(soloist::install).delete(soloist::uninstall),
+        )
+        .route("/sources/spotify/soloist/control", post(soloist::control))
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -7419,6 +7429,246 @@ mod tests {
         )
         .await;
         assert_eq!(k["set"], false);
+    }
+
+    /// Spotify Soloist: the node downloads Spotify's archive (a stand-in here) and unpacks it, runs
+    /// Soloist with the owner's key and the device name, reads what plays over `soloist ctl`, says
+    /// in plain words when the key is refused or the build has expired, and never returns the key.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spotify_soloist_runs_as_a_supervised_program() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // A stand-in soloist: --version; ctl (now --json, pause, play) through the data dir's
+        // ws.port; the daemon itself takes only the key "good-key", exits 10 when `expired` sits in
+        // its data dir, and otherwise stays up.
+        let fake = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "soloist 1.2.3 (build 2026-10-01)"; echo "x86_64-linux"; exit 0; fi
+if [ "$1" = "ctl" ]; then
+  shift; dir=""; cmd=""
+  while [ $# -gt 0 ]; do case "$1" in -D) dir="$2"; shift 2;; --json) shift;; *) cmd="$1"; shift;; esac; done
+  [ -f "$dir/ws.port" ] || exit 2
+  case "$cmd" in
+    now) [ -f "$dir/paired" ] || { echo "not logged in" >&2; exit 3; }
+         echo '{"type":"playback_state","status":"playing","volume":50,"is_active":true,"position":{"position_ms":1000,"timestamp_ms":1,"speed":1.0},"item":{"uri":"spotify:track:69kOkLUCkxIZYexIgSG8rq","entity_type":"track","decorations":{"identity":{"name":"Get Lucky"},"creators":[{"decorations":{"identity":{"name":"Daft Punk"}}}],"parent":{"entity":{"decorations":{"identity":{"name":"Random Access Memories"}}}},"playback":{"duration_ms":369000}}}}'; exit 0;;
+    pause|play|next|prev) echo "$cmd" >> "$dir/commands"; exit 0;;
+    *) exit 1;;
+  esac
+fi
+dir=""; key=""
+while [ $# -gt 0 ]; do case "$1" in -D|--data-dir) dir="$2"; shift 2;; -k|--api-key) key="$2"; shift 2;; *) shift;; esac; done
+[ "$key" = "good-key-0123456789abcdef" ] || { echo "error: Spotify rejected the API key $key" >&2; exit 1; }
+[ -f "$dir/expired" ] && { echo "Spotify Soloist build expired." >&2; exit 10; }
+echo 127.0.0.1 > "$dir/ws.addr"; echo 4242 > "$dir/ws.port"; echo $$ > "$dir/soloist.pid"
+exec sleep 300
+"#;
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("soloist_release")).unwrap();
+        std::fs::write(work.path().join("soloist_release/soloist"), fake).unwrap();
+        let tar = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(work.path().join("soloist.tar.gz"))
+            .arg("-C")
+            .arg(work.path())
+            .arg("soloist_release")
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let archive = std::fs::read(work.path().join("soloist.tar.gz")).unwrap();
+        let asset = if cfg!(target_arch = "aarch64") {
+            "soloist_release_arm64.tar.gz"
+        } else {
+            "soloist_release_x86_64.tar.gz"
+        };
+        let mock = Router::new().route(
+            &format!("/{asset}"),
+            get(move || {
+                let a = archive.clone();
+                async move { a }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        soloist::set_downloads_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let until = |pred: Box<dyn Fn(&serde_json::Value) -> bool>| {
+            let app = app.clone();
+            async move {
+                let mut last = serde_json::Value::Null;
+                for _ in 0..60 {
+                    let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+                    if pred(&u) {
+                        return u;
+                    }
+                    last = u;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                panic!("Soloist status never got there: {last}");
+            }
+        };
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+        assert_eq!(
+            (
+                u["supported"].clone(),
+                u["enabled"].clone(),
+                u["running"].clone(),
+                u["soloist"].clone(),
+                u["can_download"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::json!(false),
+                serde_json::Value::Null,
+                serde_json::json!(true)
+            ),
+            "{u}"
+        );
+        assert!(u["note"].as_str().unwrap().contains("not on the node's zones"));
+        // Download: the archive unpacks and the executable answers --version
+        let (st, u) = call(&app, "POST", "/v1/sources/spotify/soloist/binary", None).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(u["soloist"]["from"], "downloaded");
+        assert_eq!(u["soloist"]["version"], "soloist 1.2.3 (build 2026-10-01)");
+        // On without a key: it waits and says for what
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(u["enabled"], true);
+        assert_eq!(u["running"], false);
+        assert!(u["waiting_for"].as_str().unwrap().contains("API key"), "{u}");
+        // A bad-looking key is refused before anything runs
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "short"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // A key Spotify rejects: Soloist exits, the health says so, and the key is nowhere in the answer
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "rejected-key-0123456789", "device_name": "Test speaker"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(u["key_set"], true);
+        assert_eq!(u["device_name"], "Test speaker");
+        let u = until(Box::new(|u| u["health"]["ok"] == false)).await;
+        assert!(
+            u["health"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("rejected the API key"),
+            "{u}"
+        );
+        assert!(
+            !u.to_string().contains("rejected-key-0123456789"),
+            "the key never comes back: {u}"
+        );
+        // The right key: it runs, and nobody has picked the device yet
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "good-key-0123456789abcdef"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        let u = until(Box::new(|u| u["running"] == true && u["paired"] == false)).await;
+        assert!(u["pid"].as_u64().is_some(), "{u}");
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sp = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "spotify")
+            .unwrap()
+            .clone();
+        assert!(
+            sp["status"]
+                .as_str()
+                .unwrap()
+                .contains("Soloist plays on this machine"),
+            "{sp}"
+        );
+        // Picked in a Spotify app: what plays comes through ctl, and the page can pause it
+        let sdir = s.data_dir().join("soloist");
+        std::fs::write(sdir.join("paired"), "").unwrap();
+        let u = until(Box::new(|u| u["paired"] == true)).await;
+        assert_eq!(u["now"]["title"], "Get Lucky", "{u}");
+        assert_eq!(u["now"]["artists"][0], "Daft Punk");
+        assert_eq!(u["now"]["album"], "Random Access Memories");
+        assert_eq!(u["now"]["status"], "playing");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "pause"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(sdir.join("commands")).unwrap().trim(),
+            "pause"
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "eject"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Off: it stops
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(u["enabled"], false);
+        let u = until(Box::new(|u| u["running"] == false)).await;
+        assert!(u["waiting_for"].is_null(), "{u}");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "play"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        // An expired build: exit 10, said in plain words, no restart loop
+        std::fs::write(sdir.join("expired"), "").unwrap();
+        let (_, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        let u = until(Box::new(|u| u["health"]["ok"] == false)).await;
+        assert!(u["health"]["detail"].as_str().unwrap().contains("expired"), "{u}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+        assert_eq!(u["running"], false, "{u}");
+        // Remove the download
+        let (_, u) = call(&app, "DELETE", "/v1/sources/spotify/soloist/binary", None).await;
+        assert!(u["soloist"].is_null(), "{u}");
+        assert!(u["waiting_for"].as_str().unwrap().contains("download"), "{u}");
+        // The key is a secret in backups
+        assert!(backup::SECRET_SETTINGS
+            .iter()
+            .any(|(k, _)| *k == soloist::KEY_SETTING));
     }
 
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release

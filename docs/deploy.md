@@ -175,6 +175,12 @@ Open Sources › TIDAL › Connect TIDAL.
 
 - **Spotify:** Spotify allows no shared app, so you make your own free one once. Sources › Spotify walks you through
   it and takes only the client ID.
+- **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). Under
+  Sources › Spotify › Play on this machine: save your own Soloist API key (made with a Premium account at
+  developer.spotify.com › Dashboard › Spotify Soloist API Key), press Download Soloist (from Spotify's own servers;
+  Spotify forbids us to ship it), switch it on, then pick the device in a Spotify app. It plays on the machine's
+  PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or `PM_SOLOIST`) names an install of
+  your own. In Docker it needs the host's audio socket, which the image doesn't set up.
 - **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
   in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
   entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer portal is not

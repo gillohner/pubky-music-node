@@ -560,14 +560,25 @@ impl StreamingService for Spotify {
             id: SOURCE_ID.into(),
             name: "Spotify".into(),
             description: "Catalogue with ISRC/UPC, your library and playlists imported by ISRC, playback on your Spotify Connect devices (no audio enters the node: DRM)".into(),
-            status: if !c {
-                "not configured: set up your Spotify app under Sources › Spotify".into()
-            } else if u.is_some() {
-                "signed in".into()
-            } else if !app.has_secret() {
-                "needs sign-in".into()
-            } else {
-                "ready (sign in for your library and devices)".into()
+            status: {
+                let soloist = crate::soloist::running();
+                if !c {
+                    if soloist {
+                        "ready: Soloist plays on this machine; set up your Spotify app for search and import".into()
+                    } else {
+                        "not configured: set up your Spotify app under Sources › Spotify".into()
+                    }
+                } else if u.is_some() {
+                    if soloist {
+                        "signed in · Soloist plays on this machine".into()
+                    } else {
+                        "signed in".into()
+                    }
+                } else if !app.has_secret() {
+                    "needs sign-in".into()
+                } else {
+                    "ready (sign in for your library and devices)".into()
+                }
             },
         }
     }

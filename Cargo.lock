@@ -3627,6 +3627,7 @@ dependencies = [
  "hound",
  "http-body-util",
  "id3",
+ "libc",
  "md-5",
  "notify",
  "pm-audio",
