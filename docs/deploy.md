@@ -87,7 +87,7 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   - **Homeserver + music:** the same, plus this node's music service.
   - **Music only:** someone whose account is elsewhere, added by their public key.
 
-  A homeserver invite is a Pubky Ring link and QR (`direct_signup`, which needs a recent Ring; older ones can type the code). Per person you set the quota, turn their homeserver account off (that blocks writes; they can still read and delete) and take away music access.
+  A homeserver invite is a Pubky Ring link and QR (`direct_signup`, which needs a recent Ring; older ones can type the code). Per person you set the quota, turn their homeserver account off (that blocks writes; they can still read and delete) and take away music access. The tab also shows how much each person stores and which zones listeners may play on.
 - **Adding music** (Library → Add music): upload files from the browser (resumable), copy a
   folder on the machine into the homeserver, or keep using folders in place (mounts and shares as
   before). Uploads and copies go into your homeserver's private storage. The node mounts the

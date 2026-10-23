@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Settings › People and Settings › Remote access, and "Create your account here"** (STEWARD-BUNDLED-HOMESERVER.md, steps 2–4, the screens).
+  - **People:** invite someone (Homeserver + music, Homeserver only with a quota, or Music only by their Pubky key) and get a Pubky Ring QR and link; unused invites can be shown again or forgotten. Per person: music access, their homeserver account on or off, quota, and how much they store. The zones listeners may play on are picked here too.
+  - **Remote access** (only with the bundled install): paste a Cloudflare tunnel token and the hostnames, see the restart command when one is needed, and check both addresses from outside.
+  - **Your account:** with a bundled homeserver, Settings › Accounts and the first-run card offer "Create account here" (on the node's own homeserver) next to "Use an existing homeserver".
+  - **API:** `GET /v1/people` adds `homeserver_enabled` (what the node last set; the homeserver's admin API can't report it) and `used_bytes` (their files in the homeserver's files folder).
 - **CI:** main's own CI runs again after a merge. The pull_request run started by the merged branch's last push got `main` as its ref and, sharing main's concurrency group, cancelled main's run; the group is now keyed by event and PR branch.
 - **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
   - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.
