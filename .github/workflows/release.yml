@@ -35,9 +35,12 @@ env:
   PM_PROJECT_ACOUSTID_KEY: ${{ vars.PM_PROJECT_ACOUSTID_KEY }}
   PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
   PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
+# Every job has a timeout-minutes of about 4x its usual time, so a hang fails instead of
+# holding a merge (usual times from green runs, 2026-10-23).
 jobs:
   meta:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       channel: ${{ steps.m.outputs.channel }}
       version: ${{ steps.m.outputs.version }}
@@ -114,6 +117,7 @@ jobs:
             targets: ""
             args: --bundles appimage,deb
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -169,6 +173,7 @@ jobs:
   android:
     needs: meta
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: crates/pm-desktop
@@ -302,6 +307,7 @@ jobs:
             dir: target/release
             bins: pm-node pm-endpoint
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -344,6 +350,7 @@ jobs:
   image:
     needs: meta
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -389,6 +396,7 @@ jobs:
     needs: [meta, app, android, binaries, image]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

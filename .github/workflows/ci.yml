@@ -12,9 +12,12 @@ env:
   CARGO_INCREMENTAL: 0
 # Runners are pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19 and the
 # WebKitGTK package names the desktop job installs are per release.
+# Every job has a timeout-minutes of about 4x its usual time, so a hang fails instead of
+# holding a merge (usual times from green runs, 2026-10-23).
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +41,7 @@ jobs:
     # WebKitGTK on Linux; it is outside the workspace so the other jobs do
     # not. Bundles for every platform come from the release workflow.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: crates/pm-desktop
@@ -55,6 +59,7 @@ jobs:
       - run: cargo test --locked
   docker:
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -68,6 +73,7 @@ jobs:
           cache-to: type=gha,mode=max
   sidecar:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: sidecars/roon-bridge
@@ -86,6 +92,7 @@ jobs:
     # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
     # (virtme-ng). A hung guest fails the job after 20 minutes instead of holding the run (it takes 4-5).
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: check
     timeout-minutes: 20
     steps:
@@ -124,6 +131,7 @@ jobs:
     # Slimproto against real squeezelite: bit-exact at 16/44.1 and 24/96, position, pause and play,
     # reconnects (tools/slim-squeezelite.py).
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -138,6 +146,7 @@ jobs:
     # The Plex source against a real Plex Media Server: Plex's official Linux build, pinned by
     # version and checksum, unpacked and run without Docker (tools/plex-source.py).
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: check
     env:
       PMS_VERSION: 1.43.5.11029-6bf8af3f0
@@ -159,6 +168,7 @@ jobs:
     # The Audiobookshelf source against a real Audiobookshelf: its server built from a pinned
     # release (tag and commit), run without Docker (tools/abs-source.py).
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     needs: check
     env:
       ABS_TAG: v2.37.1
@@ -185,6 +195,7 @@ jobs:
     # PostgreSQL, the config wrapper), up with docker compose; tools/bundle-check.py checks the
     # node manages it, what listens where, and that no generated password reaches a log.
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -218,6 +229,7 @@ jobs:
     # A WebDAV share as a library root against a real WebDAV server (WsgiDAV, pinned), with a
     # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -231,6 +243,7 @@ jobs:
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -278,6 +291,7 @@ jobs:
           path: /tmp/pc/shots
   web-ui:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -333,6 +347,7 @@ jobs:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
     # times, pages and search in a real browser, against tools/perf-budget.json.
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -382,6 +397,7 @@ jobs:
   ui-controls:
     # The controls audit on its own runner: it takes most of half an hour as the app grows.
     runs-on: ubuntu-24.04
+    timeout-minutes: 75
     needs: check
     steps:
       - uses: actions/checkout@v6
@@ -424,6 +440,7 @@ jobs:
     # The other browser checks (accessibility, playback, YouTube, overlap, first run), split from
     # ui-controls so neither runs into its time limit.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     needs: check
     steps:
       - uses: actions/checkout@v6
