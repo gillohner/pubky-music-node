@@ -135,7 +135,7 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
    tar xzf pubky-homeserver-v0.16.2-linux-$HS_ARCH.tar.gz
    sudo install -m 755 pubky-homeserver-v0.16.2-linux-$HS_ARCH/pubky-homeserver /usr/local/bin/
    LAN_IP=$(hostname -I | cut -d' ' -f1)
-   sed -e "s/@DB_PASSWORD@/$DB_PASSWORD/" -e "s/@ADMIN_PASSWORD@/$ADMIN_PASSWORD/" -e "s/@PUBLIC_IP@/$LAN_IP/" \
+   sed -e "s/<DB_PASSWORD>/$DB_PASSWORD/" -e "s/<ADMIN_PASSWORD>/$ADMIN_PASSWORD/" -e "s/<PUBLIC_IP>/$LAN_IP/" \
      homeserver.config.toml | sudo install -o pubky -g pubky -m 600 /dev/stdin /var/lib/pubky-homeserver/config.toml
    sudo install -m 755 apply-tunnel-domain.sh /usr/local/lib/pubky-music/
    ```

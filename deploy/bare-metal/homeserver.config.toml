@@ -1,10 +1,10 @@
 # pubky-homeserver v0.16.2 for a node on bare metal (docs/deploy.md, "Bundled, without Docker").
-# Fill the @…@ values (the commands are in docs/deploy.md); it becomes
+# Fill the <…> values (the commands are in docs/deploy.md); it becomes
 # /var/lib/pubky-homeserver/config.toml, readable by the
 # pubky user only (it holds the database and admin passwords).
 
 [general]
-database_url = "postgres://pubky:@DB_PASSWORD@@127.0.0.1:5432/pubky_homeserver"
+database_url = "postgres://pubky:<DB_PASSWORD>@127.0.0.1:5432/pubky_homeserver"
 # Accounts only through invites the node mints (Settings › People)
 signup_mode = "token_required"
 
@@ -22,7 +22,7 @@ type = "file_system"
 enabled = true
 # The node manages the homeserver here; never on the network
 listen_socket = "127.0.0.1:6288"
-admin_password = "@ADMIN_PASSWORD@"
+admin_password = "<ADMIN_PASSWORD>"
 
 [metrics]
 enabled = false
@@ -31,7 +31,7 @@ enabled = false
 # What the homeserver publishes for Pubky clients: this machine's LAN address by default.
 # apply-tunnel-domain.sh replaces icann_domain and public_icann_http_port when a Cloudflare tunnel
 # (Settings › Remote access) or your own domain is set.
-public_ip = "@PUBLIC_IP@"
+public_ip = "<PUBLIC_IP>"
 public_pubky_tls_port = 6287
 public_icann_http_port = 6286
 icann_domain = "localhost"
