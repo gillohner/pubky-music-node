@@ -552,6 +552,10 @@ impl StreamingService for Spotify {
         c.configured() && (c.has_secret() || load_user(s).is_some())
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "connect", "artists", "library", "playlists"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let app = creds(s);
         let c = app.configured();

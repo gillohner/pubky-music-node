@@ -420,6 +420,14 @@ impl StreamingService for Bandcamp {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "library", "downloads"]
+    }
+
+    fn stage(&self) -> &'static str {
+        "unofficial"
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let lib = s.library.lock().expect("library poisoned");
         let st = load(&lib);

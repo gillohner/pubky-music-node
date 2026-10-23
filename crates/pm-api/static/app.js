@@ -1602,6 +1602,7 @@
     $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
+  const FEATURE_WORDS = { search: 'Search', play: 'Plays on your zones', connect: 'Plays on its own devices', artists: 'Artist pages', library: 'Your library', playlists: 'Your playlists', downloads: 'Downloads what you bought', lyrics: 'Lyrics', scrobble: 'Reports your plays' };
   const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
@@ -1802,7 +1803,7 @@
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
-    const services = (state.sources || []).filter((x) => x.enabled !== false && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
+    const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
@@ -2650,9 +2651,10 @@
             ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library</button>')
               + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Playback</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
-                + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
+                + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })()
+                + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && (!cur.features || cur.features.includes('search')) && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')

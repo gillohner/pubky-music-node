@@ -676,6 +676,10 @@ impl StreamingService for Tidal {
         c.configured() && (c.has_secret() || load_user(s).is_some())
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "artists", "library", "playlists"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let status = if !creds(s).configured() {
             "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()

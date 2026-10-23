@@ -7,6 +7,9 @@ adds an account flow in Settings (OAuth, tokens encrypted in `data_dir`), canoni
 One account per user, never proxied to others (handoff §2). Reverse-engineered APIs only after
 legal review.
 
+
+Every source declares what it can do (`features`: search, play, connect, artists, library, playlists, downloads, lyrics, scrobble) and a stage (`stable`, `beta`, `unofficial`) in `GET /v1/sources`; the Sources tab shows that under "What it does" and offers only those actions.
+
 | Provider | Credentials to obtain | Catalogue / library | Full-track audio | Notes |
 | :-- | :-- | :-- | :-- | :-- |
 | TIDAL | **Nothing** with a release build: the project's app is built in (client id only) and the sign-in is PKCE with no secret through the [return page](https://github.com/gillohner/pubky-music-auth). Your own app at developer.tidal.com still works (`[tidal] client_id`, plus `client_secret` for search before sign-in and a direct redirect) | **built**: search, albums, tracks via `/v1/sources/tidal`; sign-in from the Sources page | **built and verified live** (2026-10-20): manifests → HLS FLAC into the decoder works; on the THIRD_PARTY developer tier TIDAL answers `FULL_REQUIRES_HIGHER_ACCESS_TIER` and serves 30 s previews, so full tracks need TIDAL to raise the app's access tier (request it through the developer portal / tidal-music GitHub discussions, "Open API Access Request") | collection and playlists import as favourites / Pubky playlists by ISRC; config `[tidal] client_id / client_secret` or `PM_TIDAL_*`; register `<public_url>/tidal/callback` as the app's redirect URI |

@@ -193,6 +193,14 @@ impl StreamingService for YouTube {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play"]
+    }
+
+    fn stage(&self) -> &'static str {
+        "beta"
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),
