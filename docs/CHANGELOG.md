@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Lyrics for streamed songs** (UX review, next tier). Now playing shows lyrics from LRCLIB (lrclib.net) for TIDAL, Deezer and other streamed songs, and for library songs whose files carry none. Synced lines follow the song, with a ±0.5 s nudge, and lyrics from LRCLIB are credited. Answers are kept a week, a "none" too. The node asks only when it has a contact set, like MusicBrainz and Pinakes. API: `GET /v1/lyrics?title&artist&album&duration_ms`; `/v1/library/tracks/{id}/lyrics` falls back to it.
+- **The sleep timer is in the zone menu** too (it was only in Now playing).
+- **Smart playlists** (UX review #9). Playlists › New smart playlist chooses songs by rules over your library and your own Pubky tags, all or any of them.
+  - Rules: genre, artist, year range, favourite, times played, last played (in or not in the last N days), and your Pubky tag.
+  - Order: random (new each time), most played, longest unplayed, newest or title, up to N songs. A live preview shows how many match while you edit.
+  - Each time it opens or plays, the songs are worked out again, so they change as your library does.
+  - The rules are kept on the node and travel to your homeserver with your other settings. API: `/v1/smart`, `/v1/smart/preview`, `/v1/smart/{id}`, `/v1/smart/{id}/tracks`.
+- **Home is yours to arrange** (UX review #10): "Edit Home" lists every row with a checkbox and up/down. The layout is kept on the node and copied to your homeserver with your other settings (`GET`/`PUT /v1/home/layout`). New rows: Recently played and Recently added (they replace "Jump back in"), and Forgotten favourites: favourite songs not played for two months, from `/v1/library/home` `forgotten`.
 - **Playlists have real art** (UX review #8): the first four album covers of their songs as a 2×2 mosaic, one cover when there's only one, else their initials on a gradient. This applies in the list, on the page and on shared playlists; there are no more empty colour squares. `PlaylistSummary.covers` lists them.
 - **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
   - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.

@@ -38,6 +38,8 @@ pub fn services() -> Vec<Box<dyn StreamingService>> {
         Box::new(crate::deezer::Deezer),
         Box::new(crate::spotify::Spotify),
         Box::new(crate::jamendo::Jamendo),
+        Box::new(crate::bandcamp::Bandcamp),
+        Box::new(crate::soundcloud::SoundCloud),
         Box::new(crate::opensubsonic::OpenSubsonic),
         Box::new(crate::jellyfin::Jellyfin),
         Box::new(crate::plex::PlexSource),

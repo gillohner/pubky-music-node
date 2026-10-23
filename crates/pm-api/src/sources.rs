@@ -547,6 +547,12 @@ impl SourceFactory for NodeSources {
         if let Some(id) = item.uri.strip_prefix(crate::qobuz::TRACK_URI_PREFIX) {
             return crate::qobuz::open_track_blocking(&self.library, id);
         }
+        if let Some(key) = item.uri.strip_prefix(crate::bandcamp::TRACK_URI_PREFIX) {
+            return crate::bandcamp::open_track_blocking(&self.library, key);
+        }
+        if let Some(id) = item.uri.strip_prefix(crate::soundcloud::TRACK_URI_PREFIX) {
+            return crate::soundcloud::open_track_blocking(&self.library, id);
+        }
         if let Some(id) = item.uri.strip_prefix(crate::jamendo::TRACK_URI_PREFIX) {
             return crate::jamendo::open_track_blocking(&self.jamendo, id);
         }

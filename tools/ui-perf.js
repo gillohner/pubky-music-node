@@ -21,7 +21,7 @@ const PAGES = async () => {
   const albums = await api('/library/albums?limit=1'); const artists = await api('/library/artists?limit=1');
   const artist = Array.isArray(artists) ? artists[0] : (artists.artists || [])[0];
   return [
-    ['Home', '/', '#h-jump .hbody .tile, #h-jump .hbody p'],
+    ['Home', '/', '#h-played .hbody .tile, #h-played .hbody p, #h-added .hbody .tile'],
     ['Albums', '/albums', '.grid .tile'],
     ['Artists', '/artists', '.list .list-row'],
     ['Tracks', '/tracks', '#tracklist .track, #tracklist [data-key], #tracklist > *'],

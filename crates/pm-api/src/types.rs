@@ -427,6 +427,9 @@ pub struct HomePage {
     pub most_played: Vec<pm_library::PlayedTrack>,
     pub history: Vec<pm_library::PlayEntry>,
     pub stats: pm_library::LibraryStats,
+    /// Favourite songs not played for two months (or never), the longest-unplayed first.
+    #[serde(default)]
+    pub forgotten: Vec<Track>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,7 +653,7 @@ pub struct NewReleasesPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lyrics {
     pub track_id: i64,
-    /// `lrc` (sidecar file) or `tag` (embedded).
+    /// `lrc` (sidecar file), `tag` (embedded) or `lrclib` (lrclib.net).
     pub source: String,
     /// True when the lines carry timestamps.
     pub synced: bool,

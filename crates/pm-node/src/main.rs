@@ -173,6 +173,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::librespot::set_data_dir(&cfg.data_dir);
     pm_api::librespot::set_config_path(&cfg.spotify.librespot);
     pm_api::qobuz::set_config_app(&cfg.qobuz.app_id, &cfg.qobuz.app_secret);
+    pm_api::soundcloud::set_config_client(&cfg.soundcloud.client_id, &cfg.soundcloud.token);
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
         tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
