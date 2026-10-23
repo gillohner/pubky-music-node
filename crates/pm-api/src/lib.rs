@@ -43,6 +43,7 @@ pub mod identify;
 pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
+pub mod librespot;
 pub mod listenbrainz;
 pub mod mbproxy;
 pub mod new_releases;
@@ -367,6 +368,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             post(soloist::install).delete(soloist::uninstall),
         )
         .route("/sources/spotify/soloist/control", post(soloist::control))
+        .route(
+            "/sources/spotify/librespot",
+            get(librespot::get_status).put(librespot::put),
+        )
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -7669,6 +7674,108 @@ exec sleep 300
         assert!(backup::SECRET_SETTINGS
             .iter()
             .any(|(k, _)| *k == soloist::KEY_SETTING));
+    }
+
+    /// librespot (unofficial) as an external program: a stand-in librespot pipes PCM and reports its
+    /// events through the node's `--onevent` script; the chosen zone starts the live item, shows the
+    /// track's title, pauses and stops with it; off stops librespot.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn librespot_pipes_into_a_zone_and_the_zone_follows_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake-librespot");
+        // --version; otherwise: find --onevent and the pipe backend, report a session and a track,
+        // play (2 s of a 440 Hz-ish square wave on stdout), pause, and wait
+        std::fs::write(&bin, r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "librespot 0.8.0 test"; exit 0; fi
+ev=""; pipe=0
+while [ $# -gt 0 ]; do case "$1" in --onevent) ev="$2"; shift 2;; --backend) [ "$2" = pipe ] && pipe=1; shift 2;; *) shift;; esac; done
+[ -n "$ev" ] || { echo "no onevent" >&2; exit 3; }
+PLAYER_EVENT=session_connected USER_NAME=listener "$ev"
+PLAYER_EVENT=track_changed NAME="Get Lucky" ARTISTS="Daft Punk
+Pharrell Williams" ALBUM=RAM DURATION_MS=369000 URI=spotify:track:69kOkLUCkxIZYexIgSG8rq "$ev"
+PLAYER_EVENT=playing POSITION_MS=0 "$ev"
+if [ "$pipe" = 1 ]; then head -c 352800 /dev/zero | tr '\000' '\100'; fi
+sleep 2
+PLAYER_EVENT=paused POSITION_MS=2000 "$ev"
+exec sleep 300
+"#).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        librespot::set_config_path(bin.to_str().unwrap());
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
+        assert_eq!(
+            (u["enabled"].clone(), u["output"].clone(), u["running"].clone()),
+            (
+                serde_json::json!(false),
+                serde_json::json!("local"),
+                serde_json::json!(false)
+            )
+        );
+        assert_eq!(u["librespot"]["version"], "librespot 0.8.0 test");
+        assert!(u["warning"].as_str().unwrap().contains("not approved by Spotify"));
+        // Zone output without a zone is refused; with one it runs
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/librespot",
+            Some(serde_json::json!({"zone_id": "nope"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, u) = call(&app, "PUT", "/v1/sources/spotify/librespot", Some(serde_json::json!({"output": "zone", "zone_id": zid, "device_name": "Test speaker", "enabled": true}))).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(
+            (u["running"].clone(), u["device_name"].clone()),
+            (serde_json::json!(true), serde_json::json!("Test speaker")),
+            "{u}"
+        );
+        // The zone starts the live item and shows the track
+        let mut z = serde_json::Value::Null;
+        for _ in 0..60 {
+            z = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1;
+            if z["now_playing"]["item"]["uri"] == librespot::LIVE_URI && z["transport"] == "playing" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(z["now_playing"]["item"]["uri"], librespot::LIVE_URI, "{z}");
+        assert_eq!(z["transport"], "playing", "{z}");
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
+        assert_eq!(u["user"], "listener");
+        assert_eq!(u["now"]["title"], "Get Lucky");
+        assert_eq!(
+            u["now"]["artists"],
+            serde_json::json!(["Daft Punk", "Pharrell Williams"])
+        );
+        // librespot pauses: so does the zone
+        for _ in 0..60 {
+            z = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1;
+            if z["transport"] == "paused" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(z["transport"], "paused", "{z}");
+        // Off: librespot stops, and the zone with it
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/librespot",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(u["running"], false, "{u}");
+        let z = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1;
+        assert_eq!(z["transport"], "stopped", "{z}");
+        // The live item refuses to open while librespot isn't piping
+        assert!(librespot::open_live().is_err());
     }
 
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release

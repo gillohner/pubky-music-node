@@ -181,6 +181,9 @@ Open Sources › TIDAL › Connect TIDAL.
   Spotify forbids us to ship it), switch it on, then pick the device in a Spotify app. It plays on the machine's
   PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or `PM_SOLOIST`) names an install of
   your own. In Docker it needs the host's audio socket, which the image doesn't set up.
+- **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
+  distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
+  play on the machine's sound or into one of the node's zones.
 - **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
   in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
   entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer portal is not

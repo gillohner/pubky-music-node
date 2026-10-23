@@ -2428,7 +2428,7 @@
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
-              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div><div id="splibrespot"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2562,6 +2562,28 @@
             const sn = $('#slnext'); if (sn) sn.onclick = () => ctl('next');
           };
           fillSoloist();
+          const lso = $('#splibrespot');
+          const fillLibrespot = async () => {
+            if (!lso || !lso.isConnected) return;
+            let u; try { u = await api('GET', '/sources/spotify/librespot'); } catch (e) { lso.innerHTML = ''; return; }
+            if (!lso.isConnected) return;
+            const b = u.librespot;
+            const rows = [row('librespot (unofficial)', `${esc(u.warning)} Unlike Soloist, it can play into one of the node’s zones.`, `<input type="checkbox" class="switch" role="switch" id="lson" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="librespot (unofficial)">`)];
+            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="lsretry">Try again</button></div></div>`);
+            if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
+            if (u.enabled || b) {
+              rows.push(row('librespot', b ? `${esc(b.version || 'Found')}: ${b.from === 'config' ? 'set in the node config' : b.from === 'data' ? 'in the node’s bin folder' : 'installed on this machine'} (<code>${esc(b.path)}</code>).` : 'Not installed. librespot publishes no ready-made builds: install it with <code>cargo install librespot</code>, your distribution’s package or Homebrew, then reload this page (or point <code>[spotify] librespot</code> in the node config at it).', `<a class="btn ghost sm" href="https://github.com/librespot-org/librespot" target="_blank" rel="noopener">About librespot</a>`));
+              const zoneOpts = u.zones.map((z) => `<option value="zone:${esc(z.id)}" ${u.output === 'zone' && u.zone_id === z.id ? 'selected' : ''}>Zone: ${esc(z.name)}</option>`).join('');
+              rows.push(`<form class="set-row set-block" id="lsdev"><div class="set-label"><div class="set-name">Device and output</div>${help('The name Spotify apps show, and where the sound goes: this machine’s own sound output, or one of the node’s zones (librespot then pipes its audio into the node, and the zone starts, pauses and stops with it).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" maxlength="64" placeholder="Device name" autocomplete="off" aria-label="librespot device name" value="${esc(u.device_name)}"><select class="input" name="out" aria-label="librespot output"><option value="local" ${u.output === 'local' ? 'selected' : ''}>This machine’s sound</option>${zoneOpts}</select><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(row('Status', !u.running ? (u.enabled ? 'Not running.' : 'Off.') : `Running as “${esc(u.device_name)}”${u.user ? `, picked by ${esc(u.user)}` : '. Pick it in a Spotify app on this network'}.${u.now && u.now.title ? ` ${u.now.status === 'paused' ? 'Paused' : 'Playing'}: ${esc(u.now.title)}${u.now.artists && u.now.artists.length ? ' · ' + esc(u.now.artists.join(', ')) : ''}.` : ''}`, u.running ? '<span class="pill ok">Running</span>' : `<span class="pill">${u.enabled ? 'Waiting' : 'Off'}</span>`));
+            }
+            lso.innerHTML = group('librespot', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/librespot', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#lson').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'librespot is on' : 'librespot is off');
+            const lr = $('#lsretry'); if (lr) lr.onclick = () => put({ enabled: true }, 'Starting librespot again');
+            const ld = $('#lsdev'); if (ld) ld.onsubmit = (e) => { e.preventDefault(); const f = new FormData(ld); const out = String(f.get('out') || 'local'); put({ device_name: String(f.get('name') || '').trim(), output: out === 'local' ? 'local' : 'zone', zone_id: out.startsWith('zone:') ? out.slice(5) : '' }, 'librespot saved'); };
+          };
+          fillLibrespot();
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;

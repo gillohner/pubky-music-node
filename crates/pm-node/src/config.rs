@@ -160,6 +160,9 @@ pub struct SpotifyConfig {
     /// A Spotify Soloist executable the owner installed (`PM_SOLOIST` overrides); otherwise the
     /// node's downloaded one in `<data_dir>/bin`, or one on the PATH.
     pub soloist: String,
+    /// A librespot executable (`PM_LIBRESPOT` overrides); otherwise `<data_dir>/bin/librespot` or the
+    /// PATH. librespot publishes no ready-made builds: `cargo install librespot` or a distro package.
+    pub librespot: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]

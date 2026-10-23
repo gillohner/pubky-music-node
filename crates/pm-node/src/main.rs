@@ -170,6 +170,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::ytdlp::set_config_path(&cfg.youtube.ytdlp);
     pm_api::soloist::set_data_dir(&cfg.data_dir);
     pm_api::soloist::set_config_path(&cfg.spotify.soloist);
+    pm_api::librespot::set_data_dir(&cfg.data_dir);
+    pm_api::librespot::set_config_path(&cfg.spotify.librespot);
     pm_api::qobuz::set_config_app(&cfg.qobuz.app_id, &cfg.qobuz.app_secret);
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
@@ -253,6 +255,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     {
         let st = state.clone();
         tokio::task::spawn_blocking(move || pm_api::soloist::autostart(&st));
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
     if let Err(e) = state.start_slimproto() {
         tracing::warn!("slimproto: {e}");
