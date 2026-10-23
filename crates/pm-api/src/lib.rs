@@ -3031,8 +3031,12 @@ mod tests {
             .route(
                 "/v1/oauth2/device_authorization",
                 post(|body: String| async move {
+                    // An app from TIDAL's developer portal gets TIDAL's refusal
+                    if body.contains("client_id=portal-app") {
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid_request", "error_description": "Client is not a Limited Input Device client"})));
+                    }
                     assert!(body.contains("client_id=dev-id"), "{body}");
-                    Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1}))
+                    (StatusCode::OK, Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1})))
                 }),
             )
             .route(
@@ -3090,6 +3094,17 @@ mod tests {
         assert!(st["warning"].as_str().unwrap().contains("not approved"));
         let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
         assert_eq!(st, StatusCode::BAD_GATEWAY, "no device client yet: {r}");
+        // A developer-portal app is not a device client: plain words, not TIDAL's raw error
+        let (_, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "portal-app", "client_secret": "portal-secret"})),
+        )
+        .await;
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert_eq!(r["error"], tidal_unofficial::NOT_A_DEVICE_CLIENT, "{r}");
         let (_, r) = call(
             &app,
             "PUT",

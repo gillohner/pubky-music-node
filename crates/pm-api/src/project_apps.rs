@@ -8,6 +8,30 @@
 //! `PM_PROJECT_ACOUSTID_KEY`), set by the release workflow, so the repository holds none of them.
 //! A build without them simply has no built-in apps. A node's own `[tidal]`, `[jamendo]` or
 //! `[acoustid]` values always win.
+//!
+//! The one built-in secret is the **TIDAL device client** for Full tracks (STEWARD-TIDAL-DEFAULT.md:
+//! the client python-tidal publishes, supplied by the owner), compiled in from
+//! `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` as masked bytes (build.rs), so the
+//! plain values are in neither the source nor the binary's strings. It is not a security boundary;
+//! it keeps the values out of casual sight. A device client the owner enters always wins.
+
+mod device {
+    include!(concat!(env!("OUT_DIR"), "/tidal_device.rs"));
+}
+
+const MASK: &[u8] = b"pubky-music-node:tidal-device";
+
+fn unmask(b: &[u8]) -> String {
+    b.iter()
+        .enumerate()
+        .map(|(i, x)| (x ^ MASK[i % MASK.len()] ^ (i as u8)) as char)
+        .collect()
+}
+
+/// The built-in TIDAL device client `(id, secret)` for Full tracks, when the build carries one.
+pub fn tidal_device_client() -> Option<(String, String)> {
+    device::DEVICE.map(|(id, secret)| (unmask(id), unmask(secret)))
+}
 
 /// The project's TIDAL app (public client id).
 pub fn tidal_client_id() -> Option<&'static str> {
@@ -45,6 +69,25 @@ pub fn state_nonce(state: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_device_client_unmasks_what_the_build_masked() {
+        // The same arithmetic as build.rs
+        let mask = |v: &str| -> Vec<u8> {
+            v.bytes()
+                .enumerate()
+                .map(|(i, b)| b ^ MASK[i % MASK.len()] ^ (i as u8))
+                .collect()
+        };
+        let m = mask("zU4JXAiEUnGhXp4d");
+        assert_ne!(&m[..], b"zU4JXAiEUnGhXp4d");
+        assert!(!String::from_utf8_lossy(&m).contains("zU4J"));
+        assert_eq!(unmask(&m), "zU4JXAiEUnGhXp4d");
+        // A build without the values carries none
+        if std::env::var("PM_TIDAL_DEVICE_CLIENT_ID").is_err() {
+            assert!(tidal_device_client().is_none());
+        }
+    }
 
     #[test]
     fn state_carries_the_nonce_and_the_callback() {
