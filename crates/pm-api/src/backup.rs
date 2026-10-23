@@ -46,6 +46,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("youtube.api_key", "your YouTube Data API key"),
     ("qobuz.unofficial", "Qobuz"),
     ("qobuz.app", "the Qobuz app"),
+    ("bandcamp.identity", "your Bandcamp sign-in"),
     ("spotify.user", "Spotify"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),

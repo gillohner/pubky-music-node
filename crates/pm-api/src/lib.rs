@@ -28,6 +28,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 pub mod add_music;
 pub mod audiobookshelf;
 pub mod backup;
+pub mod bandcamp;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
@@ -357,6 +358,17 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/youtube/unofficial/ytdlp",
             post(ytdlp::install).delete(ytdlp::uninstall),
         )
+        .route("/sources/bandcamp/stream/{key}", get(bandcamp::stream))
+        .route(
+            "/sources/bandcamp/unofficial",
+            get(bandcamp::get_status).put(bandcamp::put),
+        )
+        .route("/sources/bandcamp/collection", get(bandcamp::collection))
+        .route(
+            "/sources/bandcamp/collection/{id}/download",
+            post(bandcamp::download),
+        )
+        .route("/sources/bandcamp/downloads", get(bandcamp::downloads))
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -7404,6 +7416,263 @@ mod tests {
         )
         .await;
         assert_eq!(k["set"], false);
+    }
+
+    /// Bandcamp (unofficial): search, an album page read from its data-tralbum, its stream on a zone
+    /// and in the browser, then with the owner's sign-in the collection and a purchase downloaded
+    /// (a zip) into `<data_dir>/bandcamp`, which becomes a library folder and is scanned.
+    #[tokio::test]
+    async fn bandcamp_streams_and_downloads_purchases_into_the_library() {
+        use pm_zones::SourceFactory;
+        use std::io::Write as _;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let mut zipped = Vec::new();
+        {
+            let mut z = zip::ZipWriter::new(std::io::Cursor::new(&mut zipped));
+            z.start_file(
+                "Band One - RAM - 01 One.flac",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            z.write_all(&flac).unwrap();
+            z.start_file("../escape.flac", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(b"no").unwrap();
+            z.finish().unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let esc = |v: serde_json::Value| v.to_string().replace('&', "&amp;").replace('"', "&quot;");
+        let tralbum = esc(
+            serde_json::json!({"artist": "Band One", "art_id": 42, "album_release_date": "16 Jan 2016 00:00:00 GMT",
+            "current": {"title": "RAM", "about": "An album"},
+            "trackinfo": [{"title": "One", "track_num": 1, "duration": 60.0, "file": {"mp3-128": format!("{base}/stream/1.mp3?token=t")}},
+                          {"title": "Two", "track_num": 2, "duration": 60.0, "file": null}]}),
+        );
+        let album_page = format!("<html><body><script data-tralbum=\"{tralbum}\"></script></body></html>");
+        let blob = esc(
+            serde_json::json!({"digital_items": [{"title": "RAM", "artist": "Band One", "downloads": {
+            "mp3-320": {"url": format!("{base}/download/album/1?fmt=mp3")}, "flac": {"url": format!("{base}/download/album/1?fmt=flac")}}}]}),
+        );
+        let dl_page = format!("<html><div id=\"pagedata\" data-blob=\"{blob}\"></div></html>");
+        let cookie_ok = |h: &axum::http::HeaderMap| {
+            h.get("cookie").and_then(|v| v.to_str().ok()) == Some("identity=7%09abc%3D%3D")
+        };
+        let b2 = base.clone();
+        let mock = Router::new()
+            .route("/api/bcsearch_public_api/1/autocomplete_elastic", post(move |Json(b): Json<serde_json::Value>| async move {
+                assert_eq!(b["search_text"], "ram");
+                Json(serde_json::json!({"auto": {"results": [
+                    {"type": "b", "name": "Band One", "item_url_path": "https://band1.bandcamp.com"},
+                    {"type": "a", "name": "RAM", "band_name": "Band One", "item_url_path": "https://band1.bandcamp.com/album/ram", "img": "https://f4.bcbits.com/img/9_3.jpg"},
+                    {"type": "t", "name": "Elsewhere", "band_name": "X", "item_url_path": "https://custom.example/track/x"}]}}))
+            }))
+            .route("/_band/band1/album/ram", get(move || { let p = album_page.clone(); async move { axum::response::Html(p) } }))
+            .route("/_band/band1/album/changed", get(|| async { axum::response::Html("<html>new layout</html>") }))
+            .route("/stream/1.mp3", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/api/fan/2/collection_summary", get(move |h: axum::http::HeaderMap| async move {
+                if !cookie_ok(&h) { return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": true}))); }
+                (StatusCode::OK, Json(serde_json::json!({"fan_id": 77, "collection_summary": {"fan_id": 77, "username": "listener"}})))
+            }))
+            .route("/api/fancollection/1/collection_items", post(move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+                let base = b2.clone();
+                async move {
+                    assert!(cookie_ok(&h));
+                    assert_eq!(b["fan_id"], 77);
+                    let first = b["older_than_token"].as_str().unwrap().ends_with("::a::") && !b["older_than_token"].as_str().unwrap().starts_with("1::");
+                    if first {
+                        Json(serde_json::json!({"items": [{"item_title": "RAM", "band_name": "Band One", "item_url": "https://band1.bandcamp.com/album/ram", "item_type": "album", "sale_item_type": "p", "sale_item_id": 5, "item_art_id": 42}],
+                            "redownload_urls": {"p5": format!("{base}/dl-page?payment_id=5")}, "more_available": true, "last_token": "1::a::"}))
+                    } else {
+                        Json(serde_json::json!({"items": [{"item_title": "Gift", "band_name": "Other", "item_url": "https://other.bandcamp.com/track/gift", "item_type": "track", "sale_item_type": "r", "sale_item_id": 6}],
+                            "redownload_urls": {}, "more_available": false, "last_token": "0::a::"}))
+                    }
+                }
+            }))
+            .route("/dl-page", get(move |h: axum::http::HeaderMap| { let p = dl_page.clone(); async move { assert!(cookie_ok(&h)); axum::response::Html(p) } }))
+            .route("/statdownload/album/1", get({ let b = base.clone(); move |q: axum::extract::RawQuery| { let b = b.clone(); async move {
+                let q = q.0.unwrap_or_default();
+                assert!(q.contains("fmt=flac") && q.contains(".vrs=1") && q.contains(".rand="), "{q}");
+                format!("if ( window.Downloads ) {{ Downloads.statResult ( {{\"result\":\"ok\",\"download_url\":\"{b}/files/ram.zip\"}} ) }};")
+            } } }))
+            .route("/files/ram.zip", get(move || { let z = zipped.clone(); async move { z } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        bandcamp::set_site_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // Off until switched on
+        let (st, _) = call(&app, "GET", "/v1/sources/bandcamp/search?q=ram", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(
+            (u["enabled"].clone(), u["signed_in"].clone(), u["format"].clone()),
+            (
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::json!("flac")
+            )
+        );
+        // Search: albums and tracks on bandcamp.com only
+        let (st, r) = call(&app, "GET", "/v1/sources/bandcamp/search?q=ram", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{r}");
+        assert_eq!(
+            (items[0]["id"].as_str(), items[0]["image"].as_str()),
+            (
+                Some("album:band1.ram"),
+                Some("https://f4.bcbits.com/img/9_10.jpg")
+            )
+        );
+        // The album page: the streamable track only
+        let (st, it) = call(&app, "GET", "/v1/sources/bandcamp/items/album:band1.ram", None).await;
+        assert_eq!(st, StatusCode::OK, "{it}");
+        assert_eq!(
+            (it["title"].as_str(), it["year"].as_i64()),
+            (Some("RAM"), Some(2016))
+        );
+        assert_eq!(it["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(it["tracks"][0]["url"], "bandcamp:track:band1.a.ram.1");
+        assert_eq!(it["url"], "https://band1.bandcamp.com/album/ram");
+        // Its stream: in the browser (relayed) and on a zone
+        let req = Request::builder()
+            .uri("/v1/sources/bandcamp/stream/band1.a.ram.1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            flac.len()
+        );
+        let src = s.sources.clone();
+        let it = pm_zones::QueueItem::new("bandcamp:track:band1.a.ram.1");
+        let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+            .await
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        let req = Request::builder()
+            .uri("/v1/sources/bandcamp/stream/band1.a.ram.2")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "a track the artist doesn't stream"
+        );
+        // The sign-in: a wrong cookie is refused; the right one names the fan, and never comes back
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"identity": "wrong"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"identity": "identity=7%09abc%3D%3D"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(
+            (u["signed_in"].clone(), u["user"].clone()),
+            (serde_json::json!(true), serde_json::json!("listener"))
+        );
+        assert!(!u.to_string().contains("7%09abc"), "{u}");
+        // The collection, across pages
+        let (st, c) = call(&app, "GET", "/v1/sources/bandcamp/collection", None).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        let c = c.as_array().unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            (
+                c[0]["id"].as_str(),
+                c[0]["downloadable"].as_bool(),
+                c[0]["item"].as_str()
+            ),
+            (Some("p5"), Some(true), Some("album:band1.ram"))
+        );
+        assert_eq!(c[1]["downloadable"], false);
+        // Download the purchase: FLAC, unpacked (nothing outside its folder), and scanned into the library
+        let (st, j) = call(&app, "POST", "/v1/sources/bandcamp/collection/p5/download", None).await;
+        assert_eq!(st, StatusCode::OK, "{j}");
+        let mut last = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
+            last = d[0].clone();
+            if last["state"] == "done" || last["state"] == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(last["state"], "done", "{last}");
+        assert_eq!(last["format"], "flac");
+        let folder = std::path::PathBuf::from(last["folder"].as_str().unwrap());
+        assert!(
+            folder.join("Band One - RAM - 01 One.flac").is_file(),
+            "{}",
+            folder.display()
+        );
+        assert!(
+            !folder.parent().unwrap().join("escape.flac").exists(),
+            "zip entries stay inside the folder"
+        );
+        let (mut folders, mut tracks) = (serde_json::Value::Null, serde_json::Value::Null);
+        for _ in 0..100 {
+            folders = call(&app, "GET", "/v1/library/folders", None).await.1;
+            tracks = call(&app, "GET", "/v1/library/tracks", None).await.1;
+            if folders.to_string().contains("bandcamp") && tracks.to_string().contains("01 One") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            folders.to_string().contains("bandcamp"),
+            "a library folder: {folders}"
+        );
+        assert!(
+            tracks.to_string().contains("01 One"),
+            "the purchase is in the library: {tracks}"
+        );
+        let (_, c) = call(&app, "GET", "/v1/sources/bandcamp/collection", None).await;
+        assert_eq!(c[0]["downloaded"], true);
+        let (st, _) = call(&app, "POST", "/v1/sources/bandcamp/collection/r6/download", None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "no download offered");
+        // A page that no longer carries the data switches the mode off
+        let (st, _) = call(
+            &app,
+            "GET",
+            "/v1/sources/bandcamp/items/album:band1.changed",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
+        let (_, u) = call(&app, "GET", "/v1/sources/bandcamp/unofficial", None).await;
+        assert_eq!(u["enabled"], false);
+        assert!(
+            u["health"]["detail"].as_str().unwrap().contains("pages changed"),
+            "{u}"
+        );
+        assert!(backup::SECRET_SETTINGS
+            .iter()
+            .any(|(k, _)| *k == bandcamp::COOKIE_KEY));
     }
 
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release

@@ -107,7 +107,7 @@
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
   // passes through; raw service answers ("…answered 403 Forbidden: …") are translated, and the raw
   // text stays on the error as `raw` (UX review: wording leaks internals).
-  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
+  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', bandcamp: 'Bandcamp', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
   const humanError = (raw, path = '') => {
     const text = String(raw || '');
     const svcKey = (/^\/sources\/([a-z]+)/.exec(path) || /^([a-z]+): /.exec(text) || [])[1];
@@ -399,7 +399,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -1502,7 +1502,7 @@
     $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
-  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -2313,10 +2313,11 @@
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
+              + (cur.id === 'bandcamp' ? '<div id="bcmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2408,6 +2409,48 @@
             const qo = $('#qbout'); if (qo) qo.onclick = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
           };
           fillQobuz();
+          const bcm = $('#bcmode');
+          const fillBandcamp = async () => {
+            if (!bcm || !bcm.isConnected) return;
+            let u; try { u = await api('GET', '/sources/bandcamp/unofficial'); } catch (e) { bcm.innerHTML = ''; return; }
+            if (!bcm.isConnected) return;
+            const FMT = { flac: 'FLAC', alac: 'ALAC', 'aiff-lossless': 'AIFF', wav: 'WAV', 'mp3-320': 'MP3 320', 'mp3-v0': 'MP3 V0', 'aac-hi': 'AAC', vorbis: 'Ogg Vorbis' };
+            const rows = [row('Bandcamp (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="bcon" ${u.enabled ? 'checked' : ''} aria-label="Bandcamp (unofficial)">`)];
+            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. Bandcamp links still open on bandcamp.com.<div class="actions"><button class="btn sm" id="bcretry">Try again</button></div></div>`);
+            if (u.enabled) {
+              rows.push(u.signed_in
+                ? row('Signed in', `Your Bandcamp collection${u.user ? ' (' + esc(u.user) + ')' : ''}. The sign-in stays on the node and never comes back.`, '<button class="btn ghost sm" id="bcout">Sign out</button>')
+                : `<form class="set-row set-block" id="bcin"><div class="set-label"><div class="set-name">Your purchases</div>${help('To download what you bought: sign in on bandcamp.com in your browser, open its cookies for bandcamp.com and copy the value of the one named identity. The node checks it once with Bandcamp and keeps it like a sign-in. Search and streams work without it.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="identity" type="password" placeholder="identity cookie value" autocomplete="off" spellcheck="false" aria-label="Bandcamp identity cookie" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(row('Download format', `Bought music downloads into <code class="path">${esc(u.folder)}</code>, a library folder. When a release lacks this format, the best one it has is used.`, `<select class="input" id="bcfmt" aria-label="Bandcamp download format">${u.formats.map((f) => `<option value="${esc(f)}" ${f === u.format ? 'selected' : ''}>${esc(FMT[f] || f)}</option>`).join('')}</select>`));
+              rows.push(row('Streams', 'What Bandcamp’s own player plays: MP3 128 kbit/s, full tracks where the artist allows it.', ''));
+              if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+            }
+            bcm.innerHTML = group('Unofficial mode', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/bandcamp/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#bcon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Bandcamp is on' : 'Bandcamp is off');
+            const br = $('#bcretry'); if (br) br.onclick = () => put({ enabled: true }, 'Trying Bandcamp again');
+            const bi = $('#bcin'); if (bi) bi.onsubmit = (e) => { e.preventDefault(); put({ identity: String(new FormData(bi).get('identity') || '').trim() }, 'Signed in to Bandcamp'); };
+            const bo = $('#bcout'); if (bo) bo.onclick = () => put({ identity: '' }, 'Signed out of Bandcamp');
+            const bf = $('#bcfmt'); if (bf) bf.onchange = () => put({ format: bf.value }, 'Download format saved');
+          };
+          fillBandcamp();
+          if (cur.id === 'bandcamp' && cur.enabled && cur.status === 'signed in') {
+            // Your purchases, each downloadable into the library.
+            const box = document.createElement('div'); box.id = 'bcmine'; box.innerHTML = '<p class="muted small">Loading your Bandcamp collection…</p>'; ($('#srcmine') || main).appendChild(box);
+            const draw = async () => {
+              try {
+                const [items, jobs] = await Promise.all([api('GET', '/sources/bandcamp/collection'), api('GET', '/sources/bandcamp/downloads')]);
+                if (state.view !== 'sources' || state.sourceId !== 'bandcamp' || !box.isConnected) return;
+                const job = Object.fromEntries(jobs.map((j) => [j.id, j]));
+                const act = (p) => { const j = job[p.id]; if (j && !['done', 'failed'].includes(j.state)) return `<span class="muted small">${esc(j.state === 'downloading' && j.total ? `${Math.round(100 * j.bytes / j.total)}%` : j.state)}</span>`; if (j && j.state === 'failed') return `<span class="pill bad" title="${esc(j.error || '')}">Failed</span><button class="btn ghost sm" data-bcdl="${esc(p.id)}">Retry</button>`; if (p.downloaded || (j && j.state === 'done')) return '<span class="pill ok">In your library</span>'; return p.downloadable ? `<button class="btn sm" data-bcdl="${esc(p.id)}">${icon('download')} Download</button>` : '<span class="muted small">no download</span>'; };
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your purchases</h3><span class="muted small">${countOf(items.length, 'items')}</span></div>${items.length ? `<div class="list">${items.map((p) => `<div class="list-row ${p.item ? 'clickable' : ''}" ${p.item ? `data-sitem="${esc(p.item)}"` : ''}>${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(p.title)}</div><div class="sub">${esc([p.artist, p.kind].filter(Boolean).join(' · '))}</div></div>${act(p)}</div>`).join('')}</div>` : '<p class="muted">Nothing bought on Bandcamp yet.</p>'}</section>`;
+                $$('[data-sitem]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('button')) return; setView('source-item', { source: 'bandcamp', id: b.dataset.sitem }); });
+                $$('[data-bcdl]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); b.disabled = true; try { await api('POST', `/sources/bandcamp/collection/${encodeURIComponent(b.dataset.bcdl)}/download`); toast('Downloading into your library'); } catch (er) { toast(er.message, 'error'); } draw(); });
+                if (jobs.some((j) => !['done', 'failed'].includes(j.state))) setTimeout(draw, 2000);
+              } catch (e) { box.innerHTML = `<p class="muted small">Bandcamp collection: ${esc(e.message)}</p>`; }
+            };
+            draw();
+          }
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;
