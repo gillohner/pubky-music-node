@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
+  - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.
+  - **Menus:** "Add to playlist…" opens one picker (find, New playlist, recent first) instead of listing every playlist. A song's menu also has Favourite, Start radio (on a node zone) and Go to song page. "Go to album" no longer appears on that album's own page. On phones menus open as a sheet from the bottom, and a long-press (or right-click) on a song row opens its menu.
+  - **Search:** a Top result appears only when it really matches the words you typed; otherwise "No exact match. The closest results are below." Groups come in the order Artists, Albums, Songs (six, then "See all"), Playlists. On phones the source chips are one scrolling row.
+  - **The browser's queue survives a reload,** streamed songs included (only library songs did). It also keeps the song in the bar and where it was, ready to play on. Up next and the queue show no "0:00" for songs whose length isn't known.
+  - **Albums and Artists:** sort (name, artist, year, recently added; artists by name, most albums, recently added), a Favourites toggle for albums, and an A–Z jump on long lists. The choice is remembered in this browser.
 - **People on Pubky** (owner: "use nexus to fetch avatar of people and profile for tags"; STEWARD-UX-PEOPLE.md).
   - **Faces on tags:** every tag chip on an item page shows who tagged it (up to three faces, then "+N"), and "N people tagged this" shows their faces. Tapping either lists them, marked "you" or "you follow", each opening their page.
   - **`/person/<key>` pages:** avatar, name, bio, status and links from the person's own pubky.app profile (through Nexus, else straight from their homeserver), "follows you" and the counts. Below: the tags they use on music, what they tagged recently (Pinakes), and the playlists they share. Pasting a Pubky key into search opens their page.
