@@ -80,6 +80,9 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
+| GET | `/v1/library/artists/{id}/similar` | | `{artists: [{name, mbid?, url, score, library_artist_id?}], note?}` from Last.fm's `artist.getSimilar` (by MusicBrainz id, else by name), each matched to this library; `note` says why there is nothing (`not configured` without a Last.fm app) |
+| GET / PUT / DELETE | `/v1/lastfm` | PUT `{api_key?, api_secret?, submit?}` | Last.fm: `{configured, app_from?, api_key?, connected, user?, submit, pending, problem?}`; the owner's app (both values; an empty key forgets it and signs out), and whether plays go out; DELETE signs out |
+| GET | `/v1/lastfm/login` | | `{url}`: Last.fm's permission page, which comes back to `/lastfm/callback` (no token there), where the node turns the token into a session key and redirects to `/?lastfm=signed_in` |
 | GET | `/v1/library/artists/{id}/info` | | `{bio?, image, wikipedia?, wikidata?, musicbrainz?, homepage?, note?}` from MusicBrainz → Wikidata → Wikipedia by the artist's MBID, fetched once and cached for 30 days (misses 7) |
 | GET | `/v1/library/artists/{id}/image` | | the cached portrait (Wikimedia Commons); 404 when none |
 | GET | `/v1/library/genres` | | `[{id, name, tracks, albums}]` from the files' genre tags (several per track when the tag lists several) |

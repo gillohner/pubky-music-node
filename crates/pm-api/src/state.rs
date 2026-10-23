@@ -458,11 +458,13 @@ impl NodeState {
                             record_play(&library, &id, &item.uri);
                             if let Some(n) = node.upgrade() {
                                 crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
+                                crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
                             }
                         }
                         if let pm_zones::ZoneEvent::TrackEnded { item, .. } = &event {
                             if let Some(n) = node.upgrade() {
                                 crate::listenbrainz::track_ended(&n, &id, item);
+                                crate::lastfm::track_ended(&n, &id, item);
                             }
                         }
                         if matches!(event, pm_zones::ZoneEvent::Stopped) {

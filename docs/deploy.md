@@ -193,6 +193,9 @@ Open Sources › TIDAL › Connect TIDAL.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
   value of your bandcamp.com `identity` cookie under Sources › Bandcamp. Purchases land in `<data_dir>/bandcamp`, a
   library folder.
+- **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
+  secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
+  here are scrobbled; artist pages show similar artists.
 - **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
   always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one

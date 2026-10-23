@@ -66,6 +66,7 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 ## Not offered, and why (STEWARD-PLAN step 5)
 
+- **Last.fm (scrobbling, similar artists):** official API with the owner's own API key and shared secret (Settings › Accounts › Last.fm, or `[lastfm]`, `PM_LASTFM_API_*`); the node ships no key and the secret never leaves it. Plays count like ListenBrainz's (half the track or four minutes; now-playing at the start), wait when Last.fm can't take them, and the session key is a secret in backups. Similar artists show on artist pages, matched to the library.
 - **Needs approval first:** Qobuz (requested by email), SoundCloud's official API (access is by application). Both have unofficial modes above instead.
 - **Apple Music:** needs a paid developer account, and MusicKit plays in the browser only, never on the node's outputs.
 - **No official playback API:** YouTube Music (beyond the embedded player above), Amazon Music, Bandcamp streaming, Mixcloud. The node's rule is no reverse
