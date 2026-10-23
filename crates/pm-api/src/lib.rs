@@ -292,6 +292,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/search", get(search::search))
         .route("/search/tags", get(search::tag_suggestions))
         .route("/home/location", get(home::get_location).put(home::set_location))
+        .route("/home/layout", get(home::get_layout).put(home::set_layout))
         .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
         .route(
@@ -1964,12 +1965,28 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
 async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<HomePage> {
     let limit = p.limit.unwrap_or(12).min(100);
     let lib = s.library.lock().expect("library poisoned");
-    let favourite_albums = favourites::collect(&lib)?
-        .albums
+    let favs = favourites::collect(&lib)?;
+    let favourite_albums = favs.albums.into_iter().take(limit as usize).collect();
+    // Forgotten favourites: hearted, then not played for two months
+    let cutoff = pm_library::db::now_unix() - 60 * 86_400;
+    let mut forgotten: Vec<(i64, pm_model::Track)> = favs
+        .tracks
         .into_iter()
+        .filter_map(|t| {
+            let last =
+                t.id.and_then(|id| lib.last_played(id).ok().flatten())
+                    .unwrap_or(0);
+            (last < cutoff).then_some((last, t))
+        })
+        .collect();
+    forgotten.sort_by_key(|(last, _)| *last);
+    let forgotten = forgotten
+        .into_iter()
+        .map(|(_, t)| t)
         .take(limit as usize)
         .collect();
     Ok(Json(HomePage {
+        forgotten,
         favourite_albums,
         recently_added: lib.recent_albums(0, limit)?,
         recently_played: lib.recently_played_albums(limit)?,

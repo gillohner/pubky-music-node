@@ -990,7 +990,7 @@ impl std::fmt::Debug for PubkySync {
 /// sessions, renderers added by hand, the Subsonic jukebox zone, DSP per
 /// output. Caches (`tidal.collection`, `tidal.version.*`, `artist.info.*`,
 /// `mb.rg.*`, `pinakes.version.*`) are not backed up.
-const BACKED_UP_SETTING_PREFIXES: [&str; 7] = [
+const BACKED_UP_SETTING_PREFIXES: [&str; 8] = [
     "tidal.user",
     "tidal.playback_limit",
     "outputs.upnp_addresses",
@@ -998,6 +998,7 @@ const BACKED_UP_SETTING_PREFIXES: [&str; 7] = [
     "subsonic.jukebox_zone",
     "dsp/",
     "library.",
+    "home.layout",
 ];
 
 /// What `/priv/pubky.music/settings.json` holds.

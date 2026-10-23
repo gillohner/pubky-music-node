@@ -1336,6 +1336,15 @@ impl Library {
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
+    /// When a track last started (unix seconds), if ever.
+    pub fn last_played(&self, track: TrackId) -> Result<Option<i64>> {
+        Ok(self.lock().query_row(
+            "SELECT MAX(played_at) FROM plays WHERE track_id = ?1",
+            params![track.0],
+            |r| r.get::<_, Option<i64>>(0),
+        )?)
+    }
+
     pub fn record_play(&self, track: TrackId, zone: Option<&str>) -> Result<i64> {
         let conn = self.lock();
         conn.execute(

@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Home is yours to arrange** (UX review #10): "Edit Home" lists every row with a checkbox and up/down. The layout is kept on the node and copied to your homeserver with your other settings (`GET`/`PUT /v1/home/layout`). New rows: Recently played and Recently added (they replace "Jump back in"), and Forgotten favourites: favourite songs not played for two months, from `/v1/library/home` `forgotten`.
 - **Playlists have real art** (UX review #8): the first four album covers of their songs as a 2×2 mosaic, one cover when there's only one, else their initials on a gradient. This applies in the list, on the page and on shared playlists; there are no more empty colour squares. `PlaylistSummary.covers` lists them.
 - **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
   - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.

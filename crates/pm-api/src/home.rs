@@ -91,6 +91,54 @@ fn owner(s: &NodeState) -> Option<String> {
         .map(|x| x.z32().trim_start_matches("pubky").to_string())
 }
 
+/// Which Home rows show, in which order (UX review #10). Kept on the node and copied to the
+/// homeserver with the owner's other settings, so a new node gets the same Home.
+pub const LAYOUT_KEY: &str = "home.layout";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HomeLayout {
+    /// Row ids in page order; rows not listed come after, in their default order.
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Row ids that don't show.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+}
+
+/// `GET /v1/home/layout`.
+pub(crate) async fn get_layout(State(s): State<Arc<NodeState>>) -> ApiResult<HomeLayout> {
+    Ok(Json(
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(LAYOUT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default(),
+    ))
+}
+
+/// `PUT /v1/home/layout {order, hidden}`.
+pub(crate) async fn set_layout(
+    State(s): State<Arc<NodeState>>,
+    Json(l): Json<HomeLayout>,
+) -> ApiResult<HomeLayout> {
+    let ok = |v: &Vec<String>| {
+        v.len() <= 40
+            && v.iter()
+                .all(|x| x.len() <= 40 && x.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
+    };
+    if !ok(&l.order) || !ok(&l.hidden) {
+        return Err(ApiError::bad_request("a Home layout is a list of row ids"));
+    }
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(LAYOUT_KEY, &serde_json::to_string(&l).expect("layout serializes"))?;
+    Ok(Json(l))
+}
+
 pub(crate) fn location(s: &NodeState) -> Option<HomeLocation> {
     s.library
         .lock()
