@@ -767,6 +767,36 @@ pub(crate) struct CallbackQuery {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PastedCallback {
+    /// The address the browser landed on after the service's sign-in page.
+    pub url: String,
+}
+
+/// The callback's parameters out of a pasted address (`?code=…&state=…`, or the service's error).
+pub(crate) fn callback_from_url(url: &str) -> Result<CallbackQuery, ApiError> {
+    let parsed = url::Url::parse(url.trim())
+        .map_err(|_| ApiError::bad_request("Paste the whole address, starting with http:// or https://"))?;
+    let q: std::collections::HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+    if !q.contains_key("code") && !q.contains_key("error") {
+        return Err(ApiError::bad_request(
+            "That address carries no sign-in code; paste the one the sign-in page sent you to",
+        ));
+    }
+    Ok(serde_json::from_value(serde_json::to_value(q).expect("map")).expect("string fields"))
+}
+
+/// `POST /v1/sources/spotify/callback {url}`: the pasted-address fallback, as TIDAL's.
+pub(crate) async fn pasted_callback(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PastedCallback>,
+) -> ApiResult<SpotifyStatus> {
+    let q = callback_from_url(&body.url)?;
+    finish_login(&s, q).await?;
+    Ok(Json(status_view(&s, &headers)))
+}
+
 /// `GET /spotify/callback`: finishes the sign-in and sends the browser back to the UI.
 pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<CallbackQuery>) -> Response {
     match finish_login(&s, q).await {
