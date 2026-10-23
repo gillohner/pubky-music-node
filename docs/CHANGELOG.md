@@ -6,8 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Accounts per person on the node** (STEWARD-BUNDLED-HOMESERVER.md, step 3).
   - **Signing in:** everyone signs in with Pubky Ring as before. The owner gets the API token (apps and integrations keep it); someone in People with music access now gets a **personal token**, kept only as its hash, instead of "denied".
-  - **What a listener gets:** the shared library, search, sources, and playing on the zones the owner opens to them (`/v1/people/zones`; all by default).
-  - **What stays the owner's:** settings, People, the homeserver, source sign-ins, library folders, uploads and backups (403 "Not for listeners").
+  - **What a listener gets:** the shared library, search, public directories (radio, podcast search, Discover, shared playlists, profiles), and playing on the zones the owner opens to them (`/v1/people/zones`; all by default). Reads are an allow-list too: anything not on it is refused.
+  - **What stays the owner's:** settings, People, the homeserver, source sign-ins and streaming accounts, library folders, uploads, backups, and the owner's favourites, playlists, tags, reviews, history and podcast subscriptions (403 "Not for listeners").
   - **Taking access away:** turning a person's music access off stops their token at once; `DELETE /v1/me/token` signs one device out; People shows signed-in devices per person.
   - **Not yet:** listeners' own playlists and favourites (on their own homeserver) come with the node agent's per-person sync. Until then a listener's writes to them are refused.
   - **Tested** against pubky-homeserver 0.16.2: a "homeserver + music" invitee signs up through Ring, signs in, and plays a song; a "homeserver only" invitee is refused.

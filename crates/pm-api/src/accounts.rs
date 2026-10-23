@@ -140,23 +140,71 @@ const OWNER_ONLY: &[&str] = &[
     "/outputs",
 ];
 
+/// What a listener may read: the shared library, public catalogues and directories, their
+/// zones, and who they are. Everything else (the owner's favourites, playlists, tags, reviews,
+/// history, podcast subscriptions and streaming accounts) stays the owner's.
+const LISTENER_READS: &[&str] = &[
+    "/me",
+    "/events",
+    "/info",
+    "/status",
+    "/health",
+    "/library/albums",
+    "/library/artists",
+    "/library/tracks",
+    "/library/genres",
+    "/library/search",
+    "/library/stats",
+    "/lyrics",
+    "/search",
+    "/item",
+    "/catalog/search",
+    "/discover",
+    "/shared",
+    "/profiles",
+    "/mb",
+    "/radio/countries",
+    "/radio/tags",
+    "/radio/search",
+    "/radio/curated",
+    "/podcasts/search",
+    "/zones",
+];
+
+/// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
+const LISTENER_READ_EXCEPTIONS: &[&str] = &["/candidates", "/suggestions"];
+
+fn under(path: &str, prefixes: &[&str]) -> bool {
+    prefixes
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+}
+
+/// Whether a listener may use this zone: the owner's list, or every zone when none is set.
+fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
+    match listener_zones(s) {
+        Some(allowed) if !allowed.iter().any(|z| z == zone) => {
+            Some("the owner has not opened that zone to listeners")
+        }
+        _ => None,
+    }
+}
+
 /// Whether a listener may make this request. `None` = yes; `Some(why)` = no.
 pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'static str> {
     // Inside the `/v1` router the prefix is gone; take either
     let path = path.strip_prefix("/v1").unwrap_or(path);
-    if OWNER_ONLY
-        .iter()
-        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
-    {
-        return Some("that is the owner's");
-    }
-    // A source's sign-in and server settings
-    if path.starts_with("/sources/")
-        && (path.ends_with("/server") || path.contains("/server/") || path.ends_with("/enabled"))
-    {
+    if under(path, OWNER_ONLY) {
         return Some("that is the owner's");
     }
     if *method == Method::GET || *method == Method::HEAD {
+        if !under(path, LISTENER_READS) || LISTENER_READ_EXCEPTIONS.iter().any(|x| path.contains(x)) {
+            return Some("that is the owner's");
+        }
+        // A zone's state and queue: only the zones open to listeners (the list itself is fine)
+        if let Some(rest) = path.strip_prefix("/zones/") {
+            return zone_refusal(s, rest.split('/').next().unwrap_or(rest));
+        }
         return None;
     }
     // Playing on a zone the owner allows: its queue, transport, volume and the like
@@ -165,12 +213,7 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
         if what.is_empty() || what.starts_with("dsp") {
             return Some("only the owner adds, removes or tunes zones");
         }
-        return match listener_zones(s) {
-            Some(allowed) if !allowed.iter().any(|z| z == zone) => {
-                Some("the owner has not opened that zone to listeners")
-            }
-            _ => None,
-        };
+        return zone_refusal(s, zone);
     }
     // The page asks who is signed in, and a listener may sign out
     if path == "/me" || path.starts_with("/me/") {
