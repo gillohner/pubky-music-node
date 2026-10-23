@@ -94,6 +94,7 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   homeserver's files read-only and plays them from there, so there is no second copy. Saving
   playlists, favourites and tags to the homeserver is automatic; `GET /v1/storage` is the status
   line.
+- **Signing in per person:** everyone signs in to the node's web app with Pubky Ring. The owner gets the node's API token, as before; apps and integrations keep using it. Someone in People with music access gets a personal token: the shared library, search, radio and other public directories, and playing on the zones you open to listeners (`/v1/people/zones`; all by default). Settings, People, the homeserver, the library's folders, your streaming accounts, and your favourites, playlists, tags and history stay yours. Taking someone's music access away stops their token at once. Their own playlists and favourites (on their own homeserver) come next.
 - **Your account on it:** on first run, "Create your Pubky account on this node's homeserver"
   (`POST /v1/homeserver/bundled/owner-signup`) shows a Pubky Ring link and QR. The node mints the
   owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs
@@ -193,6 +194,9 @@ Open Sources › TIDAL › Connect TIDAL.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
   value of your bandcamp.com `identity` cookie under Sources › Bandcamp. Purchases land in `<data_dir>/bandcamp`, a
   library folder.
+- **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
+  secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
+  here are scrobbled; artist pages show similar artists.
 - **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
   always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,

@@ -5,7 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 concurrency:
-  group: ci-${{ github.ref }}
+  # One run per branch; a new push replaces the older run. Keyed by the event and the PR's
+  # own branch: a pull_request run for a PR that has just been merged gets refs/heads/main
+  # as its ref (the merge ref is gone), and with a ref-only key it cancelled main's CI.
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
@@ -132,10 +135,14 @@ jobs:
       - name: a generic kernel with snd-aloop, and virtme-ng
         run: |
           sudo apt-get update
+          # The kernel that linux-image-generic points at, without that metapackage: it also pulls in
+          # all of linux-firmware and the microcode (hundreds of MB), which the guest does not need and
+          # which once took the job past its 20 minutes on a slow mirror
+          img=$(apt-cache depends linux-image-generic | sed -n 's/^ *Depends: \(linux-image-[0-9].*-generic\)$/\1/p' | head -1)
+          kver=${img#linux-image-}
+          [ -n "$img" ] || { echo "::error::no kernel behind linux-image-generic"; exit 1; }
           sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils qemu-system-x86 busybox-static \
-            linux-image-generic squeezelite
-          kver=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
-          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$kver"
+            squeezelite "$img" "linux-modules-extra-$kver"
           sudo chmod a+r "/boot/vmlinuz-$kver"
           echo "KVER=$kver" >> "$GITHUB_ENV"
           pip install --user virtme-ng==1.41

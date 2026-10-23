@@ -1067,6 +1067,39 @@ pub(crate) struct CallbackQuery {
     error_description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PastedCallback {
+    /// The address the browser landed on after the service's sign-in page.
+    pub url: String,
+}
+
+/// The callback's parameters out of a pasted address (`?code=…&state=…`, or the service's error).
+pub(crate) fn callback_from_url(url: &str) -> Result<CallbackQuery, ApiError> {
+    let parsed = url::Url::parse(url.trim())
+        .map_err(|_| ApiError::bad_request("Paste the whole address, starting with http:// or https://"))?;
+    let q: std::collections::HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+    if !q.contains_key("code") && !q.contains_key("error") {
+        return Err(ApiError::bad_request(
+            "That address carries no sign-in code; paste the one the sign-in page sent you to",
+        ));
+    }
+    Ok(serde_json::from_value(serde_json::to_value(q).expect("map")).expect("string fields"))
+}
+
+/// `POST /v1/sources/tidal/callback {url}`: the fallback when the browser could not reach the
+/// node's callback (a phone on another network, an app allowing only loopback redirects): the
+/// user pastes the address the sign-in page sent them to, and the node finishes the sign-in from
+/// its parameters as if the browser had arrived there.
+pub(crate) async fn pasted_callback(
+    State(s): State<Arc<NodeState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PastedCallback>,
+) -> ApiResult<TidalStatus> {
+    let q = callback_from_url(&body.url)?;
+    finish_login(&s, q).await?;
+    Ok(Json(status_view(&s, &headers)))
+}
+
 /// `GET /tidal/callback?code&state`: finish the sign-in, then back to the web UI.
 pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<CallbackQuery>) -> Response {
     match finish_login(&s, q).await {

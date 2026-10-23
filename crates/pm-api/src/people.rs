@@ -196,6 +196,8 @@ pub struct PersonView {
     pub person: Person,
     /// Their storage quota on the bundled homeserver (`unlimited`, a number of MB, or the default).
     pub storage_quota_mb: Option<Value>,
+    /// Devices signed in to the music service with their own token.
+    pub sessions: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +272,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             None
         };
         people.push(PersonView {
+            sessions: crate::accounts::sessions_of(&s, &p.key),
             person: p,
             storage_quota_mb: quota,
         });

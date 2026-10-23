@@ -10,6 +10,7 @@
 //! thread, and the few control calls per track do not justify a runtime.
 
 pub mod dlna;
+pub mod heos;
 pub mod output;
 pub mod soap;
 pub mod sonos;

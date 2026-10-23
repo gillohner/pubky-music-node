@@ -54,12 +54,15 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("spotify.soloist_key", "your Spotify Soloist API key"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
+    ("lastfm.app", "the Last.fm app"),
+    ("lastfm.session", "Last.fm"),
     ("opensubsonic.server", "your Subsonic server"),
     ("jellyfin.server", "Jellyfin"),
     ("plex.server", "Plex"),
     ("audiobookshelf.server", "Audiobookshelf"),
     ("webdav.shares", "your WebDAV shares"),
     ("podcasts.gpodder", "your gPodder account"),
+    ("drives.accounts", "your Google Drive and OneDrive sign-ins"),
 ];
 /// Settings that belong to this node and are never carried over (its stream key, its id, and
 /// the backup schedule with its passphrase).

@@ -1445,11 +1445,14 @@ pub struct ControllerLoginStarted {
 pub struct ControllerLoginStatus {
     /// `pending`, `ok`, `denied` (another identity approved), `expired`.
     pub status: String,
-    /// The API token, once the owner approved.
+    /// The API token, once the owner approved; a listener's personal token for a listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// `owner` or `listener` (accounts.rs), once signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

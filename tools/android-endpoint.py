@@ -80,6 +80,16 @@ def logcat():
     return (out / "logcat.txt").read_text(errors="replace") if (out / "logcat.txt").exists() else ""
 
 
+# ActivityManager killing the app itself, which is not a crash: e.g. "depends on provider
+# com.google.android.gms/.fonts.provider.FontsProvider in dying proc com.google.android.gms.persistent"
+# when Play services restarts on the emulator (release run 167, API 33)
+KILLED = re.compile(r"Killing \d+:" + re.escape(PKG) + r"/\S+ \(adj -?\d+\): (.*)")
+
+
+def system_kills():
+    return KILLED.findall(logcat())
+
+
 PROMPT = re.compile(r'text="(Don.t allow|Deny)"')
 
 
@@ -233,7 +243,41 @@ def run(node):
                 raise SystemExit(f"FAIL: the app cannot load the node's page ({err.group(1) if err else 'Webpage not available'})")
             return "Now playing" in nodes
 
-        until("the node's page in the app", node_page, timeout=90, every=3)
+        def diagnose():
+            """What the app shows, and whether the node still answers the runner."""
+            try:
+                screen = " / ".join(t for t in re.findall(r'text="([^"]+)"', "\n".join(ui_nodes())) if t.strip())[:300]
+            except Exception as e:  # noqa: BLE001
+                screen = f"(no screen: {e})"
+            try:
+                api("GET", "/v1/info")
+                node = "the node answers the runner"
+            except Exception as e:  # noqa: BLE001
+                node = f"the node does not answer the runner either ({e})"
+            return f"on screen: {screen!r}; {node}"
+
+        def wait_page(what, relaunch):
+            """The node's page; with `relaunch`, the app is started again (twice at most) when Android
+            kills it, which is the system's doing and not a crash."""
+            seen = len(system_kills())
+            for _ in range(3):
+                def ready():
+                    if relaunch and len(system_kills()) > seen:
+                        return "killed"
+                    return "page" if node_page() else None
+                try:
+                    got = until(what, ready, timeout=90, every=3)
+                except RuntimeError as e:
+                    raise RuntimeError(f"{e}; {diagnose()}") from None
+                if got == "page":
+                    return
+                kills = system_kills()
+                seen = len(kills)
+                log(f"Android killed the app, not a crash ({kills[-1]}); starting it again")
+                adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+            raise SystemExit(f"FAIL: Android kept killing the app: {system_kills()[-1]}")
+
+        wait_page("the node's page in the app", relaunch=False)
         log("the node's page is showing in the app")
         check_status_bar()
         shot("2a-light")
@@ -281,7 +325,7 @@ def run(node):
         (out / "logcat.txt").write_text("")
         adb("logcat", "-c")
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
-        until("the node's page after a restart", node_page, timeout=90, every=3)
+        wait_page("the node's page after a restart", relaunch=True)
         until("the player service after a restart", lambda: "player service started" in logcat(), timeout=90)
         shot("4-restarted")
         log("restarted: reconnected to the saved node, player service started")
