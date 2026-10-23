@@ -14,3 +14,5 @@ header:
   fallback after the Cover Art Archive (providers/itunes_artwork).
 - crates/pm-api/src/gpodder.rs: gPodder and Nextcloud gpoddersync
   subscription and episode-action sync (providers/gpodder).
+- crates/pm-out-upnp/src/heos.rs: grouping HEOS players with the HEOS CLI's
+  set_group, the leader playing for the group (providers/heos).

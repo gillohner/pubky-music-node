@@ -442,6 +442,9 @@ pub(crate) fn open_blocking(
 
 /// A library file's bytes, local or on a share (for the browser stream).
 pub(crate) async fn read_library_file(s: &NodeState, path: &Path) -> std::io::Result<Vec<u8>> {
+    if crate::drives::is_key(path) {
+        return crate::drives::read_file(s, path).await;
+    }
     if !is_key(path) {
         return tokio::fs::read(path).await;
     }

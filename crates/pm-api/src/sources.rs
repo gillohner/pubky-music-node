@@ -37,6 +37,8 @@ pub struct NodeSources {
     audiobookshelf: crate::audiobookshelf::Shared,
     /// WebDAV shares, for library files on them (`webdav://…`).
     webdav: crate::webdav::Shared,
+    /// Google Drive and OneDrive folders, for library files on them.
+    drives: crate::drives::Shared,
 }
 
 impl NodeSources {
@@ -53,6 +55,7 @@ impl NodeSources {
         plex: crate::plex::Shared,
         audiobookshelf: crate::audiobookshelf::Shared,
         webdav: crate::webdav::Shared,
+        drives: crate::drives::Shared,
     ) -> Self {
         // Restore persisted per-output configs.
         let mut dsp = HashMap::new();
@@ -78,6 +81,7 @@ impl NodeSources {
             plex,
             audiobookshelf,
             webdav,
+            drives,
         }
     }
 
@@ -433,6 +437,16 @@ pub(crate) fn first_stream_url(body: &str) -> Option<String> {
 /// Blocking; call from an audio thread. Shared by the node and the app's
 /// local zone.
 pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> {
+    open_http_stream_with(uri, &[], None)
+}
+
+/// [`open_http_stream`] with extra request headers (a bearer token for a cloud drive) and a
+/// format hint for answers that name none (`application/octet-stream`, no extension).
+pub fn open_http_stream_with(
+    uri: &str,
+    headers: &[(String, String)],
+    ext_hint: Option<&str>,
+) -> Result<Box<dyn FrameSource>, SourceError> {
     {
         let err = |reason: String| SourceError::Open {
             uri: uri.to_string(),
@@ -440,11 +454,11 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
         };
         let mut url = uri.to_string();
         for hop in 0..2 {
-            let resp = http_client()
-                .get(&url)
-                .header("Icy-MetaData", "1")
-                .send()
-                .map_err(|e| err(e.to_string()))?;
+            let mut rb = http_client().get(&url).header("Icy-MetaData", "1");
+            for (k, v) in headers {
+                rb = rb.header(k.as_str(), v.as_str());
+            }
+            let resp = rb.send().map_err(|e| err(e.without_url().to_string()))?;
             if !resp.status().is_success() {
                 return Err(err(format!("HTTP {}", resp.status())));
             }
@@ -459,7 +473,7 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
                 url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
                 continue;
             }
-            let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url));
+            let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url)).or(ext_hint);
             let metaint = resp
                 .headers()
                 .get("icy-metaint")
@@ -590,6 +604,8 @@ impl SourceFactory for NodeSources {
             })?;
         let inner = if crate::webdav::is_key(&track.file.path) {
             crate::webdav::open_blocking(&self.webdav, &track.file.path)?
+        } else if crate::drives::is_key(&track.file.path) {
+            crate::drives::open_blocking(&self.drives, &track.file.path)?
         } else {
             let mut file_item = QueueItem::new(track.file.path.to_string_lossy());
             file_item.id = item.id;

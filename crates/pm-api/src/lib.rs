@@ -25,6 +25,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
     }
 }
 
+pub mod accounts;
 pub mod add_music;
 pub mod announce;
 pub mod audiobookshelf;
@@ -34,6 +35,7 @@ pub mod bundled;
 pub mod dash;
 pub mod deezer;
 pub mod discover;
+pub mod drives;
 pub mod events;
 pub mod favourites;
 pub mod files;
@@ -46,6 +48,7 @@ pub mod identify;
 pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
+pub mod lastfm;
 pub mod librespot;
 pub mod listenbrainz;
 pub mod lrclib;
@@ -351,6 +354,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
+        .route("/sources/tidal/callback", post(tidal::pasted_callback))
+        .route("/sources/spotify/callback", post(spotify::pasted_callback))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
@@ -432,6 +437,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .delete(listenbrainz::disconnect),
         )
         .route("/listenbrainz/import", post(listenbrainz::import_listens))
+        .route(
+            "/lastfm",
+            get(lastfm::status).put(lastfm::update).delete(lastfm::disconnect),
+        )
+        .route("/lastfm/login", get(lastfm::login))
+        .route("/library/artists/{id}/similar", get(lastfm::similar))
         .route(
             "/listenbrainz/recommendations",
             get(listenbrainz::recommendations),
@@ -559,8 +570,23 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::put(profiles::follow).delete(profiles::unfollow),
         )
         .route("/library/webdav", get(webdav::list).post(webdav::add))
+        .route("/library/drives", get(drives::list).post(drives::add))
+        .route("/library/drives/{provider}/login", post(drives::login))
+        .route("/library/drives/{provider}/folders", get(drives::folders))
+        .route(
+            "/library/drives/{provider}/account",
+            axum::routing::delete(drives::sign_out),
+        )
+        .route("/library/drives/roots/{id}/scan", post(drives::rescan))
+        .route(
+            "/library/drives/roots/{id}",
+            axum::routing::delete(drives::remove),
+        )
         .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
+        .route("/me", get(accounts::me))
+        .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(
@@ -625,6 +651,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
             Router::new()
                 .route("/tidal/callback", get(tidal::callback))
                 .route("/spotify/callback", get(spotify::callback))
+                .route("/lastfm/callback", get(lastfm::callback))
+                .route("/drives/{provider}/callback", get(drives::callback))
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
@@ -660,13 +688,30 @@ async fn auth(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
-    if !token_ok(&state, &headers, &query) {
+    // The owner's API token, or a listener's personal one (accounts.rs)
+    let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    };
+    if caller.role == accounts::Role::Listener {
+        if let Some(why) = accounts::listener_refusal(&state, req.method(), req.uri().path()) {
+            return accounts::refused(why).into_response();
+        }
     }
+    req.extensions_mut().insert(caller);
     next.run(req).await
+}
+
+/// The request's bearer token (or `?token=`, for WebSocket upgrades).
+fn bearer(headers: &HeaderMap, query: &std::collections::HashMap<String, String>) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| query.get("token").cloned())
 }
 
 /// The request carries the API token (or the node has none).
@@ -1242,12 +1287,35 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
             .collect()
     };
+    // HEOS players only (Denon, Marantz) whose CLI knows them all: HEOS groups them itself
+    // (pm_out_upnp::heos).
+    let mut heos: Vec<Arc<pm_out_upnp::UpnpOutput>> = {
+        let map = s.heos.lock().expect("heos lock");
+        ids.iter()
+            .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
+            .collect()
+    };
+    if members.len() > 1 && heos.len() == ids.len() {
+        let renderers: Vec<pm_out_upnp::Renderer> = heos.iter().map(|o| o.renderer().clone()).collect();
+        let ok = tokio::task::spawn_blocking(move || {
+            pm_out_upnp::heos::can_group(&renderers, pm_out_upnp::heos::CLI_PORT)
+        })
+        .await
+        .unwrap_or(false);
+        if !ok {
+            heos.clear();
+        }
+    }
     let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
         members.remove(0)
     } else if sonos.len() == ids.len() {
         let mut sonos = sonos;
         let lead = sonos.remove(0);
         Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+    } else if heos.len() == ids.len() {
+        let mut heos = heos;
+        let lead = heos.remove(0);
+        Arc::new(pm_out_upnp::heos::HeosGroup::new(body.name.trim(), lead, heos))
     } else {
         Arc::new(
             pm_zones::outputs::GroupOutput::new(body.name.trim(), members)
@@ -2457,6 +2525,7 @@ async fn controller_login_poll(
             status: "expired".into(),
             token: None,
             user: None,
+            role: None,
         }));
     };
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
@@ -2465,6 +2534,7 @@ async fn controller_login_poll(
             status: "expired".into(),
             token: None,
             user: None,
+            role: None,
         }));
     }
     match flow.poll().await {
@@ -2472,17 +2542,30 @@ async fn controller_login_poll(
             status: "pending".into(),
             token: None,
             user: None,
+            role: None,
         })),
         Ok(Some(session)) => {
             logins.remove(&id);
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
+                // A listener in People with music access gets a personal token
+                if people::may_use_music(&s, &who) {
+                    let token = accounts::mint(&s, &who)?;
+                    tracing::info!(%who, "listener signed in with Pubky Ring");
+                    return Ok(Json(ControllerLoginStatus {
+                        status: "ok".into(),
+                        token: Some(token),
+                        user: Some(who),
+                        role: Some("listener".into()),
+                    }));
+                }
                 tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
                 return Ok(Json(ControllerLoginStatus {
                     status: "denied".into(),
                     token: None,
                     user: Some(who),
+                    role: None,
                 }));
             }
             tracing::info!(%who, "controller signed in with Pubky Ring");
@@ -2490,6 +2573,7 @@ async fn controller_login_poll(
                 status: "ok".into(),
                 token: s.token.clone(),
                 user: Some(who),
+                role: Some("owner".into()),
             }))
         }
         Err(e) => {
@@ -4260,6 +4344,380 @@ mod tests {
         assert!(!v.to_string().contains("KEY1"));
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
         assert!(srcs.to_string().contains("Your audiobooks at"), "{srcs}");
+    }
+
+    /// One mock for Google (OAuth, Drive API) and Microsoft (OAuth, Graph, pre-authenticated
+    /// downloads). Files: Music/01 Song.flac and Music/Sub/02 Two.flac.
+    async fn mock_drives(flac: Vec<u8>, refreshes: Arc<std::sync::atomic::AtomicU32>) -> String {
+        use axum::extract::{Path as P, Query as Q};
+        use std::collections::HashMap as M;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        fn ranged(h: &axum::http::HeaderMap, body: &[u8]) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            match h
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|r| r.strip_prefix("bytes="))
+            {
+                Some(r) => {
+                    let (a, b) = r.split_once('-').unwrap();
+                    let a: usize = a.parse().unwrap();
+                    let b: usize = b.parse::<usize>().unwrap_or(body.len() - 1).min(body.len() - 1);
+                    (
+                        StatusCode::PARTIAL_CONTENT,
+                        [(header::CONTENT_TYPE, "application/octet-stream")],
+                        body[a..=b].to_vec(),
+                    )
+                        .into_response()
+                }
+                None => (
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    body.to_vec(),
+                )
+                    .into_response(),
+            }
+        }
+        let token = move |body: String, prefix: &'static str, r: Arc<std::sync::atomic::AtomicU32>| {
+            let f: M<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect();
+            assert!(
+                !f.contains_key("client_secret"),
+                "a public client sends no secret"
+            );
+            assert_eq!(f["client_id"], format!("{prefix}-client"));
+            match f["grant_type"].as_str() {
+                "authorization_code" => {
+                    assert_eq!(f["code"], "C0DE");
+                    assert!(f["code_verifier"].len() >= 43, "PKCE");
+                    // Expires at once, so the next call refreshes
+                    Json(
+                        serde_json::json!({"access_token": format!("{prefix}-A1"), "refresh_token": format!("{prefix}-R"), "expires_in": 1}),
+                    )
+                }
+                "refresh_token" => {
+                    assert_eq!(f["refresh_token"], format!("{prefix}-R"));
+                    r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({"access_token": format!("{prefix}-A2"), "expires_in": 3600}))
+                }
+                g => panic!("grant {g}"),
+            }
+        };
+        let auth = |h: &axum::http::HeaderMap, prefix: &str| {
+            let a = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+            assert!(a.starts_with(&format!("Bearer {prefix}-A")), "{a}");
+        };
+        let (r1, r2) = (refreshes.clone(), refreshes);
+        let (f1, f2, f3) = (flac.clone(), flac.clone(), flac);
+        let b2 = base.clone();
+        let app = Router::new()
+            .route("/google/token", post(move |body: String| { let r = r1.clone(); async move { token(body, "g", r) } }))
+            .route("/ms/token", post(move |body: String| { let r = r2.clone(); async move { token(body, "m", r) } }))
+            .route("/gapi/drive/v3/about", get(move |h: axum::http::HeaderMap| async move { auth(&h, "g"); Json(serde_json::json!({"user": {"emailAddress": "me@gmail.example"}})) }))
+            .route("/gapi/drive/v3/files", get(move |h: axum::http::HeaderMap, Q(q): Q<M<String, String>>| {
+                let n = f1.len();
+                async move {
+                    auth(&h, "g");
+                    let folder = q["q"].split('\'').nth(1).unwrap().to_string();
+                    let file = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "mimeType": "audio/flac", "size": n.to_string(), "modifiedTime": "2026-10-20T10:00:00Z"});
+                    let dir = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "mimeType": "application/vnd.google-apps.folder"});
+                    Json(serde_json::json!({"files": match folder.as_str() {
+                        "root" => vec![dir("F1", "Music")],
+                        "F1" => vec![file("G1", "01 Song.flac"), dir("F2", "Sub")],
+                        "F2" => vec![file("G2", "02 Two.flac")],
+                        _ => vec![],
+                    }}))
+                }
+            }))
+            .route("/gapi/drive/v3/files/{id}", get(move |h: axum::http::HeaderMap, Q(q): Q<M<String, String>>| {
+                let f = f2.clone();
+                async move { auth(&h, "g"); assert_eq!(q["alt"], "media"); ranged(&h, &f) }
+            }))
+            .route("/graph/me", get(move |h: axum::http::HeaderMap| async move { auth(&h, "m"); Json(serde_json::json!({"userPrincipalName": "me@outlook.example"})) }))
+            .route("/graph/me/drive/items/{id}/children", get(move |h: axum::http::HeaderMap, P(id): P<String>, Q(q): Q<M<String, String>>| {
+                let b = b2.clone();
+                async move {
+                    auth(&h, "m");
+                    let file = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "size": 47782, "file": {}, "lastModifiedDateTime": "2026-10-20T10:00:00Z"});
+                    let dir = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "folder": {"childCount": 1}});
+                    Json(match (id.as_str(), q.contains_key("page2")) {
+                        ("root", _) => serde_json::json!({"value": [dir("M1", "Music")]}),
+                        // Two pages: the second through @odata.nextLink
+                        ("M1", false) => serde_json::json!({"value": [file("O1", "01 Song.flac")], "@odata.nextLink": format!("{b}/graph/me/drive/items/M1/children?page2=1")}),
+                        ("M1", true) => serde_json::json!({"value": [dir("M2", "Sub")]}),
+                        ("M2", _) => serde_json::json!({"value": [file("O2", "02 Two.flac")]}),
+                        _ => serde_json::json!({"value": []}),
+                    })
+                }
+            }))
+            .route("/graph/me/drive/items/{id}/content", get(move |h: axum::http::HeaderMap, P(id): P<String>| async move {
+                auth(&h, "m");
+                // OneDrive answers with a pre-authenticated download address
+                axum::response::Redirect::temporary(&format!("/dl/{id}"))
+            }))
+            .route("/dl/{id}", get(move |h: axum::http::HeaderMap| { let f = f3.clone(); async move { ranged(&h, &f) } }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_folders_sign_in_with_pkce_scan_and_play() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let refreshes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let base = mock_drives(flac.clone(), refreshes.clone()).await;
+        for (provider, prefix, scheme) in [("google", "g", "gdrive://"), ("onedrive", "m", "onedrive://")] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            {
+                let mut d = s.drives.write().unwrap();
+                d.endpoints = drives::Endpoints {
+                    google_auth: format!("{base}/google/auth"),
+                    google_token: format!("{base}/google/token"),
+                    google_api: format!("{base}/gapi"),
+                    ms_login: format!("{base}/ms"),
+                    ms_graph: format!("{base}/graph"),
+                };
+            }
+            s.set_drive_apps(drives::apps_from(
+                drives::App {
+                    client_id: "g-client".into(),
+                    client_secret: String::new(),
+                },
+                drives::App {
+                    client_id: "m-client".into(),
+                    client_secret: String::new(),
+                },
+            ));
+            let app = router(s.clone());
+            let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+            assert!(
+                v["providers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p["configured"] == true && p["connected"] == false),
+                "{v}"
+            );
+            // Sign in: PKCE, no secret, through the return page
+            let (st, login) = call(
+                &app,
+                "POST",
+                &format!("/v1/library/drives/{provider}/login"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{login}");
+            let u = url::Url::parse(login["url"].as_str().unwrap()).unwrap();
+            let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+            assert_eq!(q["code_challenge_method"], "S256");
+            assert_eq!(q["redirect_uri"], crate::project_apps::RETURN_PAGE);
+            assert!(q["state"].contains('.'), "the state carries the node's callback");
+            assert!(!q.contains_key("client_secret"));
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/drives/{provider}/callback?code=C0DE&state={}",
+                        q["state"]
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                resp.headers()["location"].to_str().unwrap().contains("drive=ok"),
+                "{:?}",
+                resp.headers()
+            );
+            let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+            let pv = v["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == provider)
+                .unwrap()
+                .clone();
+            assert_eq!(pv["connected"], true);
+            assert!(pv["user"].as_str().unwrap().starts_with("me@"), "{pv}");
+            // Pick the folder and add it
+            let (_, folders) = call(
+                &app,
+                "GET",
+                &format!("/v1/library/drives/{provider}/folders"),
+                None,
+            )
+            .await;
+            assert_eq!(folders[0]["name"], "Music", "{folders}");
+            let (st, root) = call(
+                &app,
+                "POST",
+                "/v1/library/drives",
+                Some(
+                    serde_json::json!({"provider": provider, "folder_id": folders[0]["id"], "name": "Music"}),
+                ),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{root}");
+            let mut roots = serde_json::Value::Null;
+            for _ in 0..100 {
+                let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+                if v["roots"][0]["tracks"] == 2 {
+                    roots = v["roots"].clone();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                roots[0]["tracks"], 2,
+                "{provider}: both songs, the one in Sub too"
+            );
+            let (_, tracks) = call(&app, "GET", "/v1/library/tracks", None).await;
+            let t = tracks["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["file"]["path"].as_str().unwrap().ends_with("Sub/02 Two.flac"))
+                .unwrap()
+                .clone();
+            assert!(t["file"]["path"].as_str().unwrap().starts_with(scheme));
+            // Played in a zone, and relayed to a browser byte for byte
+            let tid = t["id"].as_i64().unwrap();
+            let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+            let zid = zones[0]["id"].as_str().unwrap().to_string();
+            call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"track_ids": [tid], "replace": true, "play": true})),
+            )
+            .await;
+            let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+            assert_eq!(zone.wait_stopped().await.error, None, "{provider}");
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/v1/library/tracks/{tid}/file"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+                flac,
+                "{provider}"
+            );
+            assert!(
+                !tracks.to_string().contains(&format!("{prefix}-A")),
+                "no token in an answer"
+            );
+            // Out of the library again
+            let (_, gone) = call(
+                &app,
+                "DELETE",
+                &format!("/v1/library/drives/roots/{}", root["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+            assert_eq!(gone["tracks"], 2, "{gone}");
+        }
+        assert!(
+            refreshes.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "expired tokens were refreshed"
+        );
+    }
+
+    #[tokio::test]
+    async fn listeners_get_the_library_and_their_zones_not_the_owners_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string()).unwrap();
+        let tok = accounts::mint(&s, key).unwrap();
+        let send = |method: &'static str, uri: String, token: String, body: Option<serde_json::Value>| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let b = r.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let (_, me) = send("GET", "/v1/me".into(), tok.clone(), None).await;
+        assert_eq!(
+            (me["role"].as_str(), me["key"].as_str()),
+            (Some("listener"), Some(key))
+        );
+        let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK, "the shared library");
+        for (m, p) in [
+            ("GET", "/v1/people"),
+            ("PUT", "/v1/node/settings"),
+            ("POST", "/v1/library/folders"),
+            ("POST", "/v1/zones"),
+            ("POST", "/v1/playlists"),
+            ("GET", "/v1/sources/plex/server"),
+        ] {
+            let (st, v) = send(m, p.into(), tok.clone(), Some(serde_json::json!({}))).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{m} {p}: {v}");
+            assert!(v.to_string().contains("Not for listeners"), "{v}");
+        }
+        // Playing on a zone: yes, until the owner limits listeners to another zone
+        let (_, zones) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{v}");
+        let (st, _) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": ["elsewhere"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "a zone the owner kept back");
+        // Music access taken away: the token stops at once; a made-up token never works
+        s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": false, "added_at": 1}]}).to_string()).unwrap();
+        let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = send("GET", "/v1/library/tracks".into(), "pml_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // The owner's token is the owner
+        let (_, me) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(me["role"], "owner");
     }
 
     #[tokio::test]
@@ -7328,6 +7786,44 @@ mod tests {
             stv["redirect_uri"], page,
             "the redirect to register is the return page"
         );
+        // The pasted-address fallback: the same parameters, typed in instead of arriving by redirect
+        let (_, l) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
+        let lurl = url::Url::parse(l["url"].as_str().unwrap()).unwrap();
+        let state_param = lurl
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": "not a url"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": "https://gillohner.github.io/pubky-music-auth/callback?foo=bar"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no code: {r}");
+        let pasted = format!(
+            "http://192.168.1.5:7788/tidal/callback?code=the-code&state={}",
+            url::form_urlencoded::byte_serialize(state_param.as_bytes()).collect::<String>()
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": pasted})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["signed_in"], true, "{r}");
+        call(&app, "DELETE", "/v1/sources/tidal/session", None).await;
         assert_eq!(
             sign_in("/v1/sources/tidal/login", "/tidal/callback").await,
             "/?tidal=signed_in"
@@ -8654,11 +9150,14 @@ exec sleep 300
         assert!(librespot::open_live().is_err());
     }
 
-    /// Announcements: a chime and a clip play instead of the music, then the zone goes back to the
-    /// same track at the same position, playing or paused as it was, with the queue as it was.
+    /// Last.fm: the owner's app, the web sign-in through `/lastfm/callback` (a signed getSession),
+    /// a play scrobbled when it ends (signed, with the session), a stale session noticed and the
+    /// scrobble kept until the next sign-in, similar artists matched to the library; the secret
+    /// and the session key never come back.
     #[tokio::test]
-    async fn an_announcement_interrupts_and_the_zone_comes_back() {
-        use pm_zones::outputs::NullOutput;
+    async fn lastfm_scrobbles_and_finds_similar_artists_from_a_mock() {
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        const SECRET: &str = "fedcba9876543210fedcba9876543210";
         let flac = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../pm-audio/tests/fixtures/60_mono_audio.flac"
@@ -8666,210 +9165,335 @@ exec sleep 300
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let mock = Router::new().route(
-            "/song.flac",
-            get({
-                let f = flac.clone();
-                move || {
-                    let f = f.clone();
-                    async move { f }
-                }
-            }),
-        );
+        type Call = std::collections::HashMap<String, String>;
+        type Calls = Arc<std::sync::Mutex<Vec<Call>>>;
+        type Pred = Box<dyn Fn(&[Call]) -> bool + Send>;
+        let calls: Calls = Default::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = Router::new()
+            .route(
+                "/",
+                post({
+                    let calls = calls.clone();
+                    let refuse = refuse.clone();
+                    move |body: String| {
+                        let calls = calls.clone();
+                        let refuse = refuse.clone();
+                        async move {
+                            let p: std::collections::HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                            // Every signed call: sorted names and values, then the secret
+                            let signed: Vec<(String, String)> = p.iter().filter(|(k, _)| *k != "api_sig" && *k != "format").map(|(k, v)| (k.clone(), v.clone())).collect();
+                            assert_eq!(p.get("api_sig").map(String::as_str), Some(lastfm::sign(&signed, SECRET).as_str()), "bad signature: {p:?}");
+                            assert_eq!(p.get("api_key").map(String::as_str), Some(KEY));
+                            let method = p.get("method").cloned().unwrap_or_default();
+                            calls.lock().unwrap().push(p.clone());
+                            match method.as_str() {
+                                "auth.getSession" => {
+                                    assert_eq!(p.get("token").map(String::as_str), Some("tok123"));
+                                    Json(serde_json::json!({"session": {"name": "listener", "key": "sess-key-xyz", "subscriber": 0}}))
+                                }
+                                "track.updateNowPlaying" => {
+                                    assert_eq!(p.get("sk").map(String::as_str), Some("sess-key-xyz"));
+                                    Json(serde_json::json!({"nowplaying": {"artist": {"#text": p.get("artist")}}}))
+                                }
+                                "track.scrobble" => {
+                                    assert_eq!(p.get("sk").map(String::as_str), Some("sess-key-xyz"));
+                                    if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                                        Json(serde_json::json!({"error": 9, "message": "Invalid session key - Please re-authenticate"}))
+                                    } else {
+                                        let n = p.keys().filter(|k| k.starts_with("track[")).count();
+                                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                                    }
+                                }
+                                _ => Json(serde_json::json!({"error": 3, "message": "Invalid Method"})),
+                            }
+                        }
+                    }
+                })
+                .get(|q: axum::extract::RawQuery| async move {
+                    let p: std::collections::HashMap<String, String> = url::form_urlencoded::parse(q.0.unwrap_or_default().as_bytes())
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+                    assert_eq!(p.get("method").map(String::as_str), Some("artist.getSimilar"), "{p:?}");
+                    assert_eq!(p.get("api_key").map(String::as_str), Some(KEY));
+                    assert_eq!(p.get("artist").map(String::as_str), Some("Radiohead"), "no mbid: by name");
+                    Json(serde_json::json!({"similarartists": {"artist": [
+                        {"name": "Portishead", "mbid": "8f6bd1e4-fbe1-4f50-aa9b-94c450ec0f11", "match": "0.9", "url": "https://www.last.fm/music/Portishead"},
+                        {"name": "Thom Yorke", "mbid": "", "match": 0.5, "url": "https://www.last.fm/music/Thom+Yorke"}
+                    ], "@attr": {"artist": "Radiohead"}}}))
+                }),
+            )
+            .route("/song.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }));
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
-        // A zone on a real-time null output, so positions mean something
+        lastfm::set_api_base(&format!("{base}/"));
         let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("lib.sqlite");
-        let lib = Library::open(&db).unwrap();
-        let outputs = OutputRegistry::new();
-        outputs.register(Arc::new(NullOutput::realtime()));
-        let s = NodeState::new(
-            NodeSettings {
-                name: "test".into(),
-                version: "0".into(),
-                db_path: db,
-                scan_folders: vec![dir.path().join("music")],
-                art_dir: dir.path().join("art"),
-                mirror_dir: dir.path().join("homeserver"),
-                pipeline: PipelineConfig::default(),
-                token: None,
-                subsonic_user: "pubky".into(),
-                pubky: Default::default(),
-                public_url: "http://127.0.0.1:7788".into(),
-                upnp: false,
-                cast: false,
-                slimproto_port: 0,
-                session_secret_path: None,
-                tidal: Default::default(),
-                spotify: Default::default(),
-                acoustid_key: String::new(),
-                jamendo: Default::default(),
-            },
-            lib,
-            outputs,
-        );
-        *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
-        s.zones_for_all_outputs();
+        let s = state(dir.path(), None).await;
         let app = router(s.clone());
-        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
-        let zid = zones[0]["id"].as_str().unwrap().to_string();
-        let zone = |app: &Router| {
-            let app = app.clone();
-            let zid = zid.clone();
-            async move { call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1 }
+        // Two library artists, one of them among the similar ones
+        let aid = {
+            let lib = s.library.lock().unwrap();
+            let mk = |title: &str, artist: &str| pm_model::Track {
+                id: None,
+                title: title.into(),
+                artists: vec![pm_model::Artist {
+                    id: None,
+                    name: artist.into(),
+                    mbid: None,
+                }],
+                album: None,
+                track_no: None,
+                disc_no: None,
+                duration_ms: Some(200_000),
+                file: pm_model::AudioFile {
+                    path: dir.path().join(format!("{title}.flac")),
+                    size_bytes: 1,
+                    mtime_unix: 0,
+                    container: "flac".into(),
+                    format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                    duration_ms: Some(200_000),
+                },
+                recording_mbid: None,
+                isrc: None,
+                acoustid: None,
+                canonical: None,
+                replaygain_track_gain_db: None,
+                replaygain_album_gain_db: None,
+                genres: vec![],
+            };
+            lib.upsert_track(&mk("Creep", "Radiohead")).unwrap();
+            lib.upsert_track(&mk("Glory Box", "Portishead")).unwrap();
+            lib.list_artists()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.name == "Radiohead")
+                .unwrap()
+                .id
         };
-        // Two songs, the first playing for a while
-        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
-            {"uri": format!("{base}/song.flac"), "title": "A", "artist": "Band"},
-            {"uri": format!("{base}/song.flac"), "title": "B", "artist": "Band"}], "replace": true, "play": true}))).await;
-        assert_eq!(st, StatusCode::OK);
-        let mut z = serde_json::Value::Null;
-        for _ in 0..60 {
-            z = zone(&app).await;
-            if z["transport"] == "playing" && z["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= 1200 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        let saved = z["now_playing"]["position_ms"].as_u64().unwrap();
-        assert!(saved >= 1200, "{z}");
+        // Not configured
+        let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
+        assert_eq!(
+            (lf["configured"].clone(), lf["connected"].clone()),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+        let (_, sim) = call(&app, "GET", &format!("/v1/library/artists/{aid}/similar"), None).await;
+        assert_eq!(sim["note"], "not configured");
+        let (st, _) = call(&app, "GET", "/v1/lastfm/login", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
         let (st, _) = call(
             &app,
-            "POST",
-            &format!("/v1/zones/{zid}/announce"),
-            Some(serde_json::json!({})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "needs a uri or a chime");
-        let (st, _) = call(
-            &app,
-            "POST",
-            &format!("/v1/zones/{zid}/announce"),
-            Some(serde_json::json!({"uri": "ftp://x"})),
+            "PUT",
+            "/v1/lastfm",
+            Some(serde_json::json!({"api_key": "short", "api_secret": SECRET})),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        // The announcement: a chime, then the clip
-        let (st, a) = call(
+        let (st, lf) = call(
             &app,
-            "POST",
-            &format!("/v1/zones/{zid}/announce"),
-            Some(
-                serde_json::json!({"uri": format!("{base}/song.flac"), "chime": true, "volume_percent": 60}),
-            ),
+            "PUT",
+            "/v1/lastfm",
+            Some(serde_json::json!({"api_key": KEY, "api_secret": SECRET})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(st, StatusCode::OK, "{lf}");
         assert_eq!(
             (
-                a["resumes"].clone(),
-                a["items"].clone(),
-                a["volume_applied"].clone()
+                lf["configured"].clone(),
+                lf["app_from"].clone(),
+                lf["api_key"].clone()
             ),
             (
                 serde_json::json!(true),
-                serde_json::json!(2),
-                serde_json::json!(false)
-            ),
-            "no hardware volume on a null output: {a}"
+                serde_json::json!("settings"),
+                serde_json::json!(KEY)
+            )
         );
+        assert!(
+            !lf.to_string().contains(SECRET),
+            "the secret never comes back: {lf}"
+        );
+        // Sign in: Last.fm's page, then the callback with the token
+        let (st, l) = call(&app, "GET", "/v1/lastfm/login", None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        let url = l["url"].as_str().unwrap();
+        assert!(
+            url.starts_with("https://www.last.fm/api/auth/?")
+                && url.contains(&format!("api_key={KEY}"))
+                && url.contains("%2Flastfm%2Fcallback"),
+            "{url}"
+        );
+        let req = Request::builder()
+            .uri("/lastfm/callback?token=tok123")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()["location"], "/?lastfm=signed_in&user=listener");
+        let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
+        assert_eq!(
+            (lf["connected"].clone(), lf["user"].clone(), lf["submit"].clone()),
+            (
+                serde_json::json!(true),
+                serde_json::json!("listener"),
+                serde_json::json!(true)
+            )
+        );
+        assert!(
+            !lf.to_string().contains("sess-key"),
+            "the session key never comes back: {lf}"
+        );
+        // A play to its end: now playing at the start, the scrobble when it ends
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let play = |title: &str| serde_json::json!({"items": [{"uri": format!("{base}/song.flac"), "title": title, "artist": "Someone", "album": "Nights"}], "replace": true, "play": true});
         let (st, _) = call(
             &app,
             "POST",
-            &format!("/v1/zones/{zid}/announce"),
-            Some(serde_json::json!({"chime": true})),
+            &format!("/v1/zones/{zid}/queue"),
+            Some(play("Night Drive")),
         )
         .await;
-        assert_eq!(st, StatusCode::CONFLICT, "one at a time");
-        let mut seen_chime = false;
-        let mut seen_clip = false;
-        for _ in 0..80 {
-            z = zone(&app).await;
-            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
-            seen_chime |= t == "Chime";
-            seen_clip |= t == "Announcement";
-            if seen_clip && t != "Announcement" && t != "Chime" {
-                break;
+        assert_eq!(st, StatusCode::OK);
+        let wait_for = |pred: Pred| {
+            let calls = calls.clone();
+            async move {
+                for _ in 0..100 {
+                    if pred(&calls.lock().unwrap()) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                panic!(
+                    "Last.fm never got it: {:?}",
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|c| c.get("method").cloned().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        assert!(
-            seen_chime && seen_clip,
-            "chime {seen_chime}, clip {seen_clip}: {z}"
-        );
-        // Back on A, near where it was, playing; the queue as before
-        let mut back = serde_json::Value::Null;
-        for _ in 0..40 {
-            back = zone(&app).await;
-            if back["now_playing"]["item"]["title"] == "A"
-                && back["transport"] == "playing"
-                && back["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= saved
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        assert_eq!(back["now_playing"]["item"]["title"], "A", "{back}");
-        assert_eq!(back["transport"], "playing");
-        let pos = back["now_playing"]["position_ms"].as_u64().unwrap();
-        assert!(
-            pos >= saved && pos < saved + 2500,
-            "position {pos} vs saved {saved}"
-        );
-        assert_eq!(
-            back["queue"]
-                .as_array()
-                .unwrap()
+        };
+        wait_for(Box::new(|c| {
+            c.iter()
+                .any(|p| p.get("method").map(String::as_str) == Some("track.scrobble"))
+        }))
+        .await;
+        {
+            let c = calls.lock().unwrap();
+            let np = c
                 .iter()
-                .map(|i| i["title"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["A", "B"]
+                .find(|p| p.get("method").map(String::as_str) == Some("track.updateNowPlaying"))
+                .expect("now playing");
+            assert_eq!(
+                (
+                    np.get("artist").map(String::as_str),
+                    np.get("track").map(String::as_str)
+                ),
+                (Some("Someone"), Some("Night Drive"))
+            );
+            assert!(!np.contains_key("chosenByUser"));
+            let sc = c
+                .iter()
+                .find(|p| p.get("method").map(String::as_str) == Some("track.scrobble"))
+                .unwrap();
+            assert_eq!(sc.get("artist[0]").map(String::as_str), Some("Someone"));
+            assert_eq!(sc.get("track[0]").map(String::as_str), Some("Night Drive"));
+            assert_eq!(sc.get("album[0]").map(String::as_str), Some("Nights"));
+            assert_eq!(sc.get("chosenByUser[0]").map(String::as_str), Some("1"));
+            assert!(sc.get("timestamp[0]").is_some_and(|t| t.parse::<i64>().is_ok()));
+        }
+        // Last.fm drops the session: the scrobble waits and the card says to sign in again
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        calls.lock().unwrap().clear();
+        let (_, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(play("Second")),
+        )
+        .await;
+        wait_for(Box::new(|c| {
+            c.iter()
+                .any(|p| p.get("method").map(String::as_str) == Some("track.scrobble"))
+        }))
+        .await;
+        let mut lf = serde_json::Value::Null;
+        for _ in 0..50 {
+            lf = call(&app, "GET", "/v1/lastfm", None).await.1;
+            if lf["pending"] == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(lf["pending"], 1, "{lf}");
+        assert!(lf["problem"].as_str().unwrap().contains("sign in again"), "{lf}");
+        // Signing in again clears it; the waiting scrobble goes out with the next play
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        calls.lock().unwrap().clear();
+        let req = Request::builder()
+            .uri("/lastfm/callback?token=tok123")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::SEE_OTHER
         );
-        // Paused before: paused again after
-        call(
+        let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
+        assert!(lf["problem"].is_null(), "{lf}");
+        let (_, _) = call(
             &app,
             "POST",
-            &format!("/v1/zones/{zid}/transport"),
-            Some(serde_json::json!({"action": "pause"})),
+            &format!("/v1/zones/{zid}/queue"),
+            Some(play("Third")),
         )
         .await;
-        let (st, a) = call(
-            &app,
-            "POST",
-            &format!("/v1/zones/{zid}/announce"),
-            Some(serde_json::json!({"uri": format!("{base}/song.flac"), "title": "Doorbell"})),
-        )
+        wait_for(Box::new(|c| {
+            c.iter().any(|p| {
+                p.get("method").map(String::as_str) == Some("track.scrobble") && p.contains_key("track[1]")
+            })
+        }))
         .await;
-        assert_eq!(st, StatusCode::OK, "{a}");
-        let mut seen = false;
-        for _ in 0..80 {
-            z = zone(&app).await;
-            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
-            seen |= t == "Doorbell";
-            if seen && t != "Doorbell" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        {
+            let c = calls.lock().unwrap();
+            let sc = c.iter().find(|p| p.contains_key("track[1]")).unwrap();
+            let titles: std::collections::HashSet<&str> = [sc["track[0]"].as_str(), sc["track[1]"].as_str()]
+                .into_iter()
+                .collect();
+            assert_eq!(titles, ["Second", "Third"].into_iter().collect());
         }
-        assert!(seen, "{z}");
-        for _ in 0..30 {
-            back = zone(&app).await;
-            if back["transport"] == "paused" && back["now_playing"]["item"]["title"] == "A" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
+        assert_eq!(lf["pending"], 0, "{lf}");
+        // Similar artists, matched to the library by name
+        let (st, sim) = call(&app, "GET", &format!("/v1/library/artists/{aid}/similar"), None).await;
+        assert_eq!(st, StatusCode::OK, "{sim}");
+        let arts = sim["artists"].as_array().unwrap();
+        assert_eq!(arts.len(), 2);
+        assert_eq!(arts[0]["name"], "Portishead");
+        assert!(arts[0]["library_artist_id"].as_i64().is_some(), "{sim}");
+        assert_eq!(arts[0]["score"], 0.9);
+        assert!(arts[1]["library_artist_id"].is_null());
+        // Sign out: the app stays, the session and the queue go
+        let (_, lf) = call(&app, "DELETE", "/v1/lastfm", None).await;
         assert_eq!(
             (
-                back["transport"].clone(),
-                back["now_playing"]["item"]["title"].clone()
+                lf["connected"].clone(),
+                lf["configured"].clone(),
+                lf["pending"].clone()
             ),
-            (serde_json::json!("paused"), serde_json::json!("A")),
-            "{back}"
+            (
+                serde_json::json!(false),
+                serde_json::json!(true),
+                serde_json::json!(0)
+            )
         );
-        assert_eq!(back["queue"].as_array().unwrap().len(), 2);
-        // The chime file is a WAV in the data dir
-        assert!(s.data_dir().join("announce/chime.wav").is_file());
+        assert!(
+            backup::SECRET_SETTINGS.iter().any(|(k, _)| *k == lastfm::APP_KEY)
+                && backup::SECRET_SETTINGS
+                    .iter()
+                    .any(|(k, _)| *k == lastfm::SESSION_KEY)
+        );
     }
 
     /// Every source declares what it can do and a stage; the Sources list carries both.
@@ -9987,5 +10611,223 @@ exec sleep 300
         }
         assert!(removed);
         assert_eq!(s.zones.list().len(), 1);
+    }
+
+    /// Announcements: a chime and a clip play instead of the music, then the zone goes back to the
+    /// same track at the same position, playing or paused as it was, with the queue as it was.
+    #[tokio::test]
+    async fn an_announcement_interrupts_and_the_zone_comes_back() {
+        use pm_zones::outputs::NullOutput;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/song.flac",
+            get({
+                let f = flac.clone();
+                move || {
+                    let f = f.clone();
+                    async move { f }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        // A zone on a real-time null output, so positions mean something
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let lib = Library::open(&db).unwrap();
+        let outputs = OutputRegistry::new();
+        outputs.register(Arc::new(NullOutput::realtime()));
+        let s = NodeState::new(
+            NodeSettings {
+                name: "test".into(),
+                version: "0".into(),
+                db_path: db,
+                scan_folders: vec![dir.path().join("music")],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            lib,
+            outputs,
+        );
+        *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
+        s.zones_for_all_outputs();
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let zone = |app: &Router| {
+            let app = app.clone();
+            let zid = zid.clone();
+            async move { call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1 }
+        };
+        // Two songs, the first playing for a while
+        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+            {"uri": format!("{base}/song.flac"), "title": "A", "artist": "Band"},
+            {"uri": format!("{base}/song.flac"), "title": "B", "artist": "Band"}], "replace": true, "play": true}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let mut z = serde_json::Value::Null;
+        for _ in 0..60 {
+            z = zone(&app).await;
+            if z["transport"] == "playing" && z["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= 1200 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let saved = z["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(saved >= 1200, "{z}");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "needs a uri or a chime");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": "ftp://x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // The announcement: a chime, then the clip
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(
+                serde_json::json!({"uri": format!("{base}/song.flac"), "chime": true, "volume_percent": 60}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(
+            (
+                a["resumes"].clone(),
+                a["items"].clone(),
+                a["volume_applied"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!(2),
+                serde_json::json!(false)
+            ),
+            "no hardware volume on a null output: {a}"
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"chime": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "one at a time");
+        let mut seen_chime = false;
+        let mut seen_clip = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen_chime |= t == "Chime";
+            seen_clip |= t == "Announcement";
+            if seen_clip && t != "Announcement" && t != "Chime" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            seen_chime && seen_clip,
+            "chime {seen_chime}, clip {seen_clip}: {z}"
+        );
+        // Back on A, near where it was, playing; the queue as before
+        let mut back = serde_json::Value::Null;
+        for _ in 0..40 {
+            back = zone(&app).await;
+            if back["now_playing"]["item"]["title"] == "A"
+                && back["transport"] == "playing"
+                && back["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= saved
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(back["now_playing"]["item"]["title"], "A", "{back}");
+        assert_eq!(back["transport"], "playing");
+        let pos = back["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(
+            pos >= saved && pos < saved + 2500,
+            "position {pos} vs saved {saved}"
+        );
+        assert_eq!(
+            back["queue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["title"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        // Paused before: paused again after
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "pause"})),
+        )
+        .await;
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": format!("{base}/song.flac"), "title": "Doorbell"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        let mut seen = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen |= t == "Doorbell";
+            if seen && t != "Doorbell" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(seen, "{z}");
+        for _ in 0..30 {
+            back = zone(&app).await;
+            if back["transport"] == "paused" && back["now_playing"]["item"]["title"] == "A" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            (
+                back["transport"].clone(),
+                back["now_playing"]["item"]["title"].clone()
+            ),
+            (serde_json::json!("paused"), serde_json::json!("A")),
+            "{back}"
+        );
+        assert_eq!(back["queue"].as_array().unwrap().len(), 2);
+        // The chime file is a WAV in the data dir
+        assert!(s.data_dir().join("announce/chime.wav").is_file());
     }
 }

@@ -4,6 +4,20 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **CI:** main's own CI runs again after a merge. The pull_request run started by the merged branch's last push got `main` as its ref and, sharing main's concurrency group, cancelled main's run; the group is now keyed by event and PR branch.
+- **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
+  - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.
+  - **Sign-in:** OAuth 2 with PKCE through the project's return page, so a client id is all a node needs. It comes from the build's project apps or the node's `[drives]` config. Without one, the drive shows as not set up.
+  - **Tokens:** they refresh by themselves and stay in the node.
+  - **Tested** with mock Google and Microsoft servers: the sign-in sends no secret, an expired token is refreshed, folders are picked (OneDrive's paging and a subfolder included), a zone plays a song, the browser stream is byte-identical, and removing the folder removes its songs.
+- **Accounts per person on the node** (STEWARD-BUNDLED-HOMESERVER.md, step 3).
+  - **Signing in:** everyone signs in with Pubky Ring as before. The owner gets the API token (apps and integrations keep it); someone in People with music access now gets a **personal token**, kept only as its hash, instead of "denied".
+  - **What a listener gets:** the shared library, search, public directories (radio, podcast search, Discover, shared playlists, profiles), and playing on the zones the owner opens to them (`/v1/people/zones`; all by default). Reads are an allow-list too: anything not on it is refused.
+  - **What stays the owner's:** settings, People, the homeserver, source sign-ins and streaming accounts, library folders, uploads, backups, and the owner's favourites, playlists, tags, reviews, history and podcast subscriptions (403 "Not for listeners").
+  - **Taking access away:** turning a person's music access off stops their token at once; `DELETE /v1/me/token` signs one device out; People shows signed-in devices per person.
+  - **Not yet:** listeners' own playlists and favourites (on their own homeserver) come with the node agent's per-person sync. Until then a listener's writes to them are refused.
+  - **Tested** against pubky-homeserver 0.16.2: a "homeserver + music" invitee signs up through Ring, signs in, and plays a song; a "homeserver only" invitee is refused.
+- **HEOS groups:** a zone of HEOS players (Denon, Marantz) is now a HEOS group, kept in sync by HEOS itself (`heos-group:`, "In sync"). It uses HEOS's published CLI on port 1255: `set_group` when the zone starts, ended when it stops. The leader plays over UPnP as before. If the CLI doesn't know every member, the zone is an ordinary node group.
 - **gPodder sync for podcasts:** a gPodder account (gpodder.net, opodsync, or Nextcloud's gpoddersync app) keeps subscriptions and listening positions in step with a phone app such as AntennaPod. Set it with `PUT /v1/podcasts/gpodder {kind?, server, username, password, device?}`; the first sync checks the sign-in, and the account is kept only if it works. The node then syncs every 15 minutes, or on `POST /v1/podcasts/gpodder/sync`. Subscriptions sync both ways. A newer position from either side wins, and 95% or more counts as played. The password stays on the node.
 - **More album covers:** an album with no cover in its files, its folder or the Cover Art Archive now gets one from Apple's iTunes Search API (official, no key). A result counts only if its album title and artist both match; bracketed parts such as "(Remastered)" are ignored. "Various Artists" albums are not looked up. Like the archive, a miss is remembered for a week.
 - **Albums stay whole:**

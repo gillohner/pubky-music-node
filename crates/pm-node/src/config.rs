@@ -25,6 +25,7 @@ pub struct NodeConfig {
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
+    pub lastfm: LastfmConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
     /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
@@ -42,6 +43,35 @@ pub struct NodeConfig {
     /// The Pubky homeserver bundled with the node (deploy/bundle); `PM_HOMESERVER_ADMIN_URL` and
     /// `PM_HOMESERVER_ADMIN_PASSWORD` override.
     pub homeserver: HomeserverConfig,
+    /// Google Drive and OneDrive apps for library folders on them (public client ids; a
+    /// `google_client_secret` only for a node's own Google app). Empty = the build's project
+    /// apps, or none.
+    pub drives: DrivesConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct DrivesConfig {
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub onedrive_client_id: String,
+}
+
+impl std::fmt::Debug for DrivesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DrivesConfig")
+            .field("google_client_id", &self.google_client_id)
+            .field(
+                "google_client_secret",
+                &if self.google_client_secret.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .field("onedrive_client_id", &self.onedrive_client_id)
+            .finish()
+    }
 }
 
 /// The bundled homeserver's admin API. Empty = no bundled homeserver.
@@ -171,6 +201,27 @@ pub struct AcoustIdConfig {
     pub api_key: String,
 }
 
+/// Last.fm: the owner's own API key and shared secret (last.fm/api/account/create); Settings
+/// override them. `PM_LASTFM_API_KEY` / `PM_LASTFM_API_SECRET` as well. The secret never ships.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LastfmConfig {
+    pub api_key: String,
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for LastfmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastfmConfig")
+            .field("api_key", &self.api_key)
+            .field(
+                "api_secret",
+                &if self.api_secret.is_empty() { "" } else { "<set>" },
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct SpotifyConfig {
@@ -274,6 +325,7 @@ impl Default for NodeConfig {
             qobuz: QobuzConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
+            lastfm: LastfmConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
             youtube: YoutubeConfig::default(),
@@ -281,6 +333,7 @@ impl Default for NodeConfig {
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
             auth: AuthConfig::default(),
+            drives: DrivesConfig::default(),
         }
     }
 }
