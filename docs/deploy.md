@@ -195,6 +195,9 @@ Open Sources › TIDAL › Connect TIDAL.
   library folder.
 - **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
   always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
+  `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
+  fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one
   without `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` has no built-in TIDAL device client; add your
   own as above.

@@ -48,6 +48,19 @@ pub fn acoustid_key() -> Option<&'static str> {
     option_env!("PM_PROJECT_ACOUSTID_KEY").filter(|v| !v.trim().is_empty())
 }
 
+/// The project's fanart.tv key (a public project key; artist portraits and backgrounds).
+pub fn fanart_key() -> Option<&'static str> {
+    option_env!("PM_PROJECT_FANART_KEY").filter(|v| !v.trim().is_empty())
+}
+
+/// The project's TheAudioDB key (a public project key; artist portraits and biographies). Without
+/// one, TheAudioDB's public test key `123` is used, which allows a few requests a minute.
+pub fn audiodb_key() -> &'static str {
+    option_env!("PM_PROJECT_AUDIODB_KEY")
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("123")
+}
+
 /// The static sign-in return page registered as the redirect URI on the project's apps
 /// (source: github.com/gillohner/pubky-music-auth). `[auth] return_page` overrides it.
 pub const RETURN_PAGE: &str = "https://gillohner.github.io/pubky-music-auth/callback";
