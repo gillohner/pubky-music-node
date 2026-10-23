@@ -6429,6 +6429,7 @@ mod tests {
             {
                 let mut t = untagged_track(dir.path().join(format!("{i}.flac")), title, "Someone");
                 t.genres = vec![genre.to_string()];
+                t.duration_ms = Some(200_000);
                 t.album = Some(pm_model::Album {
                     id: None,
                     title: format!("Album {i}"),
@@ -6519,6 +6520,87 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         let (_, list) = call(&app, "GET", "/v1/smart", None).await;
         assert!(list.as_array().unwrap().is_empty());
+        // Seeds: the playlist grows from songs like the seed (same genre first), the seed itself first
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "sort": "title"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            titles(&r),
+            ["Calm", "Fast", "Faster"],
+            "the whole library is reachable through genre, then artist: {r}"
+        );
+        // Exclusions: a genre, recently played songs, a song
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"genres": ["ambient"]}}))).await;
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"played_within_days": 1}}))).await;
+        assert_eq!(titles(&r), ["Calm", "Fast"], "Faster was played today");
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"tracks": [ids[0]], "artists": ["nobody"]}}))).await;
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        // Rules still narrow a seeded pool; a length in minutes caps it
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "rules": [{"field": "favourite", "value": true}]}))).await;
+        assert_eq!(titles(&r), ["Fast"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "minutes": 1, "sort": "title"}))).await;
+        assert_eq!(
+            r["tracks"].as_array().unwrap().len(),
+            1,
+            "one song fills a minute when lengths are unknown: {r}"
+        );
+        assert_eq!(r["matched"], 3);
+        // An artist seed, and a bad kind
+        let aid = s
+            .library
+            .lock()
+            .unwrap()
+            .list_artists()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "Someone")
+            .unwrap()
+            .id;
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "artist", "id": aid}]})),
+        )
+        .await;
+        assert_eq!(titles(&r), ["Calm", "Fast", "Faster"]);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "mood", "id": 1}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Saved with its seeds and exclusions
+        let (st, p) = call(&app, "POST", "/v1/smart", Some(serde_json::json!({"name": "Like Fast", "seeds": [{"kind": "track", "id": ids[1], "label": "Fast"}], "exclude": {"genres": ["ambient"]}, "minutes": 90}))).await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(
+            (
+                p["seeds"][0]["label"].clone(),
+                p["minutes"].clone(),
+                p["exclude"]["genres"][0].clone()
+            ),
+            (
+                serde_json::json!("Fast"),
+                serde_json::json!(90),
+                serde_json::json!("ambient")
+            )
+        );
+        let (_, t) = call(
+            &app,
+            "GET",
+            &format!("/v1/smart/{}/tracks", p["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+        assert_eq!(titles(&t), ["Fast", "Faster"]);
     }
 
     /// Lyrics from LRCLIB for a streamed song and for a library song without its own; a song
