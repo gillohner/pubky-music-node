@@ -75,7 +75,10 @@ object CrashReport {
     private fun lastExit(ctx: Context) {
         if (Build.VERSION.SDK_INT < 30) return
         val am = ctx.getSystemService(ActivityManager::class.java) ?: return
-        val info = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1).firstOrNull() ?: return
+        // The app's own process: the WebView's sandboxed renderers are processes of this app too,
+        // and die with it
+        val info = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 8)
+            .firstOrNull { it.processName == ctx.packageName } ?: return
         val prefs = ctx.getSharedPreferences("pubky-music-crash", Context.MODE_PRIVATE)
         if (info.timestamp <= prefs.getLong("seen", 0)) return
         prefs.edit().putLong("seen", info.timestamp).apply()
@@ -87,10 +90,7 @@ object CrashReport {
             else -> return
         }
         val trace = try {
-            info.traceInputStream?.use { s ->
-                val b = s.readBytes()
-                String(b, 0, minOf(b.size, MAX_TRACE))
-            }
+            info.traceInputStream?.use { s -> readable(s.readBytes()) }
         } catch (_: Throwable) {
             null
         }
@@ -99,6 +99,29 @@ object CrashReport {
             "The app $what at ${stamp(info.timestamp)}: ${info.description ?: "no description"}",
             "status ${info.status}, importance ${info.importance}" + (trace?.let { "\n$it" } ?: "")
         )
+    }
+
+    /**
+     * An ANR trace is text; a native crash's (Android 12+) is a binary tombstone. Of that, keep
+     * what a person can read: its runs of printable characters (libraries, functions, the abort
+     * message), as `strings` would.
+     */
+    private fun readable(b: ByteArray): String {
+        val printable = b.count { it in 0x20..0x7e || it == 0x0a.toByte() || it == 0x09.toByte() }
+        if (b.isNotEmpty() && printable * 10 >= b.size * 9) return String(b, 0, minOf(b.size, MAX_TRACE))
+        val out = StringBuilder()
+        val run = StringBuilder()
+        for (x in b) {
+            if (x in 0x20..0x7e) {
+                run.append(x.toInt().toChar())
+            } else {
+                if (run.length >= 6) out.append(run).append('\n')
+                run.setLength(0)
+            }
+            if (out.length > MAX_TRACE) break
+        }
+        if (run.length >= 6) out.append(run)
+        return out.toString()
     }
 
     /** The share sheet, for the connect page's "Share" button (called over JNI). */

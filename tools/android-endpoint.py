@@ -294,7 +294,8 @@ def run(node):
             # A release build cannot be read with run-as: read the report off the screen
             report = "\n".join(re.findall(r'text="([^"]*)"', "\n".join(ui_nodes())))
             (out / "crash-report.txt").write_text(report)
-            assert "Java exception" in report or "crashed" in report, f"the report says: {report[:400]!r}"
+            # The newest entry's title shows in words above the details
+            assert "Java exception" in report or "crashed" in report or "Rust panic" in report, f"the report says: {report[:600]!r}"
             log("the crash report shows on the next launch")
             tap(lambda n: 'text="Continue"' in n, "Continue")
             until("the node's page after the report", node_page, timeout=90, every=3)

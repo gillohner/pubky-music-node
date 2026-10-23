@@ -133,6 +133,9 @@
   // reconnecting cannot loop (src/crash.rs).
   function showCrash(text) {
     $('crash-text').textContent = text;
+    // The newest entry's title, in words above the details ("Java exception on thread …")
+    const titles = text.split('\n').filter((l) => l.startsWith('== '));
+    $('crash-first').textContent = (titles[titles.length - 1] || '').replace(/^== .*?[+-]\d{4}: /, '').replace(/^== /, '');
     show('crash');
     const copy = async () => {
       try { await navigator.clipboard.writeText(text); $('crash-copy').textContent = 'Copied'; return; } catch (e) { /* older WebViews */ }
