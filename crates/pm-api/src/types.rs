@@ -1385,6 +1385,9 @@ pub struct OnPubky {
     pub tags: Vec<(String, u64)>,
     /// Distinct people across all labels (from the paged tagger lists).
     pub taggers: u64,
+    /// Who used each label (raw z32 ids, the first few): the faces on a tag chip.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub faces: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

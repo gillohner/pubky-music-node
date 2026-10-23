@@ -979,3 +979,12 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .to-global { margin: 6px 0 0; }
 .tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }
 .hero .art.monogram { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.88); font-size: 64px; font-weight: 700; letter-spacing: 0.02em; }
+/* People on tags: faces of who tagged, stacked */
+.faces { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 2px 4px; cursor: pointer; color: var(--muted); font: inherit; border-radius: 999px; }
+.faces:hover { background: var(--surface-2); color: var(--fg); }
+.facestack { display: inline-flex; }
+.facestack .face + .face { margin-left: -7px; }
+.face { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 2px solid var(--bg); flex: none; }
+.face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
+.faces-line { gap: 8px; }
+.hero.person .blurb { max-width: 60ch; }

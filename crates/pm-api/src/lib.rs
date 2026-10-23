@@ -53,6 +53,7 @@ pub mod play_from;
 pub mod playlists;
 pub mod plex;
 pub mod podcasts;
+pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
 pub mod radio;
@@ -490,6 +491,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(add_music::CHUNK_LIMIT)),
         )
         .route("/library/imports", post(add_music::import))
+        .route("/profiles", get(profiles::list))
+        .route("/profiles/{id}", get(profiles::page))
+        .route("/profiles/{id}/avatar", get(profiles::avatar))
+        .route(
+            "/profiles/{id}/follow",
+            axum::routing::put(profiles::follow).delete(profiles::unfollow),
+        )
         .route("/people", get(people::list))
         .route("/people/invites", post(people::invite))
         .route(
@@ -524,6 +532,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/album/{id}", get(web_ui))
         .route("/artist/{id}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
+        .route("/person/{id}", get(web_ui))
         .route("/shared/{user}", get(web_ui))
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
@@ -6174,6 +6183,90 @@ mod tests {
         let (_, sug) = call(&app, "GET", "/v1/search/tags?prefix=chi", None).await;
         assert_eq!(sug["mine"][0]["label"], "chill", "{sug}");
         assert_eq!(sug["others"], serde_json::json!(["chicago"]));
+    }
+
+    /// Profiles (STEWARD-UX-PEOPLE.md): cards in one batch, a person's page with what they
+    /// tagged, avatars served by the node, and the faces behind a song's tags.
+    #[tokio::test]
+    async fn profiles_come_from_nexus_and_tags_show_faces() {
+        const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const B: &str = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let batches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let b2 = batches.clone();
+        let user = |id: &str| serde_json::json!({"details": {"id": id, "name": "John", "bio": "music", "image": format!("pubky://{id}/pub/pubky.app/files/1"), "links": [{"title": "web", "url": "https://synonym.to"}]}, "counts": {"followers": 3, "following": 2}});
+        let mock = Router::new()
+            .route(
+                "/nexus/v0/stream/users/by_ids",
+                post(move |Json(b): Json<serde_json::Value>| {
+                    b2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let ids: Vec<String> = serde_json::from_value(b["user_ids"].clone()).unwrap();
+                    async move { Json(serde_json::Value::Array(ids.iter().filter(|i| *i == A).map(|i| user(i)).collect())) }
+                }),
+            )
+            .route("/nexus/v0/user/{id}", get(move |Path(id): Path<String>| async move { Json(user(&id)) }))
+            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 1, 2, 3]) }))
+            .route(
+                "/nexus/v0/resource/by-uri",
+                get(|| async { Json(serde_json::json!({"resource": {"id": "r1", "uri": "https://musicbrainz.org/isrc/USAAA1111111"}, "tags": [{"label": "chill", "taggers": [A, B], "taggers_count": 2}]})) }),
+            )
+            .route(
+                "/v1/search",
+                get(|Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(q.get("author").map(String::as_str), Some(A));
+                    Json(serde_json::json!({"items": [{"id": "c1", "uri": "https://www.deezer.com/track/9", "status": "ok", "type": "MusicRecording", "name": "Calm Song", "site": "Deezer"}],
+                        "facets": {"tags": [{"label": "chill", "count": 4}]}}))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let (st, cards) = call(&app, "GET", &format!("/v1/profiles?ids={A},{B},nonsense"), None).await;
+        assert_eq!(st, StatusCode::OK, "{cards}");
+        assert_eq!(cards[0]["name"], "John");
+        assert_eq!(cards[0]["avatar"], format!("/v1/profiles/{A}/avatar"));
+        assert_eq!(cards[1]["name"], "pxnu…i1jy", "not indexed: a short key");
+        assert_eq!(cards[1]["known"], false);
+        assert_eq!(cards.as_array().unwrap().len(), 2, "invalid keys are dropped");
+        // Cached: a second ask makes no call
+        call(&app, "GET", &format!("/v1/profiles?ids={A},{B}"), None).await;
+        assert_eq!(batches.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let (_, pg) = call(&app, "GET", &format!("/v1/profiles/{A}"), None).await;
+        assert_eq!(pg["bio"], "music");
+        assert_eq!(pg["tags"][0][0], "chill");
+        assert_eq!(pg["tagged"][0]["title"], "Calm Song");
+        assert_eq!(pg["profile_url"], format!("https://pubky.app/profile/{A}"));
+        let req = Request::builder()
+            .uri(format!("/v1/profiles/{A}/avatar"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.headers()["content-type"], "image/png");
+        assert!(
+            dir.path().join("art/people").join(A).is_file(),
+            "kept on the node"
+        );
+        // Following needs a Pubky sign-in
+        let (st, _) = call(&app, "PUT", &format!("/v1/profiles/{A}/follow"), None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        // The faces behind a tag
+        let (_, op) = call(
+            &app,
+            "GET",
+            "/v1/discover/uri?uri=https%3A%2F%2Fmusicbrainz.org%2Fisrc%2FUSAAA1111111",
+            None,
+        )
+        .await;
+        assert_eq!(op["faces"]["chill"], serde_json::json!([A, B]), "{op}");
     }
 
     /// One search, streamed per source: the library answers first, a slow

@@ -2,6 +2,14 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-23
+
+- **People on Pubky** (owner: "use nexus to fetch avatar of people and profile for tags"; STEWARD-UX-PEOPLE.md).
+  - **Faces on tags:** every tag chip on an item page shows who tagged it (up to three faces, then "+N"), and "N people tagged this" shows their faces. Tapping either lists them, marked "you" or "you follow", each opening their page.
+  - **`/person/<key>` pages:** avatar, name, bio, status and links from the person's own pubky.app profile (through Nexus, else straight from their homeserver), "follows you" and the counts. Below: the tags they use on music, what they tagged recently (Pinakes), and the playlists they share. Pasting a Pubky key into search opens their page.
+  - **Follow** writes the standard `/pub/pubky.app/follows/<key>` on your homeserver, the one their other Pubky apps already read. The node never writes a profile of its own.
+  - Profiles are fetched in one Nexus call per page and kept an hour; avatars are kept on the node a day, so browsers never ask Nexus. API: `GET /v1/profiles?ids=`, `GET /v1/profiles/<key>`, `GET /v1/profiles/<key>/avatar`, `PUT`/`DELETE /v1/profiles/<key>/follow`.
+
 ## 2026-10-22
 
 - **Radio, podcasts, Plex and Audiobookshelf respect the Sources on/off switch.** While one is off, its own routes answer 404 "… is turned off on Sources", as search and items already did. Its settings stay readable, so the tab can show or clear a connection. Podcast feed refreshes, podcast positions and Audiobookshelf progress reports pause.

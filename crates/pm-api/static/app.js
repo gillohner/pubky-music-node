@@ -931,6 +931,7 @@
     if (v === 'home-section' && arg && arg.section) return `/home/${arg.section}${arg.window && arg.window !== '7d' ? `?window=${arg.window}` : ''}`;
     if (v === 'tag' && arg) return `/tag/${String(arg).split(',').map(encodeURIComponent).join(',')}`;
     if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
+    if (v === 'person' && arg) return `/person/${arg}`;
     if (v === 'shared' && arg && arg.user) return `/shared/${arg.user}${arg.id ? '/' + arg.id : ''}`;
     if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
     if (v === 'sources' && arg && arg.source) return `/sources/${encodeURIComponent(arg.source)}`;
@@ -960,6 +961,8 @@
     if (p === '/discover' || p.startsWith('/discover/')) return { v: 'home' };
     m = p.match(/^\/(playlist|genre|sources?)\/([^/]+)$/);
     if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
+    m = p.match(/^\/person\/([a-z0-9]{52})$/);
+    if (m) return { v: 'person', arg: m[1] };
     m = p.match(/^\/shared\/([a-z0-9]{52})(?:\/([0-9A-Z]{13}))?$/);
     if (m) return { v: 'shared', arg: m[2] ? { user: m[1], id: m[2] } : { user: m[1] } };
     if (p === '/search') { const sp = new URLSearchParams(location.search); const q = sp.get('q') || ''; const sc = sp.get('in'); return { v: 'search', arg: q ? (sc ? { q, in: sc } : { q }) : null }; }
@@ -1095,6 +1098,9 @@
     if (!q) { if (state.view === 'search') setView('home'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
     if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }); return; }
+    // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
+    const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
+    if (pk) { setView('person', pk[1]); return; }
     const scope = (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
@@ -1223,6 +1229,32 @@
     add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
     $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+  };
+  // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
+  const profileCache = new Map();
+  const loadProfiles = async (ids) => {
+    const want = [...new Set(ids)].filter((x) => !profileCache.has(x)).slice(0, 50);
+    if (want.length) { try { (await api('GET', `/profiles?ids=${want.join(',')}`)).forEach((c) => profileCache.set(c.id, c)); } catch { /* names wait */ } }
+    return [...new Set(ids)].map((x) => profileCache.get(x)).filter(Boolean);
+  };
+  const face = (c, size = 'sm') => (c.avatar ? `<img class="face ${size}" src="${esc(imgSrc(c.avatar))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<span class="face ${size} mono" style="background:hsl(${hue(c.id)} 35% 34%)">${esc(initials(c.name))}</span>`);
+  const faceStack = (cards, total) => `<span class="facestack">${cards.slice(0, 3).map((c) => face(c)).join('')}</span>${total > 3 ? `<span class="muted small">+${total - 3}</span>` : ''}`;
+  const peopleMenu = (anchor, title, cards) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) }))]);
+  // The faces beside each tag chip in a box, and on the "N people tagged this" line
+  const fillTagFaces = async (box, faces, counts) => {
+    if (!box || !faces) return;
+    const all = Object.values(faces).flat();
+    if (!all.length) return;
+    await loadProfiles(all);
+    $$('[data-tag-open]', box).forEach((el) => {
+      const label = el.dataset.tagOpen; const ids = faces[label]; if (!ids || !ids.length) return;
+      const chip = el.closest('.chip') || el; if (chip.nextElementSibling && chip.nextElementSibling.dataset.faces === label) return;
+      const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (!cards.length) return;
+      chip.insertAdjacentHTML('afterend', `<button class="faces" data-faces="${esc(label)}" title="Who tagged #${esc(label)}" aria-label="Who tagged #${esc(label)}">${faceStack(cards, counts.get(label) || cards.length)}</button>`);
+      chip.nextElementSibling.onclick = (e) => peopleMenu(e.currentTarget, `#${label}`, cards);
+    });
+    const line = $('[data-taggers]', box.closest('section') || box);
+    if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
   // "Link another source…": candidates with what tells them apart and the evidence (same
   // length, ISRC, your album); a different artist's recording is never offered as the same.
@@ -2066,6 +2098,30 @@
           $$('[data-plplay]', main).forEach((b) => b.onclick = () => playPlaylist(b.dataset.plplay));
           break;
         }
+        case 'person': {
+          // A person on Pubky: their own profile.json (via Nexus), the music they tag, what they share
+          loading();
+          const pid = state.viewArg;
+          let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          const shared = await api('GET', `/shared/${pid}/playlists`).catch(() => []);
+          if (state.view !== 'person' || state.viewArg !== pid) return;
+          state.itemTitle = pg.name;
+          const links = (pg.links || []).map((l) => `<a class="chip" href="${esc(l.url)}" target="_blank" rel="noopener">${icon('external')} ${esc(l.title || l.url.replace(/^https?:\/\//, ''))}</a>`).join('');
+          const tagged = pg.tagged || [];
+          main.innerHTML = backBtn('home', 'Home')
+            + `<div class="hero person">${pg.avatar ? `<div class="art round"><img src="${esc(imgSrc(pg.avatar))}" alt="" style="width:100%;border-radius:50%" onerror="this.remove()"></div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(pid)} 35% 34%), hsl(${hue(pid)} 35% 20%));border-radius:50%" aria-hidden="true">${esc(initials(pg.name))}</div>`}<div><div class="eyebrow">${['Person on Pubky', pg.you ? 'you' : '', pg.followed_by ? 'follows you' : ''].filter(Boolean).join(' · ')}</div><h1>${esc(pg.name)}</h1><p class="sub">${keyHtml(pid)}</p>${pg.status ? `<p class="muted">${esc(pg.status)}</p>` : ''}${pg.bio ? `<p class="blurb">${esc(pg.bio)}</p>` : ''}
+              <div class="actions" style="margin-top:12px">${pg.you ? '' : `<button class="btn ${pg.following ? '' : 'primary'}" id="pfollow" aria-pressed="${!!pg.following}">${pg.following ? `${icon('check')} Following` : `${icon('plus')} Follow`}</button>`}<a class="btn ghost" href="${esc(pg.profile_url)}" target="_blank" rel="noopener">${icon('external')} Profile on pubky.app</a></div>
+              ${links ? `<div class="chips" style="margin-top:10px">${links}</div>` : ''}<p class="muted small">${countOf(pg.followers || 0, 'followers')} · ${pg.following_count || 0} following</p></div></div>`
+            + `<section class="section"><div class="section-head"><h3>Tags they use</h3><span class="muted small">public on Pubky</span></div>${(pg.tags || []).length ? `<div class="chips">${pg.tags.map(([l, c]) => `<button class="chip" data-ptag="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">No music tags from them on Pubky yet.</p>'}</section>`
+            + (tagged.length ? `<section class="section"><div class="section-head"><h3>Recently tagged</h3></div><div class="list">${tagged.map((h, k) => `<div class="list-row clickable" data-ptagged="${k}">${h.image ? `<img class="thumb" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : svcBadge('pubky')}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist' }[h.kind] || h.kind, h.subtitle].filter(Boolean).join(' · '))}</div></div>${icon('chevron')}</div>`).join('')}</div></section>` : '')
+            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div>${icon('chevron')}</div>`).join('')}</div>` : '<p class="muted small">No shared playlists.</p>'}</section>`;
+          $('[data-back]', main).onclick = () => goBack('home');
+          $$('[data-ptag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.ptag }));
+          $$('[data-ptagged]', main).forEach((r) => r.onclick = () => { const h = tagged[Number(r.dataset.ptagged)]; setView('item', { kind: h.kind === 'artist' ? 'artist' : h.kind === 'album' ? 'album' : 'song', id: h.id }); });
+          $$('[data-pshared]', main).forEach((r) => r.onclick = () => setView('shared', { user: pid, id: r.dataset.pshared }));
+          const fb = $('#pfollow'); if (fb) fb.onclick = async () => { const on = fb.getAttribute('aria-pressed') !== 'true'; fb.disabled = true; try { await api(on ? 'PUT' : 'DELETE', `/profiles/${pid}/follow`); profileCache.delete(pid); toast(on ? `Following ${pg.name}` : `Not following ${pg.name} any more`); render(); } catch (e) { toast(e.message, 'error'); fb.disabled = false; } };
+          break;
+        }
         case 'shared': {
           // Someone's shared playlists, or one of them: read-only here; "Save a copy" makes it yours.
           loading();
@@ -2507,7 +2563,7 @@
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<span class="muted small">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</span>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tags need this ${kind} to be known first (a MusicBrainz id).`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tags need this ${kind} to be known first (a MusicBrainz id).`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -2548,6 +2604,7 @@
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+          if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
           break;
         }

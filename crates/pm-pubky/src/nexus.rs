@@ -94,6 +94,61 @@ pub struct Taggers {
     pub relationship: bool,
 }
 
+/// A Pubky profile as Nexus indexes it (the person's own `/pub/pubky.app/profile.json`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UserDetails {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// A `pubky://…/files/…` link; the avatar itself is served at `/static/avatar/{id}`.
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub links: Vec<UserLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UserLink {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UserCounts {
+    #[serde(default)]
+    pub tagged: u64,
+    #[serde(default)]
+    pub following: u64,
+    #[serde(default)]
+    pub followers: u64,
+    #[serde(default)]
+    pub collections: u64,
+}
+
+/// How the viewer and this person relate (only with `viewer_id`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Relationship {
+    #[serde(default)]
+    pub following: bool,
+    #[serde(default)]
+    pub followed_by: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UserView {
+    pub details: UserDetails,
+    #[serde(default)]
+    pub counts: UserCounts,
+    #[serde(default)]
+    pub relationship: Option<Relationship>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HotTag {
     pub label: String,
@@ -186,6 +241,58 @@ impl NexusClient {
             url = with_query(&url, &[("limit", &l.clamp(1, 100).to_string())]);
         }
         Self::json(self.http.get(url).send().await?).await
+    }
+
+    /// Profiles in one call (`POST /v0/stream/users/by_ids`); people Nexus doesn't know are
+    /// left out.
+    pub async fn users_by_ids(
+        &self,
+        ids: &[String],
+        viewer: Option<&str>,
+    ) -> Result<Vec<UserView>, NexusError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut body = serde_json::json!({ "user_ids": ids });
+        if let Some(v) = viewer {
+            body["viewer_id"] = Value::String(v.to_string());
+        }
+        let resp = self
+            .http
+            .post(self.url("/stream/users/by_ids"))
+            .json(&body)
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
+    /// One profile, with the viewer's relationship when given.
+    pub async fn user(&self, id: &str, viewer: Option<&str>) -> Result<UserView, NexusError> {
+        let mut url = self.url(&format!("/user/{id}"));
+        if let Some(v) = viewer {
+            url = with_query(&url, &[("viewer_id", v)]);
+        }
+        Self::json(self.http.get(url).send().await?).await
+    }
+
+    /// A person's avatar bytes and media type (`/static/avatar/{id}`, outside `/v0`).
+    pub async fn avatar(&self, id: &str) -> Result<(Vec<u8>, String), NexusError> {
+        let resp = self
+            .http
+            .get(format!("{}/static/avatar/{id}", self.base))
+            .send()
+            .await?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Err(NexusError::NotFound);
+        }
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let bytes = resp.error_for_status()?.bytes().await?.to_vec();
+        Ok((bytes, ct))
     }
 
     /// Tag labels that start with `prefix` (`/v0/search/tags/by_prefix/{prefix}`).
