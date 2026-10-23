@@ -337,6 +337,10 @@ impl StreamingService for Radio {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play"]
+    }
+
     fn info(&self, _s: &NodeState) -> SourceInfo {
         SourceInfo {
             id: SOURCE_ID.into(),

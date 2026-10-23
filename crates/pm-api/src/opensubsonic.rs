@@ -267,6 +267,10 @@ impl StreamingService for OpenSubsonic {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "playlists"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let srv = s.opensubsonic.read().expect("opensubsonic").clone();
         SourceInfo {
