@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **The app keeps trying the remembered node:** when the node can't be reached at launch, for example while a phone's Wi-Fi is still coming back, the app tries again for about a minute ("Trying again in 5 s…") before stopping at "Try again". It used to give up after one try. The release emulator test hit this on API 33 after a restart.
 - **Music Assistant compared:** `docs/compare-music-assistant.md` covers how MA is built, what each side has that the other lacks, a ranked list of ideas worth porting, and MA's sources checked against ours. It also lists three library bugs it found: various-artists albums split by artist, `.pls` read as M3U, and covers above disc folders missed.
 - **The Android app: a crash report, and fixes for crashes on real phones** (owner: "just crashes on launch"; STEWARD-FIX-android-crash.md).
   - **A crash report without adb.** An uncaught Java exception, a Rust panic, and (Android 11+) the system's own record of why the app last stopped, a native crash or a freeze included with its trace, are written to the app's files. They are also logged under `PubkyMusic`. On the next launch the app says "Pubky Music closed unexpectedly last time" and shows the report with Copy and Share. It reconnects only after Continue, so a crash while reconnecting cannot loop. Nothing is sent anywhere.

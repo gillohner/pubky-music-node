@@ -68,19 +68,39 @@
   }
   $('lan-again').onclick = () => searchLan();
 
+  // The remembered node is tried again for about a minute before the page gives up: a phone
+  // opening the app as Wi-Fi comes back, or a node still starting, answers a few seconds later.
+  const RETRIES = [2, 3, 5, 5, 10, 10, 15, 15];
+  let attempt = 0; // bumped by every new reconnect, so an older retry loop stops
+
   async function reconnect(nodeUrl) {
+    const mine = ++attempt;
     show('connect', false);
     show('saved');
     show('retry', false);
     show('other', false);
     clearErr();
     $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
-    try {
-      await invoke('open_saved');
-    } catch (e) {
-      $('saved-msg').textContent = String(e) + '.';
-      show('retry');
-      show('other');
+    for (let i = 0; ; i++) {
+      try {
+        await invoke('open_saved');
+        return;
+      } catch (e) {
+        if (mine !== attempt) return;
+        show('retry');
+        show('other');
+        // Only an unreachable node is worth waiting for; a refused token is not
+        if (i >= RETRIES.length || !String(e).startsWith("Can't reach")) {
+          $('saved-msg').textContent = String(e) + '.';
+          return;
+        }
+        for (let left = RETRIES[i]; left > 0; left--) {
+          $('saved-msg').textContent = String(e) + '. Trying again in ' + left + ' s…';
+          await new Promise((r) => setTimeout(r, 1000));
+          if (mine !== attempt) return;
+        }
+        $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+      }
     }
   }
 
@@ -88,7 +108,7 @@
     const s = await invoke('saved');
     if (s) reconnect(s.node_url); else connectView();
   };
-  $('other').onclick = async () => { await invoke('forget'); connectView(); };
+  $('other').onclick = async () => { attempt++; await invoke('forget'); connectView(); };
 
   listen('ring-url', (ev) => {
     ringUrl = ev.payload.url;
