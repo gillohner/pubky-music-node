@@ -166,7 +166,10 @@ class MusicAssistant:
             if kind in ("finish", "FINISH"):
                 return step.get("result") or {}
             if kind in ("abort", "ABORT"):
-                fail(f"MA's {domain} setup aborted: {step.get('reason') or step}")
+                reason = step.get("reason") or (step.get("result") or {}).get("reason") or ""
+                if "already_configured" in json.dumps(step):
+                    return {"already": True}
+                fail(f"MA's {domain} setup aborted: {reason or step}")
             if kind in ("form", "FORM"):
                 if step.get("errors"):
                     fail(f"MA's {domain} setup refused the values: {step['errors']}")
@@ -223,8 +226,8 @@ def main():
         ok(f"music/search: {track['name']} by {', '.join(a.get('name', '') for a in track.get('artists', []))} ({track['uri']})")
 
         # 2. The zone as a DLNA player
-        ma.setup_provider("dlna")
-        ok("DLNA player provider added")
+        r = ma.setup_provider("dlna")
+        ok("DLNA player provider " + ("was already on" if r.get("already") else "added"))
         zone = node("/v1/zones")[0]
 
         def player():
