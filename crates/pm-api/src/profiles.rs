@@ -143,9 +143,26 @@ async fn views(s: &NodeState, ids: &[String]) -> HashMap<String, Option<UserView
     .ok()
     .and_then(|r| r.ok())
     .unwrap_or_default();
+    // People Nexus doesn't know: their own profile.json, a few at once
+    let unknown: Vec<String> = missing
+        .iter()
+        .filter(|id| !got.iter().any(|u| u.details.id == **id))
+        .take(12)
+        .cloned()
+        .collect();
+    let direct: Vec<(String, Option<UserView>)> =
+        futures_util::future::join_all(unknown.into_iter().map(|id| async move {
+            let v = profile_from_homeserver(s, &id).await;
+            (id, v)
+        }))
+        .await;
     let mut cache = profiles().lock().expect("profiles");
     for id in missing {
-        let v = got.iter().find(|u| u.details.id == id).cloned();
+        let v = got
+            .iter()
+            .find(|u| u.details.id == id)
+            .cloned()
+            .or_else(|| direct.iter().find(|(d, _)| *d == id).and_then(|(_, v)| v.clone()));
         cache.insert(id.clone(), (Instant::now(), v.clone()));
         out.insert(id, v);
     }
