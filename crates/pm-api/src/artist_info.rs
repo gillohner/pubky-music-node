@@ -1,6 +1,8 @@
 //! Artist pages get a portrait and a biography from open sources, keyed by
 //! the artist's MusicBrainz id: MusicBrainz (URL relations) → Wikidata
-//! (image P18, English Wikipedia sitelink) → Wikipedia REST summary. Fetched
+//! (image P18, English Wikipedia sitelink) → Wikipedia REST summary, and when
+//! those have no portrait or no text, fanart.tv (with the project's key) and
+//! TheAudioDB (compare-music-assistant #16). Fetched
 //! lazily on the first request, cached in the library settings for 30 days
 //! (misses for 7), the image stored in the art directory. Every origin is a
 //! field on `NodeState` so tests point them at a local server.
@@ -21,6 +23,10 @@ pub struct InfoBases {
     pub wikidata: String,
     pub wikipedia: String,
     pub commons: String,
+    pub fanart: String,
+    pub audiodb: String,
+    /// The fanart.tv project key (built in; tests set one).
+    pub fanart_key: Option<String>,
 }
 
 impl Default for InfoBases {
@@ -30,6 +36,9 @@ impl Default for InfoBases {
             wikidata: "https://www.wikidata.org".into(),
             wikipedia: "https://en.wikipedia.org".into(),
             commons: "https://commons.wikimedia.org".into(),
+            fanart: "https://webservice.fanart.tv".into(),
+            audiodb: "https://www.theaudiodb.com".into(),
+            fanart_key: crate::project_apps::fanart_key().map(str::to_string),
         }
     }
 }
@@ -208,10 +217,91 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistI
         );
         info.image = download(&http, &url, &image_path(s, artist_id)).await;
     }
+    // 5. fanart.tv: a portrait, with the project's key.
+    if !info.image {
+        if let Some(key) = bases.fanart_key.as_deref() {
+            if let Some(v) = get_json(
+                &http,
+                &format!(
+                    "{}/v3/music/{mbid}?api_key={key}",
+                    bases.fanart.trim_end_matches('/')
+                ),
+            )
+            .await
+            {
+                if let Some(url) = fanart_thumb(&v) {
+                    info.image = download(&http, &url, &image_path(s, artist_id)).await;
+                    if info.image {
+                        info.image_from = Some("fanart.tv".into());
+                    }
+                }
+            }
+        }
+    }
+    // 6. TheAudioDB: a portrait and a biography where the others had none.
+    if !info.image || info.bio.is_none() {
+        if let Some(v) = get_json(
+            &http,
+            &format!(
+                "{}/api/v1/json/{}/artist-mb.php?i={mbid}",
+                bases.audiodb.trim_end_matches('/'),
+                crate::project_apps::audiodb_key()
+            ),
+        )
+        .await
+        {
+            let a = &v["artists"][0];
+            if !info.image {
+                if let Some(url) = a["strArtistThumb"].as_str().filter(|u| !u.is_empty()) {
+                    info.image = download(&http, url, &image_path(s, artist_id)).await;
+                    if info.image {
+                        info.image_from = Some("TheAudioDB".into());
+                    }
+                }
+            }
+            if info.bio.is_none() {
+                info.bio = a["strBiographyEN"]
+                    .as_str()
+                    .or(a["strBiography"].as_str())
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                    .map(|b| b.chars().take(1200).collect::<String>());
+                if info.bio.is_some() {
+                    info.bio_from = Some("TheAudioDB".into());
+                }
+            }
+        }
+    }
     if info.bio.is_none() && !info.image {
-        info.note = Some(format!("Nothing found for {name} on Wikidata or Wikipedia yet."));
+        info.note = Some(format!(
+            "Nothing found for {name} on Wikidata, Wikipedia, fanart.tv or TheAudioDB yet."
+        ));
     }
     info
+}
+
+/// fanart.tv's best artist portrait: the most liked `artistthumb`, else a background.
+pub(crate) fn fanart_thumb(v: &serde_json::Value) -> Option<String> {
+    for kind in ["artistthumb", "artistbackground"] {
+        let Some(list) = v[kind].as_array() else {
+            continue;
+        };
+        let best = list
+            .iter()
+            .filter_map(|i| {
+                let likes: u64 = i["likes"]
+                    .as_str()
+                    .and_then(|l| l.parse().ok())
+                    .or_else(|| i["likes"].as_u64())?;
+                Some((likes, i["url"].as_str()?.to_string()))
+            })
+            .max_by_key(|(likes, _)| *likes)
+            .map(|(_, url)| url);
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
 }
 
 async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bool {

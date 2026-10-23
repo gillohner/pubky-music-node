@@ -953,6 +953,12 @@ pub struct ArtistInfo {
     pub musicbrainz: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    /// Where the portrait came from when not Wikimedia: `fanart.tv` or `TheAudioDB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_from: Option<String>,
+    /// Where the text came from when not Wikipedia: `TheAudioDB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio_from: Option<String>,
     /// Why there is nothing (no id, lookup running, nothing found).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,

@@ -8694,6 +8694,91 @@ exec sleep 300
             .contains(&serde_json::json!("downloads")));
     }
 
+    /// Artist pages fall back to fanart.tv (the project's key) for a portrait and to TheAudioDB for
+    /// a portrait and a biography when Wikidata and Wikipedia have none.
+    #[tokio::test]
+    async fn artist_images_fall_back_to_fanart_and_theaudiodb() {
+        let mbid = "056e4f3e-d505-4dad-8ec1-d04f521cbb56";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0, 1, 2, 3];
+        let b2 = base.clone();
+        let mock = Router::new()
+            .route(&format!("/ws/2/artist/{mbid}"), get(|| async { Json(serde_json::json!({"id": "x", "relations": []})) }))
+            .route(&format!("/v3/music/{mbid}"), get({ let b = b2.clone(); move |q: axum::extract::RawQuery| { let b = b.clone(); async move {
+                assert!(q.0.unwrap_or_default().contains("api_key=fanart-test-key"));
+                Json(serde_json::json!({"name": "Daft Punk", "artistthumb": [
+                    {"id": "1", "url": format!("{b}/img/less.png"), "likes": "2"},
+                    {"id": "2", "url": format!("{b}/img/best.png"), "likes": "7"}]}))
+            } } }))
+            .route("/api/v1/json/123/artist-mb.php", get(move |q: axum::extract::RawQuery| async move {
+                assert!(q.0.unwrap_or_default().contains(&format!("i={mbid}")));
+                Json(serde_json::json!({"artists": [{"strArtist": "Daft Punk", "strArtistThumb": format!("{b2}/img/adb.png"), "strBiography": "Daft Punk were a French electronic music duo."}]}))
+            }))
+            .route("/img/{name}", get({ let png = png.clone(); move |Path(name): Path<String>| { let png = png.clone(); async move {
+                assert_eq!(name, "best.png", "the most liked portrait");
+                ([(axum::http::header::CONTENT_TYPE, "image/png")], png)
+            } } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        {
+            let mut b = s.info_bases.write().unwrap();
+            b.musicbrainz = base.clone();
+            b.wikidata = "http://127.0.0.1:9".into();
+            b.wikipedia = "http://127.0.0.1:9".into();
+            b.fanart = base.clone();
+            b.audiodb = base.clone();
+            b.fanart_key = Some("fanart-test-key".into());
+        }
+        s.set_contact("tests@example.org").ok();
+        let aid = {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join("song.flac"), "Song", "Daft Punk");
+            t.artists[0].mbid = Some(pm_model::Mbid::parse(mbid).unwrap());
+            lib.upsert_track(&t).unwrap();
+            lib.list_artists().unwrap()[0].id
+        };
+        let app = router(s.clone());
+        let mut info = serde_json::Value::Null;
+        for _ in 0..50 {
+            info = call(&app, "GET", &format!("/v1/library/artists/{aid}/info"), None)
+                .await
+                .1;
+            if info["image"] == true || info["bio"].is_string() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(info["image"], true, "{info}");
+        assert_eq!(info["image_from"], "fanart.tv");
+        assert_eq!(info["bio_from"], "TheAudioDB");
+        assert!(
+            info["bio"].as_str().unwrap().starts_with("Daft Punk were"),
+            "{info}"
+        );
+        assert!(info["note"].is_null(), "{info}");
+        let req = Request::builder()
+            .uri(format!("/v1/library/artists/{aid}/image"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            11
+        );
+        assert_eq!(
+            artist_info::fanart_thumb(&serde_json::json!({"artistbackground": [{"url": "u", "likes": "1"}]}))
+                .as_deref(),
+            Some("u")
+        );
+        assert!(artist_info::fanart_thumb(&serde_json::json!({})).is_none());
+    }
+
     /// YouTube on the zones (unofficial): yt-dlp downloads from the (stood-in) official release
     /// only when its checksum matches, and a zone then plays a video through it.
     #[cfg(target_os = "linux")]
