@@ -48,6 +48,6 @@ button.link { width: auto; padding: 0; border: 0; background: none; color: var(-
 .lan-list .addr { font-size: 12px; font-weight: 400; color: var(--muted); }
 code { font-size: 12px; }
 .err { color: var(--err); margin-top: 16px; word-break: break-word; }
-pre.crash { max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.4; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); text-align: left; }
+pre.crash { max-height: 50vh; margin-top: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.4; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); text-align: left; }
 #crash h2 { font-size: 17px; margin: 0 0 6px; }
 .crash-first { font-weight: 600; font-size: 14px; margin: 6px 0; }

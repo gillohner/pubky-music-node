@@ -114,6 +114,10 @@ def tap(pred, what):
 
     node = until(what, find, timeout=90, every=2)
     x, y = center(node)
+    if (x, y) == (0, 0):  # off screen: scroll it into view and look again
+        adb("shell", "input", "swipe", "500", "1500", "500", "500", "300")
+        node = until(what, find, timeout=30, every=2)
+        x, y = center(node)
     adb("shell", "input", "tap", str(x), str(y))
     log(f"tapped {what} at {x},{y}")
 
