@@ -15,7 +15,32 @@ env:
 # Every job has a timeout-minutes of about 4x its usual time, so a hang fails instead of
 # holding a merge (usual times from green runs, 2026-10-23).
 jobs:
+  # Docs-only changes (docs/, Markdown, NOTICE, LICENSE) skip every other job: `check`,
+  # `desktop` and `sidecar` wait on this, and the rest wait on `check`.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
+          code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
+          echo "$(printf '%s\n' "$files" | grep -c . || true) files changed, $code outside the docs"
+          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
   check:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -37,6 +62,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
   desktop:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # The app (Tauri 2: the web UI in a native window, plus a player) needs
     # WebKitGTK on Linux; it is outside the workspace so the other jobs do
     # not. Bundles for every platform come from the release workflow.
@@ -72,6 +99,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
   sidecar:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -92,7 +121,6 @@ jobs:
     # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
     # (virtme-ng). A hung guest fails the job after 20 minutes instead of holding the run (it takes 4-5).
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
     needs: check
     timeout-minutes: 20
     steps:
