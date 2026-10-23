@@ -59,6 +59,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("plex.server", "Plex"),
     ("audiobookshelf.server", "Audiobookshelf"),
     ("webdav.shares", "your WebDAV shares"),
+    ("podcasts.gpodder", "your gPodder account"),
 ];
 /// Settings that belong to this node and are never carried over (its stream key, its id, and
 /// the backup schedule with its passphrase).
