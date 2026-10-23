@@ -53,6 +53,7 @@ pub mod lrclib;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
+pub mod party;
 pub mod people;
 pub mod pinakes_reader;
 pub mod play_from;
@@ -599,6 +600,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/pubky/files/jobs/{id}", get(files::upload_progress))
         .route("/pubky/files/jobs/{id}/cancel", post(files::cancel_job))
         .route("/events", get(events::events_ws))
+        // Party mode: the owner's parties, and what a guest token opens (party.rs)
+        .route("/party", get(party::list).post(party::create))
+        .route("/party/{id}", delete(party::end))
+        .route("/party/guest", get(party::guest))
+        .route("/party/guest/search", get(party::search))
+        .route("/party/guest/queue", post(party::add))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::map_response(plain_errors))
         .with_state(state.clone());
@@ -646,6 +653,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                // A party guest's link: the page, and joining it (party.rs)
+                .route("/party/{code}", get(party_page))
+                .route("/v1/party/join", post(party::join))
                 // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
@@ -685,10 +695,13 @@ async fn auth(
     let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
-    if caller.role == accounts::Role::Listener {
-        if let Some(why) = accounts::listener_refusal(&state, req.method(), req.uri().path()) {
-            return accounts::refused(why).into_response();
-        }
+    let refusal = match caller.role {
+        accounts::Role::Owner => None,
+        accounts::Role::Listener => accounts::listener_refusal(&state, req.method(), req.uri().path()),
+        accounts::Role::Guest => party::guest_refusal(req.method(), req.uri().path()),
+    };
+    if let Some(why) = refusal {
+        return accounts::refused(why).into_response();
     }
     req.extensions_mut().insert(caller);
     next.run(req).await
@@ -811,6 +824,18 @@ async fn web_icon() -> Response {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_str!("../static/icon.svg"),
+    )
+        .into_response()
+}
+
+/// `GET /party/{code}`: the page a party guest opens (no token; it joins with the code).
+async fn party_page() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/party.html"),
     )
         .into_response()
 }
