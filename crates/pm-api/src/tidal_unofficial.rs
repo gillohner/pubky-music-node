@@ -30,6 +30,8 @@ pub const CLIENT_KEY: &str = "tidal.unofficial_client";
 const SCOPE: &str = "r_usr w_usr w_sub";
 /// What the page says before the mode is switched on.
 pub const WARNING: &str = "This uses TIDAL's private API, which TIDAL has not approved for other apps. It can stop working at any time, and TIDAL could act on the account. It needs a paid TIDAL plan.";
+/// TIDAL's answer when the client comes from its developer portal, in plain words.
+pub const NOT_A_DEVICE_CLIENT: &str = "This client can't use the code sign-in. Apps from TIDAL's developer portal are not device clients; enter a TIDAL device client instead.";
 
 fn v1_base(s: &NodeState) -> String {
     s.tidal
@@ -155,7 +157,8 @@ pub fn set_config_client(id: &str, secret: &str) {
 }
 
 /// The device client the owner set: in Settings, else from node.toml, else the
-/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment.
+/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment, else the one built into this build
+/// (`from: builtin`, python-tidal's, STEWARD-TIDAL-DEFAULT.md).
 pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     let kept: Option<Client> = lib
         .get_setting(CLIENT_KEY)
@@ -170,11 +173,23 @@ pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     }
     let id = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_ID").unwrap_or_default();
     let secret = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_SECRET").unwrap_or_default();
-    (!id.trim().is_empty()).then(|| Client {
-        id: id.trim().into(),
-        secret: secret.trim().into(),
-        from: "config".into(),
+    if !id.trim().is_empty() {
+        return Some(Client {
+            id: id.trim().into(),
+            secret: secret.trim().into(),
+            from: "config".into(),
+        });
+    }
+    crate::project_apps::tidal_device_client().map(|(id, secret)| Client {
+        id,
+        secret,
+        from: "builtin".into(),
     })
+}
+
+/// This build carries a device client of its own.
+pub fn builtin_client() -> bool {
+    crate::project_apps::tidal_device_client().is_some()
 }
 
 /// Whether the mode is on and signed in, so TIDAL tracks can play in full.
@@ -239,6 +254,8 @@ pub struct UnofficialStatus {
     pub health: Option<Health>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_from: Option<String>,
+    /// This build has a built-in device client (python-tidal's); "Use built-in" goes back to it.
+    pub builtin: bool,
     pub warning: String,
 }
 
@@ -274,6 +291,7 @@ fn view(s: &NodeState) -> UnofficialStatus {
             }),
         health: st.health.clone(),
         client_from,
+        builtin: builtin_client(),
         warning: WARNING.into(),
     }
 }
@@ -345,15 +363,18 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<Unoffici
     let status = resp.status();
     let v: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
+        let detail = v["error_description"]
+            .as_str()
+            .or(v["error"].as_str())
+            .unwrap_or("");
+        // An app from TIDAL's developer portal is not a device client: TIDAL answers 400
+        // "Client is not a Limited Input Device client" to the device-code request.
+        if detail.to_ascii_lowercase().contains("limited input device") {
+            return Err(ApiError::bad_request(NOT_A_DEVICE_CLIENT));
+        }
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
-            format!(
-                "TIDAL refused the sign-in ({status}): {}",
-                v["error_description"]
-                    .as_str()
-                    .or(v["error"].as_str())
-                    .unwrap_or("")
-            ),
+            format!("TIDAL refused the sign-in ({status}): {detail}"),
         ));
     }
     let uri = v["verificationUriComplete"]

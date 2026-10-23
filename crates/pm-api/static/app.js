@@ -26,7 +26,7 @@
     ws: null,
     favUris: new Set(),
     trackCache: new Map(),
-    browserQueue: (() => { try { const q = JSON.parse(localStorage.getItem('pm.browserQueue') || '[]'); return Array.isArray(q) ? q.filter((it) => it && it.uri && !it.stream) : []; } catch { return []; } })(),
+    browserQueue: (() => { try { const q = JSON.parse(localStorage.getItem('pm.browserQueue') || '[]'); return Array.isArray(q) ? q.filter((it) => it && it.uri) : []; } catch { return []; } })(),
     browserIndex: -1,
     history: [],
   };
@@ -90,6 +90,36 @@
     const img = albumId ? `<img loading="lazy" alt="" src="/v1/library/albums/${albumId}/cover${tokenQ()}" onerror="this.remove()">` : '';
     return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}</div>`;
   };
+  // A playlist's art (UX review #8): four album covers as a 2×2 mosaic, one cover, or its initials
+  // on a gradient; never an empty square.
+  const mosaic = (covers, name, cls = '') => {
+    const u = [...new Set((covers || []).filter(Boolean))].map(imgSrc);
+    if (u.length >= 4) return `<div class="art mosaic ${cls}" aria-hidden="true">${u.slice(0, 4).map((x) => `<img loading="lazy" alt="" src="${esc(x)}" onerror="this.style.visibility='hidden'">`).join('')}</div>`;
+    const h = hue(name);
+    return `<div class="art ${cls}" aria-hidden="true" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))"><span>${esc(initials(name))}</span>${u[0] ? `<img loading="lazy" alt="" src="${esc(u[0])}" onerror="this.remove()">` : ''}</div>`;
+  };
+  // Smart playlists: the rules people can pick from, in words
+  const SMART_FIELDS = {
+    genre: { label: 'Genre', ops: [['contains', 'contains'], ['is', 'is']], input: 'text', hint: 'techno' },
+    artist: { label: 'Artist', ops: [['contains', 'contains']], input: 'text', hint: 'name' },
+    year: { label: 'Year', ops: [['between', 'between']], input: 'range' },
+    favourite: { label: 'Favourite', ops: [['is', 'is']], input: 'yesno' },
+    plays: { label: 'Times played', ops: [['at_least', 'at least'], ['at_most', 'at most']], input: 'number' },
+    last_played: { label: 'Last played', ops: [['within_days', 'in the last'], ['not_within_days', 'not in the last']], input: 'days' },
+    tag: { label: 'Your Pubky tag', ops: [['is', 'is']], input: 'text', hint: 'chill' },
+  };
+  const SMART_SORTS = [['random', 'Random (new each time)'], ['most_played', 'Most played'], ['least_recent', 'Longest unplayed'], ['newest', 'Newest'], ['title', 'Title']];
+  const smartRuleRow = (r, i) => {
+    const f = SMART_FIELDS[r.field] || SMART_FIELDS.genre;
+    const val = r.value == null ? '' : r.value;
+    const input = f.input === 'yesno' ? `<select class="input sm" data-k="value" aria-label="Favourite"><option value="yes" ${val !== false ? 'selected' : ''}>yes</option><option value="no" ${val === false ? 'selected' : ''}>no</option></select>`
+      : f.input === 'range' ? `<input class="input sm" data-k="value" type="number" placeholder="from" value="${esc(val || '')}" aria-label="From year" style="width:90px"> and <input class="input sm" data-k="to" type="number" placeholder="to" value="${esc(r.to || '')}" aria-label="To year" style="width:90px">`
+      : f.input === 'number' ? `<input class="input sm" data-k="value" type="number" min="0" value="${esc(val || 0)}" aria-label="Times" style="width:90px"> times`
+      : f.input === 'days' ? `<input class="input sm" data-k="value" type="number" min="1" value="${esc(val || 30)}" aria-label="Days" style="width:90px"> days`
+      : `<input class="input sm" data-k="value" value="${esc(val)}" placeholder="${esc(f.hint || '')}" aria-label="${esc(f.label)}">`;
+    return `<div class="smrule" data-smrule="${i}"><select class="input sm" data-k="field" aria-label="What">${Object.entries(SMART_FIELDS).map(([k, x]) => `<option value="${k}" ${r.field === k ? 'selected' : ''}>${x.label}</option>`).join('')}</select><select class="input sm" data-k="op" aria-label="How">${f.ops.map(([k, l]) => `<option value="${k}" ${r.op === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${input}<button class="icon-btn" data-smrm="${i}" aria-label="Remove this rule" title="Remove this rule">${icon('close')}</button></div>`;
+  };
+  const smartSummary = (x) => { const rs = (x.rules || []).map((r) => { const f = SMART_FIELDS[r.field]; if (!f) return r.field; const op = (f.ops.find(([k]) => k === r.op) || f.ops[0])[1]; if (r.field === 'favourite') return r.value === false ? 'not a favourite' : 'a favourite'; if (r.field === 'year') return `year ${r.value || '…'}–${r.to || '…'}`; return `${f.label.toLowerCase()} ${op} ${r.value}${r.field === 'last_played' ? ' days' : ''}`; }); return rs.join(x.matches === 'any' ? ' or ' : ' and '); };
   // Art for a queue item: a streaming source's image, else the library album cover.
   const itemArt = (it, cls = '') => {
     if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" onerror="this.remove()"></div>`; }
@@ -107,7 +137,7 @@
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
   // passes through; raw service answers ("…answered 403 Forbidden: …") are translated, and the raw
   // text stays on the error as `raw` (UX review: wording leaks internals).
-  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', bandcamp: 'Bandcamp', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
+  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
   const humanError = (raw, path = '') => {
     const text = String(raw || '');
     const svcKey = (/^\/sources\/([a-z]+)/.exec(path) || /^([a-z]+): /.exec(text) || [])[1];
@@ -393,13 +423,35 @@
   // listed while it is the zone in use)
   const devOutput = (id) => /^null/.test(String(id || ''));
   const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => state.devOutputs || !devOutput(z.output) || z.id === state.zone)];
-  // The browser's queue survives a reload (library tracks only; radio streams are not kept).
+  // The browser's queue survives a reload, every song with where it was (UX review #6): stream
+  // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
-  setInterval(() => { try { const j = JSON.stringify(state.browserQueue.filter((it) => !it.stream)); if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); } } catch { /* storage unavailable */ } }, 2000);
+  const isLiveRadio = (it) => it.album === 'Internet radio' && /^https?:/.test(it.uri || '');
+  setInterval(() => {
+    try {
+      const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, ...rest } = it; return rest; });
+      const j = JSON.stringify(keep);
+      if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); }
+      const cur = state.browserQueue[state.browserIndex];
+      if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: keep.indexOf(keep.find((x) => x.id === cur.id)), pos: Math.floor(audio.currentTime || 0) }));
+    } catch { /* storage unavailable */ }
+  }, 2000);
+  // Back where it was, paused: the song in the bar and its position
+  const restoreBrowserQueue = () => {
+    for (const it of state.browserQueue) if (!it.stream && it.track_id == null) { const u = streamUrlFor(it.uri); if (u) it.stream = u; }
+    let at = null; try { at = JSON.parse(localStorage.getItem('pm.browserAt') || 'null'); } catch { /* none */ }
+    const it = at && state.browserQueue[at.index];
+    if (!it) return;
+    state.browserIndex = at.index;
+    audio.preload = 'metadata';
+    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    renderBar();
+  };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -633,13 +685,17 @@
       <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>`).join('');
+      </button>`).join('')
+      // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
+      + `<div class="pop-title">This zone</div><button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+    const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { search.focus(); if (search.value.trim()) runSearch(); return; } setView(k); });
   $('#jobchip').onclick = () => {
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
@@ -776,6 +832,7 @@
   const toggleNowPlaying = (force) => {
     const open = force === true ? true : overlay.hidden;
     overlay.hidden = !open;
+    document.body.classList.toggle('np-open', open);
     if (open) renderNowPlaying();
   };
   const renderNowPlaying = () => {
@@ -803,16 +860,19 @@
             <div class="artist">${np.stream_title ? esc(it.artist || '') : npLinksHtml(it, null).artistsHtml}</div>
             ${np.stream_title ? '' : '<div class="np-pubky" id="nppubky" aria-live="polite"></div>'}
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
             <div class="path">
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
               ${np.signal_path ? np.signal_path.stages.map((s) => `<div class="path-row"><span class="pd" style="background:${colour[s.quality]}"></span><span class="pn">${esc(s.name)}</span><span class="pf">${esc(fmtFormat(s.in_format))} → ${esc(fmtFormat(s.out_format))}</span>${s.note ? `<span class="pnote">${esc(s.note)}</span>` : ''}</div>`).join('') : `<div class="path-row"><span class="pd" style="background:var(--muted)"></span><span class="pn">browser</span><span class="pf">the original file, decoded by this browser</span></div>`}
             </div>
             <div class="lyrics" id="nplyrics" hidden></div>
-            ${next.length ? `<div class="upnext"><h3>Up next</h3><div class="list">${next.map((n) => `<div class="list-row"><div class="grow"><div class="name">${esc(n.title || n.uri)}</div><div class="sub">${esc(n.artist || '')}</div></div><span class="muted small">${fmt(n.duration_ms)}</span></div>`).join('')}</div></div>` : ''}
+            ${next.length ? `<div class="upnext"><h3>Up next</h3><div class="list">${next.map((n) => `<div class="list-row"><div class="grow"><div class="name">${esc(n.title || n.uri)}</div><div class="sub">${esc(n.artist || '')}</div></div><span class="muted small">${n.duration_ms ? fmt(n.duration_ms) : ''}</span></div>`).join('')}</div></div>` : ''}
           </div>
         </div>
       </div>`;
     const s = $('#npseek'); setFill(s);
+    // Now playing's own transport (phones: the mini player hides behind it)
+    $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     s.addEventListener('input', () => { s.dataset.dragging = '1'; setFill(s); $('#nppos').textContent = fmt((s.value / 1000) * (np.duration_ms || 0)); });
     s.addEventListener('change', () => { delete s.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((s.value / 1000) * (np.duration_ms || 0)) }); });
     $('#npclose').onclick = () => toggleNowPlaying();
@@ -844,21 +904,26 @@
     const box = $('#nplyrics'); if (!box) return;
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    const off = state.lyricsOffset || 0;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
   };
+  // Library songs: their own lyrics, else LRCLIB (the node decides); streamed songs: LRCLIB by title
+  const lyricsKey = (it) => { const id = trackIdOf(it); return id != null ? `t${id}` : it && it.title && it.artist ? `s${it.uri || ''}|${it.title}|${it.artist}` : null; };
   const loadLyrics = async (it) => {
-    const id = trackIdOf(it);
-    if (id == null) { renderLyrics(null); return; }
-    if (state.lyrics.has(id)) { renderLyrics(state.lyrics.get(id)); return; }
+    const key = lyricsKey(it); const id = trackIdOf(it);
+    if (!key || (it && it.stream && /^https?:/.test(it.uri || '') && it.album === 'Internet radio')) { renderLyrics(null); return; }
+    if (state.lyrics.has(key)) { renderLyrics(state.lyrics.get(key)); return; }
     let l = null;
-    try { l = await api('GET', `/library/tracks/${id}/lyrics`); } catch { l = null; }
-    state.lyrics.set(id, l);
-    if (trackIdOf(currentNowPlayingItem()) === id) renderLyrics(l);
+    try { l = id != null ? await api('GET', `/library/tracks/${id}/lyrics`) : await api('GET', `/lyrics?${new URLSearchParams({ title: it.title, artist: String(it.artist).split(/,| & /)[0], ...(it.album ? { album: it.album } : {}), ...(it.duration_ms ? { duration_ms: String(it.duration_ms) } : {}) })}`); } catch { l = null; }
+    state.lyrics.set(key, l);
+    if (lyricsKey(currentNowPlayingItem()) === key) { state.lyricsOffset = 0; renderLyrics(l); }
   };
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-lnudge]'); if (!b) return; state.lyricsOffset = (state.lyricsOffset || 0) + Number(b.dataset.lnudge); const it = currentNowPlayingItem(); const l = state.lyrics.get(lyricsKey(it)); if (l) renderLyrics(l); });
   const currentNowPlayingItem = () => { const z = currentZone(); return z && z.now_playing ? z.now_playing.item : null; };
   const followLyrics = (positionMs) => {
     const lines = $$('#nplyrics .lyric-line[data-ms]'); if (!lines.length) return;
-    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= positionMs) cur = ln; else break; }
+    const at = positionMs - (state.lyricsOffset || 0);
+    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= at) cur = ln; else break; }
     for (const ln of lines) ln.classList.toggle('on', ln === cur);
     if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* jsdom */ } }
   };
@@ -932,6 +997,8 @@
     if (v === 'tag' && arg) return `/tag/${String(arg).split(',').map(encodeURIComponent).join(',')}`;
     if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
     if (v === 'person' && arg) return `/person/${arg}`;
+    if (v === 'smart' && arg) return `/smart/${encodeURIComponent(arg)}`;
+    if (v === 'smart-edit') return null;
     if (v === 'shared' && arg && arg.user) return `/shared/${arg.user}${arg.id ? '/' + arg.id : ''}`;
     if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
     if (v === 'sources' && arg && arg.source) return `/sources/${encodeURIComponent(arg.source)}`;
@@ -961,6 +1028,8 @@
     if (p === '/discover' || p.startsWith('/discover/')) return { v: 'home' };
     m = p.match(/^\/(playlist|genre|sources?)\/([^/]+)$/);
     if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
+    m = p.match(/^\/smart\/([A-Za-z0-9_-]+)$/);
+    if (m) return { v: 'smart', arg: m[1] };
     m = p.match(/^\/person\/([a-z0-9]{52})$/);
     if (m) return { v: 'person', arg: m[1] };
     m = p.match(/^\/shared\/([a-z0-9]{52})(?:\/([0-9A-Z]{13}))?$/);
@@ -1022,6 +1091,9 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
+    // The phone's bottom bar: Home, Search, Library (every library view and item page), Queue
+    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'radio', 'person'];
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'albums' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if ($('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false'); } $('#scrim').hidden = true; closePop();
     main.scrollTop = 0;
@@ -1341,6 +1413,8 @@
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
   const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
+  // Long-press on a touch screen (and right-click) on a song row opens its ⋯ menu
+  document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); more.click(); });
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
   const showMenu = (anchor, items) => {
@@ -1352,6 +1426,9 @@
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
     menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
+    // Phones: a sheet from the bottom, not a dropdown that runs off the screen (UX review #3)
+    menuEl.classList.toggle('sheet', !!(window.matchMedia && matchMedia('(max-width: 720px)').matches));
+    if (menuEl.classList.contains('sheet')) { menuEl.style.left = '0px'; menuEl.style.right = '0px'; menuEl.style.top = 'auto'; menuEl.style.bottom = '0px'; menuEl.style.width = 'auto'; }
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
   };
@@ -1364,11 +1441,7 @@
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
   const uriMenu = async (anchor, uris, name) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
-    showMenu(anchor, [
-      { title: 'Add to playlist' },
-      ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, [], uris) })),
-      { label: 'New playlist…', icon: 'plus', run: async () => { try { await api('POST', '/playlists', { name, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } } },
-    ]);
+    return playlistPicker((pl) => addToPlaylist(pl.id, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
   };
   const trackMenu = async (anchor, tracks) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
@@ -1392,13 +1465,11 @@
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
+      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...radioItem,
       ...versionItems,
       ...nav,
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
-      { title: 'Add to playlist' },
-      ...state.playlists.map((p) => ({ label: p.name, icon: 'playlist', run: () => addToPlaylist(p.id, tracks) })),
-      { label: 'New playlist…', icon: 'plus', run: async () => { const name = (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist'; try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } } },
     ];
     showMenu(anchor, items);
   };
@@ -1487,7 +1558,7 @@
   const srcState = (x) => {
     if (!x.enabled) return { cls: 'off', label: 'Turned off', long: 'Turned off.' };
     const st = String(x.status || '');
-    if (st === 'ready' || st === 'signed in') return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : 'Ready.' };
+    if (st === 'ready' || /^signed in\b/.test(st)) return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : st === 'ready' ? 'Ready.' : st.charAt(0).toUpperCase() + st.slice(1) + '.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
     if (/^browser\b/.test(st)) return { cls: 'ok', label: 'Ready', long: `Plays in This browser, in YouTube\u2019s own player${/zones/.test(st) ? ', and on the speakers through yt-dlp' : ''}.${/search/.test(st) ? ' Search uses your YouTube Data API key.' : ''}` };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
@@ -1502,7 +1573,7 @@
     $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
-  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -1559,18 +1630,47 @@
   };
   const copyLink = async (path) => { const u = location.origin + path; try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { toast(u); } };
   // The ⋯ menu, the same on a page's hero and on every song row.
+  // "Add to playlist…" (UX review #3): one dialog instead of every playlist in the menu: a search
+  // field, "New playlist" first, then your playlists, most recently changed first.
+  const playlistPicker = (add, newName, makeNew) => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
+    document.body.appendChild(d);
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
+    transients.push(tr); pushTransient();
+    const draw = () => {
+      const q = $('#ppq', d).value.trim().toLowerCase();
+      const list = [...state.playlists].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).filter((p) => !q || p.name.toLowerCase().includes(q));
+      $('#pplist', d).innerHTML = `<button class="list-row" data-ppnew>${icon('plus')}<div class="grow"><div class="name">New playlist${q ? `: “${esc($('#ppq', d).value.trim())}”` : ''}</div></div></button>` + list.map((p, k) => `<button class="list-row" data-ppi="${k}">${icon('playlist')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div></button>`).join('');
+      $('[data-ppnew]', d).onclick = async () => { done(); await makeNew($('#ppq', d) && $('#ppq', d).value.trim() || newName); };
+      $$('[data-ppi]', d).forEach((b) => b.onclick = async () => { const pl = list[Number(b.dataset.ppi)]; done(); await add(pl); });
+    };
+    $('#ppq', d).oninput = draw; draw();
+    $('[data-ppclose]', d).onclick = () => done();
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    $('#ppq', d).focus();
+  });
   const itemMenu = async (anchorEl, o) => {
     await pubkyUser();
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
     const trackIds = (o.songs || []).filter((t) => t.track_id != null).map((t) => t.track_id);
+    const single = (o.songs || []).length === 1 ? o.songs[0] : null;
+    const singleFav = !!(single && ((single.track_id != null && state.favUris.has(`track:${single.track_id}`)) || (single.page && state.favUris.has(single.page)) || (single.id && state.favUris.has(uriOf('song', single.id) || ''))));
+    // The page you are on: no "Go to" it
+    const onThis = (kind, pid) => state.view === 'item' && state.viewArg && state.viewArg.kind === kind && (state.viewArg.id === pid);
     const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl.id, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl.id, [], uris.length ? uris : o.uri ? [o.uri] : []));
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
-      ...state.playlists.slice(0, 6).map((pl) => ({ label: `Add to “${pl.name}”`, icon: 'playlist', run: () => addTo(pl) })),
+      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', trackIds.length === (o.songs || []).length && trackIds.length ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav); render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
-      ...(o.albumId ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
+      ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
       ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => window.open(v.url, '_blank', 'noopener') })),
       ...(o.extra || []),
       ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
@@ -1597,7 +1697,11 @@
   };
 
   const SOURCE_RANK = ['library', 'tidal', 'deezer', 'spotify', 'archive', 'audius', 'pubky'];
-  const SEARCH_KINDS = [['song', 'Songs'], ['album', 'Albums'], ['artist', 'Artists'], ['playlist', 'Playlists'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
+  // Groups in the order people scan them: who, then what (UX review #4)
+  const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
+  // A hit "matches" when every word of the query is in its title or subtitle
+  const searchWords = (x) => String(x || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+  const closeMatch = (h, q) => { const want = searchWords(q); const have = new Set(searchWords(`${h.title} ${h.subtitle || ''}`)); return want.length > 0 && want.every((w) => have.has(w) || [...have].some((x) => x.startsWith(w))); };
   const srcName = (src) => (src === 'library' ? 'Library' : src === 'pubky' ? 'Pubky' : SERVICE_NAMES[src] || (state.sources || []).find((x) => x.id === src)?.name || src);
   // Merge hits across sources: one row per song (Pinakes group, ISRC, UPC, MBID), best source first.
   const mergeSearch = (run) => {
@@ -1629,19 +1733,24 @@
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
-    const top = byKind.artist.find((x) => x.sources.includes('library')) || byKind.song.find((x) => x.sources.includes('library')) || byKind.artist[0] || byKind.album[0] || byKind.song[0];
+    // A Top result only when it really matches; a fuzzy hit is not promoted
+    const top = [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
+    const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => `<button class="chip on" data-stag="${esc(t.label)}" title="Your tag">Your #${esc(t.label)} <span class="muted">${countOf(t.count, 'items')}</span></button>`).join('')}${(tg.others || []).map((l) => `<button class="chip" data-stag="${esc(l)}">#${esc(l)}</button>`).join('')}</div></section>`);
+    if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
     if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" onerror="this.remove()">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
+    const songCap = run.allSongs ? 50 : 6;
     for (const [kind, label] of SEARCH_KINDS) {
       const items = byKind[kind];
       if (!items.length && !pendingAny) continue;
       const head = `<div class="section-head"><h3>${label}</h3><span class="muted small">${items.length ? items.length : ''}${counts[kind] && counts[kind] > items.length ? ` of ${counts[kind]} on Pubky` : ''}</span></div>`;
       let body;
       if (!items.length) body = skel(kind === 'song' ? 4 : 1, kind === 'album' || kind === 'artist');
-      else if (kind === 'song') body = songRows(items.slice(0, 12).map((h) => ({ ...h, artist: h.subtitle, id: h.id })), { showAlbum: true, numbers: 'index', extra: (t) => `${t.tagged ? `<span class="muted small tagged-by">tagged ${esc(t.tagged)}</span>` : ''}<span class="src-badges">${t.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span>` });
+      else if (kind === 'song') body = songRows(items.slice(0, songCap).map((h) => ({ ...h, artist: h.subtitle, id: h.id })), { showAlbum: true, numbers: 'index', extra: (t) => `${t.tagged ? `<span class="muted small tagged-by">tagged ${esc(t.tagged)}</span>` : ''}<span class="src-badges">${t.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span>` });
       else if (kind === 'album' || kind === 'artist') body = itemTileGrid(items.slice(0, 12).map((h) => ({ ...h, year: h.year || h.subtitle })), kind);
       else body = `<div class="list">${items.slice(0, 10).map((h, k) => `<div class="list-row clickable" data-sother="${kind}:${k}">${svcBadge(h.sources[0])}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${icon('external')}</div>`).join('')}</div>`;
-      sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}</section>`);
+      const more = kind === 'song' && items.length > songCap ? `<button class="btn ghost sm" data-sallsongs>See all ${items.length} songs</button>` : '';
+      sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}${more}</section>`);
     }
     const short = (e, src) => { const m = humanError(String(e || ''), `/sources/${src}`).replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error, src))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
@@ -1649,9 +1758,10 @@
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
     box.innerHTML = notes + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     $$('[data-stag]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.stag }));
+    const sa = $('[data-sallsongs]', box); if (sa) sa.onclick = () => { run.allSongs = true; renderSearchBody(run); };
     // Bind: rows and tiles use the shared components.
     const songsSec = $('[data-skind="song"]', box);
-    if (songsSec && byKind.song.length) bindSongRows(songsSec, byKind.song.slice(0, 12).map((h) => ({ ...h, artist: h.subtitle })), {});
+    if (songsSec && byKind.song.length) bindSongRows(songsSec, byKind.song.slice(0, run.allSongs ? 50 : 6).map((h) => ({ ...h, artist: h.subtitle })), {});
     for (const kind of ['album', 'artist']) { const sec = $(`[data-skind="${kind}"]`, box); if (sec && byKind[kind].length) bindItemTiles(sec, byKind[kind].slice(0, 12), kind); }
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (h.page) window.open(h.page, '_blank', 'noopener'); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
@@ -1779,6 +1889,29 @@
     return n < items.length ? growList(box, more) : () => {};
   };
   // A client-side filter box for long lists: hides rows/tiles whose text does not contain the query.
+  // Library list controls (UX review #7): sort, a favourites toggle and an A–Z jump in one row,
+  // remembered per list in this browser.
+  const LIST_SORTS = {
+    albums: [['name', 'Name'], ['artist', 'Artist'], ['year', 'Year'], ['added', 'Recently added']],
+    artists: [['name', 'Name'], ['albums', 'Most albums'], ['added', 'Recently added']],
+  };
+  const listPref = (kind) => { try { return JSON.parse(localStorage.getItem(`pm.list.${kind}`) || '{}'); } catch { return {}; } };
+  const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
+  const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
+  const sortList = (kind, list, how) => {
+    const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
+    if (kind === 'albums') {
+      if (how === 'artist') return by((a) => `${a.album_artist || ''}\u0000${a.title}`);
+      if (how === 'year') return [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
+      if (how === 'added') return [...list].sort((a, b) => (b.id || 0) - (a.id || 0));
+      return by((a) => a.title);
+    }
+    if (how === 'albums') return [...list].sort((a, b) => (b.albums || 0) - (a.albums || 0));
+    if (how === 'added') return [...list].sort((a, b) => (b.id || 0) - (a.id || 0));
+    return by((a) => a.name);
+  };
+  const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
+  const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}">${l}</button>`).join('')}</span>` : ''}</div>`;
   const filterBox = (placeholder) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">`;
   const bindFilter = (selector) => {
     const f = $('#filter'); if (!f) return;
@@ -1868,24 +2001,50 @@
           const win = state.homeWindow || '7d';
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
-          main.innerHTML = pageHead('Home') + resignNotice() + '<div id="h-setup"></div>'
-            + `<section class="section" id="h-jump"><div class="section-head"><h3>Jump back in</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`
-            + '<div id="h-lbwrap"></div>'
-            + sec('trending-songs', 'Trending songs', { windows: true, h: 300 }) + sec('trending-albums', 'Trending albums', { windows: true }) + sec('trending-artists', 'Trending artists', { windows: true })
-            + sec('following', 'From people you follow', { h: 120 }) + sec('tags', 'Tags people use for music', { h: 60 }) + sec('concerts', 'Concerts near you', { h: 80 })
-            + sec('podcasts', 'Podcasts') + sec('yours', 'Yours on Pubky', { h: 120 }) + sec('new', 'New on Pubky', { h: 120 });
+          // Rows the owner can hide and reorder (UX review #10); the layout is kept on the node
+          const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
+          if (!state.homeLayout) state.homeLayout = await api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] }));
+          const lay = state.homeLayout; const known = HOME_ROWS.map(([k]) => k);
+          const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
+          const showRow = (k) => !(lay.hidden || []).includes(k);
+          const rowOf = (k) => HOME_ROWS.find(([x]) => x === k);
+          const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`;
+          const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
+          const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
+          main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
+            + ordered.filter(showRow).map(rowHtml).join('');
+          const saveLayout = async (next) => { state.homeLayout = next; render(); try { state.homeLayout = await api('PUT', '/home/layout', next); } catch (e) { toast(e.message, 'error'); } };
+          $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
+          const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
+          $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
+          const move = (i, d) => { const o = [...ordered]; const [x] = o.splice(i, 1); o.splice(i + d, 0, x); saveLayout({ order: o, hidden: lay.hidden || [] }); };
+          $$('[data-hup]', main).forEach((b) => b.onclick = () => move(Number(b.dataset.hup), -1));
+          $$('[data-hdown]', main).forEach((b) => b.onclick = () => move(Number(b.dataset.hdown), 1));
           $$('[data-win]', main).forEach((b) => b.onclick = () => { state.homeWindow = b.dataset.win; render(); });
           $$('[data-seeall]', main).forEach((b) => b.onclick = () => setView('home-section', { section: b.dataset.seeall, window: state.homeWindow || '7d' }));
           renderSetup();
-          // Local first: recently played and added.
+          // Local rows first: recently played, recently added, forgotten favourites
           api('GET', '/library/home?limit=12').then((h) => {
-            const el = $('#h-jump .hbody'); if (!el || state.view !== 'home') return;
-            const albums = [...(h.recently_played || []), ...(h.recently_added || [])].filter((a, k, all) => a.id != null && all.findIndex((x) => x.id === a.id) === k).slice(0, 12);
-            if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
-            el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : '<p class="muted small">Play or add some music and it shows up here.</p>';
-            el.parentElement.classList.add('fadein');
-            if (albums.length) bindItemTiles(el, albums.map((a) => ({ id: 'lib-' + a.id, title: a.title })), 'album');
-          }).catch(() => { const el = $('#h-jump .hbody'); if (el) el.innerHTML = '<p class="muted small">The library did not answer.</p>'; });
+            if (state.view !== 'home') return;
+            const albumRow = (k, list, emptyText) => {
+              const el = $(`#h-${k} .hbody`); if (!el) return;
+              const albums = (list || []).filter((a) => a.id != null).slice(0, 12);
+              if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
+              el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : `<p class="muted small">${emptyText}</p>`;
+              el.parentElement.classList.add('fadein');
+              if (albums.length) bindItemTiles(el, albums.map((a) => ({ id: 'lib-' + a.id, title: a.title })), 'album');
+            };
+            albumRow('played', h.recently_played, 'Albums you play show up here.');
+            albumRow('added', h.recently_added, 'New music in your folders shows up here.');
+            const fe = $('#h-forgotten .hbody');
+            if (fe) {
+              const ts = h.forgotten || [];
+              if (!ts.length) { fe.parentElement.remove(); } else {
+                const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t), image: t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null }));
+                fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
+              }
+            }
+          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el) el.innerHTML = '<p class="muted small">The library did not answer.</p>'; } });
           // ListenBrainz's picks for the user, when connected (Settings › ListenBrainz).
           api('GET', '/listenbrainz').then(async (lb) => {
             if (!lb.connected || state.view !== 'home') return;
@@ -1896,7 +2055,7 @@
             bindSongRows($('#h-lb'), songs, {});
           }).catch(() => { /* not connected or not answering: no section */ });
           // Every Pubky section in parallel, each rendered as it arrives.
-          for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new']) {
+          for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new'].filter(showRow)) {
             loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
               const el = $(`#h-${name} .hbody`); if (!el || state.view !== 'home') return;
               // Without a contact Pubky has nothing to show yet: Get started says how, once
@@ -1951,14 +2110,21 @@
           loading();
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
-          const shown = albums.filter((a) => inFocus(a, state.focus));
-          main.innerHTML = pageHead('Albums', state.focus ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          const lp = listPref('albums');
+          const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
+          const shown = sorted;
+          const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
+          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, albums.length > 12 ? filterBox('Filter albums') : '') + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
+          const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); render(); };
+          const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); render(); };
           const grid = $('#albumgrid');
           if (grid) {
             let stop = () => {};
             const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles); };
             draw(shown);
+            // A–Z: the list from that letter on (the grid draws as you scroll)
+            $$('[data-az]', main).forEach((b) => b.onclick = () => { const key = lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title); const i = shown.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(shown.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
             const f = $('#filter');
             if (f) {
               f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
@@ -1971,17 +2137,22 @@
           loading();
           state.artists = await api('GET', '/library/artists');
           if (state.view !== 'artists') return;
-          main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? '<div class="list" id="artistlist"></div>' : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
+          const alp = listPref('artists');
+          const artistsSorted = sortList('artists', state.artists, alp.sort || 'name');
+          const aletters = (alp.sort || 'name') === 'name' && artistsSorted.length > 40 ? [...new Set(artistsSorted.map((a) => firstLetter(a.name)))] : [];
+          main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? listControls('artists', alp, aletters) + '<div class="list" id="artistlist"></div>' : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
           const alist = $('#artistlist');
           if (alist) {
             const row = (a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} track${a.tracks === 1 ? '' : 's'}</div></div>${icon('chevron', 'ic chev')}</div>`;
             const bindRows = () => $$('[data-artist]', alist).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
             let stop = () => {};
             const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
-            draw(state.artists);
+            draw(artistsSorted);
+            $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
+            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); render(); };
             const f = $('#filter');
             if (f) {
-              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? state.artists.filter((a) => a.name.toLowerCase().includes(q)) : state.artists; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -2099,13 +2270,68 @@
           renderSearchBody(run);
           break;
         }
+        case 'smart': {
+          // A smart playlist: its songs right now
+          loading();
+          const sid = state.viewArg;
+          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'smart' || state.viewArg !== sid) return;
+          state.itemTitle = d.playlist.name;
+          const ts = d.tracks || [];
+          const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
+          const covers = ts.map((t) => (t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null));
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(covers, d.playlist.name)}<div><div class="eyebrow">Smart playlist · songs change as your library does</div><h1>${esc(d.playlist.name)}</h1><p class="sub">${countOf(ts.length, 'songs')}${d.matched > ts.length ? ` of ${d.matched} that match` : ''} · ${esc(smartSummary(d.playlist))}</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="smplay" ${ts.length ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn" id="smshuffle" ${ts.length ? '' : 'disabled'}>${icon('shuffle')} Shuffle</button><button class="btn ghost" id="smedit">${icon('settings')} Edit rules</button></div></div></div>`
+            + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
+          $('[data-back]', main).onclick = () => goBack('playlists');
+          if (ts.length) bindSongRows($('#smsongs'), songs, {});
+          $('#smplay').onclick = () => playTracks(ts, true);
+          $('#smshuffle').onclick = () => playTracks([...ts].sort(() => Math.random() - 0.5), true);
+          $('#smedit').onclick = () => setView('smart-edit', sid);
+          break;
+        }
+        case 'smart-edit': {
+          // The rules, with a live preview of what they pick
+          const sid = state.viewArg;
+          let cur = { name: '', rules: [{ field: 'genre', op: 'contains', value: '' }], matches: 'all', sort: 'random', limit: 100 };
+          if (sid && sid !== 'new') { try { cur = (await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`)).playlist; } catch (e) { toast(e.message, 'error'); } }
+          if (state.view !== 'smart-edit') return;
+          const draw = () => {
+            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(sid === 'new' ? 'New smart playlist' : 'Edit smart playlist')
+              + `<div class="smartedit"><label class="field"><span>Name</span><input class="input" id="smname" value="${esc(cur.name)}" placeholder="Late-night techno"></label>
+                <p class="small">Songs that match <select class="input sm" id="smmatch" aria-label="Match"><option value="all" ${cur.matches !== 'any' ? 'selected' : ''}>all</option><option value="any" ${cur.matches === 'any' ? 'selected' : ''}>any</option></select> of these rules:</p>
+                <div id="smrules">${cur.rules.map((r, i) => smartRuleRow(r, i)).join('')}</div>
+                <button class="btn sm ghost" id="smadd">${icon('plus')} Add a rule</button>
+                <div class="toolbar" style="margin-top:12px"><label class="small">Order <select class="input sm" id="smsort">${SMART_SORTS.map(([k, l]) => `<option value="${k}" ${cur.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label class="small">At most <input class="input sm" id="smlimit" type="number" min="1" max="1000" value="${cur.limit || 100}" style="width:90px"> songs</label></div>
+                <div class="toolbar"><button class="btn primary" id="smsave">${icon('check')} Save</button>${sid !== 'new' ? `<button class="btn danger" id="smdel">${icon('trash')} Delete</button>` : ''}</div></div>
+              <section class="section"><div class="section-head"><h3>Preview</h3><span class="muted small" id="smcount"></span></div><div id="smprev"><p class="muted small">Add a rule to see which songs match.</p></div></section>`;
+            $('[data-back]', main).onclick = () => goBack('playlists');
+            const readRules = () => $$('[data-smrule]', main).map((row) => { const g = (k) => { const el = $(`[data-k="${k}"]`, row); return el ? el.value : undefined; }; const field = g('field'); const r = { field, op: g('op') || '' }; if (field === 'favourite') r.value = g('value') !== 'no'; else if (['plays', 'last_played'].includes(field)) r.value = Number(g('value') || 0); else if (field === 'year') { r.value = Number(g('value') || 0) || null; r.to = Number(g('to') || 0) || null; } else r.value = g('value') || ''; return r; });
+            const sync = () => { cur = { ...cur, name: $('#smname').value, matches: $('#smmatch').value, sort: $('#smsort').value, limit: Number($('#smlimit').value) || 100, rules: readRules() }; };
+            let t = null;
+            const preview = () => { clearTimeout(t); t = setTimeout(async () => { if (state.view !== 'smart-edit' || !$('#smname')) return; sync(); const box = $('#smprev'); if (!box) return; if (!cur.rules.length) { box.innerHTML = '<p class="muted small">Add a rule to see which songs match.</p>'; $('#smcount').textContent = ''; return; } try { const r = await api('POST', '/smart/preview', { rules: cur.rules, matches: cur.matches, sort: cur.sort, limit: Math.min(cur.limit, 20) }); $('#smcount').textContent = `${countOf(r.matched, 'songs')} match`; const songs = r.tracks.map((x, k) => ({ no: k + 1, title: x.title, artist: artists(x), duration_ms: x.duration_ms, track_id: x.id, id: trackPageId(x) })); box.innerHTML = songs.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches yet.</p>'; if (songs.length) bindSongRows(box, songs, {}); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; } }, 350); };
+            main.oninput = (e) => { if (state.view !== 'smart-edit') { main.oninput = null; return; } if (e.target.closest('.smartedit')) preview(); };
+            main.onchange = (e) => { if (state.view !== 'smart-edit') { main.onchange = null; return; } if (e.target.dataset && e.target.dataset.k === 'field') { sync(); const i = Number(e.target.closest('[data-smrule]').dataset.smrule); cur.rules[i] = { field: e.target.value, op: SMART_FIELDS[e.target.value].ops[0][0], value: '' }; draw(); } preview(); };
+            $('#smadd').onclick = () => { sync(); cur.rules.push({ field: 'genre', op: 'contains', value: '' }); draw(); };
+            $$('[data-smrm]', main).forEach((b) => b.onclick = () => { sync(); cur.rules.splice(Number(b.dataset.smrm), 1); draw(); });
+            $('#smsave').onclick = async () => { sync(); if (!cur.name.trim()) { toast('Give it a name', 'error'); $('#smname').focus(); return; } const body = { name: cur.name, rules: cur.rules, matches: cur.matches, sort: cur.sort, limit: cur.limit }; try { const saved = sid === 'new' ? await api('POST', '/smart', body) : await api('PUT', `/smart/${encodeURIComponent(sid)}`, body); toast(`Saved “${saved.name}”`); setView('smart', saved.id); } catch (e) { toast(e.message, 'error'); } };
+            const del = $('#smdel'); if (del) del.onclick = async () => { if (!del.dataset.armed) { del.dataset.armed = '1'; del.innerHTML = `${icon('trash')} Really delete?`; return; } try { await api('DELETE', `/smart/${encodeURIComponent(sid)}`); toast('Smart playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
+            preview();
+          };
+          draw();
+          break;
+        }
         case 'playlists': {
           state.playlists = await api('GET', '/playlists');
+          const smarts = await api('GET', '/smart').catch(() => []);
           if (state.view !== 'playlists') return;
           main.innerHTML = pageHead('Playlists', state.playlists.length) + `
             <div class="toolbar"><input class="input" id="plname" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button><label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label></div>
             <div class="toolbar"><input class="input" id="plshared" placeholder="Paste a pubky:// link to a shared playlist, or a Pubky key" style="flex:1;min-width:240px"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
-            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : emptyState('playlist', 'No playlists yet', 'Create one, import a file from another player, or add tracks from any list.'));
+            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : emptyState('playlist', 'No playlists yet', 'Create one, import a file from another player, or add tracks from any list.'))
+            + `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`;
+          $('#smartnew').onclick = () => setView('smart-edit', 'new');
+          $$('[data-smart]', main).forEach((r) => r.onclick = () => setView('smart', r.dataset.smart));
           $('#plcreate').onclick = async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
@@ -2166,7 +2392,7 @@
           const songs = sp.play_from.items.map((r, k) => { const lib = r.plays_from && r.plays_from.service === 'library'; return { no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || r.uri, id: idOf(r.uri), plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services') }; });
           const playable = songs.filter((t) => !t.unavailable);
           const chip = (t) => t.unavailable ? `<span class="chip srcchip none" title="${esc(t.unavailable)}">${icon('close')}<span>Unavailable</span></span>` : t.plays ? `<span class="chip srcchip${t.pinned ? ' pinned' : ''}" title="${esc(t.plays.label)}${t.pinned ? ' · the author’s pick' : ''}">${svcBadge(t.plays.service)}<span>${esc(srcName(t.plays.service))}</span>${t.pinned ? icon('pin') : ''}</span>` : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero"><div class="art placeholder" style="background:hsl(${hue(sp.summary.name)} 35% 28%);border-radius:12px"></div><div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${songs.length} song${songs.length === 1 ? '' : 's'} · ${playable.length} play here</p>
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${songs.length} song${songs.length === 1 ? '' : 's'} · ${playable.length} play here</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('external')} Copy link</button></div></div></div>`
             + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This playlist is empty', '')}</section>`
             + (sp.summary.description ? `<section class="section"><div class="section-head"><h3>About</h3></div><p>${esc(sp.summary.description)}</p></section>` : '');
@@ -2209,7 +2435,7 @@
           const summaryBar = pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songs.length} song${songs.length === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const ownOrder = pf && pf.own_order;
           const orderText = pf ? pf.order.order.map(srcName).join(' › ') : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero"><div class="art placeholder" style="background:hsl(${hue(d.summary.name)} 35% 28%);border-radius:12px"></div><div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songs.length + localSongs.length, 'songs')}${total ? ' · ' + mins(total) : ''}</p>
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songs.length + localSongs.length, 'songs')}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
@@ -2313,11 +2539,13 @@
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
               + (cur.id === 'bandcamp' ? '<div id="bcmode"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div>' : '')
+              + (cur.id === 'soundcloud' ? '<div id="scmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2334,9 +2562,9 @@
             if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
             if (u.enabled || u.signed_in || u.client_from) {
               rows.push(u.client_from
-                ? row('Device client', u.client_from === 'config' ? 'Set in the node config.' : 'Set here. TIDAL can stop accepting a client at any time; then enter another one.', `<button class="btn ghost sm" id="tfclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget</button>' : ''}`)
+                ? row('Device client', u.client_from === 'builtin' ? 'Built in (python-tidal\u2019s device client). TIDAL can stop accepting it at any time; then enter another one.' : u.client_from === 'config' ? 'Set in the node config.' : 'Set here. A developer-portal app won\u2019t work here, only a device client. TIDAL can stop accepting a client at any time; then enter another one.', `<button class="btn ghost sm" id="tfclientchange">Change</button>${u.client_from === 'settings' ? `<button class="btn ghost sm" id="tfclientforget">${u.builtin ? 'Use built-in' : 'Forget'}</button>` : ''}`)
                 : '');
-              rows.push(`<form class="set-row set-block" id="tfclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Device client</div>${help('The node has no built-in device client: enter a TIDAL device client id and secret you are allowed to use. Until you do, Full tracks stays off. The node keeps them like a sign-in.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Client secret" autocomplete="off" aria-label="Device client secret"><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(`<form class="set-row set-block" id="tfclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Device client</div>${help(u.builtin ? 'Enter a TIDAL device client id and secret of your own to use instead of the built-in one. An app from TIDAL\u2019s developer portal won\u2019t work here: it is not a device client. The node keeps them like a sign-in.' : 'The node has no built-in device client: enter a TIDAL device client id and secret you are allowed to use. An app from TIDAL\u2019s developer portal won\u2019t work here: it is not a device client. Until you enter one, Full tracks stays off. The node keeps them like a sign-in.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Client secret" autocomplete="off" aria-label="Device client secret"><button class="btn" type="submit">Save</button></div></div></form>`);
               if (u.signed_in) rows.push(row('Signed in', `TIDAL account${u.user ? ' ' + esc(u.user) : ''}, through the device sign-in.`, '<button class="btn ghost sm" id="tfout">Sign out</button>'));
               else if (u.pending) rows.push(block('Sign in', 'On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.', `<div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(u.pending.uri)}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`));
               else if (u.client_from) rows.push(row('Sign in', 'With a code you enter at link.tidal.com; no password goes through this node.', '<button class="btn primary" id="tfin">Sign in with a code</button>'));
@@ -2350,7 +2578,7 @@
             const tq = $('#tfq'); if (tq) tq.onchange = () => put({ quality: tq.value }, 'Quality saved');
             const cf = $('#tfclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); const f = new FormData(cf); put({ client_id: f.get('id'), client_secret: f.get('secret') }, 'Device client saved'); };
             const cc = $('#tfclientchange'); if (cc) cc.onclick = () => { cf.hidden = false; cf.querySelector('input').focus(); };
-            const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = () => put({ client_id: '' }, 'Device client forgotten');
+            const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = () => put({ client_id: '' }, u.builtin ? 'Using the built-in device client' : 'Device client forgotten');
             const ti2 = $('#tfin'); if (ti2) ti2.onclick = async () => { ti2.disabled = true; try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } fillTidalFull(); };
             const tout = $('#tfout'); if (tout) tout.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); } catch (e) { toast(e.message, 'error'); } fillTidalFull(); };
             if (u.pending) state.tidalFullPoll = setTimeout(async () => { const was = u.signed_in; await fillTidalFull(); if (!was && tf.querySelector('#tfout')) toast('TIDAL full tracks signed in'); }, 3000);
@@ -2450,6 +2678,92 @@
               } catch (e) { box.innerHTML = `<p class="muted small">Bandcamp collection: ${esc(e.message)}</p>`; }
             };
             draw();
+          }
+          const slo = $('#spotsoloist');
+          const fillSoloist = async () => {
+            if (!slo || !slo.isConnected) return;
+            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; return; }
+            if (!slo.isConnected) return;
+            const b = u.soloist;
+            const rows = [row('Spotify Soloist', esc(u.note), `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
+            if (!u.supported) rows.push('<div class="notice">Spotify Soloist runs on Linux and macOS only, so this node can’t start it.</div>');
+            else {
+              if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="slretry">Try again</button></div></div>`);
+              if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
+              const stateText = !u.running ? (u.enabled ? 'Not running.' : 'Off.') : u.paired === false ? `Running as “${esc(u.device_name)}”. Nobody has picked it yet: open a Spotify app on this network, choose this device from the device picker and press play.` : u.paired ? `Running as “${esc(u.device_name)}”, paired with a Spotify account.` : `Starting as “${esc(u.device_name)}”…`;
+              rows.push(row('Status', stateText, u.running ? '<span class="pill ok">Running</span><button class="btn ghost sm" id="slrestart">Restart</button>' : u.enabled ? '<span class="pill">Waiting</span>' : '<span class="pill">Off</span>'));
+              if (u.running && u.now && u.now.title) {
+                const n = u.now; const who = [n.artists.join(', '), n.album].filter(Boolean).join(' · ');
+                rows.push(row(n.status === 'paused' ? 'Paused' : n.status === 'playing' ? 'Playing on this machine' : 'Loaded', `${esc(n.title)}${who ? ' · ' + esc(who) : ''}${n.volume != null ? ` · volume ${n.volume}` : ''}`, `<button class="btn ghost sm" id="slprev" aria-label="Previous">${icon('prev')}</button><button class="btn sm" id="sltoggle">${n.status === 'playing' ? 'Pause' : 'Play'}</button><button class="btn ghost sm" id="slnext" aria-label="Next">${icon('next')}</button>`));
+              }
+              rows.push(`<form class="set-row set-block" id="slkey"><div class="set-label"><div class="set-name">Your Soloist API key</div>${help('Each person makes their own key, with a Spotify Premium account, at developer.spotify.com › Dashboard › Spotify Soloist API Key (accept Spotify’s terms, then Generate). The node keeps it like a sign-in and never shows it again. Soloist takes the key only on its command line, so other users of this machine can see it while Soloist runs.')}</div><div class="set-body"><div class="toolbar">${u.key_set ? `<span class="pill ok">Saved</span><button type="button" class="btn ghost sm" id="slkeychange">Change</button><button type="button" class="btn ghost sm" id="slkeyforget">Forget</button>` : ''}<input class="input" name="key" type="password" placeholder="Soloist API key" autocomplete="off" spellcheck="false" aria-label="Spotify Soloist API key" ${u.key_set ? 'hidden' : 'required'}><button class="btn" type="submit" ${u.key_set ? 'hidden' : ''}>Save</button></div></div></form>`);
+              rows.push(`<form class="set-row set-block" id="sldev"><div class="set-label"><div class="set-name">Device</div>${help('The name Spotify apps show for this machine, and, with PipeWire, which output Soloist uses (a node name or id; empty means the system default).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" placeholder="Device name" maxlength="64" autocomplete="off" aria-label="Spotify Connect device name" value="${esc(u.device_name)}"><input class="input" name="pw" placeholder="PipeWire output (optional)" autocomplete="off" spellcheck="false" aria-label="PipeWire output" value="${esc(u.pipewire_device || '')}"><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(b
+                ? row('Soloist', `${esc(b.version ? b.version : 'Found')}: ${b.from === 'downloaded' ? `downloaded by this node${u.downloaded_at ? ' on ' + new Date(u.downloaded_at * 1000).toLocaleDateString() : ''}` : b.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(b.path)}</code>). Spotify’s builds stop working 90 days after they were made.`, b.from === 'downloaded' ? '<button class="btn ghost sm" id="slupdate">Update</button><button class="btn ghost sm" id="slremove">Remove</button>' : '')
+                : row('Soloist', u.can_download ? 'The node downloads Spotify’s build for this machine from Spotify’s own servers, when you ask. Spotify publishes no checksums; the node checks that the download runs. By using it you accept Spotify’s Terms and Conditions of Use.' : 'Spotify offers no build for this machine here. Install Soloist yourself and point <code>[spotify] soloist</code> in the node config at it, then reload this page.', u.can_download ? '<button class="btn primary sm" id="slget">Download Soloist</button>' : ''));
+            }
+            slo.innerHTML = group('Play on this machine', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/soloist', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#slon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Spotify Soloist is on' : 'Spotify Soloist is off');
+            const sr = $('#slretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Starting Spotify Soloist again');
+            const srs = $('#slrestart'); if (srs) srs.onclick = () => put({ enabled: true }, 'Restarting Spotify Soloist');
+            const kf = $('#slkey'); if (kf) kf.onsubmit = (e) => { e.preventDefault(); put({ api_key: String(new FormData(kf).get('key') || '').trim() }, 'Soloist API key saved'); };
+            const kc = $('#slkeychange'); if (kc) kc.onclick = () => { kf.querySelectorAll('[hidden]').forEach((x) => { x.hidden = false; }); kc.hidden = true; kf.querySelector('input').focus(); };
+            const kg = $('#slkeyforget'); if (kg) kg.onclick = () => put({ api_key: '' }, 'Soloist API key forgotten');
+            const df = $('#sldev'); if (df) df.onsubmit = (e) => { e.preventDefault(); const f = new FormData(df); put({ device_name: String(f.get('name') || '').trim(), pipewire_device: String(f.get('pw') || '').trim() }, 'Device saved'); };
+            const get = async (btn, msg) => { btn.disabled = true; btn.textContent = 'Downloading…'; try { await api('POST', '/sources/spotify/soloist/binary'); toast(msg); } catch (er) { toast(er.message, 'error'); } render(); };
+            const sg = $('#slget'); if (sg) sg.onclick = () => get(sg, 'Soloist downloaded');
+            const su = $('#slupdate'); if (su) su.onclick = () => get(su, 'Soloist updated');
+            const sv = $('#slremove'); if (sv) sv.onclick = async () => { try { await api('DELETE', '/sources/spotify/soloist/binary'); toast('Soloist removed'); } catch (er) { toast(er.message, 'error'); } render(); };
+            const ctl = async (command) => { try { await api('POST', '/sources/spotify/soloist/control', { command }); } catch (er) { toast(er.message, 'error'); } render(); };
+            const st = $('#sltoggle'); if (st) st.onclick = () => ctl(u.now && u.now.status === 'playing' ? 'pause' : 'play');
+            const sp = $('#slprev'); if (sp) sp.onclick = () => ctl('prev');
+            const sn = $('#slnext'); if (sn) sn.onclick = () => ctl('next');
+          };
+          fillSoloist();
+          const scm = $('#scmode');
+          const fillSoundCloud = async () => {
+            if (!scm || !scm.isConnected) return;
+            let u; try { u = await api('GET', '/sources/soundcloud/unofficial'); } catch (e) { scm.innerHTML = ''; return; }
+            if (!scm.isConnected) return;
+            const broke = u.health && !u.health.ok;
+            const rows = [row('SoundCloud (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
+            if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. SoundCloud links still open on soundcloud.com.<div class="actions"><button class="btn sm" id="scretry">Try again</button></div></div>`);
+            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here. SoundCloud can stop accepting a client at any time; then enter another one.'}`, `<button class="btn ghost sm" id="scclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
+            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('The node has no built-in SoundCloud client and reads none off soundcloud.com: enter a SoundCloud web client ID you are allowed to use. Until you do, SoundCloud stays off.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
+            if (u.client_from) {
+              rows.push(u.signed_in
+                ? row('Signed in', `Your likes and playlists come from SoundCloud account ${esc(u.user || '')}. The token stays on the node and never comes back.`, '<button class="btn ghost sm" id="sctokenforget">Sign out</button>')
+                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it like a sign-in; it never shows it again. Without it, search and playback still work.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(row('Streams', 'MP3 as SoundCloud serves it, progressive or stitched from HLS. Tracks SoundCloud encrypts (Go+) are skipped; a track SoundCloud only snips plays its 30-second preview.', ''));
+              if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+            }
+            scm.innerHTML = group('Unofficial mode', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/soundcloud/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#scon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'SoundCloud is on' : 'SoundCloud is off');
+            const sr = $('#scretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Trying SoundCloud again');
+            const cf = $('#scclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); put({ client_id: String(new FormData(cf).get('id') || '').trim() }, 'SoundCloud client saved'); };
+            const cc = $('#scclientchange'); if (cc) cc.onclick = () => { cf.hidden = false; cf.querySelector('input').focus(); };
+            const cg = $('#scclientforget'); if (cg) cg.onclick = () => put({ client_id: '' }, 'SoundCloud client forgotten');
+            const tf = $('#sctoken'); if (tf) tf.onsubmit = (e) => { e.preventDefault(); put({ token: String(new FormData(tf).get('token') || '').trim() }, 'Signed in to SoundCloud'); };
+            const tg = $('#sctokenforget'); if (tg) tg.onclick = () => put({ token: '' }, 'Signed out of SoundCloud');
+          };
+          fillSoundCloud();
+          if (cur.id === 'soundcloud' && cur.enabled && cur.status === 'signed in') {
+            // Your likes and playlists, with imports into favourites and Pubky playlists.
+            const box = document.createElement('div'); box.id = 'scmine'; box.innerHTML = '<p class="muted small">Loading your SoundCloud likes…</p>'; ($('#srcmine') || main).appendChild(box);
+            (async () => {
+              try {
+                const [likes, pls] = await Promise.all([api('GET', '/sources/soundcloud/likes'), api('GET', '/sources/soundcloud/playlists')]);
+                if (state.view !== 'sources' || state.sourceId !== 'soundcloud' || !box.isConnected) return;
+                const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind === 'item' ? 'set' : h.kind)}</span></div>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your likes</h3><span class="muted small">${countOf(likes.tracks.length, 'tracks')} · ${countOf(likes.playlists.length, 'sets')}</span><button class="btn sm" id="scfav" title="Favourite them here too, by their SoundCloud link">${icon('heart')} Import as favourites</button></div>${likes.tracks.length || likes.playlists.length ? `<div class="list">${likes.playlists.slice(0, 20).map(hit).join('')}${likes.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing liked on SoundCloud yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-scpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No sets of your own on SoundCloud.</p>'}</section>`;
+                $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'soundcloud', id: b.dataset.sitem }));
+                $('#scfav').onclick = async () => { try { const r = await api('POST', '/sources/soundcloud/likes/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+                $$('[data-scpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'soundcloud', b.dataset.scpl));
+              } catch (e) { box.innerHTML = `<p class="muted small">SoundCloud likes: ${esc(e.message)}</p>`; }
+            })();
           }
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
@@ -2682,7 +2996,7 @@
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && !isBrowser() && zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).length ? `<button class="btn" id="qtransfer" title="Move this queue and position to another zone">${icon('zone')} Transfer…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${fmt(it.duration_ms)}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
             if (isBrowser()) {
@@ -3150,7 +3464,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); findJob(); api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {

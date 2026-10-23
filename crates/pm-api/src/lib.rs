@@ -45,6 +45,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod listenbrainz;
+pub mod lrclib;
 pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
@@ -64,6 +65,9 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod shared;
+pub mod smart;
+pub mod soloist;
+pub mod soundcloud;
 pub mod sources;
 pub mod spotify;
 pub mod state;
@@ -203,6 +207,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/tracks", get(tracks))
         .route("/library/tracks/{id}", get(track))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/lyrics", get(lrclib::get))
         .route("/library/tracks/{id}/versions", get(track_versions))
         .route("/library/albums/{id}/versions", get(album_versions))
         .route("/backup", get(backup::get_backup).post(backup::post_backup))
@@ -292,6 +297,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/search", get(search::search))
         .route("/search/tags", get(search::tag_suggestions))
         .route("/home/location", get(home::get_location).put(home::set_location))
+        .route("/home/layout", get(home::get_layout).put(home::set_layout))
+        .route("/smart", get(smart::list).post(smart::create))
+        .route("/smart/preview", post(smart::preview))
+        .route(
+            "/smart/{id}",
+            axum::routing::put(smart::update).delete(smart::delete),
+        )
+        .route("/smart/{id}/tracks", get(smart::tracks))
         .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
         .route(
@@ -369,6 +382,27 @@ pub fn router(state: Arc<NodeState>) -> Router {
             post(bandcamp::download),
         )
         .route("/sources/bandcamp/downloads", get(bandcamp::downloads))
+        .route(
+            "/sources/spotify/soloist",
+            get(soloist::get_status).put(soloist::put),
+        )
+        .route(
+            "/sources/spotify/soloist/binary",
+            post(soloist::install).delete(soloist::uninstall),
+        )
+        .route("/sources/spotify/soloist/control", post(soloist::control))
+        .route("/sources/soundcloud/stream/{id}", get(soundcloud::stream))
+        .route(
+            "/sources/soundcloud/unofficial",
+            get(soundcloud::get_status).put(soundcloud::put),
+        )
+        .route("/sources/soundcloud/likes", get(soundcloud::likes))
+        .route("/sources/soundcloud/likes/import", post(soundcloud::import_likes))
+        .route("/sources/soundcloud/playlists", get(soundcloud::playlists))
+        .route(
+            "/sources/soundcloud/playlists/{id}/import",
+            post(soundcloud::import_playlist),
+        )
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -549,6 +583,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/artist/{id}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
         .route("/person/{id}", get(web_ui))
+        .route("/smart/{id}", get(web_ui))
         .route("/shared/{user}", get(web_ui))
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
@@ -1674,7 +1709,22 @@ pub(crate) async fn album_versions(
 
 /// Lyrics from the file's tags or a sidecar `.lrc`; 404 when the track has none.
 async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Lyrics> {
-    let found = s.library.lock().expect("library poisoned").lyrics(TrackId(id))?;
+    let (found, track) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (lib.lyrics(TrackId(id))?, lib.get_track(TrackId(id))?)
+    };
+    // None in the file or beside it: LRCLIB, by title, artist, album and length
+    let found = match (found, track) {
+        (Some(f), _) => Some(f),
+        (None, Some(t)) => {
+            let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+            let album = t.album.as_ref().map(|a| a.title.clone());
+            lrclib::find(&s, &t.title, &artist, album.as_deref(), t.duration_ms)
+                .await
+                .map(|(text, _)| (text, "lrclib".to_string()))
+        }
+        _ => None,
+    };
     let Some((text, source)) = found else {
         return Err(ApiError::not_found(format!("no lyrics for track {id}")));
     };
@@ -1966,12 +2016,28 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
 async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<HomePage> {
     let limit = p.limit.unwrap_or(12).min(100);
     let lib = s.library.lock().expect("library poisoned");
-    let favourite_albums = favourites::collect(&lib)?
-        .albums
+    let favs = favourites::collect(&lib)?;
+    let favourite_albums = favs.albums.into_iter().take(limit as usize).collect();
+    // Forgotten favourites: hearted, then not played for two months
+    let cutoff = pm_library::db::now_unix() - 60 * 86_400;
+    let mut forgotten: Vec<(i64, pm_model::Track)> = favs
+        .tracks
         .into_iter()
+        .filter_map(|t| {
+            let last =
+                t.id.and_then(|id| lib.last_played(id).ok().flatten())
+                    .unwrap_or(0);
+            (last < cutoff).then_some((last, t))
+        })
+        .collect();
+    forgotten.sort_by_key(|(last, _)| *last);
+    let forgotten = forgotten
+        .into_iter()
+        .map(|(_, t)| t)
         .take(limit as usize)
         .collect();
     Ok(Json(HomePage {
+        forgotten,
         favourite_albums,
         recently_added: lib.recent_albums(0, limit)?,
         recently_played: lib.recently_played_albums(limit)?,
@@ -3043,8 +3109,12 @@ mod tests {
             .route(
                 "/v1/oauth2/device_authorization",
                 post(|body: String| async move {
+                    // An app from TIDAL's developer portal gets TIDAL's refusal
+                    if body.contains("client_id=portal-app") {
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid_request", "error_description": "Client is not a Limited Input Device client"})));
+                    }
                     assert!(body.contains("client_id=dev-id"), "{body}");
-                    Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1}))
+                    (StatusCode::OK, Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1})))
                 }),
             )
             .route(
@@ -3102,6 +3172,17 @@ mod tests {
         assert!(st["warning"].as_str().unwrap().contains("not approved"));
         let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
         assert_eq!(st, StatusCode::BAD_GATEWAY, "no device client yet: {r}");
+        // A developer-portal app is not a device client: plain words, not TIDAL's raw error
+        let (_, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "portal-app", "client_secret": "portal-secret"})),
+        )
+        .await;
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert_eq!(r["error"], tidal_unofficial::NOT_A_DEVICE_CLIENT, "{r}");
         let (_, r) = call(
             &app,
             "PUT",
@@ -6285,6 +6366,181 @@ mod tests {
         assert_eq!(op["faces"]["chill"], serde_json::json!([A, B]), "{op}");
     }
 
+    /// Smart playlists (UX review #9): rules over genre, year, favourites, plays and your tags,
+    /// all or any, previewed while editing, saved, and worked out again each time.
+    #[tokio::test]
+    async fn smart_playlists_pick_songs_by_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let ids: Vec<i64> = {
+            let lib = s.library.lock().unwrap();
+            let mut out = Vec::new();
+            for (i, (title, genre, year)) in [
+                ("Calm", "Ambient", 1995),
+                ("Fast", "Techno", 2020),
+                ("Faster", "Techno", 2005),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut t = untagged_track(dir.path().join(format!("{i}.flac")), title, "Someone");
+                t.genres = vec![genre.to_string()];
+                t.album = Some(pm_model::Album {
+                    id: None,
+                    title: format!("Album {i}"),
+                    album_artist: Some("Someone".into()),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: Some(*year),
+                    upc: None,
+                    total_discs: None,
+                });
+                t.canonical = Some((
+                    pm_model::MusicUri::Isrc {
+                        isrc: pm_model::Isrc::parse(&format!("USAAA111111{i}")).unwrap(),
+                    },
+                    pm_model::Confidence::TaggedIsrc,
+                ));
+                out.push(lib.upsert_track(&t).unwrap().0);
+            }
+            lib.record_play(TrackId(out[2]), Some("z")).unwrap();
+            lib.record_play(TrackId(out[2]), Some("z")).unwrap();
+            out
+        };
+        let app = router(s.clone());
+        call(
+            &app,
+            "PUT",
+            "/v1/favourites",
+            Some(serde_json::json!({"track_id": ids[1]})),
+        )
+        .await;
+        call(
+            &app,
+            "PUT",
+            "/v1/tags",
+            Some(serde_json::json!({"track_id": ids[0], "label": "sleep"})),
+        )
+        .await;
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["title"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": [{"field": "genre", "op": "is", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"rules": [{"field": "genre", "value": "techno"}, {"field": "favourite", "value": true}]}))).await;
+        assert_eq!(titles(&r), ["Fast"], "all rules");
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"matches": "any", "rules": [{"field": "tag", "value": "#sleep"}, {"field": "plays", "op": "at_least", "value": 2}]}))).await;
+        assert_eq!(titles(&r), ["Calm", "Faster"], "any rule");
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(
+                serde_json::json!({"rules": [{"field": "year", "op": "between", "value": 2000, "to": 2010}]}),
+            ),
+        )
+        .await;
+        assert_eq!(titles(&r), ["Faster"]);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": []})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, p) = call(&app, "POST", "/v1/smart", Some(serde_json::json!({"name": "Techno", "rules": [{"field": "genre", "value": "techno"}], "sort": "most_played"}))).await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        let id = p["id"].as_str().unwrap().to_string();
+        let (_, list) = call(&app, "GET", "/v1/smart", None).await;
+        assert_eq!(list[0]["name"], "Techno");
+        let (_, t) = call(&app, "GET", &format!("/v1/smart/{id}/tracks"), None).await;
+        assert_eq!(t["tracks"][0]["title"], "Faster", "most played first: {t}");
+        assert_eq!(t["matched"], 2);
+        let (st, _) = call(&app, "DELETE", &format!("/v1/smart/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, list) = call(&app, "GET", "/v1/smart", None).await;
+        assert!(list.as_array().unwrap().is_empty());
+    }
+
+    /// Lyrics from LRCLIB for a streamed song and for a library song without its own; a song
+    /// LRCLIB doesn't know answers 404 and is asked about once.
+    #[tokio::test]
+    async fn lyrics_come_from_lrclib_when_the_files_have_none() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a2 = asked.clone();
+        let mock = Router::new().route(
+            "/api/get",
+            get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                a2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if q.get("track_name").map(String::as_str) == Some("Known Song") {
+                        (StatusCode::OK, Json(serde_json::json!({"syncedLyrics": "[00:01.00]First\n[00:03.50]Second", "plainLyrics": "First\nSecond"})))
+                    } else {
+                        (StatusCode::NOT_FOUND, Json(serde_json::json!({"message": "not found"})))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        crate::lrclib::set_base(&format!("http://127.0.0.1:{port}"));
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(
+                dir.path().join("k.flac"),
+                "Known Song",
+                "Someone",
+            ))
+            .unwrap()
+            .0
+        };
+        let app = router(s.clone());
+        let (st, l) = call(
+            &app,
+            "GET",
+            "/v1/lyrics?title=Known%20Song&artist=Someone&duration_ms=200000",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(
+            (l["source"].as_str(), l["synced"].as_bool()),
+            (Some("lrclib"), Some(true))
+        );
+        assert_eq!(l["lines"][1]["ms"], 3500);
+        let (st, l) = call(&app, "GET", &format!("/v1/library/tracks/{tid}/lyrics"), None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(l["source"], "lrclib");
+        let (st, _) = call(&app, "GET", "/v1/lyrics?title=Nothing&artist=Nobody", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let before = asked.load(std::sync::atomic::Ordering::SeqCst);
+        call(&app, "GET", "/v1/lyrics?title=Nothing&artist=Nobody", None).await;
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a none is kept too"
+        );
+    }
+
     /// One search, streamed per source: the library answers first, a slow
     /// source still arrives, a failing one reports itself without holding
     /// the others back, and a second ask comes from the cache.
@@ -7416,6 +7672,580 @@ mod tests {
         )
         .await;
         assert_eq!(k["set"], false);
+    }
+
+    /// SoundCloud (unofficial): with a client ID the owner entered, search, a set page, likes and
+    /// playlists with the owner's token, and streams (progressive MP3 for one track, HLS stitched
+    /// for another) from a stand-in api-v2; a refused client switches the mode off.
+    #[tokio::test]
+    async fn soundcloud_searches_and_streams_from_a_mock() {
+        use pm_zones::SourceFactory;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = {
+            let refuse = refuse.clone();
+            move |q: &str| -> Option<StatusCode> {
+                if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Some(StatusCode::UNAUTHORIZED);
+                }
+                (!q.contains("client_id=sc-client-0123456789abcdef")).then_some(StatusCode::UNAUTHORIZED)
+            }
+        };
+        let tr = |id: u64, title: &str, kind: &str| {
+            let media = match kind {
+                "progressive" => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/progressive"), "preset": "mp3_1_0", "format": {"protocol": "progressive", "mime_type": "audio/mpeg"}}])
+                }
+                "hls" => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/hls"), "preset": "mp3_1_0", "format": {"protocol": "hls", "mime_type": "audio/mpeg"}}])
+                }
+                _ => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/enc"), "preset": "aac_256k", "format": {"protocol": "encrypted-hls", "mime_type": "audio/mp4"}}])
+                }
+            };
+            serde_json::json!({"id": id, "kind": "track", "title": title, "policy": "ALLOW", "permalink_url": format!("https://soundcloud.com/someone/{}", title.to_lowercase().replace(' ', "-")),
+                "duration": 60000, "artwork_url": "https://i1.sndcdn.com/artworks-large.jpg", "created_at": "2024-03-02T10:00:00Z", "playback_count": 7,
+                "user": {"username": "Someone"}, "track_authorization": "auth-1", "media": {"transcodings": media}})
+        };
+        let t1 = tr(1, "Night Drive", "progressive");
+        let t2 = tr(2, "Sunrise", "hls");
+        let t3 = tr(3, "Locked", "encrypted");
+        let set = serde_json::json!({"id": 9, "kind": "playlist", "title": "Late Set", "permalink_url": "https://soundcloud.com/someone/sets/late-set", "user": {"username": "Someone"},
+            "track_count": 2, "tracks": [t1.clone(), {"id": 2, "kind": "track"}]});
+        let mk = |v: serde_json::Value| {
+            let gate = gate.clone();
+            move |q: axum::extract::RawQuery| {
+                let v = v.clone();
+                let gate = gate.clone();
+                async move {
+                    match gate(q.0.as_deref().unwrap_or("")) {
+                        Some(st) => (st, Json(serde_json::json!({"error": "no"}))),
+                        None => (StatusCode::OK, Json(v)),
+                    }
+                }
+            }
+        };
+        let half = flac.len() / 2;
+        let (seg1, seg2) = (flac[..half].to_vec(), flac[half..].to_vec());
+        let mock = Router::new()
+            .route("/search/tracks", get(mk(serde_json::json!({"collection": [t1.clone(), t2.clone(), t3.clone()], "next_href": null}))))
+            .route("/search/playlists", get(mk(serde_json::json!({"collection": [set.clone()]}))))
+            .route("/resolve", get(mk(t2.clone())))
+            .route("/tracks/1", get(mk(t1.clone())))
+            .route("/tracks/2", get(mk(t2.clone())))
+            .route("/tracks/3", get(mk(t3.clone())))
+            .route("/tracks", get(mk(serde_json::json!([t2.clone()]))))
+            .route("/playlists/9", get(mk(set.clone())))
+            .route("/me", get({
+                let g = gate.clone();
+                move |q: axum::extract::RawQuery, h: axum::http::HeaderMap| {
+                    let g = g.clone();
+                    async move {
+                        let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                        if g(q.0.as_deref().unwrap_or("")).is_some() || auth != "OAuth tok-0123456789" {
+                            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "bad token"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"id": 77, "username": "Someone", "permalink": "someone"})))
+                    }
+                }
+            }))
+            .route("/users/77/likes", get(mk(serde_json::json!({"collection": [{"track": t1.clone()}, {"playlist": set.clone()}], "next_href": null}))))
+            .route("/users/77/playlists", get(mk(serde_json::json!({"collection": [set.clone()], "next_href": null}))))
+            .route("/media/1/progressive", get(mk(serde_json::json!({"url": format!("{base}/cdn/1.mp3")}))))
+            .route("/media/2/hls", get(mk(serde_json::json!({"url": format!("{base}/cdn/2.m3u8")}))))
+            .route("/cdn/1.mp3", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/cdn/2.m3u8", get({ let b = base.clone(); move || { let b = b.clone(); async move { format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:30\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:30.0,\n{b}/cdn/seg/1\n#EXTINF:30.0,\n{b}/cdn/seg/2\n#EXT-X-ENDLIST\n") } } }))
+            .route("/cdn/seg/1", get({ let f = seg1.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/cdn/seg/2", get({ let f = seg2.clone(); move || { let f = f.clone(); async move { f } } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        soundcloud::set_api_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // Not configured: no client yet; the everyday search leaves it out
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert!(
+            sc["status"].as_str().unwrap().starts_with("not configured"),
+            "{sc}"
+        );
+        let (st, _) = call(&app, "GET", "/v1/sources/soundcloud/search?q=night", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": "short"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": "sc-client-0123456789abcdef", "enabled": true})),
+        )
+        .await;
+        assert_eq!(
+            (
+                u["enabled"].clone(),
+                u["client_from"].clone(),
+                u["signed_in"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!("settings"),
+                serde_json::json!(false)
+            )
+        );
+        assert!(crate::search::sources_for(&s, "everywhere").contains(&"soundcloud".to_string()));
+        // Search: sets first, then tracks; a pasted link resolves
+        let (st, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/soundcloud/search?q=night&limit=10",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(
+            (items[0]["id"].as_str(), items[0]["kind"].as_str()),
+            (Some("playlist:9"), Some("item"))
+        );
+        assert_eq!(items[1]["uri"], "soundcloud:track:1");
+        assert_eq!(items[1]["url"], "https://soundcloud.com/someone/night-drive");
+        let (_, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/soundcloud/search?q=https%3A%2F%2Fsoundcloud.com%2Fsomeone%2Fsunrise",
+            None,
+        )
+        .await;
+        assert_eq!(r["items"][0]["uri"], "soundcloud:track:2");
+        // A set page: the stub track is fetched; the encrypted track says so on its own page
+        let (_, it) = call(&app, "GET", "/v1/sources/soundcloud/items/playlist:9", None).await;
+        assert_eq!(it["tracks"].as_array().unwrap().len(), 2, "{it}");
+        assert_eq!(it["tracks"][1]["url"], "soundcloud:track:2");
+        assert_eq!(it["tracks"][1]["format"], "MP3 (SoundCloud, HLS)");
+        let (_, it) = call(&app, "GET", "/v1/sources/soundcloud/items/track:3", None).await;
+        assert!(
+            it["tracks"][0]["format"]
+                .as_str()
+                .unwrap()
+                .contains("not playable"),
+            "{it}"
+        );
+        // Streams: progressive for browsers and zones, HLS stitched for both; encrypted refused
+        let req = Request::builder()
+            .uri("/v1/sources/soundcloud/stream/1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "audio/mpeg");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.len(), flac.len());
+        let req = Request::builder()
+            .uri("/v1/sources/soundcloud/stream/2")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.to_vec(), flac, "HLS segments come back as the one file");
+        for id in ["1", "2"] {
+            let src = s.sources.clone();
+            let it = pm_zones::QueueItem::new(format!("soundcloud:track:{id}"));
+            let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+                .await
+                .unwrap();
+            assert!(r.is_ok(), "track {id}: {r:?}");
+        }
+        let src = s.sources.clone();
+        let it = pm_zones::QueueItem::new("soundcloud:track:3");
+        let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+            .await
+            .unwrap();
+        assert!(
+            r.unwrap_err().contains("Go+"),
+            "encrypted tracks are refused, never decrypted"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(u["health"]["ok"], true, "{u}");
+        // The owner's token: checked with `me`; a wrong one is dropped
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"token": "wrong-token-123"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(
+            (u["signed_in"].clone(), u["enabled"].clone()),
+            (serde_json::json!(false), serde_json::json!(true)),
+            "a bad token doesn't switch the mode off: {u}"
+        );
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"token": "tok-0123456789"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(
+            (u["signed_in"].clone(), u["user"].clone()),
+            (serde_json::json!(true), serde_json::json!("Someone"))
+        );
+        assert!(
+            !u.to_string().contains("tok-0123456789"),
+            "the token never comes back: {u}"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert_eq!(sc["status"], "signed in");
+        // Likes and playlists, and their imports
+        let (st, l) = call(&app, "GET", "/v1/sources/soundcloud/likes", None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(
+            (
+                l["tracks"].as_array().unwrap().len(),
+                l["playlists"].as_array().unwrap().len()
+            ),
+            (1, 1)
+        );
+        let (_, r) = call(&app, "POST", "/v1/sources/soundcloud/likes/import", None).await;
+        assert_eq!(
+            (r["imported"].clone(), r["skipped"].clone()),
+            (serde_json::json!(2), serde_json::json!(0)),
+            "{r}"
+        );
+        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        assert!(
+            favs.to_string().contains("soundcloud.com/someone/night-drive"),
+            "{favs}"
+        );
+        let (_, pls) = call(&app, "GET", "/v1/sources/soundcloud/playlists", None).await;
+        assert_eq!(
+            (pls[0]["id"].clone(), pls[0]["items"].clone()),
+            (serde_json::json!("9"), serde_json::json!(2))
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/soundcloud/playlists/9/import?keep_source=true",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["imported"], 2);
+        assert_eq!(r["playlist"]["summary"]["name"], "Late Set");
+        // SoundCloud refuses the client: the mode switches itself off and says why
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (st, r) = call(&app, "GET", "/v1/sources/soundcloud/search?q=night", None).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{r}");
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(u["enabled"], false);
+        assert!(
+            u["health"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("refused the client ID"),
+            "{u}"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert!(sc["status"].as_str().unwrap().starts_with("error:"), "{sc}");
+        assert!(!crate::search::sources_for(&s, "everywhere").contains(&"soundcloud".to_string()));
+        // Try again (on) with SoundCloud answering again
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert!(u["health"].is_null() && u["enabled"] == true, "{u}");
+        // Forget the client: back to not configured
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": ""})),
+        )
+        .await;
+        assert!(u["client_from"].is_null() && u["signed_in"] == false, "{u}");
+        assert!(backup::SECRET_SETTINGS
+            .iter()
+            .any(|(k, _)| *k == soundcloud::CLIENT_KEY));
+    }
+
+    /// Spotify Soloist: the node downloads Spotify's archive (a stand-in here) and unpacks it, runs
+    /// Soloist with the owner's key and the device name, reads what plays over `soloist ctl`, says
+    /// in plain words when the key is refused or the build has expired, and never returns the key.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spotify_soloist_runs_as_a_supervised_program() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // A stand-in soloist: --version; ctl (now --json, pause, play) through the data dir's
+        // ws.port; the daemon itself takes only the key "good-key", exits 10 when `expired` sits in
+        // its data dir, and otherwise stays up.
+        let fake = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "soloist 1.2.3 (build 2026-10-01)"; echo "x86_64-linux"; exit 0; fi
+if [ "$1" = "ctl" ]; then
+  shift; dir=""; cmd=""
+  while [ $# -gt 0 ]; do case "$1" in -D) dir="$2"; shift 2;; --json) shift;; *) cmd="$1"; shift;; esac; done
+  [ -f "$dir/ws.port" ] || exit 2
+  case "$cmd" in
+    now) [ -f "$dir/paired" ] || { echo "not logged in" >&2; exit 3; }
+         echo '{"type":"playback_state","status":"playing","volume":50,"is_active":true,"position":{"position_ms":1000,"timestamp_ms":1,"speed":1.0},"item":{"uri":"spotify:track:69kOkLUCkxIZYexIgSG8rq","entity_type":"track","decorations":{"identity":{"name":"Get Lucky"},"creators":[{"decorations":{"identity":{"name":"Daft Punk"}}}],"parent":{"entity":{"decorations":{"identity":{"name":"Random Access Memories"}}}},"playback":{"duration_ms":369000}}}}'; exit 0;;
+    pause|play|next|prev) echo "$cmd" >> "$dir/commands"; exit 0;;
+    *) exit 1;;
+  esac
+fi
+dir=""; key=""
+while [ $# -gt 0 ]; do case "$1" in -D|--data-dir) dir="$2"; shift 2;; -k|--api-key) key="$2"; shift 2;; *) shift;; esac; done
+[ "$key" = "good-key-0123456789abcdef" ] || { echo "error: Spotify rejected the API key $key" >&2; exit 1; }
+[ -f "$dir/expired" ] && { echo "Spotify Soloist build expired." >&2; exit 10; }
+echo 127.0.0.1 > "$dir/ws.addr"; echo 4242 > "$dir/ws.port"; echo $$ > "$dir/soloist.pid"
+exec sleep 300
+"#;
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("soloist_release")).unwrap();
+        std::fs::write(work.path().join("soloist_release/soloist"), fake).unwrap();
+        let tar = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(work.path().join("soloist.tar.gz"))
+            .arg("-C")
+            .arg(work.path())
+            .arg("soloist_release")
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let archive = std::fs::read(work.path().join("soloist.tar.gz")).unwrap();
+        let asset = if cfg!(target_arch = "aarch64") {
+            "soloist_release_arm64.tar.gz"
+        } else {
+            "soloist_release_x86_64.tar.gz"
+        };
+        let mock = Router::new().route(
+            &format!("/{asset}"),
+            get(move || {
+                let a = archive.clone();
+                async move { a }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        soloist::set_downloads_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let until = |pred: Box<dyn Fn(&serde_json::Value) -> bool>| {
+            let app = app.clone();
+            async move {
+                let mut last = serde_json::Value::Null;
+                for _ in 0..60 {
+                    let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+                    if pred(&u) {
+                        return u;
+                    }
+                    last = u;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                panic!("Soloist status never got there: {last}");
+            }
+        };
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+        assert_eq!(
+            (
+                u["supported"].clone(),
+                u["enabled"].clone(),
+                u["running"].clone(),
+                u["soloist"].clone(),
+                u["can_download"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::json!(false),
+                serde_json::Value::Null,
+                serde_json::json!(true)
+            ),
+            "{u}"
+        );
+        assert!(u["note"].as_str().unwrap().contains("not on the node's zones"));
+        // Download: the archive unpacks and the executable answers --version
+        let (st, u) = call(&app, "POST", "/v1/sources/spotify/soloist/binary", None).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(u["soloist"]["from"], "downloaded");
+        assert_eq!(u["soloist"]["version"], "soloist 1.2.3 (build 2026-10-01)");
+        // On without a key: it waits and says for what
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(u["enabled"], true);
+        assert_eq!(u["running"], false);
+        assert!(u["waiting_for"].as_str().unwrap().contains("API key"), "{u}");
+        // A bad-looking key is refused before anything runs
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "short"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // A key Spotify rejects: Soloist exits, the health says so, and the key is nowhere in the answer
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "rejected-key-0123456789", "device_name": "Test speaker"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(u["key_set"], true);
+        assert_eq!(u["device_name"], "Test speaker");
+        let u = until(Box::new(|u| u["health"]["ok"] == false)).await;
+        assert!(
+            u["health"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("rejected the API key"),
+            "{u}"
+        );
+        assert!(
+            !u.to_string().contains("rejected-key-0123456789"),
+            "the key never comes back: {u}"
+        );
+        // The right key: it runs, and nobody has picked the device yet
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"api_key": "good-key-0123456789abcdef"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        let u = until(Box::new(|u| u["running"] == true && u["paired"] == false)).await;
+        assert!(u["pid"].as_u64().is_some(), "{u}");
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sp = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "spotify")
+            .unwrap()
+            .clone();
+        assert!(
+            sp["status"]
+                .as_str()
+                .unwrap()
+                .contains("Soloist plays on this machine"),
+            "{sp}"
+        );
+        // Picked in a Spotify app: what plays comes through ctl, and the page can pause it
+        let sdir = s.data_dir().join("soloist");
+        std::fs::write(sdir.join("paired"), "").unwrap();
+        let u = until(Box::new(|u| u["paired"] == true)).await;
+        assert_eq!(u["now"]["title"], "Get Lucky", "{u}");
+        assert_eq!(u["now"]["artists"][0], "Daft Punk");
+        assert_eq!(u["now"]["album"], "Random Access Memories");
+        assert_eq!(u["now"]["status"], "playing");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "pause"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(sdir.join("commands")).unwrap().trim(),
+            "pause"
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "eject"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Off: it stops
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(u["enabled"], false);
+        let u = until(Box::new(|u| u["running"] == false)).await;
+        assert!(u["waiting_for"].is_null(), "{u}");
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/soloist/control",
+            Some(serde_json::json!({"command": "play"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        // An expired build: exit 10, said in plain words, no restart loop
+        std::fs::write(sdir.join("expired"), "").unwrap();
+        let (_, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/soloist",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        let u = until(Box::new(|u| u["health"]["ok"] == false)).await;
+        assert!(u["health"]["detail"].as_str().unwrap().contains("expired"), "{u}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (_, u) = call(&app, "GET", "/v1/sources/spotify/soloist", None).await;
+        assert_eq!(u["running"], false, "{u}");
+        // Remove the download
+        let (_, u) = call(&app, "DELETE", "/v1/sources/spotify/soloist/binary", None).await;
+        assert!(u["soloist"].is_null(), "{u}");
+        assert!(u["waiting_for"].as_str().unwrap().contains("download"), "{u}");
+        // The key is a secret in backups
+        assert!(backup::SECRET_SETTINGS
+            .iter()
+            .any(|(k, _)| *k == soloist::KEY_SETTING));
     }
 
     /// Bandcamp (unofficial): search, an album page read from its data-tralbum, its stream on a zone

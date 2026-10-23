@@ -4,6 +4,21 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Lyrics for streamed songs** (UX review, next tier). Now playing shows lyrics from LRCLIB (lrclib.net) for TIDAL, Deezer and other streamed songs, and for library songs whose files carry none. Synced lines follow the song, with a ±0.5 s nudge, and lyrics from LRCLIB are credited. Answers are kept a week, a "none" too. The node asks only when it has a contact set, like MusicBrainz and Pinakes. API: `GET /v1/lyrics?title&artist&album&duration_ms`; `/v1/library/tracks/{id}/lyrics` falls back to it.
+- **The sleep timer is in the zone menu** too (it was only in Now playing).
+- **Smart playlists** (UX review #9). Playlists › New smart playlist chooses songs by rules over your library and your own Pubky tags, all or any of them.
+  - Rules: genre, artist, year range, favourite, times played, last played (in or not in the last N days), and your Pubky tag.
+  - Order: random (new each time), most played, longest unplayed, newest or title, up to N songs. A live preview shows how many match while you edit.
+  - Each time it opens or plays, the songs are worked out again, so they change as your library does.
+  - The rules are kept on the node and travel to your homeserver with your other settings. API: `/v1/smart`, `/v1/smart/preview`, `/v1/smart/{id}`, `/v1/smart/{id}/tracks`.
+- **Home is yours to arrange** (UX review #10): "Edit Home" lists every row with a checkbox and up/down. The layout is kept on the node and copied to your homeserver with your other settings (`GET`/`PUT /v1/home/layout`). New rows: Recently played and Recently added (they replace "Jump back in"), and Forgotten favourites: favourite songs not played for two months, from `/v1/library/home` `forgotten`.
+- **Playlists have real art** (UX review #8): the first four album covers of their songs as a 2×2 mosaic, one cover when there's only one, else their initials on a gradient. This applies in the list, on the page and on shared playlists; there are no more empty colour squares. `PlaylistSummary.covers` lists them.
+- **The UX review's top 10, items 2–4, 6 and 7** (~/UX-REVIEW-MA.md).
+  - **Phones get a bottom bar** (Home, Search, Library, Queue) and a one-row mini player: cover and title, play/pause and the zone. Before, the player took two rows (about 160 px) even with nothing playing. Now playing carries the full transport (shuffle, previous, play, next, repeat) right under the title and covers the screen down to the bottom bar.
+  - **Menus:** "Add to playlist…" opens one picker (find, New playlist, recent first) instead of listing every playlist. A song's menu also has Favourite, Start radio (on a node zone) and Go to song page. "Go to album" no longer appears on that album's own page. On phones menus open as a sheet from the bottom, and a long-press (or right-click) on a song row opens its menu.
+  - **Search:** a Top result appears only when it really matches the words you typed; otherwise "No exact match. The closest results are below." Groups come in the order Artists, Albums, Songs (six, then "See all"), Playlists. On phones the source chips are one scrolling row.
+  - **The browser's queue survives a reload,** streamed songs included (only library songs did). It also keeps the song in the bar and where it was, ready to play on. Up next and the queue show no "0:00" for songs whose length isn't known.
+  - **Albums and Artists:** sort (name, artist, year, recently added; artists by name, most albums, recently added), a Favourites toggle for albums, and an A–Z jump on long lists. The choice is remembered in this browser.
 - **People on Pubky** (owner: "use nexus to fetch avatar of people and profile for tags"; STEWARD-UX-PEOPLE.md).
   - **Faces on tags:** every tag chip on an item page shows who tagged it (up to three faces, then "+N"), and "N people tagged this" shows their faces. Tapping either lists them, marked "you" or "you follow", each opening their page.
   - **`/person/<key>` pages:** avatar, name, bio, status and links from the person's own pubky.app profile (through Nexus, else straight from their homeserver), "follows you" and the counts. Below: the tags they use on music, what they tagged recently (Pinakes), and the playlists they share. Pasting a Pubky key into search opens their page.

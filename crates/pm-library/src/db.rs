@@ -1336,6 +1336,34 @@ impl Library {
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
+    /// Every played track's play count and last start (unix seconds).
+    pub fn play_stats(&self) -> Result<std::collections::HashMap<i64, (u64, i64)>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT track_id, COUNT(*), MAX(played_at) FROM plays GROUP BY track_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?),
+            ))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, v) = row?;
+            out.insert(id, v);
+        }
+        Ok(out)
+    }
+
+    /// When a track last started (unix seconds), if ever.
+    pub fn last_played(&self, track: TrackId) -> Result<Option<i64>> {
+        Ok(self.lock().query_row(
+            "SELECT MAX(played_at) FROM plays WHERE track_id = ?1",
+            params![track.0],
+            |r| r.get::<_, Option<i64>>(0),
+        )?)
+    }
+
     pub fn record_play(&self, track: TrackId, zone: Option<&str>) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
