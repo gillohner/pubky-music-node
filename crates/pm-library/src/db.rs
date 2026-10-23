@@ -27,6 +27,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (11, include_str!("migrations/0011_identify_release.sql")),
     (12, include_str!("migrations/0012_fts_rowid.sql")),
     (13, include_str!("migrations/0013_file_hashes.sql")),
+    (14, include_str!("migrations/0014_loudness.sql")),
 ];
 
 pub struct Library {
@@ -1091,6 +1092,124 @@ impl Library {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
+    }
+
+    // ----- measured loudness ------------------------------------------------
+
+    /// Local files of tracks whose tags have no ReplayGain and that have no current
+    /// measurement (none, or the file changed since): `(track, path, size, mtime)`.
+    pub fn tracks_needing_loudness(&self, limit: u32) -> Result<Vec<(TrackId, PathBuf, i64, i64)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT t.id, f.path, f.size_bytes, f.mtime_unix FROM tracks t
+             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             LEFT JOIN track_loudness l ON l.track_id = t.id
+             WHERE t.replaygain_track_gain_db IS NULL
+               AND f.path NOT LIKE '%://%'
+               AND (l.track_id IS NULL OR l.size_bytes != f.size_bytes OR l.mtime_unix != f.mtime_unix)
+             ORDER BY t.id LIMIT ?1",
+        )?;
+        let rows = st
+            .query_map(params![limit], |r| {
+                Ok((
+                    TrackId(r.get(0)?),
+                    PathBuf::from(r.get::<_, String>(1)?),
+                    r.get(2)?,
+                    r.get(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record a measurement of `track`'s file as it was (`size`, `mtime`).
+    pub fn set_loudness(&self, track: TrackId, lufs: f64, peak: f64, size: i64, mtime: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO track_loudness(track_id, lufs, peak, size_bytes, mtime_unix, measured_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(track_id) DO UPDATE SET lufs = excluded.lufs, peak = excluded.peak,
+               size_bytes = excluded.size_bytes, mtime_unix = excluded.mtime_unix,
+               measured_at = excluded.measured_at",
+            params![track.0, lufs, peak, size, mtime, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// `track`'s current measurement: `(lufs, peak)`, while its file is unchanged. (A file that
+    /// could not be measured is kept with a negative peak, so it isn't tried again; it has none.)
+    pub fn loudness(&self, track: TrackId) -> Result<Option<(f64, f64)>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT l.lufs, l.peak FROM track_loudness l
+                 JOIN files f ON f.track_id = l.track_id
+                 WHERE l.track_id = ?1 AND f.size_bytes = l.size_bytes AND f.mtime_unix = l.mtime_unix
+                   AND l.peak >= 0",
+                params![track.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The album's loudness from its tracks' measurements, `(lufs, peak)`: the duration-weighted
+    /// energy mean and the highest peak. `None` unless every track on it is measured (and none
+    /// has ReplayGain tags, which would mix two references).
+    pub fn album_loudness(&self, album_id: i64) -> Result<Option<(f64, f64)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT t.replaygain_track_gain_db, l.lufs, l.peak, COALESCE(t.duration_ms, 1)
+             FROM tracks t
+             LEFT JOIN files f ON f.track_id = t.id
+             LEFT JOIN track_loudness l ON l.track_id = t.id
+               AND l.size_bytes = f.size_bytes AND l.mtime_unix = f.mtime_unix
+             WHERE t.album_id = ?1",
+        )?;
+        /// A track's ReplayGain tag, measured loudness and peak, and duration.
+        type Row = (Option<f64>, Option<f64>, Option<f64>, i64);
+        let rows: Vec<Row> = st
+            .query_map(params![album_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let (mut energy, mut weight, mut peak) = (0f64, 0f64, 0f64);
+        for (rg, lufs, p, ms) in rows {
+            let (None, Some(lufs), Some(p)) = (rg, lufs, p) else {
+                return Ok(None);
+            };
+            if p < 0.0 {
+                return Ok(None);
+            }
+            let w = ms.max(1) as f64;
+            energy += w * 10f64.powf(lufs / 10.0);
+            weight += w;
+            peak = peak.max(p);
+        }
+        Ok(Some((10.0 * (energy / weight).log10(), peak)))
+    }
+
+    /// Local tracks without ReplayGain tags: `(measured, could not be measured, still to measure)`.
+    pub fn loudness_counts(&self) -> Result<(u64, u64, u64)> {
+        let conn = self.lock();
+        let (measured, failed): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(l.peak >= 0), 0), COALESCE(SUM(l.peak < 0), 0)
+             FROM track_loudness l JOIN files f ON f.track_id = l.track_id
+             WHERE f.size_bytes = l.size_bytes AND f.mtime_unix = l.mtime_unix",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let todo: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tracks t
+             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             LEFT JOIN track_loudness l ON l.track_id = t.id
+             WHERE t.replaygain_track_gain_db IS NULL AND f.path NOT LIKE '%://%'
+               AND (l.track_id IS NULL OR l.size_bytes != f.size_bytes OR l.mtime_unix != f.mtime_unix)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((measured as u64, failed as u64, todo as u64))
     }
 
     // ----- genres -----------------------------------------------------------
@@ -2626,7 +2745,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 13);
+        assert_eq!(lib.schema_version().unwrap(), 14);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

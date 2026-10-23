@@ -50,6 +50,7 @@ pub mod jellyfin;
 pub mod lastfm;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod loudness;
 pub mod lrclib;
 pub mod mbproxy;
 pub mod new_releases;
@@ -228,6 +229,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
+        .route("/library/loudness", get(loudness::get))
+        .route("/library/loudness/measure", post(loudness::measure))
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
