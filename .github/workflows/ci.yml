@@ -5,7 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 concurrency:
-  group: ci-${{ github.ref }}
+  # One run per branch; a new push replaces the older run. Keyed by the event and the PR's
+  # own branch: a pull_request run for a PR that has just been merged gets refs/heads/main
+  # as its ref (the merge ref is gone), and with a ref-only key it cancelled main's CI.
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always

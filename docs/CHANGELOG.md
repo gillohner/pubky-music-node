@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **CI:** main's own CI runs again after a merge. The pull_request run started by the merged branch's last push got `main` as its ref and, sharing main's concurrency group, cancelled main's run; the group is now keyed by event and PR branch.
 - **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
   - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.
   - **Sign-in:** OAuth 2 with PKCE through the project's return page, so a client id is all a node needs. It comes from the build's project apps or the node's `[drives]` config. Without one, the drive shows as not set up.
