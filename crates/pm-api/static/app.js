@@ -780,8 +780,28 @@
     const id = m ? m[1] : null;
     $$('#main .track[data-tid]').forEach((r) => r.classList.toggle('cur', r.dataset.tid === id));
   };
+  // The dashboard follows the zone: the whole screen when the song changes, else only the time
+  const drawDashboard = () => {
+    const box = $('#dash'); if (!box || state.view !== 'dashboard') return;
+    const z = currentZone(); const np = z && z.now_playing; const raw = np && np.item;
+    // A library song queued by another app may come without its details: the library has them
+    const tid = trackIdOf(raw); const known = tid != null ? state.trackCache.get('track:' + tid) : null;
+    if (tid != null && !known && !state.dashAsked) { state.dashAsked = tid; api('GET', `/library/tracks/${tid}`).then((t) => { rememberTracks([t]); state.dashKey = null; drawDashboard(); }).catch(() => {}).finally(() => { state.dashAsked = null; }); }
+    const it = raw && known ? { ...raw, title: raw.title || known.title, artist: raw.artist || artists(known), album: raw.album || (known.album && known.album.title) } : raw;
+    const key = it ? `${z.id}|${it.uri}|${it.title}` : `${z ? z.id : ''}|none`;
+    if (key !== state.dashKey) {
+      state.dashKey = key;
+      box.innerHTML = it ? `${it.image || albumIdOf(it) ? `<div class="dash-bg" aria-hidden="true">${itemArt(it)}</div>` : ''}<div class="dash-inner">${itemArt(it, 'dash-art')}<div class="dash-text"><div class="eyebrow">Now playing on ${esc(z.name)}</div><h1>${esc(np.stream_title || it.title || '')}</h1><p class="dash-artist">${esc(it.artist || '')}</p>${it.album ? `<p class="muted">${esc(it.album)}</p>` : ''}<div class="dash-progress"><span id="dashbar"></span></div><div class="dash-times muted"><span id="dashpos"></span><span id="dashdur"></span></div></div></div><div class="dash-brand muted small">Pubky Music</div>`
+        : `<div class="dash-inner empty"><div class="dash-text"><div class="eyebrow">${esc(z ? z.name : '')}</div><h1>Nothing playing</h1><p class="muted">Start something on this zone and it shows here.</p></div></div><div class="dash-brand muted small">Pubky Music</div>`;
+    }
+    if (it) {
+      const pos = np.position_ms || 0; const dur = np.duration_ms || 0;
+      const bar = $('#dashbar'); if (bar) bar.style.width = `${dur ? Math.min(100, (100 * pos) / dur) : 0}%`;
+      const ps = $('#dashpos'); if (ps) ps.textContent = fmt(pos); const ds = $('#dashdur'); if (ds) ds.textContent = dur ? fmt(dur) : '';
+    }
+  };
   const renderBar = () => {
-    markPlaying(); renderModes();
+    markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
     const playing = z && z.transport === 'playing';
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
@@ -851,7 +871,7 @@
     const colour = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
     overlay.innerHTML = `
       <div class="np-page">
-        <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span><button class="btn ghost" id="npsleep" title="Pause this zone after a while">${icon('moon')} ${sleepLabel()}</button>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
+        <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span><button class="btn ghost" id="npdash" title="A full-screen now playing for a TV or tablet (opens in a new tab)">${icon('external')} Dashboard</button><button class="btn ghost" id="npsleep" title="Pause this zone after a while">${icon('moon')} ${sleepLabel()}</button>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
         <div class="np-hero">
           <div class="np-big">${itemArt(it)}</div>
           <div class="np-meta">
@@ -880,6 +900,7 @@
     fillNpPubky(it);
     $('#npq').onclick = () => { toggleNowPlaying(); setView('queue'); };
     const npd = $('#npdsp'); if (npd) npd.onclick = () => { toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
+    const npdb = $('#npdash'); if (npdb) npdb.onclick = () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener');
     const nps = $('#npsleep'); if (nps) nps.onclick = () => showMenu(nps, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]);
     loadLyrics(it);
     refreshSleep();
@@ -999,6 +1020,7 @@
     if (v === 'person' && arg) return `/person/${arg}`;
     if (v === 'smart' && arg) return `/smart/${encodeURIComponent(arg)}`;
     if (v === 'smart-edit') return null;
+    if (v === 'dashboard') return `/now-playing${arg ? `?zone=${encodeURIComponent(arg)}` : ''}`;
     if (v === 'shared' && arg && arg.user) return `/shared/${arg.user}${arg.id ? '/' + arg.id : ''}`;
     if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
     if (v === 'sources' && arg && arg.source) return `/sources/${encodeURIComponent(arg.source)}`;
@@ -1028,6 +1050,7 @@
     if (p === '/discover' || p.startsWith('/discover/')) return { v: 'home' };
     m = p.match(/^\/(playlist|genre|sources?)\/([^/]+)$/);
     if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
+    if (p === '/now-playing') return { v: 'dashboard', arg: new URLSearchParams(location.search).get('zone') || null };
     m = p.match(/^\/smart\/([A-Za-z0-9_-]+)$/);
     if (m) return { v: 'smart', arg: m[1] };
     m = p.match(/^\/person\/([a-z0-9]{52})$/);
@@ -1680,6 +1703,48 @@
   };
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
   const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
+  // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
+  let selBar = null;
+  const endSelect = () => { if (selBar) { selBar.remove(); selBar = null; } $$('.selecting').forEach((b) => b.classList.remove('selecting')); $$('.selbox').forEach((c) => c.remove()); $$('[data-selstart]').forEach((b) => { b.setAttribute('aria-pressed', 'false'); }); };
+  const enableSelect = (section, songs, opts = {}) => {
+    if (!section || !songs.length) return;
+    const head = $('.section-head', section); if (!head || $('[data-selstart]', head)) return;
+    head.insertAdjacentHTML('beforeend', `<button class="btn ghost sm" data-selstart aria-pressed="false">${icon('check')} Select</button>`);
+    const sel = new Set();
+    const draw = () => {
+      if (!selBar) { selBar = document.createElement('div'); selBar.className = 'selbar'; selBar.setAttribute('role', 'toolbar'); selBar.setAttribute('aria-label', 'Selected songs'); document.body.appendChild(selBar); }
+      const picked = [...sel].sort((a, b) => a - b).map((k) => songs[k]);
+      selBar.innerHTML = `<span class="selcount">${countOf(sel.size, 'songs')} selected</span><button class="btn sm primary" data-sel="play" ${sel.size ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn sm" data-sel="queue" ${sel.size ? '' : 'disabled'}>${icon('plus')} Add to queue</button><button class="btn sm" data-sel="playlist" ${sel.size ? '' : 'disabled'}>${icon('playlist')} Add to playlist…</button><button class="btn sm" data-sel="tag" ${sel.size ? '' : 'disabled'}>Tag…</button>${opts.remove ? `<button class="btn sm danger" data-sel="remove" ${sel.size ? '' : 'disabled'}>${icon('trash')} Remove</button>` : ''}<button class="btn sm ghost" data-sel="all">${sel.size === songs.length ? 'None' : 'All'}</button><button class="icon-btn" data-sel="cancel" aria-label="Stop selecting">${icon('close')}</button>`;
+      $$('[data-sel]', selBar).forEach((b) => b.onclick = async () => {
+        const what = b.dataset.sel;
+        if (what === 'cancel') return endSelect();
+        if (what === 'all') { if (sel.size === songs.length) sel.clear(); else songs.forEach((_, k) => sel.add(k)); $$('.selbox input', section).forEach((c) => { c.checked = sel.has(Number(c.dataset.k)); }); return draw(); }
+        if (what === 'play') { await playSongs(picked, 0, 'replace', opts.plays_from, b, opts.fallback); return endSelect(); }
+        if (what === 'queue') { await playSongs(picked, 0, 'end', opts.plays_from, b, opts.fallback); return endSelect(); }
+        if (what === 'playlist') {
+          if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+          const ids = picked.filter((t) => t.track_id != null).map((t) => t.track_id); const uris = picked.filter((t) => t.track_id == null).map((t) => t.page || (t.id && uriOf('song', t.id))).filter(Boolean);
+          const add = async (pl) => { try { if (ids.length) await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, { track_ids: ids }); if (uris.length) await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, { uris }); toast(`${countOf(picked.length, 'songs')} added to “${pl.name}”`); endSelect(); } catch (e) { toast(e.message, 'error'); } };
+          return playlistPicker(add, 'New playlist', async (name) => { try { await api('POST', '/playlists', { name, track_ids: ids, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); endSelect(); } catch (e) { toast(e.message, 'error'); } });
+        }
+        if (what === 'tag') {
+          const r = await choiceDialog({ title: `Tag ${countOf(picked.length, 'songs')}`, text: 'One Pubky tag on each of them (public). Songs not matched yet keep it until they are.', field: { label: 'Tag', value: '' }, choices: [{ label: 'Tag them', value: true, primary: true }] });
+          if (!r || !r.text) return;
+          let n = 0; for (const t of picked) { const ref = t.track_id != null ? { track_id: t.track_id } : (t.page || t.id) ? { uri: t.page || uriOf('song', t.id) } : null; if (!ref) continue; try { await api('PUT', '/tags', { ...ref, label: r.text }); n++; } catch { /* skip that one */ } }
+          toast(`Tagged ${countOf(n, 'songs')} #${r.text.toLowerCase()}`); return endSelect();
+        }
+        if (what === 'remove') { try { await opts.remove([...sel].sort((a, b) => b - a)); endSelect(); } catch (e) { toast(e.message, 'error'); } }
+      });
+    };
+    $('[data-selstart]', head).onclick = (e) => {
+      if (section.classList.contains('selecting')) return endSelect();
+      endSelect(); section.classList.add('selecting'); e.currentTarget.setAttribute('aria-pressed', 'true');
+      $$('.srow[data-srow]', section).forEach((row) => { const k = Number(row.dataset.srow); row.insertAdjacentHTML('afterbegin', `<label class="selbox" title="Select"><input type="checkbox" data-k="${k}" aria-label="Select ${esc(songs[k] ? songs[k].title : '')}"></label>`); const c = $('.selbox input', row); c.onclick = (ev) => ev.stopPropagation(); c.onchange = () => { if (c.checked) sel.add(k); else sel.delete(k); draw(); }; });
+      draw();
+    };
+  };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selBar) endSelect(); });
   const bindSongRows = (box, songs, ctx = {}) => {
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, Number(b.dataset.splay), 'replace', ctx.plays_from, b, ctx.fallback); });
     $$('[data-srow]', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, Number(r.dataset.srow), 'replace', ctx.plays_from, r, ctx.fallback); });
@@ -1761,7 +1826,7 @@
     const sa = $('[data-sallsongs]', box); if (sa) sa.onclick = () => { run.allSongs = true; renderSearchBody(run); };
     // Bind: rows and tiles use the shared components.
     const songsSec = $('[data-skind="song"]', box);
-    if (songsSec && byKind.song.length) bindSongRows(songsSec, byKind.song.slice(0, run.allSongs ? 50 : 6).map((h) => ({ ...h, artist: h.subtitle })), {});
+    if (songsSec && byKind.song.length) { const ss = byKind.song.slice(0, run.allSongs ? 50 : 6).map((h) => ({ ...h, artist: h.subtitle })); bindSongRows(songsSec, ss, {}); enableSelect(songsSec, ss); }
     for (const kind of ['album', 'artist']) { const sec = $(`[data-skind="${kind}"]`, box); if (sec && byKind[kind].length) bindItemTiles(sec, byKind[kind].slice(0, 12), kind); }
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (h.page) window.open(h.page, '_blank', 'noopener'); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
@@ -1993,6 +2058,9 @@
   // ---- render --------------------------------------------------------------
   const render = async () => {
     const v = state.view;
+    // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
+    document.body.classList.toggle('kiosk', v === 'dashboard');
+    endSelect();
     const lists = {};
     try {
       switch (v) {
@@ -2270,6 +2338,14 @@
           renderSearchBody(run);
           break;
         }
+        case 'dashboard': {
+          // A castable now-playing screen (UX review, next tier): /now-playing?zone=<id>
+          const zid = state.viewArg;
+          if (zid && (zid === BROWSER || state.zones[zid])) state.zone = zid;
+          main.innerHTML = '<div class="dash" id="dash" aria-live="polite"></div>';
+          state.dashKey = null; drawDashboard();
+          break;
+        }
         case 'smart': {
           // A smart playlist: its songs right now
           loading();
@@ -2284,7 +2360,7 @@
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="smplay" ${ts.length ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn" id="smshuffle" ${ts.length ? '' : 'disabled'}>${icon('shuffle')} Shuffle</button><button class="btn ghost" id="smedit">${icon('settings')} Edit rules</button></div></div></div>`
             + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
-          if (ts.length) bindSongRows($('#smsongs'), songs, {});
+          if (ts.length) { bindSongRows($('#smsongs'), songs, {}); enableSelect($('#smsongs'), songs); }
           $('#smplay').onclick = () => playTracks(ts, true);
           $('#smshuffle').onclick = () => playTracks([...ts].sort(() => Math.random() - 0.5), true);
           $('#smedit').onclick = () => setView('smart-edit', sid);
@@ -2447,6 +2523,8 @@
             + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
           bindSongRows($('#plsongs'), songs, {});
+          // Playlist rows can also be removed together (highest index first, so positions hold)
+          enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
           $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
           const playable = (list) => list.filter((t) => !t.unavailable);
@@ -2973,7 +3051,7 @@
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${f.href ? `<a href="${esc(f.href)}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
           const ig = $('#iglobal'); if (ig) ig.onclick = () => setView('item', { kind, id: idOf(pg.song_uri) });
-          if ($('#isongs')) bindSongRows($('#isongs'), songs, { plays_from: pf, fallback });
+          if ($('#isongs')) { bindSongRows($('#isongs'), songs, { plays_from: pf, fallback }); enableSelect($('#isongs'), songs, { plays_from: pf, fallback }); }
           if (pg.albums.length) bindItemTiles($('#ialbums'), pg.albums, 'album');
           // Related items and concerts come after the page (each outside call has a time budget)
           api('GET', `/item/${kind}/${encodeURIComponent(id)}/extras`).then((ex) => {

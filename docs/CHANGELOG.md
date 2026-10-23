@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **A now-playing dashboard for a TV or tablet:** `/now-playing?zone=<id>` (Now playing › Dashboard opens it). It shows a big cover on a blurred background, the title, artist and album, and the progress. There's no sidebar or player, and it follows the zone as songs change.
+- **Select several songs at once:** "Select" on album, playlist, smart playlist and search song lists turns on checkboxes and a bar with Play, Add to queue, Add to playlist…, Tag… (one Pubky tag on each), and Remove on playlist pages. Escape or ✕ ends it.
 - **Lyrics for streamed songs** (UX review, next tier). Now playing shows lyrics from LRCLIB (lrclib.net) for TIDAL, Deezer and other streamed songs, and for library songs whose files carry none. Synced lines follow the song, with a ±0.5 s nudge, and lyrics from LRCLIB are credited. Answers are kept a week, a "none" too. The node asks only when it has a contact set, like MusicBrainz and Pinakes. API: `GET /v1/lyrics?title&artist&album&duration_ms`; `/v1/library/tracks/{id}/lyrics` falls back to it.
 - **The sleep timer is in the zone menu** too (it was only in Now playing).
 - **Smart playlists** (UX review #9). Playlists › New smart playlist chooses songs by rules over your library and your own Pubky tags, all or any of them.
