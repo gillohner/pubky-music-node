@@ -98,6 +98,28 @@
     const h = hue(name);
     return `<div class="art ${cls}" aria-hidden="true" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))"><span>${esc(initials(name))}</span>${u[0] ? `<img loading="lazy" alt="" src="${esc(u[0])}" onerror="this.remove()">` : ''}</div>`;
   };
+  // Smart playlists: the rules people can pick from, in words
+  const SMART_FIELDS = {
+    genre: { label: 'Genre', ops: [['contains', 'contains'], ['is', 'is']], input: 'text', hint: 'techno' },
+    artist: { label: 'Artist', ops: [['contains', 'contains']], input: 'text', hint: 'name' },
+    year: { label: 'Year', ops: [['between', 'between']], input: 'range' },
+    favourite: { label: 'Favourite', ops: [['is', 'is']], input: 'yesno' },
+    plays: { label: 'Times played', ops: [['at_least', 'at least'], ['at_most', 'at most']], input: 'number' },
+    last_played: { label: 'Last played', ops: [['within_days', 'in the last'], ['not_within_days', 'not in the last']], input: 'days' },
+    tag: { label: 'Your Pubky tag', ops: [['is', 'is']], input: 'text', hint: 'chill' },
+  };
+  const SMART_SORTS = [['random', 'Random (new each time)'], ['most_played', 'Most played'], ['least_recent', 'Longest unplayed'], ['newest', 'Newest'], ['title', 'Title']];
+  const smartRuleRow = (r, i) => {
+    const f = SMART_FIELDS[r.field] || SMART_FIELDS.genre;
+    const val = r.value == null ? '' : r.value;
+    const input = f.input === 'yesno' ? `<select class="input sm" data-k="value" aria-label="Favourite"><option value="yes" ${val !== false ? 'selected' : ''}>yes</option><option value="no" ${val === false ? 'selected' : ''}>no</option></select>`
+      : f.input === 'range' ? `<input class="input sm" data-k="value" type="number" placeholder="from" value="${esc(val || '')}" aria-label="From year" style="width:90px"> and <input class="input sm" data-k="to" type="number" placeholder="to" value="${esc(r.to || '')}" aria-label="To year" style="width:90px">`
+      : f.input === 'number' ? `<input class="input sm" data-k="value" type="number" min="0" value="${esc(val || 0)}" aria-label="Times" style="width:90px"> times`
+      : f.input === 'days' ? `<input class="input sm" data-k="value" type="number" min="1" value="${esc(val || 30)}" aria-label="Days" style="width:90px"> days`
+      : `<input class="input sm" data-k="value" value="${esc(val)}" placeholder="${esc(f.hint || '')}" aria-label="${esc(f.label)}">`;
+    return `<div class="smrule" data-smrule="${i}"><select class="input sm" data-k="field" aria-label="What">${Object.entries(SMART_FIELDS).map(([k, x]) => `<option value="${k}" ${r.field === k ? 'selected' : ''}>${x.label}</option>`).join('')}</select><select class="input sm" data-k="op" aria-label="How">${f.ops.map(([k, l]) => `<option value="${k}" ${r.op === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${input}<button class="icon-btn" data-smrm="${i}" aria-label="Remove this rule" title="Remove this rule">${icon('close')}</button></div>`;
+  };
+  const smartSummary = (x) => { const rs = (x.rules || []).map((r) => { const f = SMART_FIELDS[r.field]; if (!f) return r.field; const op = (f.ops.find(([k]) => k === r.op) || f.ops[0])[1]; if (r.field === 'favourite') return r.value === false ? 'not a favourite' : 'a favourite'; if (r.field === 'year') return `year ${r.value || '…'}–${r.to || '…'}`; return `${f.label.toLowerCase()} ${op} ${r.value}${r.field === 'last_played' ? ' days' : ''}`; }); return rs.join(x.matches === 'any' ? ' or ' : ' and '); };
   // Art for a queue item: a streaming source's image, else the library album cover.
   const itemArt = (it, cls = '') => {
     if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" onerror="this.remove()"></div>`; }
@@ -967,6 +989,8 @@
     if (v === 'tag' && arg) return `/tag/${String(arg).split(',').map(encodeURIComponent).join(',')}`;
     if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
     if (v === 'person' && arg) return `/person/${arg}`;
+    if (v === 'smart' && arg) return `/smart/${encodeURIComponent(arg)}`;
+    if (v === 'smart-edit') return null;
     if (v === 'shared' && arg && arg.user) return `/shared/${arg.user}${arg.id ? '/' + arg.id : ''}`;
     if (v === 'genre' && arg != null) return `/genre/${encodeURIComponent(arg)}`;
     if (v === 'sources' && arg && arg.source) return `/sources/${encodeURIComponent(arg.source)}`;
@@ -996,6 +1020,8 @@
     if (p === '/discover' || p.startsWith('/discover/')) return { v: 'home' };
     m = p.match(/^\/(playlist|genre|sources?)\/([^/]+)$/);
     if (m) { const a = decodeURIComponent(m[2]); return m[1] === 'playlist' ? { v: 'playlist', arg: a } : m[1] === 'genre' ? { v: 'genre', arg: /^\d+$/.test(a) ? Number(a) : a } : { v: 'sources', arg: { source: a } }; }
+    m = p.match(/^\/smart\/([A-Za-z0-9_-]+)$/);
+    if (m) return { v: 'smart', arg: m[1] };
     m = p.match(/^\/person\/([a-z0-9]{52})$/);
     if (m) return { v: 'person', arg: m[1] };
     m = p.match(/^\/shared\/([a-z0-9]{52})(?:\/([0-9A-Z]{13}))?$/);
@@ -2236,13 +2262,68 @@
           renderSearchBody(run);
           break;
         }
+        case 'smart': {
+          // A smart playlist: its songs right now
+          loading();
+          const sid = state.viewArg;
+          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'smart' || state.viewArg !== sid) return;
+          state.itemTitle = d.playlist.name;
+          const ts = d.tracks || [];
+          const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
+          const covers = ts.map((t) => (t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null));
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(covers, d.playlist.name)}<div><div class="eyebrow">Smart playlist · songs change as your library does</div><h1>${esc(d.playlist.name)}</h1><p class="sub">${countOf(ts.length, 'songs')}${d.matched > ts.length ? ` of ${d.matched} that match` : ''} · ${esc(smartSummary(d.playlist))}</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="smplay" ${ts.length ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn" id="smshuffle" ${ts.length ? '' : 'disabled'}>${icon('shuffle')} Shuffle</button><button class="btn ghost" id="smedit">${icon('settings')} Edit rules</button></div></div></div>`
+            + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
+          $('[data-back]', main).onclick = () => goBack('playlists');
+          if (ts.length) bindSongRows($('#smsongs'), songs, {});
+          $('#smplay').onclick = () => playTracks(ts, true);
+          $('#smshuffle').onclick = () => playTracks([...ts].sort(() => Math.random() - 0.5), true);
+          $('#smedit').onclick = () => setView('smart-edit', sid);
+          break;
+        }
+        case 'smart-edit': {
+          // The rules, with a live preview of what they pick
+          const sid = state.viewArg;
+          let cur = { name: '', rules: [{ field: 'genre', op: 'contains', value: '' }], matches: 'all', sort: 'random', limit: 100 };
+          if (sid && sid !== 'new') { try { cur = (await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`)).playlist; } catch (e) { toast(e.message, 'error'); } }
+          if (state.view !== 'smart-edit') return;
+          const draw = () => {
+            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(sid === 'new' ? 'New smart playlist' : 'Edit smart playlist')
+              + `<div class="smartedit"><label class="field"><span>Name</span><input class="input" id="smname" value="${esc(cur.name)}" placeholder="Late-night techno"></label>
+                <p class="small">Songs that match <select class="input sm" id="smmatch" aria-label="Match"><option value="all" ${cur.matches !== 'any' ? 'selected' : ''}>all</option><option value="any" ${cur.matches === 'any' ? 'selected' : ''}>any</option></select> of these rules:</p>
+                <div id="smrules">${cur.rules.map((r, i) => smartRuleRow(r, i)).join('')}</div>
+                <button class="btn sm ghost" id="smadd">${icon('plus')} Add a rule</button>
+                <div class="toolbar" style="margin-top:12px"><label class="small">Order <select class="input sm" id="smsort">${SMART_SORTS.map(([k, l]) => `<option value="${k}" ${cur.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label class="small">At most <input class="input sm" id="smlimit" type="number" min="1" max="1000" value="${cur.limit || 100}" style="width:90px"> songs</label></div>
+                <div class="toolbar"><button class="btn primary" id="smsave">${icon('check')} Save</button>${sid !== 'new' ? `<button class="btn danger" id="smdel">${icon('trash')} Delete</button>` : ''}</div></div>
+              <section class="section"><div class="section-head"><h3>Preview</h3><span class="muted small" id="smcount"></span></div><div id="smprev"><p class="muted small">Add a rule to see which songs match.</p></div></section>`;
+            $('[data-back]', main).onclick = () => goBack('playlists');
+            const readRules = () => $$('[data-smrule]', main).map((row) => { const g = (k) => { const el = $(`[data-k="${k}"]`, row); return el ? el.value : undefined; }; const field = g('field'); const r = { field, op: g('op') || '' }; if (field === 'favourite') r.value = g('value') !== 'no'; else if (['plays', 'last_played'].includes(field)) r.value = Number(g('value') || 0); else if (field === 'year') { r.value = Number(g('value') || 0) || null; r.to = Number(g('to') || 0) || null; } else r.value = g('value') || ''; return r; });
+            const sync = () => { cur = { ...cur, name: $('#smname').value, matches: $('#smmatch').value, sort: $('#smsort').value, limit: Number($('#smlimit').value) || 100, rules: readRules() }; };
+            let t = null;
+            const preview = () => { clearTimeout(t); t = setTimeout(async () => { if (state.view !== 'smart-edit' || !$('#smname')) return; sync(); const box = $('#smprev'); if (!box) return; if (!cur.rules.length) { box.innerHTML = '<p class="muted small">Add a rule to see which songs match.</p>'; $('#smcount').textContent = ''; return; } try { const r = await api('POST', '/smart/preview', { rules: cur.rules, matches: cur.matches, sort: cur.sort, limit: Math.min(cur.limit, 20) }); $('#smcount').textContent = `${countOf(r.matched, 'songs')} match`; const songs = r.tracks.map((x, k) => ({ no: k + 1, title: x.title, artist: artists(x), duration_ms: x.duration_ms, track_id: x.id, id: trackPageId(x) })); box.innerHTML = songs.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches yet.</p>'; if (songs.length) bindSongRows(box, songs, {}); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; } }, 350); };
+            main.oninput = (e) => { if (state.view !== 'smart-edit') { main.oninput = null; return; } if (e.target.closest('.smartedit')) preview(); };
+            main.onchange = (e) => { if (state.view !== 'smart-edit') { main.onchange = null; return; } if (e.target.dataset && e.target.dataset.k === 'field') { sync(); const i = Number(e.target.closest('[data-smrule]').dataset.smrule); cur.rules[i] = { field: e.target.value, op: SMART_FIELDS[e.target.value].ops[0][0], value: '' }; draw(); } preview(); };
+            $('#smadd').onclick = () => { sync(); cur.rules.push({ field: 'genre', op: 'contains', value: '' }); draw(); };
+            $$('[data-smrm]', main).forEach((b) => b.onclick = () => { sync(); cur.rules.splice(Number(b.dataset.smrm), 1); draw(); });
+            $('#smsave').onclick = async () => { sync(); if (!cur.name.trim()) { toast('Give it a name', 'error'); $('#smname').focus(); return; } const body = { name: cur.name, rules: cur.rules, matches: cur.matches, sort: cur.sort, limit: cur.limit }; try { const saved = sid === 'new' ? await api('POST', '/smart', body) : await api('PUT', `/smart/${encodeURIComponent(sid)}`, body); toast(`Saved “${saved.name}”`); setView('smart', saved.id); } catch (e) { toast(e.message, 'error'); } };
+            const del = $('#smdel'); if (del) del.onclick = async () => { if (!del.dataset.armed) { del.dataset.armed = '1'; del.innerHTML = `${icon('trash')} Really delete?`; return; } try { await api('DELETE', `/smart/${encodeURIComponent(sid)}`); toast('Smart playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
+            preview();
+          };
+          draw();
+          break;
+        }
         case 'playlists': {
           state.playlists = await api('GET', '/playlists');
+          const smarts = await api('GET', '/smart').catch(() => []);
           if (state.view !== 'playlists') return;
           main.innerHTML = pageHead('Playlists', state.playlists.length) + `
             <div class="toolbar"><input class="input" id="plname" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button><label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label></div>
             <div class="toolbar"><input class="input" id="plshared" placeholder="Paste a pubky:// link to a shared playlist, or a Pubky key" style="flex:1;min-width:240px"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
-            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : emptyState('playlist', 'No playlists yet', 'Create one, import a file from another player, or add tracks from any list.'));
+            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : emptyState('playlist', 'No playlists yet', 'Create one, import a file from another player, or add tracks from any list.'))
+            + `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`;
+          $('#smartnew').onclick = () => setView('smart-edit', 'new');
+          $$('[data-smart]', main).forEach((r) => r.onclick = () => setView('smart', r.dataset.smart));
           $('#plcreate').onclick = async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));

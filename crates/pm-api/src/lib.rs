@@ -63,6 +63,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod shared;
+pub mod smart;
 pub mod soloist;
 pub mod sources;
 pub mod spotify;
@@ -293,6 +294,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/search/tags", get(search::tag_suggestions))
         .route("/home/location", get(home::get_location).put(home::set_location))
         .route("/home/layout", get(home::get_layout).put(home::set_layout))
+        .route("/smart", get(smart::list).post(smart::create))
+        .route("/smart/preview", post(smart::preview))
+        .route(
+            "/smart/{id}",
+            axum::routing::put(smart::update).delete(smart::delete),
+        )
+        .route("/smart/{id}/tracks", get(smart::tracks))
         .route("/home/{section}", get(home::section))
         .route("/item/candidates", get(item::candidates))
         .route(
@@ -548,6 +556,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/artist/{id}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
         .route("/person/{id}", get(web_ui))
+        .route("/smart/{id}", get(web_ui))
         .route("/shared/{user}", get(web_ui))
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))
@@ -6313,6 +6322,117 @@ mod tests {
         )
         .await;
         assert_eq!(op["faces"]["chill"], serde_json::json!([A, B]), "{op}");
+    }
+
+    /// Smart playlists (UX review #9): rules over genre, year, favourites, plays and your tags,
+    /// all or any, previewed while editing, saved, and worked out again each time.
+    #[tokio::test]
+    async fn smart_playlists_pick_songs_by_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let ids: Vec<i64> = {
+            let lib = s.library.lock().unwrap();
+            let mut out = Vec::new();
+            for (i, (title, genre, year)) in [
+                ("Calm", "Ambient", 1995),
+                ("Fast", "Techno", 2020),
+                ("Faster", "Techno", 2005),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut t = untagged_track(dir.path().join(format!("{i}.flac")), title, "Someone");
+                t.genres = vec![genre.to_string()];
+                t.album = Some(pm_model::Album {
+                    id: None,
+                    title: format!("Album {i}"),
+                    album_artist: Some("Someone".into()),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: Some(*year),
+                    upc: None,
+                    total_discs: None,
+                });
+                t.canonical = Some((
+                    pm_model::MusicUri::Isrc {
+                        isrc: pm_model::Isrc::parse(&format!("USAAA111111{i}")).unwrap(),
+                    },
+                    pm_model::Confidence::TaggedIsrc,
+                ));
+                out.push(lib.upsert_track(&t).unwrap().0);
+            }
+            lib.record_play(TrackId(out[2]), Some("z")).unwrap();
+            lib.record_play(TrackId(out[2]), Some("z")).unwrap();
+            out
+        };
+        let app = router(s.clone());
+        call(
+            &app,
+            "PUT",
+            "/v1/favourites",
+            Some(serde_json::json!({"track_id": ids[1]})),
+        )
+        .await;
+        call(
+            &app,
+            "PUT",
+            "/v1/tags",
+            Some(serde_json::json!({"track_id": ids[0], "label": "sleep"})),
+        )
+        .await;
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["title"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": [{"field": "genre", "op": "is", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"rules": [{"field": "genre", "value": "techno"}, {"field": "favourite", "value": true}]}))).await;
+        assert_eq!(titles(&r), ["Fast"], "all rules");
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"matches": "any", "rules": [{"field": "tag", "value": "#sleep"}, {"field": "plays", "op": "at_least", "value": 2}]}))).await;
+        assert_eq!(titles(&r), ["Calm", "Faster"], "any rule");
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(
+                serde_json::json!({"rules": [{"field": "year", "op": "between", "value": 2000, "to": 2010}]}),
+            ),
+        )
+        .await;
+        assert_eq!(titles(&r), ["Faster"]);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": []})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, p) = call(&app, "POST", "/v1/smart", Some(serde_json::json!({"name": "Techno", "rules": [{"field": "genre", "value": "techno"}], "sort": "most_played"}))).await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        let id = p["id"].as_str().unwrap().to_string();
+        let (_, list) = call(&app, "GET", "/v1/smart", None).await;
+        assert_eq!(list[0]["name"], "Techno");
+        let (_, t) = call(&app, "GET", &format!("/v1/smart/{id}/tracks"), None).await;
+        assert_eq!(t["tracks"][0]["title"], "Faster", "most played first: {t}");
+        assert_eq!(t["matched"], 2);
+        let (st, _) = call(&app, "DELETE", &format!("/v1/smart/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, list) = call(&app, "GET", "/v1/smart", None).await;
+        assert!(list.as_array().unwrap().is_empty());
     }
 
     /// One search, streamed per source: the library answers first, a slow

@@ -1043,3 +1043,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .art.mosaic img { position: static; width: 100%; height: 100%; object-fit: cover; }
 .art.pl-thumb { width: 44px; height: 44px; flex: none; border-radius: 6px; font-size: 13px; }
 .homeedit .list-row label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+/* Smart playlist editor */
+.smartedit { max-width: 760px; }
+.smartedit .field { display: grid; gap: 4px; margin-bottom: 12px; }
+.smrule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.smrule select.input, .smrule input.input, .smartedit p select.input, .smartedit .toolbar select.input { width: auto; padding: 5px 8px; font-size: 13px; height: auto; }
