@@ -253,6 +253,13 @@ impl NodeState {
     }
 
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
+        // A key entered in Settings wins over the configured one
+        let acoustid_key = library
+            .get_setting(crate::identify::KEY_SETTING)
+            .ok()
+            .flatten()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| settings.acoustid_key.clone());
         let node_id = node_id(&library);
         let stream_secret = stream_secret(&library);
         let library = Arc::new(Mutex::new(library));
@@ -379,8 +386,9 @@ impl NodeState {
             webdav,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
-                api_key: settings.acoustid_key.clone(),
+                api_key: acoustid_key,
                 base_url: "https://api.acoustid.org".into(),
+                configured: settings.acoustid_key.clone(),
             }),
             mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
             nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),

@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Fixes from the second first-use review:**
+  - Hearting an album or artist MusicBrainz doesn't know no longer fails. It's kept on this node and published once identified, like songs.
+  - Playlists can be renamed and given a description (⋯ › Rename…, and Description › Add one).
+  - Share on Pubky asks first and says what happens. Without a Pubky sign-in it explains that and offers Accounts instead of quietly marking the playlist public.
+  - A 30 s preview plays right away and keeps your queue. The player says it's a preview, with its length.
+  - Opening a section from the sidebar starts with an empty search box.
+  - The AcoustID key can be entered in Settings › Library (with where to get one) instead of the config file.
 - **Small polish from the UX review:**
   - Album, song, artist and playlist pages keep a compact bar with the title and Play at the top once their big header scrolls away.
   - One way back: on wide screens, when Back goes to the same place as a breadcrumb (the album, the artist), only the breadcrumb shows and it works as Back. Back from search results stays. Phones show Back only.

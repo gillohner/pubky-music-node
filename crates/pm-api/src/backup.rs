@@ -44,6 +44,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("tidal.unofficial", "TIDAL full tracks"),
     ("tidal.unofficial_client", "the TIDAL device client"),
     ("youtube.api_key", "your YouTube Data API key"),
+    ("acoustid.api_key", "your AcoustID key"),
     ("qobuz.unofficial", "Qobuz"),
     ("qobuz.app", "the Qobuz app"),
     ("bandcamp.identity", "your Bandcamp sign-in"),

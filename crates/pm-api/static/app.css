@@ -626,8 +626,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .list-row > .plays { margin-right: 6px; }
 
 /* Identification: the row mark, the Settings bar, the review view. */
-.idmark { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-right: 6px; border-radius: 50%; border: 1px dashed var(--line-strong); background: transparent; color: var(--muted); font-size: 10px; line-height: 1; cursor: pointer; vertical-align: 1px; padding: 0; }
+.idmark { margin-left: 8px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-size: 11px; line-height: 1.5; cursor: pointer; vertical-align: 1px; opacity: 0; transition: opacity .12s; }
 .idmark:hover { color: var(--accent-strong); border-color: var(--accent); }
+.track:hover .idmark, .track:focus-within .idmark, .idmark:focus-visible { opacity: 1; }
+@media (hover: none) { .idmark { opacity: .8; } }
 .idbar { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 6px 0 8px; }
 .idbar span { display: block; height: 100%; background: var(--accent); }
 .idrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
@@ -1081,3 +1083,6 @@ body.kiosk .main { padding: 0; }
 .stickyhead[hidden] { display: none; }
 .stickyhead strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .stickyhead { height: 46px; margin: -18px -14px -28px; padding: 0 14px; top: -18px; } }
+.track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
+.track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.track .title:has(.idmark) > .idmark { flex: none; }

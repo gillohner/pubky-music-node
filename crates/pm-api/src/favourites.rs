@@ -66,49 +66,79 @@ pub(crate) fn canonical_for(lib: &Library, r: &FavouriteRef) -> Result<MusicUri,
 }
 
 /// Library songs without a MusicBrainz id or ISRC, favourited on this node only (mn-infra:
-/// Music Assistant's `star` failed on every other song of an untagged library).
+/// Music Assistant's `star` failed on every other song of an untagged library). Albums and
+/// artists MusicBrainz doesn't know yet are kept the same way (second review: hearting such an
+/// album failed with "no MusicBrainz release id").
 const LOCAL_KEY: &str = "favourites.local";
+const LOCAL_ALBUMS: &str = "favourites.local.albums";
+const LOCAL_ARTISTS: &str = "favourites.local.artists";
 
-pub(crate) fn local_ids(lib: &Library) -> Vec<i64> {
-    lib.get_setting(LOCAL_KEY)
+fn local_of(lib: &Library, key: &str) -> Vec<i64> {
+    lib.get_setting(key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_str(&v).ok())
         .unwrap_or_default()
 }
 
-fn store_local(lib: &Library, ids: &[i64]) -> Result<(), ApiError> {
+pub(crate) fn local_ids(lib: &Library) -> Vec<i64> {
+    local_of(lib, LOCAL_KEY)
+}
+
+fn store_of(lib: &Library, key: &str, ids: &[i64]) -> Result<(), ApiError> {
     if ids.is_empty() {
-        lib.delete_setting(LOCAL_KEY)?;
+        lib.delete_setting(key)?;
     } else {
-        lib.set_setting(LOCAL_KEY, &serde_json::to_string(ids).expect("ids serialize"))?;
+        lib.set_setting(key, &serde_json::to_string(ids).expect("ids serialize"))?;
     }
     Ok(())
 }
 
-/// The library track a reference names when it has no identity yet.
-fn unidentified_track(lib: &Library, r: &FavouriteRef) -> Result<Option<i64>, ApiError> {
+fn store_local(lib: &Library, ids: &[i64]) -> Result<(), ApiError> {
+    store_of(lib, LOCAL_KEY, ids)
+}
+
+/// What a reference names when it has no identity yet: `(setting key, page key prefix, id)`.
+fn unidentified(
+    lib: &Library,
+    r: &FavouriteRef,
+) -> Result<Option<(&'static str, &'static str, i64)>, ApiError> {
     if r.uri.as_deref().is_some_and(|u| !u.trim().is_empty()) {
         return Ok(None);
     }
-    let Some(id) = r.track_id else { return Ok(None) };
-    let t = lib
-        .get_track(TrackId(id))?
-        .ok_or_else(|| ApiError::not_found(format!("track {id}")))?;
-    Ok(t.publishable_uri().is_none().then_some(id))
+    if let Some(id) = r.track_id {
+        let t = lib
+            .get_track(TrackId(id))?
+            .ok_or_else(|| ApiError::not_found(format!("track {id}")))?;
+        return Ok(t.publishable_uri().is_none().then_some((LOCAL_KEY, "track", id)));
+    }
+    if let Some(id) = r.album_id {
+        let a = lib
+            .get_album(id)?
+            .ok_or_else(|| ApiError::not_found(format!("album {id}")))?;
+        return Ok(a.release_mbid.is_none().then_some((LOCAL_ALBUMS, "album", id)));
+    }
+    if let Some(id) = r.artist_id {
+        let a = lib
+            .get_artist(id)?
+            .ok_or_else(|| ApiError::not_found(format!("artist {id}")))?;
+        return Ok(a.mbid.is_none().then_some((LOCAL_ARTISTS, "artist", id)));
+    }
+    Ok(None)
 }
 
-/// Heart or unheart: a published favourite, or (a song not identified yet) one kept on this
-/// node. Returns the key the page checks (`uri`, or `track:<id>` for a node-only one).
+/// Heart or unheart: a published favourite, or (a song, album or artist not identified yet) one
+/// kept on this node. Returns the key the page checks (`uri`, or `track:<id>`, `album:<id>`,
+/// `artist:<id>` for a node-only one).
 pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, ApiError> {
-    if let Some(id) = unidentified_track(lib, r)? {
-        let mut ids = local_ids(lib);
+    if let Some((key, kind, id)) = unidentified(lib, r)? {
+        let mut ids = local_of(lib, key);
         ids.retain(|x| *x != id);
         if on {
             ids.push(id);
         }
-        store_local(lib, &ids)?;
-        return Ok(format!("track:{id}"));
+        store_of(lib, key, &ids)?;
+        return Ok(format!("{kind}:{id}"));
     }
     let uri = canonical_for(lib, r)?;
     if on {
@@ -116,12 +146,17 @@ pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, A
     } else {
         lib.remove_favourite(&uri.to_url())?;
         // It may have been a node-only favourite before it was identified
-        if let Some(id) = r.track_id {
-            let mut ids = local_ids(lib);
+        for (key, id) in [
+            (LOCAL_KEY, r.track_id),
+            (LOCAL_ALBUMS, r.album_id),
+            (LOCAL_ARTISTS, r.artist_id),
+        ] {
+            let Some(id) = id else { continue };
+            let mut ids = local_of(lib, key);
             let n = ids.len();
             ids.retain(|x| *x != id);
             if ids.len() != n {
-                store_local(lib, &ids)?;
+                store_of(lib, key, &ids)?;
             }
         }
     }
@@ -150,6 +185,37 @@ fn promote_local(lib: &Library) -> Result<(), ApiError> {
     if keep.len() != ids.len() {
         store_local(lib, &keep)?;
     }
+    for (key, album) in [(LOCAL_ALBUMS, true), (LOCAL_ARTISTS, false)] {
+        let ids = local_of(lib, key);
+        if ids.is_empty() {
+            continue;
+        }
+        let mut keep = Vec::new();
+        for id in &ids {
+            let uri = if album {
+                match lib.get_album(*id)? {
+                    Some(a) => a.release_mbid.map(|mbid| MusicUri::Release { mbid }),
+                    None => continue,
+                }
+            } else {
+                match lib.get_artist(*id)? {
+                    Some(a) => a.mbid.map(|mbid| MusicUri::Artist { mbid }),
+                    None => continue,
+                }
+            };
+            match uri {
+                Some(u) => {
+                    if lib.favourite_by_uri(&u.to_url())?.is_none() {
+                        add(lib, u)?;
+                    }
+                }
+                None => keep.push(*id),
+            }
+        }
+        if keep.len() != ids.len() {
+            store_of(lib, key, &keep)?;
+        }
+    }
     Ok(())
 }
 
@@ -166,6 +232,18 @@ pub(crate) fn collect(lib: &Library) -> Result<Favourites, ApiError> {
         if let Some(t) = lib.get_track(TrackId(id))? {
             out.uris.push(format!("track:{id}"));
             out.tracks.push(t);
+        }
+    }
+    for id in local_of(lib, LOCAL_ALBUMS) {
+        if let Some(a) = lib.get_album(id)? {
+            out.uris.push(format!("album:{id}"));
+            out.albums.push(a);
+        }
+    }
+    for id in local_of(lib, LOCAL_ARTISTS) {
+        if let Some(a) = lib.get_artist(id)? {
+            out.uris.push(format!("artist:{id}"));
+            out.artists.push(a);
         }
     }
     for row in lib.list_favourites()? {

@@ -24,7 +24,13 @@ use std::sync::Arc;
 pub struct AcoustIdSettings {
     pub api_key: String,
     pub base_url: String,
+    /// The key from the config, env or build; a key entered in Settings (`acoustid.api_key`)
+    /// is used instead, and clearing it goes back to this one.
+    pub configured: String,
 }
+
+/// A key entered in Settings › Library (second review: it needed a config-file edit).
+pub const KEY_SETTING: &str = "acoustid.api_key";
 
 /// Where the current (or last) run stands.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -51,6 +57,8 @@ pub struct IdentifyStatus {
     pub counts: IdentityCounts,
     /// Whether an AcoustID key is configured (fingerprint lookups).
     pub acoustid: bool,
+    /// Whether that key was entered in Settings (it can be changed or removed there).
+    pub acoustid_own: bool,
     /// "Write IDs into my files" (off by default).
     pub write_ids: bool,
 }
@@ -65,7 +73,11 @@ pub struct IdentifyStart {
 /// `PUT /v1/library/identify/settings`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdentifySettings {
-    pub write_ids: bool,
+    #[serde(default)]
+    pub write_ids: Option<bool>,
+    /// Your own AcoustID key; empty removes it.
+    #[serde(default)]
+    pub acoustid_key: Option<String>,
 }
 
 /// `POST /v1/library/identify/write`: what was written.
@@ -155,10 +167,30 @@ pub(crate) async fn put_settings(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<IdentifySettings>,
 ) -> ApiResult<IdentifyStatus> {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(WRITE_IDS_KEY, if body.write_ids { "true" } else { "false" })?;
+    if let Some(w) = body.write_ids {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(WRITE_IDS_KEY, if w { "true" } else { "false" })?;
+    }
+    if let Some(k) = body.acoustid_key {
+        let k = k.trim().to_string();
+        if k.len() > 64 || k.chars().any(|c| !c.is_ascii_alphanumeric()) {
+            return Err(ApiError::bad_request(
+                "That doesn't look like an AcoustID key (letters and digits, from acoustid.org/new-application)",
+            ));
+        }
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            if k.is_empty() {
+                lib.delete_setting(KEY_SETTING)?;
+            } else {
+                lib.set_setting(KEY_SETTING, &k)?;
+            }
+        }
+        let mut a = s.acoustid.write().expect("acoustid lock");
+        a.api_key = if k.is_empty() { a.configured.clone() } else { k };
+    }
     Ok(Json(status(&s)?))
 }
 
@@ -180,11 +212,16 @@ pub struct SuggestionView {
 }
 
 fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
-    let counts = s.library.lock().expect("library poisoned").identity_counts()?;
+    let (counts, acoustid_own) = {
+        let lib = s.library.lock().expect("library poisoned");
+        let own = lib.get_setting(KEY_SETTING)?.is_some_and(|k| !k.is_empty());
+        (lib.identity_counts()?, own)
+    };
     Ok(IdentifyStatus {
         progress: s.identify.lock().expect("identify lock").clone(),
         counts,
         acoustid: !s.acoustid.read().expect("acoustid lock").api_key.is_empty(),
+        acoustid_own,
         write_ids: write_ids_on(s),
     })
 }

@@ -5430,6 +5430,7 @@ mod tests {
         *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
             api_key: "test-key".into(),
             base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
         };
         *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
         let tid = s
@@ -5478,6 +5479,37 @@ mod tests {
             .unwrap()
             .canonical
             .is_some());
+        // A key entered in Settings: kept, used, and removing it goes back to the configured one
+        let (st, b) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"acoustid_key": "own-key!"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+        let (st, b) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"acoustid_key": " OwnKey42 "})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(
+            (b["acoustid"].clone(), b["acoustid_own"].clone()),
+            (true.into(), true.into())
+        );
+        assert_eq!(s.acoustid.read().unwrap().api_key, "OwnKey42");
+        let (_, b) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"acoustid_key": ""})),
+        )
+        .await;
+        assert_eq!(b["acoustid_own"], false, "{b}");
+        assert_eq!(s.acoustid.read().unwrap().api_key, "");
         // Without a key: a new file gets MusicBrainz search suggestions only.
         s.acoustid.write().unwrap().api_key.clear();
         let c = music.join("other.wav");

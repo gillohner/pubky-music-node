@@ -287,8 +287,8 @@ async fn playlist_lifecycle() {
     let (_, list) = call(&app, "GET", "/v1/playlists", None).await;
     assert!(list.as_array().unwrap().is_empty());
 
-    // Favourites: a tagged track hearts by id; an untagged one and the
-    // album (no release id) are refused with a reason; the list joins back.
+    // Favourites: a tagged track hearts by id; an untagged one and an album
+    // without a release id are kept on this node; the list joins back.
     let (st, tracks) = call(&app, "GET", "/v1/library/tracks?limit=50", None).await;
     assert_eq!(st, StatusCode::OK);
     let tracks = tracks["tracks"].as_array().unwrap().clone();
@@ -334,18 +334,33 @@ async fn playlist_lifecycle() {
         .await;
         assert_eq!(st, StatusCode::OK);
     }
-    let (st, _) = call(
+    // An album without a release id is kept on this node, listed, and can be unhearted
+    let (st, b) = call(
         &app,
         "PUT",
         "/v1/favourites",
         Some(serde_json::json!({"album_id": bare_album_id})),
     )
     .await;
-    assert_eq!(
-        st,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "an album without a release id cannot be hearted"
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["uri"], format!("album:{bare_album_id}"));
+    let (_, all) = call(&app, "GET", "/v1/favourites", None).await;
+    assert!(
+        all["albums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == bare_album_id),
+        "{all}"
     );
+    let (st, _) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?album_id={bare_album_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
     let (st, f) = call(
         &app,
         "PUT",

@@ -116,7 +116,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | PUT | `/v1/playlists/{id}/order` | `{order: [service…]}` or `{order: null}` | the playlist; its own play order, or the node's |
 | GET/PUT | `/v1/play-order` | `{order: [service…]}` | `{order, services: [{id, name, connected, note}]}`: the node's global play order (`library`, `tidal`, `spotify`) |
 | GET | `/v1/favourites` | | `{tracks, albums, artists, other: [url], uris: [url]}`: hearts joined to the library (ADR 0010) |
-| PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`. A library song without a MusicBrainz id or ISRC is a favourite on this node only (`uri` is `track:<id>`; never synced) until it's identified. An album or artist without an id answers 422 |
+| PUT | `/v1/favourites` | `{uri}` or `{track_id}` / `{album_id}` / `{artist_id}` | `{uri, favourite: true}`. A library song without a MusicBrainz id or ISRC is a favourite on this node only (`uri` is `track:<id>`; never synced) until it's identified. An album without a MusicBrainz release id or an artist without one is kept the same way (`album:<id>`, `artist:<id>`) and published once MusicBrainz knows it |
 | DELETE | `/v1/favourites` | `?uri=` or `?track_id=` / `?album_id=` / `?artist_id=` | `{uri, favourite: false}` |
 | GET | `/v1/tags` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, tags: [{uri, label, created_at, synced}]}`: my tags (ADR 0011) |
 | PUT | `/v1/tags` | `{uri|track_id|album_id|artist_id, label}` | `{uri, label, tagged: true}`; label trimmed and lowercased, 1–20 chars; 422 without a canonical identity |
@@ -156,7 +156,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/library/tracks/{id}/candidates` | | "Which song is this?": searches MusicBrainz by the track's tags now (with, then without its length) and lists its suggestions with MusicBrainz's title, artist and release, one per release; `{track, suggestions, needs_contact}`; pick one with the accept call below |
 | POST | `/v1/library/suggestions/{id}/accept` | | the owner confirms: the track's identity becomes that recording (`confirmed_by_user`) |
 | DELETE | `/v1/library/suggestions/{id}` | | not this one |
-| PUT | `/v1/library/identify/settings` | `{write_ids}` | "Write IDs into my files" on or off (off by default) |
+| PUT | `/v1/library/identify/settings` | `{write_ids?, acoustid_key?}` | "Write IDs into my files" on or off (off by default); your own AcoustID key (letters and digits; empty removes it and goes back to the configured one). The status says `acoustid` (a key is in use) and `acoustid_own` (it was entered here). The key goes into encrypted backups only |
 | POST | `/v1/library/identify/write` | | write the IDs found so far into the files now (FLAC, WAV, AIFF; tags backed up first): `{written, skipped: [{track_id, path, reason}], backup_dir}` |
 | GET, POST | `/v1/library/tag-fixes` | `?limit=`; POST `{track_ids?}` | GET: what would change per file (`{total, files: [{track_id, title, path, changes: [{key, now, then}]}], cannot}`): separate artists (`ARTISTS`, artist ids) and the IDs of confirmed matches. POST writes them (tags backed up first, audio untouched): `{written, skipped, backup_dir}` |
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
