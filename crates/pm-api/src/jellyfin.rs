@@ -225,6 +225,10 @@ impl StreamingService for Jellyfin {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play", "playlists"]
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let srv = s.jellyfin.read().expect("jellyfin").clone();
         SourceInfo {

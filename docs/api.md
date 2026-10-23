@@ -163,7 +163,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/discover/trends` | `?window=7d&limit=` | Pinakes trending music, each item with `in_library` (the matching track); 412 without a valid `contact` |
 | GET | `/v1/discover/tag/{label}` | `?limit=` | music tagged `label` |
 | GET | `/v1/discover/friends/{viewer}` | `?limit=` | music the people a pubky follows tagged or posted |
-| GET | `/v1/sources` | | streaming sources the node can search and play: `[{id, name, description, status, enabled}]` (`archive` = Internet Archive, `audius` = Audius, `tidal` = TIDAL, `deezer` = Deezer catalogue with 30 s previews; hits carry `uri` when a track can be queued directly) |
+| GET | `/v1/sources` | | streaming sources the node can search and play: `[{id, name, description, status, enabled, features, stage}]`; `features` is what the source declares it can do (`search`, `play`, `connect`, `artists`, `library`, `playlists`, `downloads`, `lyrics`, `scrobble`) and the app shows only that; `stage` is `stable`, `beta` or `unofficial` (`archive` = Internet Archive, `audius` = Audius, `tidal` = TIDAL, `deezer` = Deezer catalogue with 30 s previews; hits carry `uri` when a track can be queued directly) |
 | PUT | `/v1/sources/{source}/enabled` | `{enabled}` | switch a source on or off; off hides it from search, Home, item pages and the play order (its own search answers 404), its sign-in and settings are kept |
 | GET | `/v1/sources/youtube/key` | | `{set}`: whether YouTube search has the owner's Data API key (the key never comes back) |
 | PUT | `/v1/sources/youtube/key` | `{key}` | Keeps the key after one check call to YouTube (400 with YouTube's reason when refused); empty forgets it |

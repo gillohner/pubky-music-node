@@ -292,6 +292,14 @@ impl StreamingService for Audiobookshelf {
         SOURCE_ID
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        &["search", "play"]
+    }
+
+    fn stage(&self) -> &'static str {
+        "beta"
+    }
+
     fn info(&self, s: &NodeState) -> SourceInfo {
         let srv = s.audiobookshelf.read().expect("audiobookshelf").server.clone();
         SourceInfo {
