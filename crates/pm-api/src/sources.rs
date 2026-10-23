@@ -535,6 +535,9 @@ impl SourceFactory for NodeSources {
         if is_http_uri(&item.uri) {
             return open_http_stream(&item.uri);
         }
+        if item.uri == crate::librespot::LIVE_URI {
+            return crate::librespot::open_live();
+        }
         if let Some(id) = item.uri.strip_prefix(crate::tidal::TRACK_URI_PREFIX) {
             return crate::tidal::open_track_blocking(&self.library, &self.tidal, id);
         }
