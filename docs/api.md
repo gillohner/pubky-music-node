@@ -178,6 +178,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | PUT | `/v1/sources/qobuz/unofficial` | `{enabled?, quality?: max\|cd, app_id?, app_secret?}` | Switch it on or off (on again is Try again), the quality, the owner's app (an empty `app_id` forgets it) |
 | POST | `/v1/sources/qobuz/unofficial/login` | `{email, password}` | Signs in once; the node keeps only Qobuz's session token. 403 for an account without a streaming plan |
 | DELETE | `/v1/sources/qobuz/unofficial/login` | | Forgets the session |
+| GET | `/v1/sources/soundcloud/unofficial` | | SoundCloud (unofficial-only): `{enabled, client_from?: settings\|config, client_id?, signed_in, user?, health?, warning}` (the token never comes back) |
+| PUT | `/v1/sources/soundcloud/unofficial` | `{enabled?, client_id?, token?}` | Switch it on or off (on again is Try again); the owner's client ID (empty forgets it); their sign-in token, checked once with `me` (400 when SoundCloud doesn't take it; empty signs out) |
+| GET | `/v1/sources/soundcloud/likes` (POST `…/import`) | | `{tracks, playlists}` the signed-in user's likes as source hits; POST favourites them here by their SoundCloud link (`{imported, skipped}`) |
+| GET | `/v1/sources/soundcloud/playlists` (POST `…/{id}/import[?keep_source=true]`) | | `[{id, name, description?, items, url}]` the user's own sets; POST creates a private Pubky playlist of the tracks' SoundCloud links (`{imported, skipped, playlist}`) |
+| GET | `/v1/sources/soundcloud/stream/{id}` | | The track as MP3 (or AAC) for browsers, relayed by the node; HLS is stitched into one stream |
 | GET | `/v1/sources/qobuz/stream/{id}` | | The track as FLAC for browsers, relayed by the node |
 | POST / DELETE | `/v1/sources/tidal/unofficial/login` | | POST starts the device sign-in (the code to enter at link.tidal.com, in `pending`; the node waits for the approval); DELETE forgets the session |
 | GET / DELETE | `/v1/sources/tidal/status` (DELETE `…/session`) | | `{configured, signed_in, user_id?, country?, scope?, expires_at?, redirect_uri, requested_scopes, access_tier?, playback_limit?}` (`playback_limit` such as `FULL_REQUIRES_HIGHER_ACCESS_TIER` means TIDAL serves previews to this app's tier); DELETE forgets the tokens |

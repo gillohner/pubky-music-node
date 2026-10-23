@@ -33,6 +33,7 @@ pub struct NodeConfig {
     /// YouTube on the zones (unofficial): the yt-dlp to run; empty = one the node downloaded, or
     /// yt-dlp on the PATH. `PM_YTDLP` overrides.
     pub youtube: YoutubeConfig,
+    pub soundcloud: SoundcloudConfig,
     /// Sign-ins with the project's built-in apps.
     pub auth: AuthConfig,
     /// Every zone as a UPnP/DLNA MediaRenderer on the LAN (Music Assistant, Home Assistant,
@@ -91,6 +92,24 @@ impl Default for RendererConfig {
 #[serde(default)]
 pub struct YoutubeConfig {
     pub ytdlp: String,
+}
+
+/// SoundCloud (unofficial): a client ID the owner may use and, optionally, their own sign-in
+/// token; Settings override both. `PM_SOUNDCLOUD_CLIENT_ID` / `PM_SOUNDCLOUD_TOKEN` as well.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SoundcloudConfig {
+    pub client_id: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for SoundcloudConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SoundcloudConfig")
+            .field("client_id", &self.client_id)
+            .field("token", &if self.token.is_empty() { "" } else { "<set>" })
+            .finish()
+    }
 }
 
 /// Sign-ins with the project's built-in apps return through one static page that forwards the
@@ -255,6 +274,7 @@ impl Default for NodeConfig {
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
             youtube: YoutubeConfig::default(),
+            soundcloud: SoundcloudConfig::default(),
             renderer: RendererConfig::default(),
             homeserver: HomeserverConfig::default(),
             auth: AuthConfig::default(),

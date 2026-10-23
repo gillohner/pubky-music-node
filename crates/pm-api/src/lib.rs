@@ -64,6 +64,7 @@ pub mod roon_import;
 pub mod search;
 pub mod shared;
 pub mod soloist;
+pub mod soundcloud;
 pub mod sources;
 pub mod spotify;
 pub mod state;
@@ -368,6 +369,18 @@ pub fn router(state: Arc<NodeState>) -> Router {
             post(soloist::install).delete(soloist::uninstall),
         )
         .route("/sources/spotify/soloist/control", post(soloist::control))
+        .route("/sources/soundcloud/stream/{id}", get(soundcloud::stream))
+        .route(
+            "/sources/soundcloud/unofficial",
+            get(soundcloud::get_status).put(soundcloud::put),
+        )
+        .route("/sources/soundcloud/likes", get(soundcloud::likes))
+        .route("/sources/soundcloud/likes/import", post(soundcloud::import_likes))
+        .route("/sources/soundcloud/playlists", get(soundcloud::playlists))
+        .route(
+            "/sources/soundcloud/playlists/{id}/import",
+            post(soundcloud::import_playlist),
+        )
         .route(
             "/sources/subsonic/server",
             get(opensubsonic::get_server)
@@ -7446,6 +7459,340 @@ mod tests {
         )
         .await;
         assert_eq!(k["set"], false);
+    }
+
+    /// SoundCloud (unofficial): with a client ID the owner entered, search, a set page, likes and
+    /// playlists with the owner's token, and streams (progressive MP3 for one track, HLS stitched
+    /// for another) from a stand-in api-v2; a refused client switches the mode off.
+    #[tokio::test]
+    async fn soundcloud_searches_and_streams_from_a_mock() {
+        use pm_zones::SourceFactory;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = {
+            let refuse = refuse.clone();
+            move |q: &str| -> Option<StatusCode> {
+                if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Some(StatusCode::UNAUTHORIZED);
+                }
+                (!q.contains("client_id=sc-client-0123456789abcdef")).then_some(StatusCode::UNAUTHORIZED)
+            }
+        };
+        let tr = |id: u64, title: &str, kind: &str| {
+            let media = match kind {
+                "progressive" => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/progressive"), "preset": "mp3_1_0", "format": {"protocol": "progressive", "mime_type": "audio/mpeg"}}])
+                }
+                "hls" => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/hls"), "preset": "mp3_1_0", "format": {"protocol": "hls", "mime_type": "audio/mpeg"}}])
+                }
+                _ => {
+                    serde_json::json!([{"url": format!("{base}/media/{id}/enc"), "preset": "aac_256k", "format": {"protocol": "encrypted-hls", "mime_type": "audio/mp4"}}])
+                }
+            };
+            serde_json::json!({"id": id, "kind": "track", "title": title, "policy": "ALLOW", "permalink_url": format!("https://soundcloud.com/someone/{}", title.to_lowercase().replace(' ', "-")),
+                "duration": 60000, "artwork_url": "https://i1.sndcdn.com/artworks-large.jpg", "created_at": "2024-03-02T10:00:00Z", "playback_count": 7,
+                "user": {"username": "Someone"}, "track_authorization": "auth-1", "media": {"transcodings": media}})
+        };
+        let t1 = tr(1, "Night Drive", "progressive");
+        let t2 = tr(2, "Sunrise", "hls");
+        let t3 = tr(3, "Locked", "encrypted");
+        let set = serde_json::json!({"id": 9, "kind": "playlist", "title": "Late Set", "permalink_url": "https://soundcloud.com/someone/sets/late-set", "user": {"username": "Someone"},
+            "track_count": 2, "tracks": [t1.clone(), {"id": 2, "kind": "track"}]});
+        let mk = |v: serde_json::Value| {
+            let gate = gate.clone();
+            move |q: axum::extract::RawQuery| {
+                let v = v.clone();
+                let gate = gate.clone();
+                async move {
+                    match gate(q.0.as_deref().unwrap_or("")) {
+                        Some(st) => (st, Json(serde_json::json!({"error": "no"}))),
+                        None => (StatusCode::OK, Json(v)),
+                    }
+                }
+            }
+        };
+        let half = flac.len() / 2;
+        let (seg1, seg2) = (flac[..half].to_vec(), flac[half..].to_vec());
+        let mock = Router::new()
+            .route("/search/tracks", get(mk(serde_json::json!({"collection": [t1.clone(), t2.clone(), t3.clone()], "next_href": null}))))
+            .route("/search/playlists", get(mk(serde_json::json!({"collection": [set.clone()]}))))
+            .route("/resolve", get(mk(t2.clone())))
+            .route("/tracks/1", get(mk(t1.clone())))
+            .route("/tracks/2", get(mk(t2.clone())))
+            .route("/tracks/3", get(mk(t3.clone())))
+            .route("/tracks", get(mk(serde_json::json!([t2.clone()]))))
+            .route("/playlists/9", get(mk(set.clone())))
+            .route("/me", get({
+                let g = gate.clone();
+                move |q: axum::extract::RawQuery, h: axum::http::HeaderMap| {
+                    let g = g.clone();
+                    async move {
+                        let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                        if g(q.0.as_deref().unwrap_or("")).is_some() || auth != "OAuth tok-0123456789" {
+                            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "bad token"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"id": 77, "username": "Someone", "permalink": "someone"})))
+                    }
+                }
+            }))
+            .route("/users/77/likes", get(mk(serde_json::json!({"collection": [{"track": t1.clone()}, {"playlist": set.clone()}], "next_href": null}))))
+            .route("/users/77/playlists", get(mk(serde_json::json!({"collection": [set.clone()], "next_href": null}))))
+            .route("/media/1/progressive", get(mk(serde_json::json!({"url": format!("{base}/cdn/1.mp3")}))))
+            .route("/media/2/hls", get(mk(serde_json::json!({"url": format!("{base}/cdn/2.m3u8")}))))
+            .route("/cdn/1.mp3", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/cdn/2.m3u8", get({ let b = base.clone(); move || { let b = b.clone(); async move { format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:30\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:30.0,\n{b}/cdn/seg/1\n#EXTINF:30.0,\n{b}/cdn/seg/2\n#EXT-X-ENDLIST\n") } } }))
+            .route("/cdn/seg/1", get({ let f = seg1.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/cdn/seg/2", get({ let f = seg2.clone(); move || { let f = f.clone(); async move { f } } }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        soundcloud::set_api_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // Not configured: no client yet; the everyday search leaves it out
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert!(
+            sc["status"].as_str().unwrap().starts_with("not configured"),
+            "{sc}"
+        );
+        let (st, _) = call(&app, "GET", "/v1/sources/soundcloud/search?q=night", None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": "short"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": "sc-client-0123456789abcdef", "enabled": true})),
+        )
+        .await;
+        assert_eq!(
+            (
+                u["enabled"].clone(),
+                u["client_from"].clone(),
+                u["signed_in"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!("settings"),
+                serde_json::json!(false)
+            )
+        );
+        assert!(crate::search::sources_for(&s, "everywhere").contains(&"soundcloud".to_string()));
+        // Search: sets first, then tracks; a pasted link resolves
+        let (st, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/soundcloud/search?q=night&limit=10",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(
+            (items[0]["id"].as_str(), items[0]["kind"].as_str()),
+            (Some("playlist:9"), Some("item"))
+        );
+        assert_eq!(items[1]["uri"], "soundcloud:track:1");
+        assert_eq!(items[1]["url"], "https://soundcloud.com/someone/night-drive");
+        let (_, r) = call(
+            &app,
+            "GET",
+            "/v1/sources/soundcloud/search?q=https%3A%2F%2Fsoundcloud.com%2Fsomeone%2Fsunrise",
+            None,
+        )
+        .await;
+        assert_eq!(r["items"][0]["uri"], "soundcloud:track:2");
+        // A set page: the stub track is fetched; the encrypted track says so on its own page
+        let (_, it) = call(&app, "GET", "/v1/sources/soundcloud/items/playlist:9", None).await;
+        assert_eq!(it["tracks"].as_array().unwrap().len(), 2, "{it}");
+        assert_eq!(it["tracks"][1]["url"], "soundcloud:track:2");
+        assert_eq!(it["tracks"][1]["format"], "MP3 (SoundCloud, HLS)");
+        let (_, it) = call(&app, "GET", "/v1/sources/soundcloud/items/track:3", None).await;
+        assert!(
+            it["tracks"][0]["format"]
+                .as_str()
+                .unwrap()
+                .contains("not playable"),
+            "{it}"
+        );
+        // Streams: progressive for browsers and zones, HLS stitched for both; encrypted refused
+        let req = Request::builder()
+            .uri("/v1/sources/soundcloud/stream/1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "audio/mpeg");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.len(), flac.len());
+        let req = Request::builder()
+            .uri("/v1/sources/soundcloud/stream/2")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.to_vec(), flac, "HLS segments come back as the one file");
+        for id in ["1", "2"] {
+            let src = s.sources.clone();
+            let it = pm_zones::QueueItem::new(format!("soundcloud:track:{id}"));
+            let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+                .await
+                .unwrap();
+            assert!(r.is_ok(), "track {id}: {r:?}");
+        }
+        let src = s.sources.clone();
+        let it = pm_zones::QueueItem::new("soundcloud:track:3");
+        let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))
+            .await
+            .unwrap();
+        assert!(
+            r.unwrap_err().contains("Go+"),
+            "encrypted tracks are refused, never decrypted"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(u["health"]["ok"], true, "{u}");
+        // The owner's token: checked with `me`; a wrong one is dropped
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"token": "wrong-token-123"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(
+            (u["signed_in"].clone(), u["enabled"].clone()),
+            (serde_json::json!(false), serde_json::json!(true)),
+            "a bad token doesn't switch the mode off: {u}"
+        );
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"token": "tok-0123456789"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        assert_eq!(
+            (u["signed_in"].clone(), u["user"].clone()),
+            (serde_json::json!(true), serde_json::json!("Someone"))
+        );
+        assert!(
+            !u.to_string().contains("tok-0123456789"),
+            "the token never comes back: {u}"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert_eq!(sc["status"], "signed in");
+        // Likes and playlists, and their imports
+        let (st, l) = call(&app, "GET", "/v1/sources/soundcloud/likes", None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(
+            (
+                l["tracks"].as_array().unwrap().len(),
+                l["playlists"].as_array().unwrap().len()
+            ),
+            (1, 1)
+        );
+        let (_, r) = call(&app, "POST", "/v1/sources/soundcloud/likes/import", None).await;
+        assert_eq!(
+            (r["imported"].clone(), r["skipped"].clone()),
+            (serde_json::json!(2), serde_json::json!(0)),
+            "{r}"
+        );
+        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        assert!(
+            favs.to_string().contains("soundcloud.com/someone/night-drive"),
+            "{favs}"
+        );
+        let (_, pls) = call(&app, "GET", "/v1/sources/soundcloud/playlists", None).await;
+        assert_eq!(
+            (pls[0]["id"].clone(), pls[0]["items"].clone()),
+            (serde_json::json!("9"), serde_json::json!(2))
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/soundcloud/playlists/9/import?keep_source=true",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["imported"], 2);
+        assert_eq!(r["playlist"]["summary"]["name"], "Late Set");
+        // SoundCloud refuses the client: the mode switches itself off and says why
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (st, r) = call(&app, "GET", "/v1/sources/soundcloud/search?q=night", None).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{r}");
+        let (_, u) = call(&app, "GET", "/v1/sources/soundcloud/unofficial", None).await;
+        assert_eq!(u["enabled"], false);
+        assert!(
+            u["health"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("refused the client ID"),
+            "{u}"
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let sc = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "soundcloud")
+            .unwrap()
+            .clone();
+        assert!(sc["status"].as_str().unwrap().starts_with("error:"), "{sc}");
+        assert!(!crate::search::sources_for(&s, "everywhere").contains(&"soundcloud".to_string()));
+        // Try again (on) with SoundCloud answering again
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert!(u["health"].is_null() && u["enabled"] == true, "{u}");
+        // Forget the client: back to not configured
+        let (_, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/soundcloud/unofficial",
+            Some(serde_json::json!({"client_id": ""})),
+        )
+        .await;
+        assert!(u["client_from"].is_null() && u["signed_in"] == false, "{u}");
+        assert!(backup::SECRET_SETTINGS
+            .iter()
+            .any(|(k, _)| *k == soundcloud::CLIENT_KEY));
     }
 
     /// Spotify Soloist: the node downloads Spotify's archive (a stand-in here) and unpacks it, runs

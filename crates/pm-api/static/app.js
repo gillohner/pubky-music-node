@@ -115,7 +115,7 @@
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
   // passes through; raw service answers ("…answered 403 Forbidden: …") are translated, and the raw
   // text stays on the error as `raw` (UX review: wording leaks internals).
-  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
+  const SVC_WORDS = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', spotify: 'Spotify', deezer: 'Deezer', jamendo: 'Jamendo', subsonic: 'Subsonic', jellyfin: 'Jellyfin', archive: 'The Internet Archive', audius: 'Audius', radio: 'The radio directory', pubky: 'Your homeserver', pinakes: 'Pinakes', listenbrainz: 'ListenBrainz' };
   const humanError = (raw, path = '') => {
     const text = String(raw || '');
     const svcKey = (/^\/sources\/([a-z]+)/.exec(path) || /^([a-z]+): /.exec(text) || [])[1];
@@ -429,7 +429,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -1539,7 +1539,7 @@
     $$('.nav-item[data-view]').forEach((b) => { if (b.dataset.view !== 'sources') b.hidden = off.has(b.dataset.view); });
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
-  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -2450,11 +2450,12 @@
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
               + (account ? group('Account', block('', '', account)) : '')
-              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
+              + (cur.enabled && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalfull"></div>' : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
               + (cur.id === 'spotify' ? '<div id="spotsoloist"></div>' : '')
+              + (cur.id === 'soundcloud' ? '<div id="scmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -2588,6 +2589,50 @@
             const sn = $('#slnext'); if (sn) sn.onclick = () => ctl('next');
           };
           fillSoloist();
+          const scm = $('#scmode');
+          const fillSoundCloud = async () => {
+            if (!scm || !scm.isConnected) return;
+            let u; try { u = await api('GET', '/sources/soundcloud/unofficial'); } catch (e) { scm.innerHTML = ''; return; }
+            if (!scm.isConnected) return;
+            const broke = u.health && !u.health.ok;
+            const rows = [row('SoundCloud (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
+            if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. SoundCloud links still open on soundcloud.com.<div class="actions"><button class="btn sm" id="scretry">Try again</button></div></div>`);
+            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here. SoundCloud can stop accepting a client at any time; then enter another one.'}`, `<button class="btn ghost sm" id="scclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
+            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('The node has no built-in SoundCloud client and reads none off soundcloud.com: enter a SoundCloud web client ID you are allowed to use. Until you do, SoundCloud stays off.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
+            if (u.client_from) {
+              rows.push(u.signed_in
+                ? row('Signed in', `Your likes and playlists come from SoundCloud account ${esc(u.user || '')}. The token stays on the node and never comes back.`, '<button class="btn ghost sm" id="sctokenforget">Sign out</button>')
+                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it like a sign-in; it never shows it again. Without it, search and playback still work.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              rows.push(row('Streams', 'MP3 as SoundCloud serves it, progressive or stitched from HLS. Tracks SoundCloud encrypts (Go+) are skipped; a track SoundCloud only snips plays its 30-second preview.', ''));
+              if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+            }
+            scm.innerHTML = group('Unofficial mode', rows.join(''));
+            const put = async (body, ok) => { try { await api('PUT', '/sources/soundcloud/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            $('#scon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'SoundCloud is on' : 'SoundCloud is off');
+            const sr = $('#scretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Trying SoundCloud again');
+            const cf = $('#scclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); put({ client_id: String(new FormData(cf).get('id') || '').trim() }, 'SoundCloud client saved'); };
+            const cc = $('#scclientchange'); if (cc) cc.onclick = () => { cf.hidden = false; cf.querySelector('input').focus(); };
+            const cg = $('#scclientforget'); if (cg) cg.onclick = () => put({ client_id: '' }, 'SoundCloud client forgotten');
+            const tf = $('#sctoken'); if (tf) tf.onsubmit = (e) => { e.preventDefault(); put({ token: String(new FormData(tf).get('token') || '').trim() }, 'Signed in to SoundCloud'); };
+            const tg = $('#sctokenforget'); if (tg) tg.onclick = () => put({ token: '' }, 'Signed out of SoundCloud');
+          };
+          fillSoundCloud();
+          if (cur.id === 'soundcloud' && cur.enabled && cur.status === 'signed in') {
+            // Your likes and playlists, with imports into favourites and Pubky playlists.
+            const box = document.createElement('div'); box.id = 'scmine'; box.innerHTML = '<p class="muted small">Loading your SoundCloud likes…</p>'; ($('#srcmine') || main).appendChild(box);
+            (async () => {
+              try {
+                const [likes, pls] = await Promise.all([api('GET', '/sources/soundcloud/likes'), api('GET', '/sources/soundcloud/playlists')]);
+                if (state.view !== 'sources' || state.sourceId !== 'soundcloud' || !box.isConnected) return;
+                const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind === 'item' ? 'set' : h.kind)}</span></div>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your likes</h3><span class="muted small">${countOf(likes.tracks.length, 'tracks')} · ${countOf(likes.playlists.length, 'sets')}</span><button class="btn sm" id="scfav" title="Favourite them here too, by their SoundCloud link">${icon('heart')} Import as favourites</button></div>${likes.tracks.length || likes.playlists.length ? `<div class="list">${likes.playlists.slice(0, 20).map(hit).join('')}${likes.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing liked on SoundCloud yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-scpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No sets of your own on SoundCloud.</p>'}</section>`;
+                $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'soundcloud', id: b.dataset.sitem }));
+                $('#scfav').onclick = async () => { try { const r = await api('POST', '/sources/soundcloud/likes/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+                $$('[data-scpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'soundcloud', b.dataset.scpl));
+              } catch (e) { box.innerHTML = `<p class="muted small">SoundCloud likes: ${esc(e.message)}</p>`; }
+            })();
+          }
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;
