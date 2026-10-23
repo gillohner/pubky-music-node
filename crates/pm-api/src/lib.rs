@@ -349,6 +349,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
+        .route("/sources/tidal/callback", post(tidal::pasted_callback))
+        .route("/sources/spotify/callback", post(spotify::pasted_callback))
         .route("/sources/tidal/stream/{id}", get(tidal::stream))
         .route("/sources/deezer/stream/{id}", get(deezer::stream))
         .route("/sources/jamendo/stream/{id}", get(jamendo::stream))
@@ -7325,6 +7327,44 @@ mod tests {
             stv["redirect_uri"], page,
             "the redirect to register is the return page"
         );
+        // The pasted-address fallback: the same parameters, typed in instead of arriving by redirect
+        let (_, l) = call(&app, "GET", "/v1/sources/tidal/login", None).await;
+        let lurl = url::Url::parse(l["url"].as_str().unwrap()).unwrap();
+        let state_param = lurl
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": "not a url"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": "https://gillohner.github.io/pubky-music-auth/callback?foo=bar"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no code: {r}");
+        let pasted = format!(
+            "http://192.168.1.5:7788/tidal/callback?code=the-code&state={}",
+            url::form_urlencoded::byte_serialize(state_param.as_bytes()).collect::<String>()
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(serde_json::json!({"url": pasted})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["signed_in"], true, "{r}");
+        call(&app, "DELETE", "/v1/sources/tidal/session", None).await;
         assert_eq!(
             sign_in("/v1/sources/tidal/login", "/tidal/callback").await,
             "/?tidal=signed_in"
