@@ -191,6 +191,8 @@ pub struct NodeState {
     pub plex: crate::plex::Shared,
     /// WebDAV shares that are library roots, shared with the audio thread.
     pub webdav: crate::webdav::Shared,
+    /// Google Drive and OneDrive folders that are library roots, shared with the audio thread.
+    pub drives: crate::drives::Shared,
     /// The user's Audiobookshelf, shared with the audio thread.
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
@@ -293,6 +295,10 @@ impl NodeState {
         let webdav: crate::webdav::Shared = Arc::new(std::sync::RwLock::new(crate::webdav::load(
             &library.lock().expect("library poisoned"),
         )));
+        let drives: crate::drives::Shared = Arc::new(std::sync::RwLock::new(crate::drives::load(
+            &library.lock().expect("library poisoned"),
+            Default::default(),
+        )));
         let audiobookshelf: crate::audiobookshelf::Shared = Arc::new(std::sync::RwLock::new(
             crate::audiobookshelf::load(&library.lock().expect("library poisoned")),
         ));
@@ -307,6 +313,7 @@ impl NodeState {
             plex.clone(),
             audiobookshelf.clone(),
             webdav.clone(),
+            drives.clone(),
         ));
         let events = crate::events::EventBus::new(1024);
         let sources_off =
@@ -387,6 +394,7 @@ impl NodeState {
             plex,
             audiobookshelf,
             webdav,
+            drives,
             spotify,
             acoustid: std::sync::RwLock::new(crate::identify::AcoustIdSettings {
                 api_key: acoustid_key,
@@ -1313,6 +1321,14 @@ impl NodeState {
 
     pub fn tunnel_dir(&self) -> Option<&std::path::Path> {
         self.tunnel_dir.get().map(PathBuf::as_path)
+    }
+
+    /// The Google Drive and OneDrive apps from the config (or the build's project apps).
+    pub fn set_drive_apps(
+        &self,
+        apps: std::collections::HashMap<crate::drives::Provider, crate::drives::App>,
+    ) {
+        self.drives.write().expect("drives").apps = apps;
     }
 
     /// Set once at start with the bundled homeserver's files folder (`PM_HOMESERVER_FILES_DIR`).

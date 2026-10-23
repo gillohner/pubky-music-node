@@ -34,6 +34,7 @@ pub mod bundled;
 pub mod dash;
 pub mod deezer;
 pub mod discover;
+pub mod drives;
 pub mod events;
 pub mod favourites;
 pub mod files;
@@ -558,6 +559,18 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::put(profiles::follow).delete(profiles::unfollow),
         )
         .route("/library/webdav", get(webdav::list).post(webdav::add))
+        .route("/library/drives", get(drives::list).post(drives::add))
+        .route("/library/drives/{provider}/login", post(drives::login))
+        .route("/library/drives/{provider}/folders", get(drives::folders))
+        .route(
+            "/library/drives/{provider}/account",
+            axum::routing::delete(drives::sign_out),
+        )
+        .route("/library/drives/roots/{id}/scan", post(drives::rescan))
+        .route(
+            "/library/drives/roots/{id}",
+            axum::routing::delete(drives::remove),
+        )
         .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
@@ -627,6 +640,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             Router::new()
                 .route("/tidal/callback", get(tidal::callback))
                 .route("/spotify/callback", get(spotify::callback))
+                .route("/drives/{provider}/callback", get(drives::callback))
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
@@ -4317,6 +4331,293 @@ mod tests {
         assert!(!v.to_string().contains("KEY1"));
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
         assert!(srcs.to_string().contains("Your audiobooks at"), "{srcs}");
+    }
+
+    /// One mock for Google (OAuth, Drive API) and Microsoft (OAuth, Graph, pre-authenticated
+    /// downloads). Files: Music/01 Song.flac and Music/Sub/02 Two.flac.
+    async fn mock_drives(flac: Vec<u8>, refreshes: Arc<std::sync::atomic::AtomicU32>) -> String {
+        use axum::extract::{Path as P, Query as Q};
+        use std::collections::HashMap as M;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        fn ranged(h: &axum::http::HeaderMap, body: &[u8]) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            match h
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|r| r.strip_prefix("bytes="))
+            {
+                Some(r) => {
+                    let (a, b) = r.split_once('-').unwrap();
+                    let a: usize = a.parse().unwrap();
+                    let b: usize = b.parse::<usize>().unwrap_or(body.len() - 1).min(body.len() - 1);
+                    (
+                        StatusCode::PARTIAL_CONTENT,
+                        [(header::CONTENT_TYPE, "application/octet-stream")],
+                        body[a..=b].to_vec(),
+                    )
+                        .into_response()
+                }
+                None => (
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    body.to_vec(),
+                )
+                    .into_response(),
+            }
+        }
+        let token = move |body: String, prefix: &'static str, r: Arc<std::sync::atomic::AtomicU32>| {
+            let f: M<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect();
+            assert!(
+                !f.contains_key("client_secret"),
+                "a public client sends no secret"
+            );
+            assert_eq!(f["client_id"], format!("{prefix}-client"));
+            match f["grant_type"].as_str() {
+                "authorization_code" => {
+                    assert_eq!(f["code"], "C0DE");
+                    assert!(f["code_verifier"].len() >= 43, "PKCE");
+                    // Expires at once, so the next call refreshes
+                    Json(
+                        serde_json::json!({"access_token": format!("{prefix}-A1"), "refresh_token": format!("{prefix}-R"), "expires_in": 1}),
+                    )
+                }
+                "refresh_token" => {
+                    assert_eq!(f["refresh_token"], format!("{prefix}-R"));
+                    r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({"access_token": format!("{prefix}-A2"), "expires_in": 3600}))
+                }
+                g => panic!("grant {g}"),
+            }
+        };
+        let auth = |h: &axum::http::HeaderMap, prefix: &str| {
+            let a = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+            assert!(a.starts_with(&format!("Bearer {prefix}-A")), "{a}");
+        };
+        let (r1, r2) = (refreshes.clone(), refreshes);
+        let (f1, f2, f3) = (flac.clone(), flac.clone(), flac);
+        let b2 = base.clone();
+        let app = Router::new()
+            .route("/google/token", post(move |body: String| { let r = r1.clone(); async move { token(body, "g", r) } }))
+            .route("/ms/token", post(move |body: String| { let r = r2.clone(); async move { token(body, "m", r) } }))
+            .route("/gapi/drive/v3/about", get(move |h: axum::http::HeaderMap| async move { auth(&h, "g"); Json(serde_json::json!({"user": {"emailAddress": "me@gmail.example"}})) }))
+            .route("/gapi/drive/v3/files", get(move |h: axum::http::HeaderMap, Q(q): Q<M<String, String>>| {
+                let n = f1.len();
+                async move {
+                    auth(&h, "g");
+                    let folder = q["q"].split('\'').nth(1).unwrap().to_string();
+                    let file = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "mimeType": "audio/flac", "size": n.to_string(), "modifiedTime": "2026-10-20T10:00:00Z"});
+                    let dir = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "mimeType": "application/vnd.google-apps.folder"});
+                    Json(serde_json::json!({"files": match folder.as_str() {
+                        "root" => vec![dir("F1", "Music")],
+                        "F1" => vec![file("G1", "01 Song.flac"), dir("F2", "Sub")],
+                        "F2" => vec![file("G2", "02 Two.flac")],
+                        _ => vec![],
+                    }}))
+                }
+            }))
+            .route("/gapi/drive/v3/files/{id}", get(move |h: axum::http::HeaderMap, Q(q): Q<M<String, String>>| {
+                let f = f2.clone();
+                async move { auth(&h, "g"); assert_eq!(q["alt"], "media"); ranged(&h, &f) }
+            }))
+            .route("/graph/me", get(move |h: axum::http::HeaderMap| async move { auth(&h, "m"); Json(serde_json::json!({"userPrincipalName": "me@outlook.example"})) }))
+            .route("/graph/me/drive/items/{id}/children", get(move |h: axum::http::HeaderMap, P(id): P<String>, Q(q): Q<M<String, String>>| {
+                let b = b2.clone();
+                async move {
+                    auth(&h, "m");
+                    let file = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "size": 47782, "file": {}, "lastModifiedDateTime": "2026-10-20T10:00:00Z"});
+                    let dir = |id: &str, name: &str| serde_json::json!({"id": id, "name": name, "folder": {"childCount": 1}});
+                    Json(match (id.as_str(), q.contains_key("page2")) {
+                        ("root", _) => serde_json::json!({"value": [dir("M1", "Music")]}),
+                        // Two pages: the second through @odata.nextLink
+                        ("M1", false) => serde_json::json!({"value": [file("O1", "01 Song.flac")], "@odata.nextLink": format!("{b}/graph/me/drive/items/M1/children?page2=1")}),
+                        ("M1", true) => serde_json::json!({"value": [dir("M2", "Sub")]}),
+                        ("M2", _) => serde_json::json!({"value": [file("O2", "02 Two.flac")]}),
+                        _ => serde_json::json!({"value": []}),
+                    })
+                }
+            }))
+            .route("/graph/me/drive/items/{id}/content", get(move |h: axum::http::HeaderMap, P(id): P<String>| async move {
+                auth(&h, "m");
+                // OneDrive answers with a pre-authenticated download address
+                axum::response::Redirect::temporary(&format!("/dl/{id}"))
+            }))
+            .route("/dl/{id}", get(move |h: axum::http::HeaderMap| { let f = f3.clone(); async move { ranged(&h, &f) } }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_folders_sign_in_with_pkce_scan_and_play() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let refreshes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let base = mock_drives(flac.clone(), refreshes.clone()).await;
+        for (provider, prefix, scheme) in [("google", "g", "gdrive://"), ("onedrive", "m", "onedrive://")] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            {
+                let mut d = s.drives.write().unwrap();
+                d.endpoints = drives::Endpoints {
+                    google_auth: format!("{base}/google/auth"),
+                    google_token: format!("{base}/google/token"),
+                    google_api: format!("{base}/gapi"),
+                    ms_login: format!("{base}/ms"),
+                    ms_graph: format!("{base}/graph"),
+                };
+            }
+            s.set_drive_apps(drives::apps_from(
+                drives::App {
+                    client_id: "g-client".into(),
+                    client_secret: String::new(),
+                },
+                drives::App {
+                    client_id: "m-client".into(),
+                    client_secret: String::new(),
+                },
+            ));
+            let app = router(s.clone());
+            let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+            assert!(
+                v["providers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p["configured"] == true && p["connected"] == false),
+                "{v}"
+            );
+            // Sign in: PKCE, no secret, through the return page
+            let (st, login) = call(
+                &app,
+                "POST",
+                &format!("/v1/library/drives/{provider}/login"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{login}");
+            let u = url::Url::parse(login["url"].as_str().unwrap()).unwrap();
+            let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+            assert_eq!(q["code_challenge_method"], "S256");
+            assert_eq!(q["redirect_uri"], crate::project_apps::RETURN_PAGE);
+            assert!(q["state"].contains('.'), "the state carries the node's callback");
+            assert!(!q.contains_key("client_secret"));
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/drives/{provider}/callback?code=C0DE&state={}",
+                        q["state"]
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                resp.headers()["location"].to_str().unwrap().contains("drive=ok"),
+                "{:?}",
+                resp.headers()
+            );
+            let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+            let pv = v["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == provider)
+                .unwrap()
+                .clone();
+            assert_eq!(pv["connected"], true);
+            assert!(pv["user"].as_str().unwrap().starts_with("me@"), "{pv}");
+            // Pick the folder and add it
+            let (_, folders) = call(
+                &app,
+                "GET",
+                &format!("/v1/library/drives/{provider}/folders"),
+                None,
+            )
+            .await;
+            assert_eq!(folders[0]["name"], "Music", "{folders}");
+            let (st, root) = call(
+                &app,
+                "POST",
+                "/v1/library/drives",
+                Some(
+                    serde_json::json!({"provider": provider, "folder_id": folders[0]["id"], "name": "Music"}),
+                ),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{root}");
+            let mut roots = serde_json::Value::Null;
+            for _ in 0..100 {
+                let (_, v) = call(&app, "GET", "/v1/library/drives", None).await;
+                if v["roots"][0]["tracks"] == 2 {
+                    roots = v["roots"].clone();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                roots[0]["tracks"], 2,
+                "{provider}: both songs, the one in Sub too"
+            );
+            let (_, tracks) = call(&app, "GET", "/v1/library/tracks", None).await;
+            let t = tracks["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["file"]["path"].as_str().unwrap().ends_with("Sub/02 Two.flac"))
+                .unwrap()
+                .clone();
+            assert!(t["file"]["path"].as_str().unwrap().starts_with(scheme));
+            // Played in a zone, and relayed to a browser byte for byte
+            let tid = t["id"].as_i64().unwrap();
+            let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+            let zid = zones[0]["id"].as_str().unwrap().to_string();
+            call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"track_ids": [tid], "replace": true, "play": true})),
+            )
+            .await;
+            let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+            assert_eq!(zone.wait_stopped().await.error, None, "{provider}");
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/v1/library/tracks/{tid}/file"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+                flac,
+                "{provider}"
+            );
+            assert!(
+                !tracks.to_string().contains(&format!("{prefix}-A")),
+                "no token in an answer"
+            );
+            // Out of the library again
+            let (_, gone) = call(
+                &app,
+                "DELETE",
+                &format!("/v1/library/drives/roots/{}", root["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+            assert_eq!(gone["tracks"], 2, "{gone}");
+        }
+        assert!(
+            refreshes.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "expired tokens were refreshed"
+        );
     }
 
     #[tokio::test]

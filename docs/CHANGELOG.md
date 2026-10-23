@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
+  - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.
+  - **Sign-in:** OAuth 2 with PKCE through the project's return page, so a client id is all a node needs. It comes from the build's project apps or the node's `[drives]` config. Without one, the drive shows as not set up.
+  - **Tokens:** they refresh by themselves and stay in the node.
+  - **Tested** with mock Google and Microsoft servers: the sign-in sends no secret, an expired token is refreshed, folders are picked (OneDrive's paging and a subfolder included), a zone plays a song, the browser stream is byte-identical, and removing the folder removes its songs.
 - **Accounts per person on the node** (STEWARD-BUNDLED-HOMESERVER.md, step 3).
   - **Signing in:** everyone signs in with Pubky Ring as before. The owner gets the API token (apps and integrations keep it); someone in People with music access now gets a **personal token**, kept only as its hash, instead of "denied".
   - **What a listener gets:** the shared library, search, public directories (radio, podcast search, Discover, shared playlists, profiles), and playing on the zones the owner opens to them (`/v1/people/zones`; all by default). Reads are an allow-list too: anything not on it is refused.

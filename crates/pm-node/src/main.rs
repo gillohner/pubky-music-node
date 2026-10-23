@@ -360,6 +360,17 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     }
     pm_api::storage::spawn_autosave(&state);
     pm_api::webdav::spawn_rescans(&state);
+    state.set_drive_apps(pm_api::drives::apps_from(
+        pm_api::drives::App {
+            client_id: env_or("PM_GOOGLE_DRIVE_CLIENT_ID", &cfg.drives.google_client_id),
+            client_secret: env_or("PM_GOOGLE_DRIVE_CLIENT_SECRET", &cfg.drives.google_client_secret),
+        },
+        pm_api::drives::App {
+            client_id: env_or("PM_ONEDRIVE_CLIENT_ID", &cfg.drives.onedrive_client_id),
+            client_secret: String::new(),
+        },
+    ));
+    pm_api::drives::spawn_rescans(&state);
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     state.set_return_page(&cfg.auth.return_page);
     // Tests point TIDAL at a mock (tools/ui-tidal-login.js); never needed in use

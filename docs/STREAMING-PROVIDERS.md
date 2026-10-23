@@ -67,6 +67,8 @@ token refresh on the node, playlist import by canonical URL, the service in the 
 
 | WebDAV (Nextcloud, ownCloud, a NAS) | The folder's address, a user and password or app password (Settings › Library › WebDAV shares; kept in the node) | **built**: a library root like a folder; only each song's tags are read (range requests), rescanned every 6 hours | **built**: played from the share in any zone, relayed to browsers | CI runs a real WebDAV server (WsgiDAV, `tools/webdav-source.py`); Google Drive and OneDrive wait for project apps (QUESTIONS.md) |
 
+| Google Drive, OneDrive | The project's app (built in) or the node's own (`[drives] google_client_id`, `google_client_secret` for a node's own Google app, `onedrive_client_id`); sign in from Settings › Library › Cloud drives (PKCE, no secret, the return page) | **built**: a folder as a library root, like WebDAV; tags only (range requests), rescanned every 6 hours | **built**: played from the drive in any zone (the token in a header, kept in the node), relayed to browsers | tested with mock Google and Microsoft servers; the project apps wait for the owner (QUESTIONS.md). Google redeems a "Web application" code only with the app's secret |
+
 ## Not offered, and why (STEWARD-PLAN step 5)
 
 - **Needs approval first:** Qobuz (requested by email), SoundCloud's official API (access is by application). Both have unofficial modes above instead.
