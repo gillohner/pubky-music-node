@@ -584,6 +584,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/playlist/{id}", get(web_ui))
         .route("/person/{id}", get(web_ui))
         .route("/smart/{id}", get(web_ui))
+        .route("/now-playing", get(web_ui))
         .route("/shared/{user}", get(web_ui))
         .route("/shared/{user}/{id}", get(web_ui))
         .route("/genre/{id}", get(web_ui))

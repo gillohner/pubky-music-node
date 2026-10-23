@@ -1049,3 +1049,28 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .smrule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
 .smrule select.input, .smrule input.input, .smartedit p select.input, .smartedit .toolbar select.input { width: auto; padding: 5px 8px; font-size: 13px; height: auto; }
 .lyric-nudge { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; vertical-align: middle; }
+/* The castable now-playing dashboard (/now-playing): the whole screen */
+body.kiosk .sidebar, body.kiosk .topbar, body.kiosk .player, body.kiosk .bottomnav { display: none !important; }
+body.kiosk .shell { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-template-areas: "content"; }
+body.kiosk .main { padding: 0; }
+.dash { position: relative; min-height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--bg); }
+.dash-bg { position: absolute; inset: -40px; filter: blur(48px) saturate(1.2); opacity: 0.45; }
+.dash-bg .art { width: 100%; height: 100%; border-radius: 0; aspect-ratio: auto; }
+.dash-inner { position: relative; display: grid; grid-template-columns: minmax(200px, 42vh) minmax(0, 1fr); gap: 5vw; align-items: center; width: min(1400px, 90vw); }
+.dash-inner.empty { grid-template-columns: 1fr; text-align: center; }
+.dash-art { width: 100%; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45); border-radius: 18px; font-size: 64px; }
+.dash-text h1 { font-size: clamp(32px, 5vw, 72px); line-height: 1.05; margin: 8px 0 12px; }
+.dash-artist { font-size: clamp(20px, 2.6vw, 36px); margin: 0 0 6px; }
+.dash-progress { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; margin-top: 28px; }
+.dash-progress span { display: block; height: 100%; background: var(--accent); transition: width 0.9s linear; }
+.dash-times { display: flex; justify-content: space-between; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.dash-brand { position: absolute; right: 24px; bottom: 18px; }
+@media (max-width: 720px) { .dash-inner { grid-template-columns: 1fr; text-align: center; } .dash-art { width: 60vw; margin: 0 auto; } }
+/* Multi-select: checkboxes on the rows and a bar of actions above the player */
+.selbox { display: inline-flex; align-items: center; padding: 0 6px 0 2px; cursor: pointer; }
+.selbox input { width: 18px; height: 18px; accent-color: var(--accent); }
+.selbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player) + 14px); z-index: 40; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: calc(100vw - 24px); padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow); }
+.selcount { font-weight: 600; margin-right: 4px; }
+@media (max-width: 720px) { .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; } }
+.selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
+@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
