@@ -1,5 +1,5 @@
 //! Playlist files from other players, for migration: M3U/M3U8 (most
-//! players), CSV (Exportify, Soundiiz, TuneMyMusic, Roon's Excel export saved
+//! players), PLS (Winamp, many radio players), CSV (Exportify, Soundiiz, TuneMyMusic, Roon's Excel export saved
 //! as CSV) and Roon's own Excel export (`.xlsx`, Roon → Export → Excel).
 //!
 //! Parsing is deliberately tolerant: columns are found by header name, in any
@@ -35,13 +35,14 @@ pub struct ImportedList {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
     M3u,
+    Pls,
     Csv,
     Xlsx,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    #[error("cannot tell the playlist format; name the file .m3u, .m3u8, .csv or .xlsx")]
+    #[error("cannot tell the playlist format; name the file .m3u, .m3u8, .pls, .csv or .xlsx")]
     UnknownFormat,
     #[error("the file is not valid UTF-8 text")]
     NotText,
@@ -91,7 +92,8 @@ pub fn detect_format(file_name: Option<&str>, bytes: &[u8]) -> Option<ImportForm
         .map(str::to_ascii_lowercase)
     {
         match ext.as_str() {
-            "m3u" | "m3u8" | "pls" => return Some(ImportFormat::M3u),
+            "m3u" | "m3u8" => return Some(ImportFormat::M3u),
+            "pls" => return Some(ImportFormat::Pls),
             "csv" | "tsv" | "txt" => return Some(ImportFormat::Csv),
             "xlsx" | "xlsm" => return Some(ImportFormat::Xlsx),
             _ => {}
@@ -105,6 +107,9 @@ pub fn detect_format(file_name: Option<&str>, bytes: &[u8]) -> Option<ImportForm
     if first.eq_ignore_ascii_case("#EXTM3U") {
         return Some(ImportFormat::M3u);
     }
+    if first.eq_ignore_ascii_case("[playlist]") {
+        return Some(ImportFormat::Pls);
+    }
     let lower = first.to_ascii_lowercase();
     if (lower.contains(',') || lower.contains('\t') || lower.contains(';'))
         && TITLE_KEYS.iter().any(|k| lower.contains(k))
@@ -114,12 +119,16 @@ pub fn detect_format(file_name: Option<&str>, bytes: &[u8]) -> Option<ImportForm
     None
 }
 
-/// Parse `bytes` as `format`; relative M3U entries resolve against `base`.
+/// Parse `bytes` as `format`; relative M3U and PLS entries resolve against `base`.
 pub fn parse(bytes: &[u8], format: ImportFormat, base: Option<&Path>) -> Result<ImportedList, ImportError> {
     match format {
         ImportFormat::M3u => {
             let text = std::str::from_utf8(bytes).map_err(|_| ImportError::NotText)?;
             Ok(parse_m3u(text, base))
+        }
+        ImportFormat::Pls => {
+            let text = std::str::from_utf8(bytes).map_err(|_| ImportError::NotText)?;
+            Ok(parse_pls(text, base))
         }
         ImportFormat::Csv => {
             let text = std::str::from_utf8(bytes).map_err(|_| ImportError::NotText)?;
@@ -215,6 +224,57 @@ pub fn parse_m3u(text: &str, base: Option<&Path>) -> ImportedList {
             album: None,
             path: Some(path),
             duration_ms,
+        });
+    }
+    list
+}
+
+/// `[playlist]` with `FileN=`, `TitleN=` and `LengthN=` (seconds, `-1` for a stream) lines,
+/// in any order; entries come out in N order. Titles written "Artist - Title" are split like
+/// M3U's `#EXTINF`.
+pub fn parse_pls(text: &str, base: Option<&Path>) -> ImportedList {
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Entry {
+        file: Option<String>,
+        title: Option<String>,
+        secs: Option<f64>,
+    }
+    let mut entries: BTreeMap<u32, Entry> = BTreeMap::new();
+    for raw in text.trim_start_matches('\u{feff}').lines() {
+        let Some((key, value)) = raw.trim().split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        let Some(i) = key.find(|c: char| c.is_ascii_digit()) else {
+            continue;
+        };
+        let Ok(n) = key[i..].parse::<u32>() else {
+            continue;
+        };
+        let e = entries.entry(n).or_default();
+        match &key[..i] {
+            "file" if !value.is_empty() => e.file = Some(value.to_string()),
+            "title" if !value.is_empty() => e.title = Some(value.to_string()),
+            "length" => e.secs = value.parse::<f64>().ok().filter(|d| *d > 0.0),
+            _ => {}
+        }
+    }
+    let mut list = ImportedList::default();
+    for e in entries.into_values() {
+        let Some(file) = e.file else { continue };
+        let path = resolve_entry(&file, base);
+        let (artist, title) = match e.title.as_deref().and_then(|t| t.split_once(" - ")) {
+            Some((a, t)) => (Some(a.trim().to_string()), Some(t.trim().to_string())),
+            None => (None, e.title),
+        };
+        list.tracks.push(ImportedTrack {
+            title: title.unwrap_or_else(|| title_from_path(&path)),
+            artist,
+            album: None,
+            path: Some(path),
+            duration_ms: e.secs.map(|s| (s * 1000.0) as u64),
         });
     }
     list
@@ -390,6 +450,36 @@ pub fn local_path(entry: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn pls_entries_in_order_with_titles_and_lengths() {
+        let text = "[playlist]\r\nNumberOfEntries=3\r\nFile2=music/b.flac\r\nTitle2=Sefa - Gold\r\n\
+                    Length2=241\r\nFile1=/abs/a.flac\r\nFile3=http://radio.example/stream\r\n\
+                    Title3=A station\r\nLength3=-1\r\nVersion=2\r\n";
+        assert_eq!(detect_format(None, text.as_bytes()), Some(ImportFormat::Pls));
+        assert_eq!(detect_format(Some("x.PLS"), b""), Some(ImportFormat::Pls));
+        let l = parse(text.as_bytes(), ImportFormat::Pls, Some(Path::new("/lists"))).unwrap();
+        let got: Vec<_> = l
+            .tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.path.as_deref().unwrap(),
+                    t.artist.as_deref(),
+                    t.title.as_str(),
+                    t.duration_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/abs/a.flac", None, "a", None),
+                ("/lists/music/b.flac", Some("Sefa"), "Gold", Some(241_000)),
+                ("http://radio.example/stream", None, "A station", None),
+            ]
+        );
+    }
 
     #[test]
     fn m3u_with_extinf_and_relative_paths() {

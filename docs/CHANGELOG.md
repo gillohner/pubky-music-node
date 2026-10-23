@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-23
 
+- **Albums stay whole:**
+  - An album whose files carry no album artist, and whose songs are by different artists, now shows as one album by "Various Artists". It used to split into one album per artist. A compilation flag or MusicBrainz release type says the same.
+  - An album without an album artist whose songs feature guests ("Daft Punk feat. Pharrell Williams") stays the main artist's.
+  - Disc folders (`CD1`, `Disc 2`, `Vol. 3`) count as part of the album folder, and their cover can sit in the album folder above them.
+  - Albums without a cover pick up a folder image added later.
+  - Existing libraries regroup on their next scan, re-reading only the files of albums that were split.
+- **`.pls` playlists import:** they used to go to the M3U reader and came out empty or wrong.
 - **The app keeps trying the remembered node:** when the node can't be reached at launch, for example while a phone's Wi-Fi is still coming back, the app tries again for about a minute ("Trying again in 5 s…") before stopping at "Try again". It used to give up after one try. The release emulator test hit this on API 33 after a restart.
 - **Music Assistant compared:** `docs/compare-music-assistant.md` covers how MA is built, what each side has that the other lacks, a ranked list of ideas worth porting, and MA's sources checked against ours. It also lists three library bugs it found: various-artists albums split by artist, `.pls` read as M3U, and covers above disc folders missed.
 - **The Android app: a crash report, and fixes for crashes on real phones** (owner: "just crashes on launch"; STEWARD-FIX-android-crash.md).

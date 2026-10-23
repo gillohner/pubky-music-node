@@ -35,6 +35,10 @@ pub struct TagSet {
     pub artists: Vec<String>,
     pub album_artist: Option<String>,
     pub album: Option<String>,
+    /// A compilation: the compilation flag (ID3 `TCMP`, MP4 `cpil`, Vorbis `COMPILATION`), or
+    /// MusicBrainz's release type naming one. An album without an album artist then belongs to
+    /// "Various Artists".
+    pub compilation: bool,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
     pub total_discs: Option<u32>,
@@ -339,6 +343,7 @@ impl TagSet {
         if other.picture.is_some() {
             self.picture = other.picture;
         }
+        self.compilation |= other.compilation;
         macro_rules! take {
             ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
         }
@@ -432,6 +437,14 @@ impl TagSet {
                 Self::set_mbid(&mut self.release_group_mbid, value, "release group")
             }
             "musicbrainzartistid" => self.push_artist_mbid(value),
+            "compilation" | "tcmp" | "cpil" => {
+                let v = value.trim();
+                self.compilation |= v == "1" || v.eq_ignore_ascii_case("true");
+            }
+            // Picard writes the primary type and secondary types, e.g. "album; compilation".
+            "releasetype" | "musicbrainzalbumtype" | "musicbrainzreleasetype" => {
+                self.compilation |= value.to_ascii_lowercase().contains("compilation");
+            }
             "artists" => {
                 for a in value.split(['\0', ';']) {
                     let a = a.trim();
@@ -515,6 +528,8 @@ fn merge_symphonia_tags(tags: &mut TagSet, list: &[Tag]) {
                     }
                 }
                 StandardTag::AlbumArtist(s) => tags.album_artist = Some(s.to_string()),
+                StandardTag::CompilationFlag(b) => tags.compilation |= *b,
+                StandardTag::MusicBrainzReleaseType(s) => tags.apply_named("releasetype", s),
                 StandardTag::Album(s) => tags.album = Some(s.to_string()),
                 StandardTag::TrackNumber(n) => tags.track_no = Some(*n as u32),
                 StandardTag::DiscNumber(n) => tags.disc_no = Some(*n as u32),
@@ -609,6 +624,9 @@ pub fn from_id3(t: &id3::Tag) -> TagSet {
     };
     if let Some(isrc) = t.text_for_frame_id("TSRC") {
         tags.set_isrc(isrc);
+    }
+    if let Some(v) = t.text_for_frame_id("TCMP") {
+        tags.apply_named("tcmp", v);
     }
     if let Some(g) = t.genre_parsed() {
         tags.push_genre(&g);

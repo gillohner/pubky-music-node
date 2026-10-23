@@ -1024,6 +1024,42 @@ impl Library {
         Ok(v)
     }
 
+    /// Every present file under `root` with its album's id and title. The scanner uses it to
+    /// find albums that one folder's files were split into.
+    pub fn album_files_under(&self, root: &Path) -> Result<Vec<(PathBuf, i64, String)>> {
+        let mut prefix = root.to_string_lossy().to_string();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let conn = self.lock();
+        let v = conn
+            .prepare(
+                "SELECT f.path, al.id, al.title FROM files f
+                 JOIN tracks t ON t.id = f.track_id
+                 JOIN albums al ON al.id = t.album_id
+                 WHERE f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+            )?
+            .query_map(params![format!("{}%", like_escape(&prefix))], |r| {
+                Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?, r.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(v)
+    }
+
+    /// Drop albums no track belongs to any more (their tracks moved to another album when
+    /// re-read), with their covers. Returns how many albums went.
+    pub fn prune_empty_albums(&self) -> Result<u64> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM album_art WHERE album_id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        Ok(conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )? as u64)
+    }
+
     // ----- lyrics -----------------------------------------------------------
 
     /// Store (or clear, with `None`) the lyrics of a track; `source` is

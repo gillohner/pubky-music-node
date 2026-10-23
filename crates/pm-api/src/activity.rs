@@ -125,7 +125,7 @@ pub(crate) async fn import_playlist(
     import_described(&s, body.name, body.description, body.tracks).map(Json)
 }
 
-/// Import a playlist file (M3U/M3U8, CSV, Roon's Excel export) sent as the
+/// Import a playlist file (M3U/M3U8, PLS, CSV, Roon's Excel export) sent as the
 /// raw body. Entries resolve by path, file name, then title and artist.
 pub(crate) async fn import_playlist_file(
     State(s): State<Arc<NodeState>>,
@@ -134,6 +134,7 @@ pub(crate) async fn import_playlist_file(
 ) -> ApiResult<ImportedPlaylist> {
     let format = match q.format.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("m3u") | Some("m3u8") => Some(pm_library::ImportFormat::M3u),
+        Some("pls") => Some(pm_library::ImportFormat::Pls),
         Some("csv") | Some("tsv") => Some(pm_library::ImportFormat::Csv),
         Some("xlsx") => Some(pm_library::ImportFormat::Xlsx),
         Some(other) => return Err(ApiError::bad_request(format!("unknown format {other}"))),

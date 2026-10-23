@@ -7,3 +7,6 @@ Copyright The Music Assistant Authors. The files concerned say so in their
 header:
 - crates/pm-api/src/radio_sources.rs: SomaFM and Radio Paradise channel lists
   and which Radio Paradise mounts carry FLAC with stream titles.
+- crates/pm-library/src/scan.rs: the disc-folder names (CD1, Disc 2, Vol. 3)
+  and "Various Artists" for albums without an album artist
+  (music_assistant/helpers/util.py, providers/filesystem_local).

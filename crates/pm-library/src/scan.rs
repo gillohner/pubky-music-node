@@ -7,13 +7,20 @@
 //! `files.missing = 1` (see the schema) so that playlists, history and
 //! canonical-URI lookups still resolve; a later scan that finds the path
 //! again clears the flag.
+//!
+//! Albums: disc folders (`CD1`, `Disc 2`) belong to the album folder above them, and an album
+//! without an album artist whose songs name different artists is "Various Artists". Both
+//! follow Music Assistant (github.com/music-assistant/server, Apache-2.0, Copyright The Music
+//! Assistant Authors): `helpers/util.py` and `providers/filesystem_local`. See NOTICE.
 
 use crate::canonical;
 use crate::db::{Library, ScanCounts};
 use crate::error::{LibraryError, Result};
 use crate::tags::{self, TagSet};
 use pm_model::{Album, Artist, AudioFile, Track, TrackId};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
@@ -33,14 +40,29 @@ pub struct Scanner<'a> {
     lib: &'a Library,
     /// Where extracted embedded covers are written; `None` skips cover art.
     art_dir: Option<PathBuf>,
+    /// Per album folder: for each album title (lower case) among its files without an album
+    /// artist, their main artists (lower case). Read once per folder in a scan.
+    folders: Mutex<HashMap<PathBuf, HashMap<String, HashSet<String>>>>,
 }
 
 /// Folder image names tried, in order, when a file has no embedded picture.
 const FOLDER_COVERS: &[&str] = &["cover", "folder", "front", "album", "artwork"];
 
+/// The album artist of an album whose songs have different artists and no album artist tag.
+pub const VARIOUS_ARTISTS: &str = "Various Artists";
+
+/// The library setting, per root, saying its albums were regrouped by the folder rules
+/// (`scan.album_rules:<root>`); its value is [`ALBUM_RULES`].
+const ALBUM_RULES_KEY: &str = "scan.album_rules:";
+const ALBUM_RULES: &str = "1";
+
 impl<'a> Scanner<'a> {
     pub fn new(lib: &'a Library) -> Self {
-        Self { lib, art_dir: None }
+        Self {
+            lib,
+            art_dir: None,
+            folders: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Extract embedded covers into `dir` (created on demand) and pick up
@@ -90,6 +112,38 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
+    /// Give albums without a cover the folder image next to (or above) one of their files, if
+    /// there is one now: a cover added later, or one in the album folder above `CD1/`.
+    fn fill_folder_covers(&self) -> Result<()> {
+        if self.art_dir.is_none() {
+            return Ok(());
+        }
+        for (album_id, path) in self.lib.albums_without_art()? {
+            if let Some((file, mime)) = folder_cover(&path) {
+                self.lib.set_album_art(&crate::db::AlbumArt {
+                    album_id,
+                    file,
+                    mime,
+                    source: "folder".into(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The number of different main artists among the files of `path`'s album folder (disc
+    /// folders included) that have the album title `album` and no album artist tag.
+    fn folder_artist_count(&self, path: &Path, album: &str) -> usize {
+        let Some(folder) = album_folder(path) else {
+            return 0;
+        };
+        let mut folders = self.folders.lock().unwrap_or_else(|e| e.into_inner());
+        let albums = folders
+            .entry(folder.clone())
+            .or_insert_with(|| read_folder_albums(&folder));
+        albums.get(&album.to_lowercase()).map_or(0, HashSet::len)
+    }
+
     /// Give every album without a cover one again, from one of its files (after a restore on
     /// another machine, where the extracted covers were not carried over). Returns how many.
     pub fn fill_missing_art(&self) -> Result<u64> {
@@ -117,6 +171,14 @@ impl<'a> Scanner<'a> {
         let mut report = ScanReport {
             scan_id,
             ..Default::default()
+        };
+        // Once per root: re-read the files of albums that one folder was split into (before
+        // the "Various Artists" rule), so existing libraries regroup without a full re-read.
+        let rules_key = format!("{ALBUM_RULES_KEY}{}", root.display());
+        let regroup = if self.lib.get_setting(&rules_key)?.as_deref() == Some(ALBUM_RULES) {
+            HashSet::new()
+        } else {
+            split_album_files(self.lib.album_files_under(&root)?)
         };
         // Writes go in batches of a few hundred files (or half a second), not one commit each.
         let batch = Batch::new(self.lib)?;
@@ -156,7 +218,7 @@ impl<'a> Scanner<'a> {
 
             let existing = self.lib.file_by_path(&path)?;
             if let Some(row) = &existing {
-                if row.size_bytes == size && row.mtime_unix == mtime {
+                if row.size_bytes == size && row.mtime_unix == mtime && !regroup.contains(&path) {
                     self.lib.mark_file_seen(&path, scan_id)?;
                     report.files_unchanged += 1;
                     continue;
@@ -180,6 +242,11 @@ impl<'a> Scanner<'a> {
 
         batch.finish()?;
         report.files_removed = self.lib.mark_missing_under(&root, scan_id)?;
+        self.lib.prune_empty_albums()?;
+        self.lib.set_setting(&rules_key, ALBUM_RULES)?;
+        if let Err(e) = self.fill_folder_covers() {
+            tracing::warn!("folder covers: {e}");
+        }
         self.lib.finish_scan(
             scan_id,
             &ScanCounts {
@@ -204,9 +271,18 @@ impl<'a> Scanner<'a> {
         size: u64,
         mtime: i64,
         existing: Option<TrackId>,
-        (probe, tagset): (tags::FileProbe, TagSet),
+        (probe, mut tagset): (tags::FileProbe, TagSet),
     ) -> Result<TrackId> {
         let has_album = tagset.album.is_some();
+        // No album artist, and the album's other files name other artists: "Various Artists",
+        // so the album stays one album (local files; a remote share's folders aren't read).
+        if tagset.album_artist.is_none() && !tagset.compilation {
+            if let Some(album) = &tagset.album {
+                if path.is_absolute() && self.folder_artist_count(path, album) > 1 {
+                    tagset.album_artist = Some(VARIOUS_ARTISTS.into());
+                }
+            }
+        }
         let file = AudioFile {
             path: path.to_path_buf(),
             size_bytes: size,
@@ -381,8 +457,123 @@ pub fn title_from_file_name(stem: &str) -> String {
     }
 }
 
+/// The cover image next to `audio_path`, else, in a disc folder (`CD1`, `Disc 2`), in the album
+/// folder above it.
 pub fn folder_cover(audio_path: &Path) -> Option<(PathBuf, String)> {
     let dir = audio_path.parent()?;
+    cover_in(dir).or_else(|| {
+        if is_disc_folder(dir) {
+            cover_in(dir.parent()?)
+        } else {
+            None
+        }
+    })
+}
+
+/// A disc folder of a multi-disc album: `CD1`, `CD 2`, `Disc 01`, `disk-3`, `Vol. 2`,
+/// `Volume 4`, `DVD 1`, optionally followed by a subtitle (`CD2 - Live`). As in Music
+/// Assistant's `helpers/util.py` (Apache-2.0).
+pub fn is_disc_folder(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.trim().to_lowercase();
+    let Some(rest) = ["disc", "disk", "cd", "dvd", "volume", "vol"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+    else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([' ', '.', '_', '-']);
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && !rest[digits..].starts_with(|c: char| c.is_alphanumeric())
+}
+
+/// The folder an album lives in: the file's folder, or the one above a disc folder.
+pub fn album_folder(audio_path: &Path) -> Option<PathBuf> {
+    let dir = audio_path.parent()?;
+    if is_disc_folder(dir) {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir.to_path_buf())
+    }
+}
+
+/// The audio files of an album folder and its disc folders.
+fn album_folder_files(folder: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if is_disc_folder(&p) {
+                if let Ok(inner) = std::fs::read_dir(&p) {
+                    out.extend(
+                        inner
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|p| tags::is_supported(p)),
+                    );
+                }
+            }
+        } else if tags::is_supported(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// For each album title (lower case) among the folder's files without an album artist tag or a
+/// compilation flag, their main artists: the first artist of the first credit, lower case.
+fn read_folder_albums(folder: &Path) -> HashMap<String, HashSet<String>> {
+    let mut albums: HashMap<String, HashSet<String>> = HashMap::new();
+    for p in album_folder_files(folder) {
+        let Ok((_, t)) = tags::probe_and_read(&p) else {
+            continue;
+        };
+        let (Some(album), None, false) = (&t.album, &t.album_artist, t.compilation) else {
+            continue;
+        };
+        let main = if let Some(a) = t.artist_list.first() {
+            a.clone()
+        } else if let Some(credit) = t.artists.first() {
+            crate::credits::split_all(std::slice::from_ref(credit))
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| credit.clone())
+        } else {
+            continue;
+        };
+        albums
+            .entry(album.to_lowercase())
+            .or_default()
+            .insert(main.trim().to_lowercase());
+    }
+    albums
+}
+
+/// Files whose album shares its title and album folder with another album: one album split by
+/// track artist before the "Various Artists" rule.
+fn split_album_files(rows: Vec<(PathBuf, i64, String)>) -> HashSet<PathBuf> {
+    let mut groups: HashMap<(PathBuf, String), (HashSet<i64>, Vec<PathBuf>)> = HashMap::new();
+    for (path, album_id, title) in rows {
+        let Some(folder) = album_folder(&path) else {
+            continue;
+        };
+        let g = groups.entry((folder, title.to_lowercase())).or_default();
+        g.0.insert(album_id);
+        g.1.push(path);
+    }
+    groups
+        .into_values()
+        .filter(|(ids, _)| ids.len() > 1)
+        .flat_map(|(_, paths)| paths)
+        .collect()
+}
+
+fn cover_in(dir: &Path) -> Option<(PathBuf, String)> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut best: Option<(usize, PathBuf, String)> = None;
     for e in entries.flatten() {
@@ -457,7 +648,14 @@ pub fn track_from_tags(file: AudioFile, t: &TagSet) -> Track {
     let album = t.album.as_ref().map(|title| Album {
         id: None,
         title: title.clone(),
-        album_artist: t.album_artist.clone().or_else(|| t.artists.first().cloned()),
+        album_artist: t.album_artist.clone().or_else(|| {
+            // The main artist, not the whole credit: "D feat. E" on D's album stays D's.
+            if t.compilation {
+                Some(VARIOUS_ARTISTS.into())
+            } else {
+                names.first().or(t.artists.first()).cloned()
+            }
+        }),
         release_mbid: t.release_mbid,
         release_group_mbid: t.release_group_mbid,
         year: t.year,
@@ -608,6 +806,109 @@ mod tests {
         let r = scanner.scan(dir.path()).unwrap();
         assert_eq!(r.files_updated, 1);
         assert!(lib.lyrics(id).unwrap().is_none());
+    }
+
+    /// A WAV with `artist`, `album` and, when given, the ID3 compilation flag.
+    fn write_album_wav(path: &Path, title: &str, artist: &str, album: &str, compilation: bool) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_wav(path, 441, title, false);
+        let mut t = id3::Tag::read_from_path(path).unwrap();
+        t.set_artist(artist);
+        t.set_album(album);
+        if compilation {
+            t.set_text("TCMP", "1");
+        }
+        t.write_to_path(path, id3::Version::Id3v24).unwrap();
+    }
+
+    #[test]
+    fn various_artists_compilations_and_disc_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // A two-disc mix without album artist tags: one album, "Various Artists", the cover
+        // in the folder above the disc folders.
+        write_album_wav(&d.join("Mix/CD1/01.wav"), "One", "Sefa", "Mix", false);
+        write_album_wav(&d.join("Mix/CD1/02.wav"), "Two", "Dr. Peacock", "Mix", false);
+        write_album_wav(&d.join("Mix/CD 2/01.wav"), "Three", "Cyclon", "Mix", false);
+        fs::write(d.join("Mix/cover.jpg"), b"\xff\xd8jpeg").unwrap();
+        // A compilation flag alone is enough.
+        write_album_wav(&d.join("Comp/01.wav"), "Four", "Angerfist", "Comp", true);
+        // One artist with a guest: the album stays the artist's.
+        write_album_wav(&d.join("Solo/01.wav"), "Five", "Daft Punk", "Solo", false);
+        write_album_wav(
+            &d.join("Solo/02.wav"),
+            "Six",
+            "Daft Punk feat. Pharrell Williams",
+            "Solo",
+            false,
+        );
+
+        let lib = Library::open_in_memory().unwrap();
+        let art = d.join("art");
+        Scanner::new(&lib).with_art_dir(&art).scan(d).unwrap();
+        let albums = lib.list_albums(None, 20).unwrap();
+        let by = |title: &str| -> Vec<Option<String>> {
+            albums
+                .iter()
+                .filter(|a| a.title == title)
+                .map(|a| a.album_artist.clone())
+                .collect()
+        };
+        assert_eq!(by("Mix"), vec![Some(VARIOUS_ARTISTS.to_string())]);
+        assert_eq!(by("Comp"), vec![Some(VARIOUS_ARTISTS.to_string())]);
+        assert_eq!(by("Solo"), vec![Some("Daft Punk".to_string())]);
+        let mix = albums.iter().find(|a| a.title == "Mix").unwrap().id.unwrap();
+        let cover = lib.album_art(mix).unwrap().unwrap();
+        assert_eq!(cover.source, "folder");
+        assert!(cover.file.ends_with("Mix/cover.jpg"));
+        // A rescan changes nothing.
+        let r = Scanner::new(&lib).with_art_dir(&art).scan(d).unwrap();
+        assert_eq!(r.files_unchanged, 6);
+        assert_eq!(lib.list_albums(None, 20).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn disc_folder_names() {
+        for yes in [
+            "CD1",
+            "cd 2",
+            "Disc 01",
+            "disk-3",
+            "Vol. 2",
+            "Volume 4",
+            "DVD1",
+            "CD2 - Live",
+        ] {
+            assert!(is_disc_folder(Path::new(yes)), "{yes}");
+        }
+        for no in ["Disco 2", "CDs", "cd", "Volume", "2 CD", "Discovery", "CD1a"] {
+            assert!(!is_disc_folder(Path::new(no)), "{no}");
+        }
+        assert_eq!(
+            album_folder(Path::new("/m/Mix/CD1/01.flac")),
+            Some(PathBuf::from("/m/Mix"))
+        );
+        assert_eq!(
+            album_folder(Path::new("/m/Mix/01.flac")),
+            Some(PathBuf::from("/m/Mix"))
+        );
+    }
+
+    #[test]
+    fn albums_split_in_one_folder_are_found() {
+        let rows = vec![
+            (PathBuf::from("/m/Mix/CD1/01.flac"), 1, "Mix".to_string()),
+            (PathBuf::from("/m/Mix/CD2/01.flac"), 2, "mix".to_string()),
+            (PathBuf::from("/m/Solo/01.flac"), 3, "Solo".to_string()),
+            (PathBuf::from("/m/Solo/02.flac"), 3, "Solo".to_string()),
+            (PathBuf::from("/m/Other/01.flac"), 4, "Mix".to_string()),
+        ];
+        let got = split_album_files(rows);
+        let want: HashSet<PathBuf> = ["/m/Mix/CD1/01.flac", "/m/Mix/CD2/01.flac"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]
