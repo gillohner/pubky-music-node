@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const SOURCE_ID: &str = "podcasts";
-const FEEDS: &str = "podcasts.feeds";
-const PROGRESS: &str = "podcasts.progress";
+pub(crate) const FEEDS: &str = "podcasts.feeds";
+pub(crate) const PROGRESS: &str = "podcasts.progress";
 /// Episodes kept per feed (newest first).
 const MAX_EPISODES: usize = 300;
 const REFRESH_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -272,7 +272,7 @@ pub fn parse_feed(url: &str, xml: &str) -> Result<Feed, String> {
 
 // ---- storage ----
 
-fn load<T: for<'de> Deserialize<'de> + Default>(s: &NodeState, key: &str) -> T {
+pub(crate) fn load<T: for<'de> Deserialize<'de> + Default>(s: &NodeState, key: &str) -> T {
     let lib = s.library.lock().expect("library poisoned");
     lib.get_setting(key)
         .ok()
@@ -281,21 +281,21 @@ fn load<T: for<'de> Deserialize<'de> + Default>(s: &NodeState, key: &str) -> T {
         .unwrap_or_default()
 }
 
-fn store<T: Serialize>(s: &NodeState, key: &str, v: &T) -> Result<(), ApiError> {
+pub(crate) fn store<T: Serialize>(s: &NodeState, key: &str, v: &T) -> Result<(), ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     lib.set_setting(key, &serde_json::to_string(v).expect("serialize"))?;
     Ok(())
 }
 
-fn feeds(s: &NodeState) -> Vec<Feed> {
+pub(crate) fn feeds(s: &NodeState) -> Vec<Feed> {
     load(s, FEEDS)
 }
 
-fn progress(s: &NodeState) -> HashMap<String, Progress> {
+pub(crate) fn progress(s: &NodeState) -> HashMap<String, Progress> {
     load(s, PROGRESS)
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
@@ -303,7 +303,7 @@ fn bad_gateway(m: String) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, m)
 }
 
-async fn fetch_feed(s: &NodeState, url: &str) -> Result<Feed, ApiError> {
+pub(crate) async fn fetch_feed(s: &NodeState, url: &str) -> Result<Feed, ApiError> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(ApiError::bad_request(
             "a feed URL starts with http:// or https://",
@@ -635,6 +635,7 @@ pub(crate) async fn subscribe(
     all.retain(|x| x.id != f.id);
     all.insert(0, f.clone());
     store(&s, FEEDS, &all)?;
+    crate::gpodder::note_subscribed(&s, &f.url);
     tracing::info!(feed = %f.url, episodes = f.episodes.len(), "podcast subscribed");
     Ok(Json(summary(&f, &progress(&s))))
 }
@@ -646,12 +647,11 @@ pub(crate) async fn unsubscribe(
 ) -> ApiResult<Subscriptions> {
     crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let mut all = feeds(&s);
-    let before = all.len();
-    all.retain(|f| f.id != id);
-    if all.len() == before {
+    let Some(gone) = all.iter().position(|f| f.id == id).map(|i| all.remove(i)) else {
         return Err(ApiError::not_found(format!("no subscription {id}")));
-    }
+    };
     store(&s, FEEDS, &all)?;
+    crate::gpodder::note_unsubscribed(&s, &gone.url);
     let prog = progress(&s);
     Ok(Json(Subscriptions {
         subscriptions: all.iter().map(|f| summary(f, &prog)).collect(),

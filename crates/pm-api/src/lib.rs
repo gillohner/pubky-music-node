@@ -37,6 +37,7 @@ pub mod events;
 pub mod favourites;
 pub mod files;
 pub mod first_run;
+pub mod gpodder;
 pub mod health;
 pub mod hls;
 pub mod home;
@@ -518,6 +519,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/podcasts/new", get(podcasts::newest))
         .route("/podcasts/refresh", post(podcasts::refresh_route))
+        .route(
+            "/podcasts/gpodder",
+            get(gpodder::get).put(gpodder::put).delete(gpodder::delete),
+        )
+        .route("/podcasts/gpodder/sync", post(gpodder::sync_now))
         .route("/podcasts/play", post(podcasts::play))
         .route(
             "/podcasts/progress/{id}",

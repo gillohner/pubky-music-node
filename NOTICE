@@ -12,3 +12,5 @@ header:
   (music_assistant/helpers/util.py, providers/filesystem_local).
 - crates/pm-api/src/art.rs: covers from Apple's iTunes Search API as the
   fallback after the Cover Art Archive (providers/itunes_artwork).
+- crates/pm-api/src/gpodder.rs: gPodder and Nextcloud gpoddersync
+  subscription and episode-action sync (providers/gpodder).
