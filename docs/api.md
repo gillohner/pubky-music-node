@@ -187,6 +187,11 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/soundcloud/likes` (POST `…/import`) | | `{tracks, playlists}` the signed-in user's likes as source hits; POST favourites them here by their SoundCloud link (`{imported, skipped}`) |
 | GET | `/v1/sources/soundcloud/playlists` (POST `…/{id}/import[?keep_source=true]`) | | `[{id, name, description?, items, url}]` the user's own sets; POST creates a private Pubky playlist of the tracks' SoundCloud links (`{imported, skipped, playlist}`) |
 | GET | `/v1/sources/soundcloud/stream/{id}` | | The track as MP3 (or AAC) for browsers, relayed by the node; HLS is stitched into one stream |
+| GET / PUT | `/v1/sources/bandcamp/unofficial` | PUT `{enabled?, identity?, format?}` | Bandcamp (unofficial): `{enabled, signed_in, user?, format, formats, folder, health?, warning}`; `identity` is the owner's cookie value, checked with Bandcamp first (400 when refused; empty signs out; it never comes back) |
+| GET | `/v1/sources/bandcamp/collection` | | The owner's purchases: `[{id, title, artist?, kind, url, image?, item?, downloadable, downloaded}]` |
+| POST | `/v1/sources/bandcamp/collection/{id}/download` | `{format?}` (optional body) | Downloads one purchase into `<data_dir>/bandcamp` (a library folder, scanned after); 409 when Bandcamp offers no download or it is already running |
+| GET | `/v1/sources/bandcamp/downloads` | | This run's downloads: `[{id, title, state: queued\|downloading\|unpacking\|done\|failed, format?, bytes, total?, folder?, error?}]` |
+| GET | `/v1/sources/bandcamp/stream/{key}` | | A Bandcamp stream for browsers, relayed with a fresh token |
 | GET | `/v1/sources/qobuz/stream/{id}` | | The track as FLAC for browsers, relayed by the node |
 | POST / DELETE | `/v1/sources/tidal/unofficial/login` | | POST starts the device sign-in (the code to enter at link.tidal.com, in `pending`; the node waits for the approval); DELETE forgets the session |
 | GET / DELETE | `/v1/sources/tidal/status` (DELETE `…/session`) | | `{configured, signed_in, user_id?, country?, scope?, expires_at?, redirect_uri, requested_scopes, access_tier?, playback_limit?}` (`playback_limit` such as `FULL_REQUIRES_HIGHER_ACCESS_TIER` means TIDAL serves previews to this app's tier); DELETE forgets the tokens |
