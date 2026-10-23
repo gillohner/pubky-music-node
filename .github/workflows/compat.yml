@@ -1,0 +1,76 @@
+name: compat
+# Real Home Assistant and Music Assistant containers against a node with a fixture library
+# (STEWARD-COMPAT-HA-MA.md §4). Nightly and on demand, and on pull requests that touch what they test.
+# Images are pinned so a red run means our side changed; the nightly also tries the newest
+# releases, so we hear early when they move.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - tools/ha-check.py
+      - tools/ma-check.py
+      - integrations/home-assistant/**
+      - crates/pm-renderer/**
+      - crates/pm-api/src/renderer.rs
+      - crates/pm-api/src/opensubsonic.rs
+      - crates/pm-api/src/subsonic.rs
+      - crates/pm-api/src/events.rs
+      - .github/workflows/compat.yml
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  home-assistant:
+    # dlna_dmr finds the zone renderers and plays to them; the Pubky Music integration finds the
+    # node by zeroconf, browses the library, plays, groups (tools/ha-check.py).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ghcr.io/home-assistant/home-assistant:2026.10.2"]
+        include:
+          - image: ghcr.io/home-assistant/home-assistant:stable
+            newest: true
+    continue-on-error: ${{ matrix.newest == true }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: docker pull -q ${{ matrix.image }}
+      - run: cargo build -p pm-node
+      - name: dlna_dmr against the zone renderers
+        run: python3 -I tools/ha-check.py dlna target/debug/pm-node /tmp/ha-dlna --docker ${{ matrix.image }}
+      - name: the Pubky Music integration
+        run: python3 -I tools/ha-check.py integration target/debug/pm-node /tmp/ha-int --docker ${{ matrix.image }}
+      - if: failure()
+        run: |
+          tail -60 /tmp/ha-dlna/node.log /tmp/ha-int/node.log || true
+          grep -E 'ERROR|WARNING|pubky_music|dlna_dmr' /tmp/ha-dlna/ha.log /tmp/ha-int/ha.log | tail -80 || true
+  music-assistant:
+    # MA adds the node as an OpenSubsonic source and plays one of its tracks to a zone through
+    # MA's DLNA player provider (tools/ma-check.py).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ghcr.io/music-assistant/server:2.10.7"]
+        include:
+          - image: ghcr.io/music-assistant/server:latest
+            newest: true
+    continue-on-error: ${{ matrix.newest == true }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: docker pull -q ${{ matrix.image }}
+      - run: cargo build -p pm-node
+      - run: python3 -I tools/ma-check.py target/debug/pm-node /tmp/ma ${{ matrix.image }}
+      - if: failure()
+        run: |
+          tail -60 /tmp/ma/node.log || true
+          grep -E 'ERROR|WARNING|opensubsonic|dlna' /tmp/ma/ma.log | tail -80 || true
