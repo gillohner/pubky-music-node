@@ -155,7 +155,8 @@ pub fn set_config_client(id: &str, secret: &str) {
 }
 
 /// The device client the owner set: in Settings, else from node.toml, else the
-/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment.
+/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment, else the one built into this build
+/// (`from: builtin`, python-tidal's, STEWARD-TIDAL-DEFAULT.md).
 pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     let kept: Option<Client> = lib
         .get_setting(CLIENT_KEY)
@@ -170,11 +171,23 @@ pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     }
     let id = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_ID").unwrap_or_default();
     let secret = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_SECRET").unwrap_or_default();
-    (!id.trim().is_empty()).then(|| Client {
-        id: id.trim().into(),
-        secret: secret.trim().into(),
-        from: "config".into(),
+    if !id.trim().is_empty() {
+        return Some(Client {
+            id: id.trim().into(),
+            secret: secret.trim().into(),
+            from: "config".into(),
+        });
+    }
+    crate::project_apps::tidal_device_client().map(|(id, secret)| Client {
+        id,
+        secret,
+        from: "builtin".into(),
     })
+}
+
+/// This build carries a device client of its own.
+pub fn builtin_client() -> bool {
+    crate::project_apps::tidal_device_client().is_some()
 }
 
 /// Whether the mode is on and signed in, so TIDAL tracks can play in full.
@@ -239,6 +252,8 @@ pub struct UnofficialStatus {
     pub health: Option<Health>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_from: Option<String>,
+    /// This build has a built-in device client (python-tidal's); "Use built-in" goes back to it.
+    pub builtin: bool,
     pub warning: String,
 }
 
@@ -274,6 +289,7 @@ fn view(s: &NodeState) -> UnofficialStatus {
             }),
         health: st.health.clone(),
         client_from,
+        builtin: builtin_client(),
         warning: WARNING.into(),
     }
 }
