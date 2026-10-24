@@ -721,6 +721,17 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         fact("Format", t.file.format.to_string()),
         fact("File", t.file.path.display().to_string()),
     ];
+    // Where the file lives decides nothing else in the UI; the details say it (STEWARD-BUNDLED-HOMESERVER §7)
+    if let Some(hs) = s.homeserver_files_dir() {
+        about.push(fact(
+            "Stored",
+            if t.file.path.starts_with(hs) {
+                "On your homeserver".to_string()
+            } else {
+                "In a folder this node plays in place".to_string()
+            },
+        ));
+    }
     if let Some(g) = t.replaygain_track_gain_db {
         about.push(fact("ReplayGain", format!("{g:+.1} dB")));
     }
