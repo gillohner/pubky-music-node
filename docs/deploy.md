@@ -117,9 +117,11 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
    sudo apt install postgresql openssl
    DB_PASSWORD=$(openssl rand -hex 24); ADMIN_PASSWORD=$(openssl rand -hex 24); TOKEN=$(openssl rand -hex 32)
    sudo -u postgres psql -c "CREATE ROLE pubky LOGIN PASSWORD '$DB_PASSWORD'" -c "CREATE DATABASE pubky_homeserver OWNER pubky"
+   sudo groupadd --system pubky-files   # the homeserver's stored files, readable by the node
    sudo useradd --system --home /var/lib/pubky-homeserver --shell /usr/sbin/nologin pubky
-   sudo useradd --system --home /var/lib/pubky-music --shell /usr/sbin/nologin --groups audio,pubky pubky-music
-   sudo install -d -o pubky -g pubky -m 750 /var/lib/pubky-homeserver   # put it on the big disk if you like
+   sudo useradd --system --home /var/lib/pubky-music --shell /usr/sbin/nologin --groups audio,pubky-files pubky-music
+   sudo install -d -o pubky -g pubky-files -m 710 /var/lib/pubky-homeserver   # put it on the big disk if you like
+   sudo install -d -o pubky -g pubky-files -m 2750 /var/lib/pubky-homeserver/data
    sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music /var/lib/pubky-music/tunnel
    sudo install -d -m 755 /etc/pubky-music /usr/local/lib/pubky-music
    ```
@@ -176,17 +178,24 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 - **What listens where:** the node on 7788 and Pubky TLS on 6287 on the network; the homeserver's
   plain HTTP (6286) and admin API (6288) on 127.0.0.1 only. The homeserver stops on SIGINT (the
   unit sets it) and retries when its first publish to the Pubky network fails at boot.
-- **Its files:** under `/var/lib/pubky-homeserver/data/files`, group-readable by the node (it is in
-  the `pubky` group), so your music there is a library folder without a second copy. What the
-  operator can see is the same as above: everything, `/priv` included.
-- **Reachable from outside, Cloudflare Tunnel:** install `cloudflared` from Cloudflare's package
-  repository (pkg.cloudflare.com), then `sudo install -m 644 cloudflared-pubky.service
+- **Its files:** under `/var/lib/pubky-homeserver/data/files`, readable by the node through the
+  `pubky-files` group, so your music there is a library folder without a second copy. `data/` is
+  setgid, so every file the homeserver stores (uploads land in `data/files-tmp` first) gets that
+  group; the homeserver's `secret` and `config.toml` stay readable by `pubky` alone (0600), and the
+  node can't list the homeserver's folder. What the operator can see is the same as above:
+  everything, `/priv` included.
+- **Reachable from outside, Cloudflare Tunnel:** install `cloudflared` 2025.4.0 or newer (the
+  first to read the token from a file) from Cloudflare's package repository (pkg.cloudflare.com),
+  then `sudo install -m 644 cloudflared-pubky.service
   /etc/systemd/system/ && sudo systemctl enable --now cloudflared-pubky`. In Cloudflare, send the
   homeserver's hostname to `http://localhost:6286` and the music one to `http://localhost:7788`;
   paste the token and hostnames in Settings › Remote access. The unit picks up the token by itself
   (it retries until one is saved). Then `sudo systemctl restart pubky-homeserver`: before it
-  starts, `apply-tunnel-domain.sh` publishes the hostname on 443 (removing the tunnel in Settings
-  and restarting goes back to the LAN address). Settings shows that command when it's needed.
+  starts, `apply-tunnel-domain.sh` publishes the hostname on 443. Removing the tunnel in Settings
+  deletes the token, but a running cloudflared keeps the tunnel up until it restarts: run
+  `sudo systemctl restart pubky-homeserver cloudflared-pubky` (Settings shows that command), and the
+  homeserver goes back to the LAN address. The token file is the node user's alone (0600), and
+  cloudflared runs as that user.
 - **Your own domain instead:** Caddy on 443 in front of `127.0.0.1:6286`, ports 80, 443 and 6287
   forwarded; write the hostname into `/var/lib/pubky-music/tunnel/domain` (no token needed) and
   restart the homeserver.
@@ -224,7 +233,9 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
 
 - **Host network:** the node finds speakers on the LAN (SSDP, mDNS) and serves its web UI and API
   itself on 7788, the app's port; umbrelOS adds HTTPS in front. Native apps and OpenSubsonic
-  clients use 7788 with the bearer token (`APP_SEED`, generated per install).
+  clients use 7788 with the bearer token: the password umbrelOS shows for the app (right-click
+  its icon; `APP_PASSWORD`, generated per install). The homeserver's admin and database password
+  is a different one that umbrelOS keeps to itself (`APP_SEED`).
 - **The homeserver:** Pubky TLS on 6287 on the network; its plain HTTP (6286) and admin API (6288)
   on 127.0.0.1 only, for the node and cloudflared. Install this app or Pubky's "Pubky Homeserver"
   app, not both: both publish 6287. On first open, Settings › Accounts › Create account here.

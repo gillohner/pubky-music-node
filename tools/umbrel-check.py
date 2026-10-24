@@ -4,11 +4,13 @@
 The package is copied the way umbrelOS installs it (placeholders stripped) and started with
 Umbrel's variables (APP_DATA_DIR, APP_SEED, APP_PASSWORD, UMBREL_ROOT); only the node's image is
 swapped for the one built from this commit. Checks:
-- the node (host network, port 7788, token APP_SEED) finds its bundled homeserver;
+- the node (host network, port 7788, token APP_PASSWORD, which umbrelOS shows) finds its bundled
+  homeserver (admin and database password APP_SEED, never shown);
 - the homeserver's plain HTTP (6286) and admin API (6288) answer on 127.0.0.1 only, Pubky TLS
   (6287) and the node (7788) on the network;
-- Settings › Remote access works: the tunnel folder is writable, and a saved tunnel asks for an
-  Umbrel app restart in words (no docker command);
+- Settings › Remote access works: the tunnel folder is writable, the token is saved 0600 and
+  cloudflared (running as the node's uid) reads it, and a saved tunnel asks for an Umbrel app
+  restart in words (no docker command);
 - APP_SEED and APP_PASSWORD appear in no container's log.
 
 Usage: umbrel-check.py <compose project name> <APP_SEED> <APP_PASSWORD> <APP_DATA_DIR>
@@ -36,7 +38,7 @@ def api(path, method="GET", body=None):
         API + path,
         data=data,
         method=method,
-        headers={"Authorization": f"Bearer {seed}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {password}", "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(r, timeout=15) as resp:
         raw = resp.read()
@@ -72,7 +74,7 @@ def lan_ip():
 until("the node", lambda: api("/v1/info"))
 st = until("the bundled homeserver", lambda: (lambda v: v if v["reachable"] else None)(api("/v1/homeserver/bundled")))
 assert st["version"] and st["public_key"], st
-assert password not in json.dumps(st)
+assert seed not in json.dumps(st)
 log(f"node → homeserver: {st['version']}, key {st['public_key']}")
 
 ip = lan_ip()
@@ -87,10 +89,26 @@ token = base64.b64encode(json.dumps({"a": "ci", "t": "00000000-0000-4000-8000-00
 api("/v1/remote/tunnel", "PUT", {"token": token, "homeserver_domain": "pubky.example.org"})
 saved = Path(data_dir) / "data" / "cloudflare" / "token"
 assert saved.read_text().strip() == token, "the token is in the folder cloudflared reads"
+assert saved.stat().st_mode & 0o777 == 0o600, f"the token's mode is {oct(saved.stat().st_mode & 0o777)}, not 0600"
+# cloudflared runs as the node's uid and still reads the 0600 token: "Starting tunnel" names the
+# tunnel ID from the token; "Failed to read token file" would mean it can't
+since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+subprocess.run(["docker", "compose", "-p", project, "restart", "cloudflared"], check=True, capture_output=True)
+
+
+def cloudflared_log():
+    out = subprocess.run(["docker", "compose", "-p", project, "logs", "--no-color", "--since", since, "cloudflared"],
+                         capture_output=True, text=True)
+    text = out.stdout + out.stderr
+    assert "Failed to read token file" not in text, "cloudflared can't read the token the node saved"
+    return "tunnelID=00000000-0000-4000-8000-000000000000" in text
+
+
+until("cloudflared to start with the saved token", cloudflared_log, timeout=90)
 t = api("/v1/remote/tunnel")
 assert t["configured"] and t["restart_needed"], t
 assert t["restart_command"] is None and "Umbrel" in (t["restart_hint"] or ""), t
-log("remote access: the token reaches cloudflared's folder; the restart is asked for in Umbrel's words")
+log("remote access: the token (0600) reaches cloudflared, which reads it; the restart is asked for in Umbrel's words")
 api("/v1/remote/tunnel", "DELETE")
 
 logs = subprocess.run(["docker", "compose", "-p", project, "logs", "--no-color"], capture_output=True, text=True).stdout

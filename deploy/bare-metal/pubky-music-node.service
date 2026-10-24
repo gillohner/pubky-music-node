@@ -7,11 +7,12 @@ After=network-online.target pubky-homeserver.service sound.target
 [Service]
 User=pubky-music
 Group=pubky-music
-# audio: the DAC; pubky: read the homeserver's files (its music is a library folder)
-SupplementaryGroups=audio pubky
+# audio: the DAC; pubky-files: read the homeserver's stored files (its music is a library folder),
+# nothing else of the homeserver's
+SupplementaryGroups=audio pubky-files
 ExecStart=/usr/local/bin/pm-node -c /etc/pubky-music/node.toml serve
 # How Settings › Remote access tells you to restart the homeserver after a tunnel change
-Environment=PM_TUNNEL_RESTART_HINT="On the machine: sudo systemctl restart pubky-homeserver"
+Environment=PM_TUNNEL_RESTART_HINT="On the machine: sudo systemctl restart pubky-homeserver cloudflared-pubky"
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

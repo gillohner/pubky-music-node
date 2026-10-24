@@ -2,8 +2,9 @@ version: "3.7"
 
 # The node runs on the host network: it finds speakers on the LAN (SSDP, mDNS) and serves its
 # web UI and API itself on 7788, the manifest port (no app_proxy; umbrelOS adds HTTPS in front).
-# Native apps and OpenSubsonic clients on other machines use 7788 with the bearer token
-# (APP_SEED). Keep it secret.
+# Native apps and OpenSubsonic clients on other machines use 7788 with the bearer token, the
+# password umbrelOS shows for this app (APP_PASSWORD). The homeserver's admin and database password
+# is APP_SEED, which umbrelOS never shows. Keep both secret.
 services:
   # The bundled Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md), as in Pubky's own Umbrel app
   # (github.com/pubky/umbrel-app-store, pubky-homeserver, MIT). Its admin API is reached by the
@@ -15,7 +16,7 @@ services:
     stop_grace_period: 1m
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${APP_PASSWORD}
+      POSTGRES_PASSWORD: ${APP_SEED}
       POSTGRES_DB: pubky_homeserver
     volumes:
       - ${APP_DATA_DIR}/data/postgres:/var/lib/postgresql/data
@@ -39,8 +40,8 @@ services:
     restart: on-failure
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${APP_PASSWORD}
-      ADMIN_PASSWORD: ${APP_PASSWORD}
+      POSTGRES_PASSWORD: ${APP_SEED}
+      ADMIN_PASSWORD: ${APP_SEED}
       DEVICE_DOMAIN_NAME: ${DEVICE_DOMAIN_NAME:-}
       PUBLIC_IP: ${PUBLIC_IP:-}
     volumes:
@@ -81,12 +82,12 @@ services:
     network_mode: host
     environment:
       PM_LISTEN: "0.0.0.0:7788"
-      PM_TOKEN: "${APP_SEED}"
+      PM_TOKEN: "${APP_PASSWORD}"
       PM_CONTACT: "${APP_PUBKY_MUSIC_CONTACT:-}"
       PM_FOLDERS: "/music"
       PM_NAME: "Umbrel"
       PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
-      PM_HOMESERVER_ADMIN_PASSWORD: "${APP_PASSWORD}"
+      PM_HOMESERVER_ADMIN_PASSWORD: "${APP_SEED}"
       # Settings › Remote access writes the Cloudflare tunnel here (shared with cloudflared)
       PM_TUNNEL_DIR: "/tunnel"
       PM_TUNNEL_RESTART_HINT: "Restart the Pubky Music Node app in Umbrel once (right-click its icon, then Restart)."
@@ -119,6 +120,8 @@ services:
     restart: on-failure
     stop_grace_period: 1m
     network_mode: host
+    # The node's uid: the token it saves is readable by that user only
+    user: "1000:1000"
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN_FILE: /etc/pubky-cloudflare/token
