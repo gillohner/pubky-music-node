@@ -88,7 +88,9 @@ assert t["available"] and not t["configured"], t
 token = base64.b64encode(json.dumps({"a": "ci", "t": "00000000-0000-4000-8000-000000000000", "s": "c2VjcmV0"}).encode()).decode()
 api("/v1/remote/tunnel", "PUT", {"token": token, "homeserver_domain": "pubky.example.org"})
 saved = Path(data_dir) / "data" / "cloudflare" / "token"
-assert saved.read_text().strip() == token, "the token is in the folder cloudflared reads"
+# 0600 and owned by the node's uid (1000), so the runner (another uid) reads it as root
+stored = subprocess.run(["sudo", "cat", str(saved)], capture_output=True, text=True, check=True).stdout
+assert stored.strip() == token, "the token is in the folder cloudflared reads"
 assert saved.stat().st_mode & 0o777 == 0o600, f"the token's mode is {oct(saved.stat().st_mode & 0o777)}, not 0600"
 # cloudflared runs as the node's uid and still reads the 0600 token: "Starting tunnel" names the
 # tunnel ID from the token; "Failed to read token file" would mean it can't
