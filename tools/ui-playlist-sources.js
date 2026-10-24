@@ -67,7 +67,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       await p.click('#plownorder'); await p.waitForFunction(() => document.querySelector('#plownorder') && document.querySelector('#plownorder').checked, null, { timeout: 30000 }).catch(() => {});
       check(await p.$eval('#plownorder', (c) => c.checked), '"Use my node’s order" goes back to the global order');
       // global order in Settings
-      await p.goto(`${BASE}/settings`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
+      await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);
       check(g === globalBefore.length, `Settings lists the global order (${g})`);
       if (OUT) { await p.$eval('#gordercard', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/settings-play-from-1280-dark.png` }); }

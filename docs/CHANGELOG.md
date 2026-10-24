@@ -4,11 +4,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-24
 
-  - The saved tunnel token is readable by the node's user only (0600, created that way); cloudflared runs as that user on every install (uid 1000 in Docker).
+- **Settings › Accounts says where things are, without the sync controls** (STEWARD-BUNDLED-HOMESERVER.md §7, after #76):
+  - **Saved:** one line, "Everything is saved on your homeserver" (with when), "Saving 3 changes…", or the error with **Try again** (`GET /v1/storage`, `POST /v1/storage/save`).
+  - **Your music:** how many songs are on your homeserver and how many in folders the node plays in place, with **Add music**.
+  - **Advanced:** Save now and the list of private files. "Copy library", "Bring files here" and the copy speed are there only with a homeserver that isn't this node's own.
+  - A song page's details say whether its file is stored on your homeserver or in a folder.
 - **The bundled homeserver on Umbrel and on bare metal** (STEWARD-BUNDLED-HOMESERVER.md, step 1 finished).
   - **Umbrel:** `deploy/umbrel/` is now a community app store. The app runs the node on the host network (speaker discovery), with the homeserver's HTTP and admin ports on 127.0.0.1 only, the Cloudflare tunnel from Settings › Remote access (cloudflared starts once a token is saved), and the homeserver's files mounted read-only. Data moved under `data/` as umbrelOS expects (the app was never installable before: its image tag didn't exist; it now pins an `edge` build by digest). The node's token is the password umbrelOS shows (`APP_PASSWORD`); the homeserver's passwords use `APP_SEED`, which it never shows. Umbrel's linter passes; CI starts the app with Umbrel's variables (`tools/umbrel-check.py`).
   - **Bare metal:** `deploy/bare-metal/` has systemd units for the homeserver (stops on SIGINT, retries a failed first publish), the node and cloudflared, a homeserver config template and `apply-tunnel-domain.sh`, which publishes the tunnel's hostname before the homeserver starts. The node reads the homeserver's stored files through a `pubky-files` group (setgid `data/`), not the homeserver's own group. Steps in docs/deploy.md. Checked against the real homeserver 0.16.2 and PostgreSQL 18.
   - `GET /v1/remote/tunnel` adds `restart_hint`: Umbrel and bare-metal installs say how to restart in their own words.
+  - The saved tunnel token is readable by the node's user only (0600, created that way); cloudflared runs as that user on every install (uid 1000 in Docker).
 - **Better song matches** (second review #5, #6). "Which song is this?" and Review matches rank MusicBrainz's answers by what the file says:
   - **Title:** a match must have the file's title. Songs that only mention it in a longer title are no longer offered (the review found an offensive one).
   - **Album:** the release named like the file's album is picked and ranked first. Otherwise a studio release is picked over a live album, bootleg or compilation, which rank lower.

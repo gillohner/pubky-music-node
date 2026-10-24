@@ -924,6 +924,9 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .src-dot.ok { background: var(--ok); box-shadow: none; }
 .src-dot.bad { background: var(--bad); box-shadow: none; }
 .src-dot.off { background: transparent; }
+.set-adv { border-top: 1px solid var(--line); }
+.set-adv > summary { padding: 12px 16px; color: var(--muted); font-size: 13px; cursor: pointer; }
+.set-adv > summary:hover { color: var(--fg); }
 .src-offgroup summary { padding: 9px 12px; color: var(--muted); font-size: 13px; cursor: pointer; }
 .src-desc { margin: -8px 0 16px; max-width: 70ch; }
 .src-noswitch { width: 34px; margin: 0 4px; flex: none; }
