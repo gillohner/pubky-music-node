@@ -36,6 +36,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | DELETE | `/v1/zones/{id}/queue` | | 204 (stops and clears) |
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |
+| POST | `/v1/zones/{id}/announce` | `{uri?, chime?, volume_percent?, title?}` | Play a clip (an http(s) URL or a file path; TTS from Home Assistant) instead of the music, after an optional chime, at its own volume on outputs with hardware volume; then back to the same track and position, playing or paused as before, the queue and volume as they were: `{resumes, volume_applied, restores_volume?, items}`; 409 while one is playing |
 | POST | `/v1/zones/{id}/volume` (absolute dB requests are capped at the zone's `max_volume_db` from its DSP settings) | `{volume: {db: -20} \| {percent: 50} \| "up" \| "down" \| {mute: true}}` | 204 |
 | GET / PUT | `/v1/zones/{id}/sleep` | PUT: `{seconds}` or `{seconds: null}` | `{ends_at_ms?, remaining_ms?}`; sleep timer: the zone pauses when it fires; one timer per zone, a new PUT replaces it |
 | POST | `/v1/zones/{id}/transfer` | `{to}` | the target's `ZoneState`; moves the queue, the playing item and its position, repeat and radio to zone `to` (paused stays paused); the source ends up stopped and empty; 400 for an empty queue or the same zone |
@@ -77,9 +78,12 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/sources/spotify/devices` | | Spotify Connect devices |
 | POST | `/v1/sources/spotify/play` | `{uris, device_id?}` | start `track:<id>` / `album:<id>` on a device (Premium); no audio enters the node |
 | GET | `/v1/sources/deezer/stream/{id}` | | 307 to the track's 30 s preview (browsers); zones play `deezer:track:<id>` directly |
-| GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts) |
+| GET | `/v1/library/artists` | | `ArtistSummary[]` (id, name, mbid, album and track counts). Songs without any artist come last as "Unknown artist" with id `0`; its page is `/v1/item/artist/lib-0` (every such song). Subsonic and the other lists leave it out |
 | GET | `/v1/library/artists/{id}` | | `{artist, albums}` |
 | GET | `/v1/library/artists/{id}/tracks` | | `{tracks}` |
+| GET | `/v1/library/artists/{id}/similar` | | `{artists: [{name, mbid?, url, score, library_artist_id?}], note?}` from Last.fm's `artist.getSimilar` (by MusicBrainz id, else by name), each matched to this library; `note` says why there is nothing (`not configured` without a Last.fm app) |
+| GET / PUT / DELETE | `/v1/lastfm` | PUT `{api_key?, api_secret?, submit?}` | Last.fm: `{configured, app_from?, api_key?, connected, user?, submit, pending, problem?}`; the owner's app (both values; an empty key forgets it and signs out), and whether plays go out; DELETE signs out |
+| GET | `/v1/lastfm/login` | | `{url}`: Last.fm's permission page, which comes back to `/lastfm/callback` (no token there), where the node turns the token into a session key and redirects to `/?lastfm=signed_in` |
 | GET | `/v1/library/artists/{id}/info` | | `{bio?, image, wikipedia?, wikidata?, musicbrainz?, homepage?, image_from?, bio_from?, note?}` from MusicBrainz → Wikidata → Wikipedia, then fanart.tv (the project's key, `PM_PROJECT_FANART_KEY` at build time) and TheAudioDB (`PM_PROJECT_AUDIODB_KEY`, else its public test key) for a portrait and a biography the others lack (`image_from`, `bio_from` say so) → Wikipedia by the artist's MBID, fetched once and cached for 30 days (misses 7) |
 | GET | `/v1/library/artists/{id}/image` | | the cached portrait (Wikimedia Commons); 404 when none |
 | GET | `/v1/library/genres` | | `[{id, name, tracks, albums}]` from the files' genre tags (several per track when the tag lists several) |
@@ -138,6 +142,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/home/{section}` | `?window&limit` | one Home section (`trending-songs`, `trending-albums`, `trending-artists`, `following`, `tags`, `concerts`, `podcasts`, `yours`, `new`; `tag?labels=a,b`): `{section, items, tags, note?, needs?: pubky\|location\|contact, error?}`; cached 60 s |
 | GET / PUT | `/v1/home/layout` | PUT: `{order, hidden}` (row ids) | which Home rows show and in which order; kept on the node and in the homeserver settings copy |
 | GET / POST | `/v1/smart` | POST: `{name, rules: [{field, op, value, to?}], matches: all\|any, sort, limit}` | smart playlists; `field` is `genre`, `artist`, `year`, `favourite`, `plays`, `last_played` or `tag` (your Pubky tags); `sort` is `random`, `most_played`, `least_recent`, `newest` or `title` |
+| | (smart playlist rules may also carry `seeds: [{kind: track\|artist\|album\|genre, id, label?}]` (the pool is then what the library finds similar to them), `minutes` (stop at that length, after sorting) and `exclude: {artists?, genres?, tracks?, played_within_days?}`) | | |
 | POST | `/v1/smart/preview` | the rules | `{matched, tracks}` without saving |
 | PUT / DELETE | `/v1/smart/{id}` | PUT: as POST | change or remove one |
 | GET | `/v1/smart/{id}/tracks` | | `{playlist, matched, tracks}`: its songs right now |
@@ -245,6 +250,8 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | GET | `/v1/party/guest` | | **guest token:** `{party, zone_name, expires_at, you, playing, waiting: [{title, artist, cover, by, mine}], adds_left, waiting_left, next_add_at}` |
 | GET | `/v1/party/guest/search` | `?q=` | **guest token:** library songs `[{track_id, title, artist, cover, duration_ms}]` |
 | POST | `/v1/party/guest/queue` | `{track_id}` | **guest token:** add a song to the guest section (after the current song and other guests' waiting songs). 429 past the hourly limit or with too many waiting; the limits are checked on the node. A guest token opens only `/v1/party/guest…` and album covers |
+| GET | `/v1/library/loudness` | | measured loudness for files without ReplayGain tags: `{on, measured, failed, to_measure, running}`; `on` = some zone has loudness on, so new files are measured in the background |
+| POST | `/v1/library/loudness/measure` | | measure what's left now, even with loudness off |
 | GET / PUT | `/v1/people/zones` | PUT: `{zones}` | the zones open to listeners (empty = all) |
 | GET | `/v1/people` | | `{owner, people: [{key, access, name, music_enabled, homeserver_enabled, added_at, storage_quota_mb, used_bytes, sessions}], invites: [{id, access, name, token, storage_quota_mb, created_at, url, qr_svg}], homeserver}`. `access` is `homeserver`, `homeserver_music` or `music`; used invites turn into people. `homeserver_enabled` is what the node last set (the admin API can't read it); `used_bytes` is the size of their files in the homeserver's files folder, when the node has it (`[homeserver] files_dir`), else `null` |
 | POST | `/v1/people/invites` | `{access, name?, storage_quota_mb?, key?}` | a homeserver invite: a signup token with that quota, as a Pubky Ring link (`pubkyauth://direct_signup?hs=…&st=…`) and QR. `music` adds someone with an account elsewhere by `key` |

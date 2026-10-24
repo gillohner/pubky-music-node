@@ -25,6 +25,7 @@ pub struct NodeConfig {
     pub spotify: SpotifyConfig,
     /// AcoustID application key for identifying untagged files; optional.
     pub acoustid: AcoustIdConfig,
+    pub lastfm: LastfmConfig,
     /// Jamendo developer app (devportal.jamendo.com); `PM_JAMENDO_CLIENT_ID` and
     /// `PM_JAMENDO_CLIENT_SECRET` override. Empty = the project's built-in app (no Jamendo sign-in).
     pub jamendo: JamendoConfig,
@@ -200,6 +201,27 @@ pub struct AcoustIdConfig {
     pub api_key: String,
 }
 
+/// Last.fm: the owner's own API key and shared secret (last.fm/api/account/create); Settings
+/// override them. `PM_LASTFM_API_KEY` / `PM_LASTFM_API_SECRET` as well. The secret never ships.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LastfmConfig {
+    pub api_key: String,
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for LastfmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastfmConfig")
+            .field("api_key", &self.api_key)
+            .field(
+                "api_secret",
+                &if self.api_secret.is_empty() { "" } else { "<set>" },
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct SpotifyConfig {
@@ -303,6 +325,7 @@ impl Default for NodeConfig {
             qobuz: QobuzConfig::default(),
             spotify: SpotifyConfig::default(),
             acoustid: AcoustIdConfig::default(),
+            lastfm: LastfmConfig::default(),
             jamendo: JamendoConfig::default(),
             remote: RemoteConfig::default(),
             youtube: YoutubeConfig::default(),
@@ -326,7 +349,7 @@ impl Default for LibraryConfig {
 }
 
 /// Network endpoints (`pm-endpoint`) this node plays to.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OutputsConfig {
     /// Endpoint addresses (`host:port`) to connect to at start, besides discovery.
@@ -346,6 +369,34 @@ pub struct OutputsConfig {
     pub snapcast: String,
     /// Discover AirPlay 1 receivers (mDNS `_raop._tcp`) and offer them as outputs.
     pub airplay: bool,
+    /// Discover BluOS players (Bluesound, NAD; mDNS `_musc._tcp`) and offer them as outputs.
+    pub bluos: bool,
+    /// MPD servers to offer as outputs: `host`, `host:port` or `password@host:port` (port 6600
+    /// by default). MPD isn't discovered.
+    pub mpd: Vec<String>,
+}
+
+impl std::fmt::Debug for OutputsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // MPD entries may carry a password (`password@host:port`): only the address shows
+        let mpd: Vec<&str> = self
+            .mpd
+            .iter()
+            .map(|e| e.rsplit_once('@').map_or(e.as_str(), |(_, a)| a))
+            .collect();
+        f.debug_struct("OutputsConfig")
+            .field("endpoints", &self.endpoints)
+            .field("discover", &self.discover)
+            .field("discover_ms", &self.discover_ms)
+            .field("upnp", &self.upnp)
+            .field("slimproto_port", &self.slimproto_port)
+            .field("cast", &self.cast)
+            .field("snapcast", &self.snapcast)
+            .field("airplay", &self.airplay)
+            .field("bluos", &self.bluos)
+            .field("mpd", &mpd)
+            .finish()
+    }
 }
 
 impl Default for OutputsConfig {
@@ -359,6 +410,8 @@ impl Default for OutputsConfig {
             cast: true,
             snapcast: String::new(),
             airplay: true,
+            bluos: true,
+            mpd: Vec::new(),
         }
     }
 }
@@ -462,6 +515,18 @@ mod tests {
         assert_eq!(took, vec!["tidal", "contact"]);
         assert_eq!(cfg.tidal.client_secret, "old-secret");
         assert_eq!(cfg.spotify.client_id, "mine", "this node's own key wins");
+    }
+
+    #[test]
+    fn mpd_servers_parse_and_their_passwords_stay_out_of_debug() {
+        let cfg: NodeConfig =
+            toml::from_str("[outputs]\nmpd = [\"s3cret@10.0.0.9:6600\", \"music.local\"]\n").unwrap();
+        assert_eq!(cfg.outputs.mpd.len(), 2);
+        let shown = format!("{:?}", cfg.outputs);
+        assert!(
+            !shown.contains("s3cret") && shown.contains("10.0.0.9:6600"),
+            "{shown}"
+        );
     }
 
     #[test]

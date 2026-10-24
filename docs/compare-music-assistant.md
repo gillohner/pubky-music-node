@@ -97,15 +97,15 @@ Cost: S = a day or less, M = a few days, L = a week or more. Value is for the no
 | 4 | Party mode on listener accounts (#46): guest links with an expiry, a guest section in the queue, rate limits **checked on the node** | M | high | MA sends its limits to the guest page and checks them there only. Built in #77: guests need no account; the guest token opens only the party. |
 | 5 | Announcements on a zone: URL or TTS, chime, volume, then restore and resume | M | medium | The Home Assistant integration (mn-sources) can use it. |
 | 6 | iTunes covers as a fallback after the Cover Art Archive | S | medium | Apple's Search and Lookup API, no key. |
-| 7 | Measured loudness (EBU R128) for files without ReplayGain, feeding our ReplayGain stage | M | medium | The `ebur128` crate (MIT). Off unless loudness is on, so bit-perfect stays the default. |
+| 7 | Measured loudness (EBU R128) for files without ReplayGain, feeding our ReplayGain stage | M | medium | The `ebur128` crate (MIT). Off unless loudness is on, so bit-perfect stays the default. Built in #79. |
 | 8 | HEOS player (Denon/Marantz), with HEOS groups | S–M | medium | Official HEOS CLI protocol, JSON over TCP 1255, mDNS discovery. |
-| 9 | BluOS player (Bluesound, NAD), with BluOS groups | S | medium | Official BluOS HTTP API. |
+| 9 | BluOS player (Bluesound, NAD), with BluOS groups | S | medium | Official BluOS HTTP API. Built in #78. |
 | 10 | gPodder sync of subscriptions and progress | M | medium | gpodder.net API v2, Nextcloud gpoddersync, opodsync. |
 | 11 | Crossfade per zone (standard, off by default) | M | medium | Marked as a named stage, like the others. Skip "smart" fades (neural nets). |
 | 12 | Last.fm scrobbling and similar artists | M | medium | Needs our own API key, and the secret for signing. Either the owner enters both, or the calls go through Pinakes. A client secret never ships. |
 | 13 | Smart playlists from seeds, with duration and exclusions | S | low–medium | Seeds use our "keep playing" similar-songs logic. |
 | 14 | A declared feature set per source (search, library, playlists, lyrics, scrobble), with a stage label | M | medium | The app hides what a source can't do. |
-| 15 | MPD player | S | low–medium | Official text protocol, no discovery. |
+| 15 | MPD player | S | low–medium | Official text protocol, no discovery. Built in #81. |
 | 16 | fanart.tv and TheAudioDB artist images | S | low–medium | Needs our own project key (public, through Pinakes or built in like the AcoustID key). We have Wikipedia portraits already. |
 | 17 | "Paste the redirect URL" fallback for sign-ins | S | low | Only for apps that allow loopback redirects only. |
 | 18 | A Sendspin output | M–L | watch | Open spec, but young. Revisit when HA devices ship it. |
