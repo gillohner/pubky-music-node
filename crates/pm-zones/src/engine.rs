@@ -212,6 +212,17 @@ impl Engine {
             Command::QueueChanged => {
                 // The next item may have changed; prefetch again lazily.
                 self.prefetch = None;
+                // A fade in progress goes on only while its track is still the one that plays
+                // after the current one ("Play next", a removal or a repeat change may differ).
+                if let (Some(cur), Some(inc)) = (self.current.as_ref(), self.incoming.as_ref()) {
+                    let still_next = {
+                        let q = self.queue.lock().expect("queue poisoned");
+                        q.after_end(cur.item.id).and_then(|i| q.get(i)).map(|i| i.id) == Some(inc.item.id)
+                    };
+                    if !still_next {
+                        self.cancel_crossfade();
+                    }
+                }
                 self.emit(ZoneEvent::QueueChanged);
             }
             Command::Play(None) => match self.transport {
@@ -772,20 +783,23 @@ impl Engine {
             }
         }
         self.output.now_playing(Some(&inc.item));
-        self.queue
-            .lock()
-            .expect("queue poisoned")
-            .set_current(Some(inc.index));
+        // Where the item is now: the queue may have changed since the fade began.
+        let index = {
+            let mut q = self.queue.lock().expect("queue poisoned");
+            let i = q.position_of(inc.item.id).unwrap_or(inc.index);
+            q.set_current(Some(i));
+            i
+        };
         self.emit(ZoneEvent::TrackStarted {
             item: inc.item.clone(),
-            index: inc.index,
+            index,
             source_format: inc.proc.source_format(),
             output_format: fmt,
             signal_path: inc.proc.signal_path().clone(),
             gapless: false,
         });
         self.current = Some(Current {
-            index: inc.index,
+            index,
             item: inc.item,
             source: inc.source,
             proc: inc.proc,

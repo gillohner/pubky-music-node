@@ -639,3 +639,63 @@ async fn crossfade_waits_for_a_track_long_enough_and_a_matching_format() {
     r.zone.wait_stopped().await;
     assert_eq!(r.rec.samples.lock().unwrap().len(), 1000);
 }
+
+/// Let blocks through one at a time until the fade from a into b has begun (a's block 600..700
+/// is written), then hold the engine there.
+async fn into_the_fade(r: &Rig) {
+    loop {
+        r.gate.blocked().await;
+        if r.rec.samples.lock().unwrap().len() >= 700 {
+            return;
+        }
+        r.gate.allow(1);
+        wait_for(|| *r.gate.permits.lock().unwrap() == 0).await;
+    }
+}
+
+#[tokio::test]
+async fn crossfade_gives_way_to_play_next_during_the_fade() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000), ("c", RATE, 1000)]);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    into_the_fade(&r).await;
+    // "Play next" while a fades into b: c comes first, b after it
+    r.zone.enqueue(vec![QueueItem::new("c")], Insert::Next);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        [
+            "start:a:false",
+            "end:a",
+            "start:c:true",
+            "end:c",
+            "start:b:false",
+            "end:b",
+            "stopped"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn crossfade_stops_when_its_track_is_removed_during_the_fade() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000), ("c", RATE, 1000)]);
+    r.zone.set_crossfade_ms(30);
+    let ids = r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("b"), QueueItem::new("c")],
+        Insert::End,
+    );
+    r.zone.play();
+    into_the_fade(&r).await;
+    assert!(r.zone.remove(ids[1]));
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        ["start:a:false", "end:a", "start:c:true", "end:c", "stopped"]
+    );
+    assert_eq!(r.zone.queue().len(), 2);
+}
