@@ -1615,6 +1615,8 @@
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
+      // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
+      ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...radioItem,
       ...versionItems,
@@ -1889,7 +1891,7 @@
     $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: songs[Number(a.dataset.sartist)].artist_id }); });
     $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = songs[Number(a.dataset.sartistq)].artist; runSearch(); });
     $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: songs[Number(a.dataset.salbum)].album_id }); });
-    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null }); });
+    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
   const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" onerror="this.remove()">` : ''}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div></button>`).join('')}</div>`;
@@ -1912,11 +1914,22 @@
     const answers = Object.values(run.answers).filter((x) => x.status === 'ok').sort((x, y) => SOURCE_RANK.indexOf(x.source) - SOURCE_RANK.indexOf(y.source));
     for (const ans of answers) for (const h of ans.hits) {
       if (!byKind[h.kind]) continue;
-      const found = (h.keys || []).map((k) => index.get(h.kind + '|' + k)).find(Boolean);
+      // Artists without a shared id: the same name is one row across services, and a service's
+      // later namesakes (tribute acts, typos) are dropped: five identical "Queen" rows helped no
+      // one (second review #13)
+      const byName = h.kind === 'artist' && searchWords(h.title).join(' ');
+      let found = (h.keys || []).map((k) => index.get(h.kind + '|' + k)).find(Boolean);
+      if (!found && byName) {
+        const same = index.get('artist-name|' + byName);
+        if (same && same.sources.includes(ans.source)) continue;
+        found = same;
+        if (found && !found.image && h.image) found.image = h.image;
+      }
       if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
       const m = { ...h, sources: [ans.source] };
       byKind[h.kind].push(m);
       for (const k of h.keys || []) index.set(h.kind + '|' + k, m);
+      if (byName) index.set('artist-name|' + byName, m);
     }
     return byKind;
   };
@@ -2379,7 +2392,7 @@
           const byFolder = new Map(); for (const g of byTrack.values()) { const f = (g.track.file.path || '').replace(/[^/]*$/, ''); if (!byFolder.has(f)) byFolder.set(f, []); byFolder.get(f).push(g); }
           // The release most suggestions in a folder point at (the folder as an album).
           const releaseOf = (groups) => { const n = new Map(); groups.forEach((g) => g.options.forEach((o) => { if (o.release_mbid) n.set(o.release_mbid, (n.get(o.release_mbid) || 0) + 1); })); let best = null; n.forEach((c, r) => { if (!best || c > best[1]) best = [r, c]; }); return best && best[0]; };
-          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file on the left; what MusicBrainz knows on the right. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file, with what MusicBrainz knows about it. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
           // Side by side: the folder's files and the MusicBrainz release's tracklist, aligned by position.
           $$('[data-align]', main).forEach((b) => b.onclick = async () => {
             const sec = b.closest('[data-folder]'); const box = $('.alignbox', sec); const groups = byFolder.get(b.dataset.align) || [];
@@ -2679,7 +2692,10 @@
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`
             + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
-          bindSongRows($('#plsongs'), songs, {});
+          // Phones hide a row's Move up / Move down / Remove buttons (no room next to the title):
+          // the row's ⋯ menu offers them and presses the same buttons
+          const rowActs = (k, row) => (row && $('.q-actions', row) && getComputedStyle($('.q-actions', row)).display === 'none' ? [['pup', 'Move up', 'upload'], ['pdown', 'Move down', 'download'], ['rm', 'Remove from playlist', 'trash']].filter(([a]) => { const b = $(`[data-${a}]`, row); return b && !b.disabled; }).map(([a, label, ic]) => ({ label, icon: ic, run: () => $(`[data-${a}]`, row).click() })) : []);
+          bindSongRows($('#plsongs'), songs, { rowExtra: rowActs });
           // Playlist rows can also be removed together (highest index first, so positions hold)
           enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});

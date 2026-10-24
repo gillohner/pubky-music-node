@@ -2,6 +2,20 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-24
+
+- **Better song matches** (second review #5, #6). "Which song is this?" and Review matches rank MusicBrainz's answers by what the file says:
+  - **Title:** a match must have the file's title. Songs that only mention it in a longer title are no longer offered (the review found an offensive one).
+  - **Album:** the release named like the file's album is picked and ranked first. Otherwise a studio release is picked over a live album, bootleg or compilation, which rank lower.
+  - **No artist:** files with no artist get no guesses by title alone.
+  - "Compare with the album" then compares against the right album.
+- **One search row per artist** (second review #13). The same artist name from several services is one row listing them all, and a service's later namesakes are dropped.
+- **Phones** (second review #22):
+  - two album covers per row;
+  - song titles get most of the row: narrower number and length columns, and the "Match" chip moves into the song's ⋯ menu as "Which song is this?…";
+  - item pages no longer start with an empty band above Back;
+  - Confirm matches no longer says "left" and "right" (the sides stack on a phone).
+
 ## 2026-10-23
 
 - **Party mode** (compare-music-assistant #4). Settings › People › Party starts a party on a zone and shows a guest link and QR. Guests open it on their phones, give a name, search the library and add songs, with no account. Their songs play right after the current one, in the order they came, before the rest of the queue; an idle zone starts. Limits per guest (songs per hour, songs waiting at once) are checked on the node, and a guest token opens nothing but the party. Links expire after 1 to 72 hours, and ending a party stops its guests at once.

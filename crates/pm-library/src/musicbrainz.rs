@@ -407,6 +407,32 @@ pub struct RecordingHit {
     pub release: Option<String>,
     pub release_mbid: Option<Mbid>,
     pub length_ms: Option<u64>,
+    /// Every release MusicBrainz lists it on, so the caller can pick the one the file is from.
+    #[serde(default)]
+    pub releases: Vec<HitRelease>,
+}
+
+/// A release a search hit appears on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HitRelease {
+    pub title: String,
+    pub mbid: Option<Mbid>,
+    /// `Official`, `Bootleg`, `Promotion`… (empty when MusicBrainz doesn't say).
+    pub status: String,
+    /// The release group's primary and secondary types: `Album`, `Live`, `Compilation`…
+    pub kinds: Vec<String>,
+}
+
+impl HitRelease {
+    /// A bootleg, live recording, compilation, DJ mix or remix album: rarely what a file
+    /// tagged with a studio album is from.
+    pub fn is_secondary(&self) -> bool {
+        self.status.eq_ignore_ascii_case("bootleg")
+            || self.kinds.iter().any(|k| {
+                ["live", "compilation", "dj-mix", "remix", "mixtape/street"]
+                    .contains(&k.to_lowercase().as_str())
+            })
+    }
 }
 
 pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
@@ -430,10 +456,35 @@ pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
                                 .collect::<String>()
                         })
                         .unwrap_or_default();
-                    let release = r
-                        .get("releases")
-                        .and_then(Value::as_array)
-                        .and_then(|a| a.first());
+                    let all = r.get("releases").and_then(Value::as_array);
+                    let release = all.and_then(|a| a.first());
+                    let releases = all
+                        .map(|a| {
+                            a.iter()
+                                .map(|x| {
+                                    let rg = x.get("release-group");
+                                    let mut kinds: Vec<String> = rg
+                                        .and_then(|g| str_at(g, "primary-type"))
+                                        .map(|k| vec![k.to_string()])
+                                        .unwrap_or_default();
+                                    kinds.extend(
+                                        rg.and_then(|g| g.get("secondary-types"))
+                                            .and_then(Value::as_array)
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(Value::as_str)
+                                            .map(str::to_string),
+                                    );
+                                    HitRelease {
+                                        title: str_at(x, "title").unwrap_or_default().to_string(),
+                                        mbid: mbid_at(x, "id"),
+                                        status: str_at(x, "status").unwrap_or_default().to_string(),
+                                        kinds,
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     Some(RecordingHit {
                         mbid: mbid_at(r, "id")?,
                         score: r.get("score").and_then(Value::as_u64).unwrap_or(0) as u32,
@@ -442,6 +493,7 @@ pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
                         release: release.and_then(|x| str_at(x, "title")).map(str::to_string),
                         release_mbid: release.and_then(|x| mbid_at(x, "id")),
                         length_ms: r.get("length").and_then(Value::as_u64),
+                        releases,
                     })
                 })
                 .collect()
@@ -456,6 +508,27 @@ mod tests {
 
     const MB: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     const MB2: &str = "0383dadf-2a4e-4d10-a46a-e9e041da8eb3";
+
+    #[test]
+    fn search_hits_keep_every_release_with_its_kind() {
+        let v = json!({"recordings": [{
+            "id": MB, "score": 100, "title": "Death on Two Legs", "length": 223_000,
+            "artist-credit": [{"name": "Queen"}],
+            "releases": [
+                {"id": MB2, "title": "Ultimate Houston 1977", "status": "Bootleg",
+                 "release-group": {"primary-type": "Album", "secondary-types": ["Live"]}},
+                {"id": MB, "title": "A Night at the Opera", "status": "Official",
+                 "release-group": {"primary-type": "Album"}}
+            ]
+        }]});
+        let h = &parse_search_hits(&v)[0];
+        assert_eq!(h.release.as_deref(), Some("Ultimate Houston 1977"));
+        assert_eq!(h.releases.len(), 2);
+        assert_eq!(h.releases[0].kinds, ["Album", "Live"]);
+        assert!(h.releases[0].is_secondary());
+        assert_eq!(h.releases[1].status, "Official");
+        assert!(!h.releases[1].is_secondary());
+    }
 
     #[test]
     fn recording_mapping() {

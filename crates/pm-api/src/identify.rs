@@ -445,12 +445,12 @@ async fn lookup(
     Ok(results)
 }
 
-/// MusicBrainz recordings matching the tags' artist and title (± 2 s):
-/// suggestions only, scored by MusicBrainz's own ranking.
+/// MusicBrainz recordings matching the tags' artist and title (± 2 s): suggestions only, ranked
+/// by [`rank_hits`]. A file with no artist gets none: a title alone matches strangers' songs.
 async fn search_suggestions(s: &NodeState, t: &Track) -> Result<Vec<Candidate>, String> {
     let contact = s.contact();
     let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
-    if contact.is_empty() || t.title.trim().is_empty() {
+    if contact.is_empty() || t.title.trim().is_empty() || artist.trim().is_empty() {
         return Ok(Vec::new());
     }
     let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
@@ -460,28 +460,117 @@ async fn search_suggestions(s: &NodeState, t: &Track) -> Result<Vec<Candidate>, 
         .search_recording_hits(&artist, &t.title, t.duration_ms)
         .await
         .map_err(|e| e.to_string())?;
-    // A length far from the file's lowers the score: the owner decides
-    let near = |h: &pm_library::musicbrainz::RecordingHit| match (h.length_ms, t.duration_ms) {
-        (Some(a), Some(b)) => a.abs_diff(b) <= 3000,
-        _ => true,
-    };
-    // One choice per title, artist and release: identical-looking rows only confuse
-    let mut seen = std::collections::HashSet::new();
-    Ok(found
+    Ok(rank_hits(
+        &t.title,
+        t.album.as_ref().map(|a| a.title.as_str()),
+        t.duration_ms,
+        found,
+    ))
+}
+
+/// A title as people compare them: lower case, without "(Live)", "[Remastered]" or
+/// " - 2011 Remaster", and with punctuation as spaces.
+fn plain_title(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0u32;
+    let s = s.split(" - ").next().unwrap_or(s);
+    for c in s.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            c if depth == 0 => out.extend(if c.is_alphanumeric() {
+                c.to_lowercase().collect::<Vec<_>>()
+            } else {
+                vec![' ']
+            }),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether two titles name the same song: equal when plain, or one is the other with a few
+/// words more ("Bohemian Rhapsody" and "Bohemian Rhapsody Live Aid").
+fn same_title(a: &str, b: &str) -> Option<bool> {
+    let (a, b) = (plain_title(a), plain_title(b));
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    if a == b {
+        return Some(true);
+    }
+    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    (long.starts_with(short.as_str()) && short.len() * 10 >= long.len() * 6).then_some(false)
+}
+
+/// Rank MusicBrainz's hits for a file (second review #5, #6):
+/// - a hit must carry the file's title (MusicBrainz also returns songs that only mention it);
+/// - of the releases a recording is on, the one named like the file's album wins, else the
+///   first studio release; bootlegs, live albums and compilations rank lower unless the file's
+///   album is one;
+/// - a length more than 3 s off, a title with extra words or another album lower the score.
+fn rank_hits(
+    title: &str,
+    album: Option<&str>,
+    duration_ms: Option<u64>,
+    hits: Vec<pm_library::musicbrainz::RecordingHit>,
+) -> Vec<Candidate> {
+    let album = album.map(plain_title).filter(|a| !a.is_empty());
+    let mut out: Vec<Candidate> = hits
         .into_iter()
         .filter(|h| h.score >= 80)
-        .filter(|h| seen.insert((h.title.to_lowercase(), h.artist.to_lowercase(), h.release.clone())))
-        .take(5)
-        .map(|h| Candidate {
-            recording: h.mbid,
-            release: h.release_mbid,
-            title: Some(h.title.clone()),
-            artist: Some(h.artist.clone()),
-            release_title: h.release.clone(),
-            score: h.score as f32 / 100.0 * if near(&h) { 1.0 } else { 0.7 },
-            source: "search".into(),
+        .filter_map(|h| {
+            let exact = same_title(title, &h.title)?;
+            let near = match (h.length_ms, duration_ms) {
+                (Some(a), Some(b)) => a.abs_diff(b) <= 3000,
+                _ => true,
+            };
+            let on_album = album
+                .as_ref()
+                .and_then(|al| h.releases.iter().find(|r| plain_title(&r.title) == *al));
+            let pick = on_album
+                .or_else(|| h.releases.iter().find(|r| !r.is_secondary()))
+                .or(h.releases.first());
+            let (release, release_title) = match pick {
+                Some(r) => (r.mbid, Some(r.title.clone())),
+                None => (h.release_mbid, h.release.clone()),
+            };
+            let mut score = h.score as f32 / 100.0;
+            if !near {
+                score *= 0.7;
+            }
+            if !exact {
+                score *= 0.9;
+            }
+            if album.is_some() && on_album.is_none() {
+                score *= 0.9;
+            }
+            if on_album.is_none() && pick.is_some_and(|r| r.is_secondary()) {
+                score *= 0.85;
+            }
+            Some(Candidate {
+                recording: h.mbid,
+                release,
+                title: Some(h.title.clone()),
+                artist: Some(h.artist.clone()),
+                release_title,
+                score,
+                source: "search".into(),
+            })
         })
-        .collect())
+        .collect();
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // One choice per title, artist and release: identical-looking rows only confuse
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| {
+        seen.insert((
+            c.title.as_deref().unwrap_or_default().to_lowercase(),
+            c.artist.as_deref().unwrap_or_default().to_lowercase(),
+            c.release_title.clone(),
+        ))
+    });
+    out.truncate(5);
+    out
 }
 
 /// `GET /v1/library/suggestions`: open suggestions with their tracks.
@@ -572,5 +661,121 @@ pub(crate) async fn reject(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!("no suggestion {id}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_library::musicbrainz::{HitRelease, RecordingHit};
+    use pm_model::Mbid;
+
+    const R1: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+    const R2: &str = "0383dadf-2a4e-4d10-a46a-e9e041da8eb3";
+    const R3: &str = "5b11f4ce-a62d-471e-81fc-a69a8278c7da";
+
+    fn rel(title: &str, id: &str, status: &str, kinds: &[&str]) -> HitRelease {
+        HitRelease {
+            title: title.into(),
+            mbid: Mbid::parse(id).ok(),
+            status: status.into(),
+            kinds: kinds.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    fn hit(id: &str, title: &str, length_ms: u64, releases: Vec<HitRelease>) -> RecordingHit {
+        RecordingHit {
+            mbid: Mbid::parse(id).unwrap(),
+            score: 100,
+            title: title.into(),
+            artist: "Queen".into(),
+            release: releases.first().map(|r| r.title.clone()),
+            release_mbid: releases.first().and_then(|r| r.mbid),
+            length_ms: Some(length_ms),
+            releases,
+        }
+    }
+
+    #[test]
+    fn the_files_album_and_studio_releases_come_first() {
+        // Second review #5: a live bootleg first, "Greatest Hits II" above "A Night at the Opera"
+        let hits = vec![
+            hit(
+                R1,
+                "Death on Two Legs",
+                223_000,
+                vec![rel("Ultimate Houston 1977", R1, "Bootleg", &["Album", "Live"])],
+            ),
+            hit(
+                R2,
+                "Death on Two Legs (Dedicated to…)",
+                225_000,
+                vec![
+                    rel("Greatest Hits II", R2, "Official", &["Album", "Compilation"]),
+                    rel("A Night at the Opera", R3, "Official", &["Album"]),
+                ],
+            ),
+        ];
+        let c = rank_hits(
+            "Death on Two Legs",
+            Some("A Night at the Opera"),
+            Some(223_000),
+            hits,
+        );
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].recording, Mbid::parse(R2).unwrap());
+        assert_eq!(c[0].release_title.as_deref(), Some("A Night at the Opera"));
+        assert_eq!(c[0].release, Mbid::parse(R3).ok());
+        assert!(c[1].score < c[0].score);
+        assert_eq!(c[1].release_title.as_deref(), Some("Ultimate Houston 1977"));
+        // Without an album tag, the studio release is picked over the compilation
+        let hits = vec![hit(
+            R2,
+            "Death on Two Legs",
+            223_000,
+            vec![
+                rel("Greatest Hits II", R2, "Official", &["Album", "Compilation"]),
+                rel("A Night at the Opera", R3, "Official", &["Album"]),
+            ],
+        )];
+        let c = rank_hits("Death on Two Legs", None, Some(223_000), hits);
+        assert_eq!(c[0].release_title.as_deref(), Some("A Night at the Opera"));
+        assert_eq!(c[0].score, 1.0);
+    }
+
+    #[test]
+    fn a_hit_must_carry_the_files_title() {
+        // Second review #6: a long, unrelated title that only mentions the file's
+        let hits = vec![
+            hit(
+                R1,
+                "HOLY SHIT EACH EAR HAS ITS OWN TRACK?! (fuck mono audio)",
+                5_000,
+                vec![],
+            ),
+            hit(R2, "Mono Audio", 5_000, vec![]),
+            hit(R3, "Mono Audio Test Tone For Speakers", 5_000, vec![]),
+        ];
+        let c = rank_hits("Mono audio", None, Some(5_000), hits);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].recording, Mbid::parse(R2).unwrap());
+    }
+
+    #[test]
+    fn plain_titles() {
+        assert_eq!(
+            plain_title("Bohemian Rhapsody - Remastered 2011"),
+            "bohemian rhapsody"
+        );
+        assert_eq!(
+            plain_title("Get Lucky (Radio Edit) [feat. Pharrell]"),
+            "get lucky"
+        );
+        assert_eq!(same_title("Don't Stop Me Now", "Don’t Stop Me Now"), Some(true));
+        assert_eq!(
+            same_title("Bohemian Rhapsody", "Bohemian Rhapsody (Live Aid)"),
+            Some(true)
+        );
+        assert_eq!(same_title("Love", "Love of My Life"), None);
     }
 }
