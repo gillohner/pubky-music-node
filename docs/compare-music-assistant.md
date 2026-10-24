@@ -101,7 +101,7 @@ Cost: S = a day or less, M = a few days, L = a week or more. Value is for the no
 | 8 | HEOS player (Denon/Marantz), with HEOS groups | S–M | medium | Official HEOS CLI protocol, JSON over TCP 1255, mDNS discovery. |
 | 9 | BluOS player (Bluesound, NAD), with BluOS groups | S | medium | Official BluOS HTTP API. Built in #78. |
 | 10 | gPodder sync of subscriptions and progress | M | medium | gpodder.net API v2, Nextcloud gpoddersync, opodsync. |
-| 11 | Crossfade per zone (standard, off by default) | M | medium | Marked as a named stage, like the others. Skip "smart" fades (neural nets). |
+| 11 | Crossfade per zone (standard, off by default) | M | medium | Marked as a named stage, like the others. Skip "smart" fades (neural nets). Built in #80. |
 | 12 | Last.fm scrobbling and similar artists | M | medium | Needs our own API key, and the secret for signing. Either the owner enters both, or the calls go through Pinakes. A client secret never ships. |
 | 13 | Smart playlists from seeds, with duration and exclusions | S | low–medium | Seeds use our "keep playing" similar-songs logic. |
 | 14 | A declared feature set per source (search, library, playlists, lyrics, scrobble), with a stage label | M | medium | The app hides what a source can't do. |

@@ -91,6 +91,9 @@ pub struct ZoneState {
     /// How closely the zone's speakers stay together.
     #[serde(default)]
     pub sync: crate::SyncClass,
+    /// Crossfade between tracks in ms; 0 = off.
+    #[serde(default)]
+    pub crossfade_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +146,7 @@ pub struct Zone {
     seq: AtomicU64,
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
+    crossfade: Arc<AtomicU64>,
 }
 
 impl Zone {
@@ -165,8 +169,10 @@ impl Zone {
             error: None,
             acked: 0,
             sync: output.sync(),
+            crossfade_ms: 0,
         };
         let (state_tx, state) = watch::channel(initial);
+        let crossfade = Arc::new(AtomicU64::new(0));
         engine::spawn(
             id.clone(),
             output.clone(),
@@ -175,6 +181,7 @@ impl Zone {
             cmd_rx,
             state_tx,
             events.clone(),
+            crossfade.clone(),
         );
         Self {
             id,
@@ -185,7 +192,19 @@ impl Zone {
             seq: AtomicU64::new(0),
             state,
             events,
+            crossfade,
         }
+    }
+
+    /// Crossfade between tracks, in ms (0 = off, the default). Songs of the same album
+    /// following each other stay gapless; takes effect at the next track end.
+    pub fn set_crossfade_ms(&self, ms: u64) {
+        self.crossfade.store(ms, Ordering::Relaxed);
+        self.send(Command::QueueChanged);
+    }
+
+    pub fn crossfade_ms(&self) -> u64 {
+        self.crossfade.load(Ordering::Relaxed)
     }
 
     pub fn id(&self) -> &ZoneId {

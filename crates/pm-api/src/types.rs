@@ -517,6 +517,9 @@ pub struct ErrorBody {
 
 /// What the WebSocket at `/v1/events` sends. The first message is a
 /// `snapshot`; after that every zone state change and zone event.
+// Zone states dominate this event's size; boxing them would only move the copy, and events
+// are short-lived on a broadcast channel.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {

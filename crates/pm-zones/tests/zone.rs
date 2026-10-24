@@ -561,3 +561,141 @@ async fn zones_manager_ids_and_lookup() {
         Err(SinkError::NoVolume(_))
     ));
 }
+
+#[tokio::test]
+async fn crossfade_mixes_the_next_track_over_the_end() {
+    // 100 ms tracks, 30 ms crossfade; blocks are 10 ms. The fade starts with the block that
+    // reaches the last 30 ms (frames 600..700 end 30 ms before the end), so it covers a's last
+    // 400 frames and b's first 400.
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000)]);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(st.crossfade_ms, 30);
+    let got = r.rec.samples.lock().unwrap().clone();
+    assert_eq!(got.len(), 1600, "the overlap is played once");
+    assert_eq!(got[..600], frames(0, 600)[..], "a alone until the fade");
+    assert_eq!(
+        got[1000..],
+        frames(400, 1000)[..],
+        "b alone after it, from where the mix left it"
+    );
+    for i in 0..400u64 {
+        let t = i as f64 / 400.0 * std::f64::consts::FRAC_PI_2;
+        let want = ((600 + i) as f64 * t.cos() + i as f64 * t.sin()).round() as i32;
+        assert_eq!(got[600 + i as usize], want, "equal-power mix at {i}");
+    }
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        ["start:a:false", "end:a", "start:b:false", "end:b", "stopped"]
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "one sink throughout");
+}
+
+#[tokio::test]
+async fn crossfade_leaves_an_album_gapless() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000)]);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    let mut a = QueueItem::new("a");
+    let mut b = QueueItem::new("b");
+    a.album = Some("Kind of Blue".into());
+    b.album = Some("Kind of Blue".into());
+    r.zone.enqueue(vec![a, b], Insert::End);
+    r.zone.play();
+    r.zone.wait_stopped().await;
+    let mut want = frames(0, 1000);
+    want.extend(frames(0, 1000));
+    assert_eq!(*r.rec.samples.lock().unwrap(), want);
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        ["start:a:false", "end:a", "start:b:true", "end:b", "stopped"]
+    );
+}
+
+#[tokio::test]
+async fn crossfade_waits_for_a_track_long_enough_and_a_matching_format() {
+    // b changes format: no fade, the sink drains and reopens as without crossfade
+    let r = rig(&[("a", RATE, 1000), ("b", 2 * RATE, 1000)]);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    r.zone.wait_stopped().await;
+    assert_eq!(r.rec.samples.lock().unwrap().len(), 2000);
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2);
+    // A track shorter than twice the fade plays whole
+    let r = rig(&[("a", RATE, 500), ("b", RATE, 500)]);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    r.zone.wait_stopped().await;
+    assert_eq!(r.rec.samples.lock().unwrap().len(), 1000);
+}
+
+/// Let blocks through one at a time until the fade from a into b has begun (a's block 600..700
+/// is written), then hold the engine there.
+async fn into_the_fade(r: &Rig) {
+    loop {
+        r.gate.blocked().await;
+        if r.rec.samples.lock().unwrap().len() >= 700 {
+            return;
+        }
+        r.gate.allow(1);
+        wait_for(|| *r.gate.permits.lock().unwrap() == 0).await;
+    }
+}
+
+#[tokio::test]
+async fn crossfade_gives_way_to_play_next_during_the_fade() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000), ("c", RATE, 1000)]);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    into_the_fade(&r).await;
+    // "Play next" while a fades into b: c comes first, b after it
+    r.zone.enqueue(vec![QueueItem::new("c")], Insert::Next);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        [
+            "start:a:false",
+            "end:a",
+            "start:c:true",
+            "end:c",
+            "start:b:false",
+            "end:b",
+            "stopped"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn crossfade_stops_when_its_track_is_removed_during_the_fade() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000), ("c", RATE, 1000)]);
+    r.zone.set_crossfade_ms(30);
+    let ids = r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("b"), QueueItem::new("c")],
+        Insert::End,
+    );
+    r.zone.play();
+    into_the_fade(&r).await;
+    assert!(r.zone.remove(ids[1]));
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        ["start:a:false", "end:a", "start:c:true", "end:c", "stopped"]
+    );
+    assert_eq!(r.zone.queue().len(), 2);
+}
