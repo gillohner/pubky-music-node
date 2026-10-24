@@ -2,9 +2,34 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-24
+
+  - The saved tunnel token is readable by the node's user only (0600, created that way); cloudflared runs as that user on every install (uid 1000 in Docker).
+- **The bundled homeserver on Umbrel and on bare metal** (STEWARD-BUNDLED-HOMESERVER.md, step 1 finished).
+  - **Umbrel:** `deploy/umbrel/` is now a community app store. The app runs the node on the host network (speaker discovery), with the homeserver's HTTP and admin ports on 127.0.0.1 only, the Cloudflare tunnel from Settings › Remote access (cloudflared starts once a token is saved), and the homeserver's files mounted read-only. Data moved under `data/` as umbrelOS expects (the app was never installable before: its image tag didn't exist; it now pins an `edge` build by digest). The node's token is the password umbrelOS shows (`APP_PASSWORD`); the homeserver's passwords use `APP_SEED`, which it never shows. Umbrel's linter passes; CI starts the app with Umbrel's variables (`tools/umbrel-check.py`).
+  - **Bare metal:** `deploy/bare-metal/` has systemd units for the homeserver (stops on SIGINT, retries a failed first publish), the node and cloudflared, a homeserver config template and `apply-tunnel-domain.sh`, which publishes the tunnel's hostname before the homeserver starts. The node reads the homeserver's stored files through a `pubky-files` group (setgid `data/`), not the homeserver's own group. Steps in docs/deploy.md. Checked against the real homeserver 0.16.2 and PostgreSQL 18.
+  - `GET /v1/remote/tunnel` adds `restart_hint`: Umbrel and bare-metal installs say how to restart in their own words.
+- **Better song matches** (second review #5, #6). "Which song is this?" and Review matches rank MusicBrainz's answers by what the file says:
+  - **Title:** a match must have the file's title. Songs that only mention it in a longer title are no longer offered (the review found an offensive one).
+  - **Album:** the release named like the file's album is picked and ranked first. Otherwise a studio release is picked over a live album, bootleg or compilation, which rank lower.
+  - **No artist:** files with no artist get no guesses by title alone.
+  - "Compare with the album" then compares against the right album.
+- **One search row per artist** (second review #13). The same artist name from several services is one row listing them all, and a service's later namesakes are dropped.
+- **Phones** (second review #22):
+  - two album covers per row;
+  - song titles get most of the row: narrower number and length columns, and the "Match" chip moves into the song's ⋯ menu as "Which song is this?…";
+  - item pages no longer start with an empty band above Back;
+  - Confirm matches no longer says "left" and "right" (the sides stack on a phone).
+
 ## 2026-10-23
 
 - **Crossfade per zone** (compare-music-assistant #11), off by default. `PUT /v1/zones/{id}/crossfade {seconds}` (up to 12 s) fades each track into the next with an equal-power curve; the next track then carries on from where the mix left it. Songs of the same album stay gapless, and there's no fade across a format change. While it fades, the signal path shows a `crossfade` stage (Enhanced), so a crossfading zone is never labelled bit-perfect.
+- **Party mode** (compare-music-assistant #4). Settings › People › Party starts a party on a zone and shows a guest link and QR. Guests open it on their phones, give a name, search the library and add songs, with no account. Their songs play right after the current one, in the order they came, before the rest of the queue; an idle zone starts. Limits per guest (songs per hour, songs waiting at once) are checked on the node, and a guest token opens nothing but the party. Links expire after 1 to 72 hours, and ending a party stops its guests at once.
+- **Settings › People and Settings › Remote access, and "Create your account here"** (STEWARD-BUNDLED-HOMESERVER.md, steps 2–4, the screens).
+  - **People:** invite someone (Homeserver + music, Homeserver only with a quota, or Music only by their Pubky key) and get a Pubky Ring QR and link; unused invites can be shown again or forgotten. Per person: music access, their homeserver account on or off, quota, and how much they store. The zones listeners may play on are picked here too.
+  - **Remote access** (only with the bundled install): paste a Cloudflare tunnel token and the hostnames, see the restart command when one is needed, and check both addresses from outside.
+  - **Your account:** with a bundled homeserver, Settings › Accounts and the first-run card offer "Create account here" (on the node's own homeserver) next to "Use an existing homeserver".
+  - **API:** `GET /v1/people` adds `homeserver_enabled` (what the node last set; the homeserver's admin API can't report it) and `used_bytes` (their files in the homeserver's files folder).
 - **Steadier playlist page, plainer words** (second review #20 and #16):
   - The playlist page keeps room for its source chips while they load, so the songs no longer jump under your pointer.
   - "Play from" lists only services that are connected.

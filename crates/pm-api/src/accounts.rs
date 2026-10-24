@@ -28,6 +28,8 @@ const ZONES: &str = "accounts.listener_zones";
 pub enum Role {
     Owner,
     Listener,
+    /// A party guest (party.rs): adds songs to one party, nothing else.
+    Guest,
 }
 
 /// Who made a request.
@@ -125,6 +127,7 @@ pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
 /// Routes a listener may never use (reads included): the owner's settings and data.
 const OWNER_ONLY: &[&str] = &[
     "/people",
+    "/party",
     "/remote",
     "/homeserver",
     "/node",
@@ -240,6 +243,12 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         return Some(Caller {
             role: Role::Owner,
             key: owner_key(),
+        });
+    }
+    if t.starts_with(crate::party::GUEST_PREFIX) {
+        return crate::party::guest_of(s, t).map(|_| Caller {
+            role: Role::Guest,
+            key: None,
         });
     }
     listener_of(s, t).map(|key| Caller {

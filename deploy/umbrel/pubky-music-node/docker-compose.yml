@@ -1,8 +1,10 @@
 version: "3.7"
 
-# The node's API is reached directly on port 7788 with the bearer token (the
-# Pubky Music controller on another machine cannot pass Umbrel's web login),
-# so there is no app_proxy in front of it. Keep APP_PUBKY_MUSIC_TOKEN secret.
+# The node runs on the host network: it finds speakers on the LAN (SSDP, mDNS) and serves its
+# web UI and API itself on 7788, the manifest port (no app_proxy; umbrelOS adds HTTPS in front).
+# Native apps and OpenSubsonic clients on other machines use 7788 with the bearer token, the
+# password umbrelOS shows for this app (APP_PASSWORD). The homeserver's admin and database password
+# is APP_SEED, which umbrelOS never shows. Keep both secret.
 services:
   # The bundled Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md), as in Pubky's own Umbrel app
   # (github.com/pubky/umbrel-app-store, pubky-homeserver, MIT). Its admin API is reached by the
@@ -14,28 +16,37 @@ services:
     stop_grace_period: 1m
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${APP_PASSWORD}
+      POSTGRES_PASSWORD: ${APP_SEED}
       POSTGRES_DB: pubky_homeserver
     volumes:
-      - ${APP_DATA_DIR}/postgres:/var/lib/postgresql/data
+      - ${APP_DATA_DIR}/data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pubky -d pubky_homeserver"]
       interval: 10s
       timeout: 5s
       retries: 10
 
+  # One-shot: lets the node (uid 1000) write the tunnel folder it shares with cloudflared and the
+  # config wrapper (Settings › Remote access saves the tunnel token and the homeserver's hostname).
+  tunnel-folder:
+    image: alpine:3.22@sha256:d406446bc05b82480756ce8f1287964d28768c23955fa9480d2a74a2eae7a654
+    restart: on-failure
+    command: ["sh", "-c", "chown 1000 /tunnel && chmod 755 /tunnel"]
+    volumes:
+      - ${APP_DATA_DIR}/data/cloudflare:/tunnel
+
   homeserver-config:
     image: synonymsoft/homeserver-umbrel-config-wrapper:v0.0.8@sha256:23d2ba85fa07e61a9d87550179910d85a03cd49b6532b62c584d9b4e8ba2eb14
     restart: on-failure
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${APP_PASSWORD}
-      ADMIN_PASSWORD: ${APP_PASSWORD}
+      POSTGRES_PASSWORD: ${APP_SEED}
+      ADMIN_PASSWORD: ${APP_SEED}
       DEVICE_DOMAIN_NAME: ${DEVICE_DOMAIN_NAME:-}
       PUBLIC_IP: ${PUBLIC_IP:-}
     volumes:
-      - ${APP_DATA_DIR}/homeserver:/data
-      - ${APP_DATA_DIR}/cloudflare:/etc/pubky-cloudflare
+      - ${APP_DATA_DIR}/data/homeserver:/data
+      - ${APP_DATA_DIR}/data/cloudflare:/etc/pubky-cloudflare
 
   homeserver:
     image: synonymsoft/homeserver:v0.16.2@sha256:b357fecec481a37c8af40a7ed70562871a587ecb5bfd251a6e95330f1e61c7df
@@ -44,9 +55,13 @@ services:
     stop_grace_period: 1m
     command: ["homeserver", "--data-dir", "/data"]
     volumes:
-      - ${APP_DATA_DIR}/homeserver:/data
+      - ${APP_DATA_DIR}/data/homeserver:/data
     ports:
+      # Pubky TLS for Pubky apps and Ring on the network
       - "6287:6287"
+      # Plain HTTP and the admin API, for the node and cloudflared on this machine only
+      - "127.0.0.1:6286:6286"
+      - "127.0.0.1:6288:6288"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,24 +75,29 @@ services:
       start_period: 120s
 
   node:
-    # Version tags come from `git tag v0.1.0` (release.yml); for a test install use
-    # ghcr.io/gillohner/pubky-music-node:edge, published by running the workflow by hand.
-    image: ghcr.io/gillohner/pubky-music-node:0.1.0
+    # A pinned edge build (main @ a432705) until the first release tag publishes a version image.
+    image: ghcr.io/gillohner/pubky-music-node:edge@sha256:67cf0368d91ab188a24f1560d94942e0eb038f9c2d8162680b30f1836d1dc55e
     restart: on-failure
     stop_grace_period: 10s
-    ports:
-      - "7788:7788"
+    network_mode: host
     environment:
       PM_LISTEN: "0.0.0.0:7788"
-      PM_TOKEN: "${APP_SEED}"
+      PM_TOKEN: "${APP_PASSWORD}"
       PM_CONTACT: "${APP_PUBKY_MUSIC_CONTACT:-}"
       PM_FOLDERS: "/music"
       PM_NAME: "Umbrel"
-      PM_HOMESERVER_ADMIN_URL: "http://homeserver:6288"
-      PM_HOMESERVER_ADMIN_PASSWORD: "${APP_PASSWORD}"
+      PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
+      PM_HOMESERVER_ADMIN_PASSWORD: "${APP_SEED}"
+      # Settings › Remote access writes the Cloudflare tunnel here (shared with cloudflared)
+      PM_TUNNEL_DIR: "/tunnel"
+      PM_TUNNEL_RESTART_HINT: "Restart the Pubky Music Node app in Umbrel once (right-click its icon, then Restart)."
+      # The homeserver's own files, read-only: the owner's music there is a library folder
+      PM_HOMESERVER_FILES_DIR: "/homeserver/data/files"
       RUST_LOG: "info"
     volumes:
-      - ${APP_DATA_DIR}/data:/data
+      - ${APP_DATA_DIR}/data/node:/data
+      - ${APP_DATA_DIR}/data/cloudflare:/tunnel
+      - ${APP_DATA_DIR}/data/homeserver:/homeserver:ro
       # Umbrel's shared storage: anything a download app drops here is a scan source.
       - ${UMBREL_ROOT}/data/storage:/music:ro
     devices:
@@ -88,3 +108,25 @@ services:
     depends_on:
       homeserver:
         condition: service_healthy
+      tunnel-folder:
+        condition: service_completed_successfully
+
+  # Cloudflare Tunnel (Settings › Remote access saves the token). In the tunnel's public
+  # hostnames, send the homeserver's to http://localhost:6286 and the music one to
+  # http://localhost:7788. Until a token exists this container exits and retries, as in Pubky's
+  # own Umbrel app.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.5.2@sha256:12ff5c6992a9863db4da270746af7c244bcaee49353039af8104268a18d6c4f0
+    restart: on-failure
+    stop_grace_period: 1m
+    network_mode: host
+    # The node's uid: the token it saves is readable by that user only
+    user: "1000:1000"
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN_FILE: /etc/pubky-cloudflare/token
+    volumes:
+      - ${APP_DATA_DIR}/data/cloudflare:/etc/pubky-cloudflare:ro
+    depends_on:
+      homeserver:
+        condition: service_started

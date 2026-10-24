@@ -74,6 +74,14 @@ pub struct Person {
     /// Music access on (the owner can take it away without touching their homeserver account).
     pub music_enabled: bool,
     pub added_at: i64,
+    /// Their account on the bundled homeserver is on. The admin API has no way to read this, so
+    /// the node keeps what it last set (`PATCH /v1/people/{key} {homeserver_enabled}`).
+    #[serde(default = "on")]
+    pub homeserver_enabled: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -178,6 +186,7 @@ async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
                 name: inv.name.clone(),
                 music_enabled: inv.access.music(),
                 added_at: now(),
+                homeserver_enabled: true,
             });
         }
         changed = true;
@@ -198,6 +207,28 @@ pub struct PersonView {
     pub storage_quota_mb: Option<Value>,
     /// Devices signed in to the music service with their own token.
     pub sessions: usize,
+    /// Bytes their files take on the bundled homeserver, counted in its files folder when the node
+    /// has it (`[homeserver] files_dir`); `None` otherwise.
+    pub used_bytes: Option<u64>,
+}
+
+/// Sizes of the files under `dir`, not following links. `None` when `dir` isn't there.
+fn folder_bytes(dir: &std::path::Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut todo = vec![std::fs::read_dir(dir).ok()?];
+    while let Some(rd) = todo.pop() {
+        for e in rd.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(e.path()) {
+                    todo.push(sub);
+                }
+            } else if m.is_file() {
+                total += m.len();
+            }
+        }
+    }
+    Some(total)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,8 +292,19 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
         Default::default()
     };
     let hs = homeserver.public_key.clone();
+    let files = s.homeserver_files_dir().map(std::path::Path::to_path_buf);
     let mut people = Vec::new();
     for p in r.people {
+        let used_bytes = match (&files, p.access.on_homeserver()) {
+            (Some(root), true) => {
+                let dir = root.join(&p.key);
+                tokio::task::spawn_blocking(move || folder_bytes(&dir))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            _ => None,
+        };
         let quota = if p.access.on_homeserver() && homeserver.reachable {
             admin(&s, Method::GET, &format!("/users/{}/quota", p.key), None)
                 .await
@@ -275,6 +317,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             sessions: crate::accounts::sessions_of(&s, &p.key),
             person: p,
             storage_quota_mb: quota,
+            used_bytes,
         });
     }
     Ok(Json(PeopleView {
@@ -326,6 +369,7 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
                 name,
                 music_enabled: true,
                 added_at: now(),
+                homeserver_enabled: true,
             });
         }
         store(&s, &r)?;
@@ -438,6 +482,9 @@ pub(crate) async fn change(
         admin(&s, Method::POST, &path, None).await?;
     }
     let p = &mut r.people[i];
+    if let Some(on) = b.homeserver_enabled {
+        p.homeserver_enabled = on;
+    }
     if let Some(m) = b.music {
         p.music_enabled = m;
         if m && p.access == Access::Homeserver {
@@ -476,5 +523,22 @@ mod tests {
         );
         let c: PersonChange = serde_json::from_str(r#"{"music": false}"#).unwrap();
         assert!(c.storage_quota_mb.is_none());
+        // Rosters saved before the node kept the homeserver switch read as "on"
+        let p: Person =
+            serde_json::from_str(r#"{"key": "k", "access": "music", "music_enabled": true, "added_at": 1}"#)
+                .unwrap();
+        assert!(p.homeserver_enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_bytes_counts_files_not_links() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(folder_bytes(&d.path().join("nobody")), None);
+        std::fs::create_dir_all(d.path().join("u/pub/a")).unwrap();
+        std::fs::write(d.path().join("u/pub/a/one"), b"12345").unwrap();
+        std::fs::write(d.path().join("u/two"), b"123").unwrap();
+        std::os::unix::fs::symlink(d.path().join("u/pub"), d.path().join("u/loop")).unwrap();
+        assert_eq!(folder_bytes(&d.path().join("u")), Some(8));
     }
 }

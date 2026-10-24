@@ -147,6 +147,8 @@ services:
     image: cloudflare/cloudflared:2026.5.2@sha256:12ff5c6992a9863db4da270746af7c244bcaee49353039af8104268a18d6c4f0
     restart: unless-stopped
     network_mode: host
+    # The node's uid: the token it saves is readable by that user only
+    user: "1000:1000"
     command: tunnel --no-autoupdate run
     environment:
       # Compose resolves every variable even for profiles that are off, so this one is optional.

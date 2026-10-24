@@ -26,6 +26,15 @@ use std::time::Duration;
 const MUSIC_HOST: &str = "tunnel.music_hostname";
 pub const RESTART_COMMAND: &str = "docker compose up -d --force-recreate homeserver-config homeserver";
 
+/// How to restart the homeserver on installs other than the compose bundle (`PM_TUNNEL_RESTART_HINT`,
+/// plain words: the Umbrel app says to restart the app); then no command is shown.
+fn restart_hint() -> Option<String> {
+    std::env::var("PM_TUNNEL_RESTART_HINT")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
 fn dir(s: &NodeState) -> Result<PathBuf, ApiError> {
     s.tunnel_dir().map(Path::to_path_buf).ok_or_else(|| {
         ApiError::new(
@@ -81,14 +90,26 @@ fn write(dir: &Path, name: &str, body: &str, mode: u32) -> Result<(), ApiError> 
     let tmp = dir.join(format!(".{name}.tmp"));
     let io =
         |e: std::io::Error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("tunnel folder: {e}"));
-    std::fs::write(&tmp, format!("{body}\n")).map_err(io)?;
+    // Created with its final mode, so the token is never readable by others, not even briefly.
+    let _ = std::fs::remove_file(&tmp);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(io)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(mode);
     }
     #[cfg(not(unix))]
     let _ = mode;
+    let mut f = o.open(&tmp).map_err(io)?;
+    std::io::Write::write_all(&mut f, format!("{body}\n").as_bytes()).map_err(io)?;
+    drop(f);
+    #[cfg(unix)]
+    {
+        // The umask may have taken bits off `mode` (never added any)
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(io)?;
+    }
     std::fs::rename(&tmp, dir.join(name)).map_err(io)
 }
 
@@ -106,6 +127,9 @@ pub struct TunnelStatus {
     /// The homeserver still has to be restarted to publish the domain: run `restart_command`.
     pub restart_needed: bool,
     pub restart_command: Option<String>,
+    /// The same in plain words, on installs where a command doesn't fit (Umbrel).
+    #[serde(default)]
+    pub restart_hint: Option<String>,
     /// `https://<homeserver_domain>/` answers as a Pubky homeserver.
     pub homeserver_reachable: Option<bool>,
     /// `https://<music_hostname>/` reaches this node.
@@ -175,7 +199,8 @@ pub(crate) async fn status(
         music_hostname: music,
         published,
         restart_needed,
-        restart_command: restart_needed.then(|| RESTART_COMMAND.to_string()),
+        restart_command: (restart_needed && restart_hint().is_none()).then(|| RESTART_COMMAND.to_string()),
+        restart_hint: restart_needed.then(restart_hint).flatten(),
         homeserver_reachable,
         music_reachable,
     }))
@@ -216,9 +241,10 @@ pub(crate) async fn setup(
             "the homeserver and the music node need two different hostnames",
         ));
     }
-    // Readable by cloudflared (another user in its own container); the folder is only mounted
-    // into the bundle's containers.
-    write(&d, "token", b.token.trim(), 0o644)?;
+    // The token is for the node's own user only: cloudflared runs as that user (uid 1000 in the
+    // compose bundle and on Umbrel, `pubky-music` on bare metal). The hostname is not a secret and
+    // the homeserver's side reads it as another user.
+    write(&d, "token", b.token.trim(), 0o600)?;
     write(&d, "domain", &domain, 0o644)?;
     {
         let lib = s.library.lock().expect("library poisoned");
@@ -268,5 +294,29 @@ mod tests {
         assert!(valid_host("localhost").is_none());
         assert!(valid_host("evil.org\nicann_domain=x").is_none());
         assert!(valid_host("-x.org").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_token_is_for_the_node_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        // A leftover from an interrupted write is replaced, not reused with its old mode
+        std::fs::write(d.path().join(".token.tmp"), "old").unwrap();
+        std::fs::set_permissions(
+            d.path().join(".token.tmp"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        write(d.path(), "token", "secret", 0o600).unwrap();
+        write(d.path(), "domain", "hs.example.org", 0o644).unwrap();
+        let mode = |n: &str| std::fs::metadata(d.path().join(n)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("token"), 0o600);
+        assert_eq!(mode("domain"), 0o644);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("token")).unwrap(),
+            "secret\n"
+        );
+        assert!(!d.path().join(".token.tmp").exists());
     }
 }
