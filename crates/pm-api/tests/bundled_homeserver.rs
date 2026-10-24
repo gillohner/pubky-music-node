@@ -170,6 +170,11 @@ async fn invites_become_people_with_quotas_and_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = node(dir.path());
     s.set_bundled_homeserver(ep);
+    // With the homeserver's files folder, People shows what each account stores
+    let files = std::env::var("PM_BUNDLED_HS_FILES").ok();
+    if let Some(f) = &files {
+        s.set_homeserver_files_dir(std::path::PathBuf::from(f));
+    }
     let app = router(s.clone());
     let pubky = Pubky::new().unwrap();
 
@@ -239,6 +244,17 @@ async fn invites_become_people_with_quotas_and_access() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert!(put("two").await.is_err(), "a disabled account can't write");
+    let sam_in = |people: &serde_json::Value| {
+        people["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["key"] == sam_key.as_str())
+            .unwrap()
+            .clone()
+    };
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    assert_eq!(sam_in(&people)["homeserver_enabled"], false, "{people}");
     call_json(
         &app,
         "PATCH",
@@ -247,6 +263,14 @@ async fn invites_become_people_with_quotas_and_access() {
     )
     .await;
     put("three").await.expect("writes again");
+    let (_, people) = call(&app, "GET", "/v1/people").await;
+    let p = sam_in(&people);
+    assert_eq!(p["homeserver_enabled"], true, "{people}");
+    if files.is_some() {
+        assert_eq!(p["used_bytes"], 5, "Sam stores one 5-byte file: {people}");
+    } else {
+        assert!(p["used_bytes"].is_null());
+    }
 
     // Quota and music access
     let (st, _) = call_json(

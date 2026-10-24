@@ -70,6 +70,7 @@
   const bareKey = (k) => String(k || '').replace(/^pubky:?\/*/i, '').replace(/^pk:/i, '');
   const shortKey = (k) => { const b = bareKey(k); return b.length > 20 ? `${b.slice(0, 6)}…${b.slice(-10)}` : b; };
   const keyHtml = (k) => `<span class="pkey"><code title="${esc(bareKey(k))}">${esc(shortKey(k))}</code><button class="icon-btn sm" data-copykey="${esc(bareKey(k))}" title="Copy the whole key" aria-label="Copy the whole key">${icon('copy')}</button></span>`;
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-copylink]'); if (!b) return; e.preventDefault(); const v = b.dataset.copylink; (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(() => toast('Copied')).catch(() => toast(v)); }, true);
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-addmusic]'); if (!b) return; e.preventDefault(); setView('add-music'); });
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-copykey]'); if (!b) return; e.preventDefault(); e.stopPropagation(); const k = b.dataset.copykey; (navigator.clipboard ? navigator.clipboard.writeText(k) : Promise.reject()).then(() => toast('Key copied')).catch(() => toast(k)); }, true);
   const artists = (t) => (t.artists || []).map((a) => a.name).join(', ');
@@ -1085,7 +1086,7 @@
     };
     return { phone, active, name, nav, panel, page, wire };
   };
-  const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
+  const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['people', 'People', 'artist'], ['remote', 'Remote access', 'external'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music'];
   const VIEW_LABELS = { 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
@@ -2145,10 +2146,12 @@
   const setupHidden = () => { try { return localStorage.getItem('pm.setupHidden') === '1'; } catch { return false; } };
   const renderSetup = async () => {
     const box = $('#h-setup'); if (!box) return;
-    const [info, ns, hist, user] = await Promise.all([
+    const [info, ns, hist, user, bundled] = await Promise.all([
       api('GET', '/info'), api('GET', '/node/settings').catch(() => ({ contact: '' })),
       api('GET', '/library/history?limit=1').catch(() => ({ plays: [] })), pubkyUser(),
+      api('GET', '/homeserver/bundled').catch(() => null),
     ]).catch(() => [null]);
+    const hsHere = !!(bundled && bundled.configured && bundled.reachable);
     if (!info || state.view !== 'home' || !box.isConnected) return;
     state.info = info;
     const has = { music: info.library.tracks > 0, played: (hist.plays || []).length > 0, contact: !!(ns.contact || '').trim(), pubky: !!user };
@@ -2170,7 +2173,9 @@
       + step('music', 1, 'Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
       + step('played', 2, 'Play something', has.music ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : 'Once your music is in.', has.music ? '<button class="btn sm primary" id="setupplay">' + icon('play') + ' Shuffle my music</button>' : '')
       + step('contact', 3, 'See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>')
-      + step('pubky', 4, 'Keep your playlists on Pubky (optional)', has.pubky ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>')
+      + (hsHere && !has.pubky
+        ? step('pubky', 4, 'Create your Pubky account here (optional)', 'This node has its own Pubky homeserver. Create your account on it with the Pubky Ring app: your playlists, favourites, tags and files stay on this machine. Or sign in to a homeserver you already use.', '<button class="btn sm primary" id="setupcreate">Create account here</button> <button class="btn sm" id="setupsignin">Use an existing homeserver</button>')
+        : step('pubky', 4, 'Keep your playlists on Pubky (optional)', has.pubky ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>'))
       + '</ol></div></section>';
     const again = () => setTimeout(() => { if (state.view === 'home') renderSetup(); }, 1500);
     const addFolder = async (path) => {
@@ -2192,6 +2197,7 @@
     }
     const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); state.focusRestore = true; setView('settings', 'backup'); };
     const si = $('#setupsignin'); if (si) si.onclick = () => { state.autoResign = true; setView('settings', 'accounts'); };
+    const sc = $('#setupcreate'); if (sc) sc.onclick = () => { state.autoCreate = true; setView('settings', 'accounts'); };
     const hide = $('#setuphide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } state.setupShown = false; box.innerHTML = ''; };
   };
 
@@ -3469,11 +3475,15 @@
           const shares = await api('GET', '/library/webdav').catch(() => []);
           const drv = await api('GET', '/library/drives').catch(() => ({ providers: [], roots: [] }));
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
+          // The homeserver bundled with the node (deploy/bundle) and its Cloudflare Tunnel, when there is one
+          const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
+          const tunnel = await api('GET', '/remote/tunnel').catch(() => null);
+          const hsHere = !!(bundled && bundled.configured && bundled.reachable);
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           if (state.view !== 'settings') return;
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS, prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS.filter(([k]) => k !== 'remote' || (tunnel && tunnel.available)), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -3504,7 +3514,8 @@
               + block('Group outputs', 'Pick two or more outputs to play as one zone; the first one checked leads. They are kept in time sample by sample.', `<div class="chips" id="groupouts">${outs.filter((o) => o.caps.groupable !== false).map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>`))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           const accounts = group('Pubky', pk ? (
-              row(pk.user ? 'Signed in' : 'Not signed in', pk.user ? keyHtml(pk.user) : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : '<button class="btn primary" id="pklogin">Sign in with Pubky</button>')
+              (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
+              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
               + (pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : '')
               + '<div id="pkurl"></div>'
               + (pk.user ? row('Sync', pk.sync && pk.sync.running ? `<span role="status"><span class="spin"></span> ${esc(pk.sync.step || 'Syncing with your homeserver')}…</span>` : (pk.unsynced ? `${countOf(pk.unsynced, 'changes')} waiting to go to your homeserver.` : 'Everything is on your homeserver.') + (pk.sync && pk.sync.ms != null && !pk.sync.running ? ` Last sync took ${(pk.sync.ms / 1000).toFixed(1)} s.` : '') + (pk.sync && pk.sync.error ? ` <span class="warn-text">The last sync failed: ${esc(pk.sync.error)}</span>` : ''), `<button class="btn" id="sync" ${pk.needs_resign || (pk.sync && pk.sync.running) ? 'disabled' : ''} ${pk.needs_resign ? `title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Sync now</button>`) : row('Sync', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
@@ -3525,7 +3536,7 @@
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
-          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           // Fix my files' tags: the list first, then the write
@@ -3741,15 +3752,104 @@
           const loadOrder = async () => { const box = $('#gorder'); if (!box) return; try { const o = await api('GET', '/play-order'); box.innerHTML = orderList(o); bindOrderList(box, o.order, async (order) => { try { await api('PUT', '/play-order', { order }); state.plPf = null; loadOrder(); } catch (e) { toast(e.message, 'error'); } }); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; } };
           loadOrder();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
-          const pl = $('#pklogin'); if (pl) pl.onclick = async () => {
+          // Settings › People: invites to this node's homeserver and its music, and who has what
+          const ACCESS = { homeserver_music: 'Homeserver + music', homeserver: 'Homeserver only', music: 'Music only' };
+          const quotaText = (q) => (q == null ? 'the default quota' : q === 'unlimited' || q === 'Unlimited' ? 'no limit' : `${q} MB`);
+          const inviteQr = (inv, hsKey) => (inv.url ? `<div class="notice qrbox" style="margin-top:10px">${inv.qr_svg ? `<div class="qr">${inv.qr_svg}</div>` : ''}<div><p>Send this to ${inv.name ? esc(inv.name) : 'them'}: they scan it with Pubky Ring (or open the link on their phone), and Ring creates their account on this node’s homeserver.</p><p class="muted small">Older Ring versions can’t open it; they can sign up by hand with the code <code>${esc(inv.token || '')}</code>${hsKey ? ` and this homeserver’s key <code>${esc(hsKey)}</code>` : ''}.</p><a class="btn sm" href="${esc(inv.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" data-copylink="${esc(inv.url)}">Copy link</button></div></div>` : '');
+          const loadPeople = async () => {
+            const box = $('#peoplebox'); if (!box) return;
+            let r; try { r = await api('GET', '/people'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+            const zl = await api('GET', '/people/zones').catch(() => ({ zones: [] }));
+            const parties = await api('GET', '/party').catch(() => []);
+            if (!box.isConnected) return;
+            const hs = r.homeserver || {};
+            const onHs = !!(hs.configured && hs.reachable);
+            const kinds = onHs ? ['homeserver_music', 'homeserver', 'music'] : ['music'];
+            const open = new Set(zl.zones || []);
+            const zones = zoneList().filter((z) => z.id !== BROWSER);
+            const person = (p) => {
+              const bits = [ACCESS[p.access] || p.access];
+              if (p.access !== 'music') bits.push(p.homeserver_enabled === false ? '<span class="warn-text">homeserver account off (can read, can’t write)</span>' : `${p.used_bytes != null ? `uses ${fmtBytes(p.used_bytes)} of ` : ''}${quotaText(p.storage_quota_mb)}`);
+              if (p.music_enabled && p.sessions) bits.push(`signed in on ${countOf(p.sessions, 'devices')}`);
+              const ctl = `<label class="check small"><input type="checkbox" data-pmusic="${esc(p.key)}" ${p.music_enabled ? 'checked' : ''}> Music</label>`
+                + (p.access !== 'music' && onHs ? `<label class="check small"><input type="checkbox" data-phs="${esc(p.key)}" ${p.homeserver_enabled === false ? '' : 'checked'}> Homeserver</label><input class="input sm" type="number" min="1" style="width:9em" data-pquota="${esc(p.key)}" placeholder="Quota, MB" aria-label="Storage quota in MB for ${esc(p.name || shortKey(p.key))} (empty: no limit)" value="${typeof p.storage_quota_mb === 'number' ? p.storage_quota_mb : ''}">` : '');
+              return row(p.name ? esc(p.name) : esc(shortKey(p.key)), `${p.name ? keyHtml(p.key) + ' · ' : ''}${bits.join(' · ')}`, ctl);
+            };
+            const invite = (inv) => row(inv.name ? esc(inv.name) : 'Unnamed invite', `${ACCESS[inv.access] || inv.access} · made ${new Date(inv.created_at * 1000).toLocaleDateString()}${inv.url ? `<details class="small"><summary>Show the invite again</summary>${inviteQr(inv, hs.public_key)}</details>` : ''}`, `<button class="btn sm ghost" data-pinv-del="${esc(inv.id)}" title="An invite that was sent stays usable on the homeserver; this only takes it off the list">Forget</button>`);
+            box.innerHTML = group('This node’s homeserver', hs.configured
+                ? row(onHs ? `Pubky homeserver ${esc(hs.version || '')}` : 'Not reachable', onHs ? `${countOf(hs.users || 0, 'accounts')}${hs.disabled_users ? ` (${hs.disabled_users} turned off)` : ''} · ${fmtBytes((hs.disk_used_mb || 0) * 1e6)} used · whoever runs it (you) can read every account’s files, <code>/priv</code> included, so tell the people you invite.` : esc(hs.error || 'The node can’t reach its homeserver’s admin API.'), '')
+                : row('No homeserver on this node', 'Installed without its own homeserver (the bundled install has one). You can still let someone with a Pubky account elsewhere play this node’s music.', ''))
+              + group('Invite someone', block('', 'Homeserver only: a Pubky account here, with a storage quota. Homeserver + music: the same, and they can sign in to this node’s music with Ring. Music only: someone whose Pubky account is elsewhere, by their key. Their own playlists and favourites live on their account.', `<div class="toolbar"><select class="input" id="pinvaccess" aria-label="What they get">${kinds.map((k) => `<option value="${k}">${ACCESS[k]}</option>`).join('')}</select><input class="input" id="pinvname" placeholder="Name (optional)" aria-label="Their name"><input class="input" id="pinvquota" type="number" min="1" placeholder="Quota, MB (empty: no limit)" aria-label="Storage quota in MB" ${onHs ? '' : 'hidden'}><input class="input" id="pinvkey" placeholder="Their Pubky key" aria-label="Their Pubky key" ${onHs ? 'hidden' : ''}><button class="btn primary" id="pinvgo">${icon('plus')} Create invite</button></div><div id="pinvout" aria-live="polite"></div>`))
+              + (r.invites.length ? group('Not used yet', r.invites.map(invite).join('')) : '')
+              + group('People', r.people.length ? r.people.map(person).join('') : row('Nobody yet', 'People you invite show here once they have signed up.', ''))
+              + group('Party', (parties.map((pt) => row(esc(pt.name), `${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${countOf(pt.guests.length, 'guests')} · ${countOf(pt.added, 'songs')} added · ${pt.adds_per_hour} per guest per hour, ${pt.waiting_per_guest} waiting at once<details class="small"><summary>Show the guest link</summary><div class="notice qrbox" style="margin-top:10px">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code>${esc(pt.url)}</code></p><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></details>`, `<button class="btn sm ghost" data-party-end="${esc(pt.id)}">End party</button>`)).join(''))
+                + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the limits are checked by the node.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar" style="margin-top:8px"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input" id="ptadds" type="number" min="1" max="100" value="5" style="width:6em"><label class="small" for="ptwait">Waiting at once</label><input class="input" id="ptwait" type="number" min="1" max="50" value="3" style="width:6em"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', '')))
+              + group('Zones listeners may play on', block('', 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')));
+            const acc = $('#pinvaccess', box);
+            const fit = () => { const music = acc.value === 'music'; $('#pinvquota', box).hidden = music; $('#pinvkey', box).hidden = !music; };
+            acc.onchange = fit; fit();
+            $('#pinvgo', box).onclick = async () => {
+              const body = { access: acc.value, name: $('#pinvname', box).value.trim() || undefined };
+              if (acc.value === 'music') { body.key = $('#pinvkey', box).value.trim(); if (!body.key) { toast('Paste their Pubky key', 'error'); return; } } else { const q = Number($('#pinvquota', box).value); if (q > 0) body.storage_quota_mb = Math.round(q); }
+              try {
+                const v = await api('POST', '/people/invites', body);
+                if (acc.value === 'music') { toast('Added: they can sign in with Pubky Ring now'); loadPeople(); return; }
+                await loadPeople();
+                const out = $('#pinvout'); if (out) { out.innerHTML = inviteQr(v, hs.public_key); out.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+              } catch (e) { toast(e.message, 'error'); }
+            };
+            const patch = async (key, body, done) => { try { await api('PATCH', `/people/${encodeURIComponent(key)}`, body); toast(done); loadPeople(); } catch (e) { toast(e.message, 'error'); loadPeople(); } };
+            $$('[data-pmusic]', box).forEach((c) => c.onchange = () => patch(c.dataset.pmusic, { music: c.checked }, c.checked ? 'Music access on' : 'Music access off: their devices are signed out'));
+            $$('[data-phs]', box).forEach((c) => c.onchange = () => patch(c.dataset.phs, { homeserver_enabled: c.checked }, c.checked ? 'Homeserver account on' : 'Homeserver account off: they can read and delete, not write'));
+            $$('[data-pquota]', box).forEach((i) => i.onchange = () => { const q = Number(i.value); patch(i.dataset.pquota, { storage_quota_mb: q > 0 ? Math.round(q) : 'unlimited' }, q > 0 ? `Quota set to ${Math.round(q)} MB` : 'No storage limit'); });
+            $$('[data-pinv-del]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/people/invites/${encodeURIComponent(b.dataset.pinvDel)}`); toast('Invite taken off the list'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
+            const ptg = $('#ptgo', box); if (ptg) ptg.onclick = async () => {
+              const body = { zone: $('#ptzone', box).value, name: $('#ptname', box).value.trim() || undefined, hours: Number($('#pthours', box).value), adds_per_hour: Number($('#ptadds', box).value) || 5, waiting_per_guest: Number($('#ptwait', box).value) || 3 };
+              try { await api('POST', '/party', body); toast('Party started: share the guest link'); await loadPeople(); const last = $$('#peoplebox details').filter((x) => x.querySelector('[data-copylink*="/party/"]')).pop(); if (last) { last.open = true; last.scrollIntoView({ behavior: 'smooth', block: 'center' }); } } catch (e) { toast(e.message, 'error'); }
+            };
+            $$('[data-party-end]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/party/${encodeURIComponent(b.dataset.partyEnd)}`); toast('Party ended: the guest link no longer works'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
+            const pzs = $('#pzsave', box); if (pzs) pzs.onclick = async () => { const zones = $$('#pzones input:checked', box).map((i) => i.value); try { await api('PUT', '/people/zones', { zones }); toast(zones.length ? `Listeners may play on ${countOf(zones.length, 'zones')}` : 'Listeners may play on every zone'); } catch (e) { toast(e.message, 'error'); } };
+          };
+          // Settings › Remote access: the bundled install's Cloudflare Tunnel
+          const loadRemote = async (check = false) => {
+            const box = $('#remotebox'); if (!box) return;
+            if (check) { const b = $('#rtcheck', box); if (b) { b.disabled = true; b.innerHTML = '<span class="spin"></span> Checking…'; } }
+            let t; try { t = await api('GET', `/remote/tunnel${check ? '?check=1' : ''}`); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+            if (!box.isConnected) return;
+            const yes = (v, good, bad) => (v == null ? '' : v ? `<span class="pill ok">${good}</span>` : `<span class="pill warn">${bad}</span>`);
+            box.innerHTML = group('Cloudflare Tunnel', (t.configured
+                ? row('Homeserver', `<code>${esc(t.homeserver_domain || '')}</code>${t.published === false ? ' · not published yet' : t.published ? ' · published: Pubky apps find it at this address' : ''}`, yes(t.homeserver_reachable, 'Reachable', 'Not reachable'))
+                  + (t.music_hostname ? row('This node', `<code>${esc(t.music_hostname)}</code>`, yes(t.music_reachable, 'Reachable', 'Not reachable')) : '')
+                  + (t.restart_needed ? `<div class="notice warn" role="status">Restart the homeserver once so it publishes the address. ${t.restart_hint ? esc(t.restart_hint) : `On the machine, in <code>deploy/bundle</code>: <code>${esc(t.restart_command || '')}</code> <button class="btn sm ghost" data-copylink="${esc(t.restart_command || '')}">Copy</button>`}</div>` : '')
+                  + row('Check from outside', 'Opens both addresses over HTTPS, as someone outside your network would.', '<button class="btn" id="rtcheck">Check now</button>')
+                : row('Not set up', 'Reach this node and its homeserver from anywhere, with no open ports or static IP.', ''))
+              + block(t.configured ? 'Change the tunnel' : 'Set up', 'In Cloudflare Zero Trust › Networks › Tunnels, create a tunnel and give it two public hostnames: one to <code>http://localhost:6286</code> (the homeserver), one to <code>http://localhost:7788</code> (this node). Paste the tunnel’s token and the hostnames here. With the compose bundle, start cloudflared once: <code>docker compose --profile tunnel up -d</code> (Umbrel and the bare-metal install start it by themselves).', `<form class="stack" id="rtform"><input class="input" id="rttoken" type="password" autocomplete="off" placeholder="${t.configured ? 'Tunnel token (saved; paste to replace)' : 'Tunnel token'}" aria-label="Cloudflare tunnel token"><input class="input" id="rths" placeholder="Homeserver hostname, e.g. pubky.example.org" aria-label="Homeserver hostname" value="${esc(t.homeserver_domain || '')}"><input class="input" id="rtmusic" placeholder="This node’s hostname (optional), e.g. music.example.org" aria-label="This node's hostname" value="${esc(t.music_hostname || '')}"><div class="actions"><button class="btn primary" id="rtsave" type="submit">Save tunnel</button>${t.configured ? '<button class="btn ghost" id="rtdel" type="button">Remove tunnel</button>' : ''}</div></form>`))
+              + group('Other ways', row('Your own domain', 'A static IP, ports 80, 443 and 6287 forwarded, and Caddy in front: see “With its own Pubky homeserver” in the deploy guide (docs/deploy.md).', ''));
+            const ck = $('#rtcheck', box); if (ck) ck.onclick = () => loadRemote(true);
+            $('#rtform', box).onsubmit = async (e) => {
+              e.preventDefault();
+              const token = $('#rttoken', box).value.trim(); const homeserver_domain = $('#rths', box).value.trim(); const music_hostname = $('#rtmusic', box).value.trim() || undefined;
+              if (!token) { toast('Paste the tunnel’s token', 'error'); return; }
+              if (!homeserver_domain) { toast('Enter the homeserver’s hostname', 'error'); return; }
+              try { await api('PUT', '/remote/tunnel', { token, homeserver_domain, music_hostname }); toast('Tunnel saved'); loadRemote(); } catch (err) { toast(err.message, 'error'); }
+            };
+            const del = $('#rtdel', box); if (del) del.onclick = async () => { try { await api('DELETE', '/remote/tunnel'); toast('Tunnel removed'); loadRemote(); } catch (e) { toast(e.message, 'error'); } };
+          };
+          // Pubky Ring: a QR and link, then wait for the approval (a sign-in, or creating the owner's
+          // account on the bundled homeserver, which signs the node in the same way)
+          const ringFlow = async (path, what) => {
             try {
-              const r = await api('POST', '/pubky/login');
-              $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
+              const r = await api('POST', path);
+              $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
               $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); state.pubkyUser = undefined; toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
           };
+          const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
+          const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
+          if (state.autoCreate && hc) { state.autoCreate = false; hc.click(); hc.scrollIntoView({ block: 'center' }); }
+          loadPeople(); loadRemote();
           if (state.autoResign && pl) { state.autoResign = false; pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }

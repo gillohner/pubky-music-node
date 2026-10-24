@@ -4,11 +4,17 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-24
 
-- **Listeners no longer see where the owner keeps files** (mn-app, QUESTIONS.md): in a listener's JSON answers every track's `file.path` is just the file name (track lists, albums, search, item pages); the owner's answers are unchanged.
+- **Listeners no longer see where the owner keeps files** (mn-app, QUESTIONS.md): in a listener's (or party guest's) JSON answers every track's `file.path` is just the file name (track lists, albums, search, item pages); the owner's answers are unchanged.
 - **Home Assistant no longer lists the node as a broken LMS server** (mn-sources, QUESTIONS.md): the Slimproto discovery reply leaves out the `JSON` (LMS JSON-RPC port) field, since there is no JSON-RPC; squeezelite finds the node as before.
 
 ## 2026-10-23
 
+- **Party mode** (compare-music-assistant #4). Settings › People › Party starts a party on a zone and shows a guest link and QR. Guests open it on their phones, give a name, search the library and add songs, with no account. Their songs play right after the current one, in the order they came, before the rest of the queue; an idle zone starts. Limits per guest (songs per hour, songs waiting at once) are checked on the node, and a guest token opens nothing but the party. Links expire after 1 to 72 hours, and ending a party stops its guests at once.
+- **Settings › People and Settings › Remote access, and "Create your account here"** (STEWARD-BUNDLED-HOMESERVER.md, steps 2–4, the screens).
+  - **People:** invite someone (Homeserver + music, Homeserver only with a quota, or Music only by their Pubky key) and get a Pubky Ring QR and link; unused invites can be shown again or forgotten. Per person: music access, their homeserver account on or off, quota, and how much they store. The zones listeners may play on are picked here too.
+  - **Remote access** (only with the bundled install): paste a Cloudflare tunnel token and the hostnames, see the restart command when one is needed, and check both addresses from outside.
+  - **Your account:** with a bundled homeserver, Settings › Accounts and the first-run card offer "Create account here" (on the node's own homeserver) next to "Use an existing homeserver".
+  - **API:** `GET /v1/people` adds `homeserver_enabled` (what the node last set; the homeserver's admin API can't report it) and `used_bytes` (their files in the homeserver's files folder).
 - **Steadier playlist page, plainer words** (second review #20 and #16):
   - The playlist page keeps room for its source chips while they load, so the songs no longer jump under your pointer.
   - "Play from" lists only services that are connected.
