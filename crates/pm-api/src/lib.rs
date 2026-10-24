@@ -698,13 +698,19 @@ async fn auth(
     let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
-    if caller.role == accounts::Role::Listener {
+    let listener = caller.role == accounts::Role::Listener;
+    if listener {
         if let Some(why) = accounts::listener_refusal(&state, req.method(), req.uri().path()) {
             return accounts::refused(why).into_response();
         }
     }
     req.extensions_mut().insert(caller);
-    next.run(req).await
+    let resp = next.run(req).await;
+    if listener {
+        accounts::listener_response(resp).await
+    } else {
+        resp
+    }
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).

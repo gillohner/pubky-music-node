@@ -80,6 +80,32 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
     let listener = pm_api::accounts::mint(&s, KEY).unwrap();
     let app = router(s.clone());
 
+    // A track in the owner's folder: listeners get its file name, not where the owner keeps it
+    let file = dir.path().join("Owner's music").join("A.flac");
+    let track: pm_model::Track = serde_json::from_value(serde_json::json!({
+        "id": null, "title": "A", "artists": [{"id": null, "name": "X", "mbid": null}], "album": null,
+        "track_no": 1, "disc_no": null, "duration_ms": 1000,
+        "file": {"path": file, "size_bytes": 1, "mtime_unix": 0, "container": "flac",
+                 "format": serde_json::to_value(pm_model::AudioFormat::pcm(44_100, 16, 2)).unwrap(), "duration_ms": 1000},
+        "recording_mbid": null, "isrc": null, "acoustid": null, "canonical": null,
+        "replaygain_track_gain_db": null, "replaygain_album_gain_db": null}))
+    .unwrap();
+    let id = s.library.lock().unwrap().upsert_track(&track).unwrap().0;
+    for uri in [
+        "/v1/library/tracks".to_string(),
+        format!("/v1/library/tracks/{id}"),
+    ] {
+        let (st, body) = call(&app, &listener, "GET", &uri, None).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {body}");
+        assert!(body.contains("\"path\":\"A.flac\""), "{uri}: {body}");
+        assert!(!body.contains("Owner's music"), "{uri}: {body}");
+        let (_, owner) = call(&app, OWNER, "GET", &uri, None).await;
+        assert!(
+            owner.contains("Owner's music"),
+            "the owner still sees the folder: {owner}"
+        );
+    }
+
     let (st, me) = call(&app, &listener, "GET", "/v1/me", None).await;
     assert_eq!(st, StatusCode::OK, "{me}");
     assert!(me.contains("\"listener\""), "{me}");

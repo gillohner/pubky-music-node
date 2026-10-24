@@ -2,6 +2,11 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-24
+
+- **Listeners no longer see where the owner keeps files** (mn-app, QUESTIONS.md): in a listener's JSON answers every track's `file.path` is just the file name (track lists, albums, search, item pages); the owner's answers are unchanged.
+- **Home Assistant no longer lists the node as a broken LMS server** (mn-sources, QUESTIONS.md): the Slimproto discovery reply leaves out the `JSON` (LMS JSON-RPC port) field, since there is no JSON-RPC; squeezelite finds the node as before.
+
 ## 2026-10-23
 
 - **Steadier playlist page, plainer words** (second review #20 and #16):

@@ -850,7 +850,7 @@ impl NodeState {
         std::thread::Builder::new()
             .name("slimproto-discovery".into())
             .spawn(move || {
-                if let Err(e) = pm_out_slimproto::discovery_responder(&name, web_port) {
+                if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
                     tracing::info!("slimproto discovery responder unavailable: {e}");
                 }
             })?;

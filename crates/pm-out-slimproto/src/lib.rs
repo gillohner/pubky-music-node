@@ -369,45 +369,83 @@ fn session(
     result
 }
 
-/// Answer players' UDP discovery broadcasts on port 3483 with our name and
-/// web port so `squeezelite` without `-s` finds the node. Blocks.
-pub fn discovery_responder(name: &str, web_port: u16) -> io::Result<()> {
+/// Answer players' UDP discovery broadcasts on port 3483 with our name so `squeezelite` without
+/// `-s` finds the node (it only needs the reply's address). Blocks.
+pub fn discovery_responder(name: &str) -> io::Result<()> {
     let socket = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))?;
     socket.set_broadcast(true)?;
     let mut buf = [0u8; 1024];
     loop {
         let (n, from) = socket.recv_from(&mut buf)?;
-        if n == 0 || buf[0] != b'e' {
-            continue;
+        if let Some(reply) = discovery_reply(&buf[..n], name) {
+            let _ = socket.send_to(&reply, from);
         }
-        // Request: 'e' then TLVs: 4-char tag + 1 byte len + value; reply 'E' + TLVs.
-        let mut reply = vec![b'E'];
-        let mut i = 1;
-        while i + 5 <= n {
-            let tag = &buf[i..i + 4];
-            let len = buf[i + 4] as usize;
-            i += 5 + len;
-            let value: Option<String> = match tag {
-                b"NAME" => Some(name.to_string()),
-                b"JSON" => Some(web_port.to_string()),
-                b"VERS" => Some("7.9.0".into()),
-                b"UUID" => Some("pubky-music-node".into()),
-                _ => None,
-            };
-            if let Some(v) = value {
-                reply.extend_from_slice(tag);
-                reply.push(v.len().min(255) as u8);
-                reply.extend_from_slice(&v.as_bytes()[..v.len().min(255)]);
-            }
-        }
-        let _ = socket.send_to(&reply, from);
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// The reply to one discovery request: 'e' then TLVs (4-char tag, 1-byte length, value) in,
+/// 'E' and the TLVs we can answer out. No `JSON` (the LMS JSON-RPC port): we don't serve
+/// JSON-RPC, and Home Assistant's Squeezebox flow and LMS controllers would list the node as an
+/// LMS server that then fails to connect (docs/lms-compat.md).
+fn discovery_reply(req: &[u8], name: &str) -> Option<Vec<u8>> {
+    if req.first() != Some(&b'e') {
+        return None;
+    }
+    let mut reply = vec![b'E'];
+    let mut i = 1;
+    while i + 5 <= req.len() {
+        let tag = &req[i..i + 4];
+        let len = req[i + 4] as usize;
+        i += 5 + len;
+        let value: Option<String> = match tag {
+            b"NAME" => Some(name.to_string()),
+            b"VERS" => Some("7.9.0".into()),
+            b"UUID" => Some("pubky-music-node".into()),
+            _ => None,
+        };
+        if let Some(v) = value {
+            let v = &v.as_bytes()[..v.len().min(255)];
+            reply.extend_from_slice(tag);
+            reply.push(v.len() as u8);
+            reply.extend_from_slice(v);
+        }
+    }
+    Some(reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_answers_name_and_uuid_but_no_json_port() {
+        // What squeezelite and Home Assistant's Squeezebox discovery ask for
+        let req = b"eIPAD\x00NAME\x00JSON\x00VERS\x00UUID\x00";
+        let r = discovery_reply(req, "Living room").unwrap();
+        assert_eq!(r[0], b'E');
+        let mut tags = Vec::new();
+        let mut i = 1;
+        while i + 5 <= r.len() {
+            let len = r[i + 4] as usize;
+            tags.push((
+                String::from_utf8_lossy(&r[i..i + 4]).to_string(),
+                String::from_utf8_lossy(&r[i + 5..i + 5 + len]).to_string(),
+            ));
+            i += 5 + len;
+        }
+        assert_eq!(
+            tags,
+            [
+                ("NAME".to_string(), "Living room".to_string()),
+                ("VERS".to_string(), "7.9.0".to_string()),
+                ("UUID".to_string(), "pubky-music-node".to_string()),
+            ]
+        );
+        assert!(discovery_reply(b"x", "n").is_none());
+        // A length running past the end is not read
+        assert_eq!(discovery_reply(b"eNAME\xff", "n").unwrap()[0], b'E');
+    }
 
     #[test]
     fn hello_parsing_old_and_new_players() {
