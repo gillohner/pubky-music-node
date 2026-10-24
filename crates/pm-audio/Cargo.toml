@@ -17,6 +17,7 @@ pm-zones = { workspace = true }
 symphonia = { workspace = true }
 rubato = "5"
 realfft = "3"
+ebur128 = "0.1"
 rusty-chromaprint = "0.3"
 base64 = "0.22"
 serde = { workspace = true }

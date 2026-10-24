@@ -20,6 +20,8 @@ members = [
     "crates/pm-remote",
     "crates/pm-out-snapcast",
     "crates/pm-out-airplay",
+    "crates/pm-out-bluos",
+    "crates/pm-out-mpd",
     "crates/pm-renderer",
     "crates/pubky-music-specs",
 ]
@@ -50,6 +52,8 @@ pm-out-slimproto = { path = "crates/pm-out-slimproto" }
 pm-out-cast = { path = "crates/pm-out-cast" }
 pm-out-snapcast = { path = "crates/pm-out-snapcast" }
 pm-out-airplay = { path = "crates/pm-out-airplay" }
+pm-out-bluos = { path = "crates/pm-out-bluos" }
+pm-out-mpd = { path = "crates/pm-out-mpd" }
 pm-discovery = { path = "crates/pm-discovery" }
 pm-remote = { path = "crates/pm-remote" }
 pm-renderer = { path = "crates/pm-renderer" }

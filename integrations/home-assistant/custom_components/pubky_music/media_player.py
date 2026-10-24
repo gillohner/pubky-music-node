@@ -50,6 +50,7 @@ BASE_FEATURES = (
     | MediaPlayerEntityFeature.CLEAR_PLAYLIST
     | MediaPlayerEntityFeature.SELECT_SOURCE
     | MediaPlayerEntityFeature.GROUPING
+    | MediaPlayerEntityFeature.MEDIA_ANNOUNCE
 )
 VOLUME_FEATURES = (
     MediaPlayerEntityFeature.VOLUME_SET | MediaPlayerEntityFeature.VOLUME_STEP | MediaPlayerEntityFeature.VOLUME_MUTE
@@ -407,6 +408,16 @@ class ZonePlayer(MediaPlayerEntity):
             item = await media_source.async_resolve_media(self.hass, media_id, self.entity_id)
             media_id = async_process_play_media_url(self.hass, item.url)
             title = media_id.rsplit("/", 1)[-1].split("?")[0]
+        if kwargs.get("announce"):
+            # Plays instead of the music, then the zone goes back to where it was
+            extra = kwargs.get("extra") or {}
+            body: dict[str, Any] = {"uri": media_id, "chime": bool(extra.get("chime", False))}
+            if (vol := extra.get("volume")) is not None:
+                body["volume_percent"] = int(round(float(vol) * 100 if float(vol) <= 1 else float(vol)))
+            if title:
+                body["title"] = title
+            await self._call("POST", f"/zones/{self.zone_id}/announce", body)
+            return
         replace = enqueue in (None, MediaPlayerEnqueue.PLAY, MediaPlayerEnqueue.REPLACE)
         at = "next" if enqueue == MediaPlayerEnqueue.NEXT else "end"
         kind, ident = parse(media_id)

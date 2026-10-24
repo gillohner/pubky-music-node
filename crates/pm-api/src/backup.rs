@@ -54,6 +54,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("spotify.soloist_key", "your Spotify Soloist API key"),
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
+    ("lastfm.app", "the Last.fm app"),
+    ("lastfm.session", "Last.fm"),
     ("opensubsonic.server", "your Subsonic server"),
     ("jellyfin.server", "Jellyfin"),
     ("plex.server", "Plex"),

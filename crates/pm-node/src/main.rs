@@ -174,6 +174,10 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::librespot::set_config_path(&cfg.spotify.librespot);
     pm_api::qobuz::set_config_app(&cfg.qobuz.app_id, &cfg.qobuz.app_secret);
     pm_api::soundcloud::set_config_client(&cfg.soundcloud.client_id, &cfg.soundcloud.token);
+    pm_api::lastfm::set_config_app(
+        &env_or("PM_LASTFM_API_KEY", &cfg.lastfm.api_key),
+        &env_or("PM_LASTFM_API_SECRET", &cfg.lastfm.api_secret),
+    );
     let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
     if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
         tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
@@ -266,12 +270,16 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         state.set_snapcast(Some(cfg.outputs.snapcast.trim().to_string()));
     }
     state.set_airplay(cfg.outputs.airplay);
+    state.set_bluos(cfg.outputs.bluos);
+    state.set_mpd(&cfg.outputs.mpd);
     {
         let st = state.clone();
         let found = tokio::task::spawn_blocking(move || {
             let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
             found.extend(st.discover_snapcast());
             found.extend(st.discover_airplay(std::time::Duration::from_millis(1500)));
+            found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
+            found.extend(st.discover_mpd());
             found.extend(st.restore_upnp_addresses());
             found.extend(st.restore_endpoint_addresses());
             found
@@ -359,6 +367,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         state.set_homeserver_files_dir(PathBuf::from(files_dir.trim()));
     }
     pm_api::storage::spawn_autosave(&state);
+    pm_api::loudness::spawn(&state);
     pm_api::webdav::spawn_rescans(&state);
     state.set_drive_apps(pm_api::drives::apps_from(
         pm_api::drives::App {

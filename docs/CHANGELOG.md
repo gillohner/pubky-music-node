@@ -9,6 +9,25 @@ Newest first. Dates are when the change landed on `main`.
   - **Remote access** (only with the bundled install): paste a Cloudflare tunnel token and the hostnames, see the restart command when one is needed, and check both addresses from outside.
   - **Your account:** with a bundled homeserver, Settings › Accounts and the first-run card offer "Create account here" (on the node's own homeserver) next to "Use an existing homeserver".
   - **API:** `GET /v1/people` adds `homeserver_enabled` (what the node last set; the homeserver's admin API can't report it) and `used_bytes` (their files in the homeserver's files folder).
+- **Steadier playlist page, plainer words** (second review #20 and #16):
+  - The playlist page keeps room for its source chips while they load, so the songs no longer jump under your pointer.
+  - "Play from" lists only services that are connected.
+  - The tag hint and the "Add a renderer" help say plainly what they need.
+- **Library › Add music** (STEWARD-BUNDLED-HOMESERVER.md §7). Three ways in, from Albums or Tracks › Add music:
+  - **Upload files:** drag and drop files or whole folders, or choose them, from the browser to your Pubky homeserver's private storage. They go in 4 MiB chunks and carry on after a reload or a cut connection. Progress shows per file, and they join the library.
+  - **Copy from a folder** on the node's machine or a mounted share: it says how many files and how big first, then copies them as a job in the job chip, skipping what's already there.
+  - **Use a folder in place:** watched and played where it is, as before.
+  - Without a homeserver, the first two say so and point to Accounts.
+- **Unknown artist:** songs with no artist at all are listed under "Unknown artist" in Artists, with a page of those songs (second review #26).
+- **The web UI for listeners** (people who sign in with their own Pubky Ring key, #46):
+  - The page asks `/v1/me` who is using it.
+  - A listener sees the shared library (Albums, Artists, Genres, Tracks, search, song and album pages), Queue, and only the zones the owner opened to them.
+  - Hidden from them: the owner's Home, Favourites, Playlists, Radio, Sources, hearts, tags, the owner's menu entries (playlists, favourites, matching, uploads) and file paths.
+  - Their Settings page shows who they are, which zones they may use, Sign out of this device, and the theme.
+  - The page no longer asks the node for owner-only data a listener would be refused.
+- **Measured loudness for files without ReplayGain tags** (compare-music-assistant #7). While a zone has loudness on, the node measures those files in the background (EBU R128, one at a time) and the loudness stage uses the result where the tag is missing: the gain to −18 LUFS, held back so the peak stays at full scale. Album mode uses the album's measured loudness once all its tracks are measured. A changed file is measured again; one that can't be decoded or is silent isn't retried. With loudness off everywhere nothing is measured and playback stays bit-perfect. `GET /v1/library/loudness` shows the progress; `POST /v1/library/loudness/measure` starts a pass.
+- **BluOS players** (Bluesound, NAD; compare-music-assistant #9, `crates/pm-out-bluos`). Found over mDNS (`_musc._tcp`) and named from their `/SyncStatus`, each player is a zone: it fetches the zone's stream (`/Play?url=`, bit-perfect WAV up to 24/192) and its volume follows the zone. A zone of BluOS players only is a BluOS group: the first leads, the others follow it in sync (`/AddSlave`), and the group ends when the zone stops. Off with `[outputs] bluos = false`. Tested against a fake player that answers like the BluOS API.
+- **MPD servers as zones** (compare-music-assistant #15, `crates/pm-out-mpd`). List them under `[outputs] mpd` (`host`, `host:port` or `password@host:port`); each one that answers is a zone. Over MPD's own protocol it plays the zone's stream (`addid` / `playid`, bit-perfect WAV up to 24/192), follows the zone's volume (`setvol`), and on stop removes only its own playlist entry. Passwords never show in logs.
 - **CI:** main's own CI runs again after a merge. The pull_request run started by the merged branch's last push got `main` as its ref and, sharing main's concurrency group, cancelled main's run; the group is now keyed by event and PR branch.
 - **Google Drive and OneDrive folders are library folders** (owner-approved list §6.4).
   - **In Settings:** Settings › Library › Cloud drives signs in and lets you pick a music folder; its songs join the library and play from the drive, like a WebDAV share. Only each song's tags are downloaded, and folders are re-read every 6 hours.

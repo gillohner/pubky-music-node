@@ -29,8 +29,11 @@ Nothing leaves your network.
 - **Updates are pushed:** zones change in Home Assistant as they change on the node, including zones added
   or removed there.
 
-Not yet: announcements (TTS over music), because the node's zones can't lower the music under an
-announcement. TTS still plays as normal media through the media sources.
+- **Announcements** (`play_media` with `announce: true`, so TTS and doorbells work): the clip plays instead
+  of the music, then the zone goes back to the same track at the same position, playing or paused as it was.
+  `extra.chime: true` adds a short chime first; `extra.volume` (0 to 1, or 0 to 100) sets the clip's volume on
+  outputs with hardware volume and restores it afterwards. The music pauses rather than ducks, since the
+  zones have no software gain.
 
 ## Install
 
