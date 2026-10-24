@@ -506,12 +506,17 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .zone-btn span { max-width: 90px; }
   .hero { grid-template-columns: 1fr; }
   .hero .art { width: 180px; }
-  .track { grid-template-columns: 36px minmax(0, 1fr) 56px 40px; }
+  .main > .back + .hero, .main > .pagebar + .hero { margin-top: 8px; }
+  /* Phones (second review #22): two covers per row, and song titles get the row's width */
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
+  .track { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; gap: 8px; }
   .track .album-col, .track .fmt { display: none; }
+  .track .idmark { display: none; }
+  .track .dur { padding-right: 0; }
   .track .row-actions { opacity: 1; }
   .track .row-actions .icon-btn:not([data-act="more"]) { display: none; }
   .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
-  .track.compact { grid-template-columns: 36px minmax(0, 1fr) 56px 40px; }
+  .track.compact { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; }
   .np-hero { grid-template-columns: 1fr; }
   .np-page { padding: 16px; }
   .kv { grid-template-columns: 1fr; }
@@ -745,7 +750,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .q-actions .icon-btn { width: 30px; height: 30px; }
 .q-actions .icon-btn .ic { width: 16px; height: 16px; }
 @media (hover: hover) { .srow .q-actions { opacity: 0; transition: opacity 0.12s; } .srow:hover .q-actions, .srow:focus-within .q-actions { opacity: 1; } }
-@media (max-width: 600px) { #plsongs .srow .thumb { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions .icon-btn { width: 28px; } }
+@media (max-width: 600px) { #plsongs .srow .thumb { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions { display: none; } }
 .porder-row .grow { flex: 1; min-width: 0; }
 /* Choice dialog (playlist import) */
 .choices { display: flex; flex-direction: column; gap: 8px; }
@@ -919,6 +924,9 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .src-dot.ok { background: var(--ok); box-shadow: none; }
 .src-dot.bad { background: var(--bad); box-shadow: none; }
 .src-dot.off { background: transparent; }
+.set-adv { border-top: 1px solid var(--line); }
+.set-adv > summary { padding: 12px 16px; color: var(--muted); font-size: 13px; cursor: pointer; }
+.set-adv > summary:hover { color: var(--fg); }
 .src-offgroup summary { padding: 9px 12px; color: var(--muted); font-size: 13px; cursor: pointer; }
 .src-desc { margin: -8px 0 16px; max-width: 70ch; }
 .src-noswitch { width: 34px; margin: 0 4px; flex: none; }
@@ -1081,6 +1089,8 @@ body.kiosk .main { padding: 0; }
 @media (max-width: 720px) { .pagebar .crumbs { display: none; } }
 .stickyhead { position: sticky; z-index: 15; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-sizing: border-box; height: 52px; margin: -24px -24px -28px; padding: 0 24px; top: -24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
 .stickyhead[hidden] { display: none; }
+/* The bar takes no room in the flow (its margins cancel its height), so the page starts where it would without it */
+.main > .stickyhead + * { margin-top: 0; }
 .stickyhead strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .stickyhead { height: 46px; margin: -18px -14px -28px; padding: 0 14px; top: -18px; } }
 .track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }

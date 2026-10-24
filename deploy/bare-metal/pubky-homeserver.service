@@ -1,0 +1,30 @@
+# The Pubky homeserver bundled with the node, on bare metal (docs/deploy.md).
+[Unit]
+Description=Pubky homeserver (bundled with Pubky Music Node)
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+User=pubky
+Group=pubky
+# Stored files 0640: data/ is setgid pubky-files, so the node reads them (docs/deploy.md); its
+# secret is 0600 whatever the umask
+UMask=0027
+# Publish the tunnel's hostname, if Settings › Remote access saved one
+ExecStartPre=/usr/local/lib/pubky-music/apply-tunnel-domain.sh /var/lib/pubky-homeserver/config.toml /var/lib/pubky-music/tunnel/domain
+ExecStart=/usr/local/bin/pubky-homeserver --data-dir /var/lib/pubky-homeserver
+# It stops cleanly on SIGINT, not SIGTERM
+KillSignal=SIGINT
+TimeoutStopSec=60
+# Startup fails when the first publish to the Pubky network does (no network yet): try again
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pubky-homeserver
+
+[Install]
+WantedBy=multi-user.target

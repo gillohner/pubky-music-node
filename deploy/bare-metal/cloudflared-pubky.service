@@ -1,0 +1,21 @@
+# Cloudflare Tunnel for the node and its homeserver, on bare metal (docs/deploy.md). The token is
+# the one Settings › Remote access saves; until there is one this unit fails and retries.
+[Unit]
+Description=Cloudflare Tunnel for Pubky Music Node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=pubky-music
+Group=pubky-music
+Environment=TUNNEL_TOKEN_FILE=/var/lib/pubky-music/tunnel/token
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@ manifestVersion: 1
 id: pubky-music-node
 category: media
 name: Pubky Music Node
-version: "0.1.0"
+version: "a432705"
 tagline: Bit-perfect music server and zones, built on Pubky
 icon: https://raw.githubusercontent.com/gillohner/pubky-music-node/main/deploy/umbrel/pubky-music-node/icon.svg
 description: >-
@@ -30,7 +30,7 @@ gallery: []
 path: /
 defaultUsername: ""
 defaultPassword: ""
-# APP_PASSWORD: the bundled homeserver's admin and database password.
+# APP_PASSWORD (shown by umbrelOS): the token for the web UI, the apps and Subsonic clients.
 deterministicPassword: true
 releaseNotes: >-
   Zones overview, queue tools (shuffle, save as playlist, transfer between

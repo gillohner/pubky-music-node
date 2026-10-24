@@ -5932,7 +5932,7 @@ mod tests {
                 get(|| async {
                     (
                         [(header::CONTENT_TYPE, "application/json")],
-                        r#"{"recordings":[{"id":"b1a9c0e9-d987-4042-ae91-78d6a3267d69","score":100},{"id":"ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d","score":62}]}"#,
+                        r#"{"recordings":[{"id":"b1a9c0e9-d987-4042-ae91-78d6a3267d69","score":100,"title":"Bohemian Rhapsody"},{"id":"ebf79ba5-085e-48d2-9eb8-2d992fbf0f6d","score":62,"title":"Bohemian Rhapsody"}]}"#,
                     )
                 }),
             );

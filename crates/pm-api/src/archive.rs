@@ -47,10 +47,7 @@ impl StreamingService for InternetArchive {
     }
 
     async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError> {
-        // Ranked by how well it matches (title, then artist), not by downloads: "grateful dead"
-        // found a popular radio series first (fresh-eyes review)
-        let t = lucene(term);
-        let query = format!("(title:({t})^4 OR creator:({t})^3 OR ({t})) AND mediatype:(audio)");
+        let query = search_query(term);
         let url = format!("{}/advancedsearch.php", base(s));
         let resp = s
             .http_client()
@@ -95,6 +92,24 @@ fn upstream(e: impl std::fmt::Display) -> ApiError {
 }
 
 /// Escape a user term for the archive's Lucene query.
+/// The search query for `term`: every word in the item's title or artist (never only in its
+/// description or subjects: "pink floyd" found radio shows and unrelated bands that way), ranked
+/// by how well the title, then the artist, matches rather than by downloads ("grateful dead" found
+/// a popular radio series first). Audio items only.
+fn search_query(term: &str) -> String {
+    let t = lucene(term);
+    let rank = format!("(title:({t})^4 OR creator:({t})^3)");
+    let each: Vec<String> = term
+        .split_whitespace()
+        .map(lucene)
+        .map(|w| format!("(title:({w}) OR creator:({w}))"))
+        .collect();
+    if each.is_empty() {
+        return format!("{rank} AND mediatype:(audio)");
+    }
+    format!("({}) AND {rank} AND mediatype:(audio)", each.join(" AND "))
+}
+
 fn lucene(term: &str) -> String {
     let mut out = String::with_capacity(term.len() + 8);
     for c in term.chars() {
@@ -296,6 +311,25 @@ impl SourceTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_asks_for_every_word_in_the_title_or_artist() {
+        let q = search_query("pink floyd");
+        assert_eq!(
+            q,
+            "((title:(pink) OR creator:(pink)) AND (title:(floyd) OR creator:(floyd))) AND (title:(pink floyd)^4 OR creator:(pink floyd)^3) AND mediatype:(audio)"
+        );
+        assert!(!q.contains(" OR (pink"), "no match on the description alone");
+        assert!(
+            search_query("AC/DC").contains("title:(AC\\/DC)"),
+            "{}",
+            search_query("AC/DC")
+        );
+        assert_eq!(
+            search_query(""),
+            "(title:()^4 OR creator:()^3) AND mediatype:(audio)"
+        );
+    }
 
     #[test]
     fn search_and_item_documents_parse() {

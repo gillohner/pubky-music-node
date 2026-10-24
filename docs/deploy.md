@@ -104,6 +104,105 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
 The Umbrel app (below) bundles the same homeserver. Install it or Pubky's own "Pubky Homeserver"
 app, not both: both use port 6287.
 
+## With its own Pubky homeserver, without Docker (bare metal)
+
+The same bundle as above on a Raspberry Pi, NUC or any Debian/Ubuntu machine, with systemd and no
+Docker: PostgreSQL, pubky-homeserver v0.16.2 and the node, plus cloudflared if you want the tunnel.
+The files are in `deploy/bare-metal/`. Run the commands from that folder (a checkout of this
+repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
+
+1. **PostgreSQL, users and folders**
+
+   ```sh
+   sudo apt install postgresql openssl
+   DB_PASSWORD=$(openssl rand -hex 24); ADMIN_PASSWORD=$(openssl rand -hex 24); TOKEN=$(openssl rand -hex 32)
+   sudo -u postgres psql -c "CREATE ROLE pubky LOGIN PASSWORD '$DB_PASSWORD'" -c "CREATE DATABASE pubky_homeserver OWNER pubky"
+   sudo groupadd --system pubky-files   # the homeserver's stored files, readable by the node
+   sudo useradd --system --home /var/lib/pubky-homeserver --shell /usr/sbin/nologin pubky
+   sudo useradd --system --home /var/lib/pubky-music --shell /usr/sbin/nologin --groups audio,pubky-files pubky-music
+   sudo install -d -o pubky -g pubky-files -m 710 /var/lib/pubky-homeserver   # put it on the big disk if you like
+   sudo install -d -o pubky -g pubky-files -m 2750 /var/lib/pubky-homeserver/data
+   sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music /var/lib/pubky-music/tunnel
+   sudo install -d -m 755 /etc/pubky-music /usr/local/lib/pubky-music
+   ```
+
+2. **The homeserver** (Pubky's release binary; check its SHA-256 against the release page)
+
+   ```sh
+   HS_ARCH=$([ "$ARCH" = x86_64 ] && echo amd64 || echo arm64)
+   curl -LO https://github.com/pubky/pubky-core/releases/download/v0.16.2/pubky-homeserver-v0.16.2-linux-$HS_ARCH.tar.gz
+   sha256sum pubky-homeserver-v0.16.2-linux-$HS_ARCH.tar.gz
+   #   amd64: 2502dba5a2e06614f1fdfd979c91c212de1a8e75f6f7c9e4bc9066a7dc3dea66
+   #   arm64: 8e58362f22a4023712f54cbccb6a86de18a5773178c3a6f465876389f63e32ff
+   tar xzf pubky-homeserver-v0.16.2-linux-$HS_ARCH.tar.gz
+   sudo install -m 755 pubky-homeserver-v0.16.2-linux-$HS_ARCH/pubky-homeserver /usr/local/bin/
+   LAN_IP=$(hostname -I | cut -d' ' -f1)
+   sed -e "s/<DB_PASSWORD>/$DB_PASSWORD/" -e "s/<ADMIN_PASSWORD>/$ADMIN_PASSWORD/" -e "s/<PUBLIC_IP>/$LAN_IP/" \
+     homeserver.config.toml | sudo install -o pubky -g pubky -m 600 /dev/stdin /var/lib/pubky-homeserver/config.toml
+   sudo install -m 755 apply-tunnel-domain.sh /usr/local/lib/pubky-music/
+   ```
+
+3. **The node** (the release binary from the same release page as the app, or `cargo build --release -p pm-node --features alsa`)
+
+   ```sh
+   tar xzf pubky-music-node-linux-$ARCH.tar.gz
+   sudo install -m 755 pubky-music-node-linux-$ARCH/pm-node /usr/local/bin/
+   sudo install -o pubky-music -g pubky-music -m 600 /dev/stdin /etc/pubky-music/node.toml <<EOF
+   data_dir = "/var/lib/pubky-music"
+   [api]
+   listen = "0.0.0.0:7788"
+   token = "$TOKEN"
+   [library]
+   folders = ["/srv/music"]
+   [homeserver]
+   admin_url = "http://127.0.0.1:6288"
+   admin_password = "$ADMIN_PASSWORD"
+   tunnel_dir = "/var/lib/pubky-music/tunnel"
+   files_dir = "/var/lib/pubky-homeserver/data/files"
+   EOF
+   ```
+
+4. **Start them**
+
+   ```sh
+   sudo install -m 644 pubky-homeserver.service pubky-music-node.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now pubky-homeserver pubky-music-node
+   echo "Web UI: http://$LAN_IP:7788  token: $TOKEN"   # keep the token; the passwords are in the two config files
+   ```
+
+   Open the web UI, enter the token, and in Settings › Accounts choose **Create account here**:
+   Pubky Ring creates your account on this homeserver and signs the node in. Invite others in
+   Settings › People.
+
+- **What listens where:** the node on 7788 and Pubky TLS on 6287 on the network; the homeserver's
+  plain HTTP (6286) and admin API (6288) on 127.0.0.1 only. The homeserver stops on SIGINT (the
+  unit sets it) and retries when its first publish to the Pubky network fails at boot.
+- **Its files:** under `/var/lib/pubky-homeserver/data/files`, readable by the node through the
+  `pubky-files` group, so your music there is a library folder without a second copy. `data/` is
+  setgid, so every file the homeserver stores (uploads land in `data/files-tmp` first) gets that
+  group; the homeserver's `secret` and `config.toml` stay readable by `pubky` alone (0600), and the
+  node can't list the homeserver's folder. What the operator can see is the same as above:
+  everything, `/priv` included.
+- **Reachable from outside, Cloudflare Tunnel:** install `cloudflared` 2025.4.0 or newer (the
+  first to read the token from a file) from Cloudflare's package repository (pkg.cloudflare.com),
+  then `sudo install -m 644 cloudflared-pubky.service
+  /etc/systemd/system/ && sudo systemctl enable --now cloudflared-pubky`. In Cloudflare, send the
+  homeserver's hostname to `http://localhost:6286` and the music one to `http://localhost:7788`;
+  paste the token and hostnames in Settings › Remote access. The unit picks up the token by itself
+  (it retries until one is saved). Then `sudo systemctl restart pubky-homeserver`: before it
+  starts, `apply-tunnel-domain.sh` publishes the hostname on 443. Removing the tunnel in Settings
+  deletes the token, but a running cloudflared keeps the tunnel up until it restarts: run
+  `sudo systemctl restart pubky-homeserver cloudflared-pubky` (Settings shows that command), and the
+  homeserver goes back to the LAN address. The token file is the node user's alone (0600), and
+  cloudflared runs as that user.
+- **Your own domain instead:** Caddy on 443 in front of `127.0.0.1:6286`, ports 80, 443 and 6287
+  forwarded; write the hostname into `/var/lib/pubky-music/tunnel/domain` (no token needed) and
+  restart the homeserver.
+- **Updating:** replace the binary and `sudo systemctl restart pubky-homeserver` (or
+  `pubky-music-node`). Back up `/var/lib/pubky-homeserver` (its `secret` is the homeserver's key)
+  and the PostgreSQL database together.
+
 ## TrueNAS SCALE
 
 `deploy/truenas/docker-compose.yaml` is a ready custom app: Apps → Discover Apps → ⋮ → *Install
@@ -125,33 +224,36 @@ only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for
 
 ## Umbrel
 
-`deploy/umbrel/pubky-music-node/` holds the app manifest and compose file for an Umbrel community
-app store. Points worth knowing:
+`deploy/umbrel/` is an Umbrel community app store (`umbrel-app-store.yml`, store id `pubky-music`)
+with one app, `pubky-music-node`: the node with its own Pubky homeserver inside, as in the compose
+bundle (PostgreSQL, pubky-homeserver v0.16.2 with Pubky's config wrapper, cloudflared). Umbrel's
+own linter (`npm run lint:apps -- pubky-music-node --check-images` in getumbrel/umbrel-apps) passes
+with no errors, and CI's `bundle` job starts the app with Umbrel's variables and checks it
+(`tools/umbrel-check.py`). Points worth knowing:
 
-- The API is exposed on port 7788 with the bearer token (`APP_SEED`, which Umbrel generates per app)
-  instead of behind `app_proxy`, because the native controller and OpenSubsonic clients on other
-  machines cannot pass Umbrel's web login. The built-in web UI at `/` uses the same token (entered
-  once in the browser), so one port serves every client.
-- `/dev/snd` is passed through for a DAC on the Umbrel box; otherwise use a network endpoint (M2).
+- **Host network:** the node finds speakers on the LAN (SSDP, mDNS) and serves its web UI and API
+  itself on 7788, the app's port; umbrelOS adds HTTPS in front. Native apps and OpenSubsonic
+  clients use 7788 with the bearer token: the password umbrelOS shows for the app (right-click
+  its icon; `APP_PASSWORD`, generated per install). The homeserver's admin and database password
+  is a different one that umbrelOS keeps to itself (`APP_SEED`).
+- **The homeserver:** Pubky TLS on 6287 on the network; its plain HTTP (6286) and admin API (6288)
+  on 127.0.0.1 only, for the node and cloudflared. Install this app or Pubky's "Pubky Homeserver"
+  app, not both: both publish 6287. On first open, Settings › Accounts › Create account here.
+- **Remote access:** Settings › Remote access saves the Cloudflare tunnel token; cloudflared starts
+  by itself once it exists (send the hostnames to `http://localhost:6286` and
+  `http://localhost:7788`). Then restart the app once so the homeserver publishes the hostname.
+- `/dev/snd` is passed through for a DAC on the Umbrel box; otherwise use a network endpoint.
 - Umbrel's shared storage is mounted read-only at `/music`, so a torrent or download app writing
-  there is just a scan source. The node watches its folders and rescans 15 s after the last change
-  (`[library] watch`, `watch_quiet_secs`), so downloads appear on their own; `POST /v1/library/scan`
-  and the controller's Settings page still trigger a scan at any time.
-- Your own files on your homeserver: `pm-node upload a.flac` (or `POST /v1/pubky/files`) puts audio
-  into the homeserver's private storage. On another node with your session, Settings › Accounts ›
-  Bring files here downloads what that node lacks into a library folder (`From homeserver` by
-  default) and indexes it. Private only, never `/pub/`.
-- Hard constraints hold on every shape: audio stays node-local or in private storage, nothing under
-  `/pub/`, and the node never serves one person's library to many users.
-
-Images are published to `ghcr.io/gillohner/pubky-music-node` for `linux/amd64` and `linux/arm64`
-(Umbrel boxes are mostly Raspberry Pis) by `.github/workflows/release.yml`: every `v*` tag gives
-`<version>`, `<major.minor>` and `latest`; running the workflow by hand publishes `edge`. The
-arm64 binary is cross-compiled on the amd64 runner (Debian multiarch ALSA headers, GNU cross
-toolchain), so no emulated cargo build. The Umbrel compose file pins the version tag; make the
-package public in the repository's package settings before pointing an Umbrel at it. Image builds
-are not possible on the development machine (no Docker daemon); CI's `docker` job builds the
-native image on every push to catch Dockerfile drift.
+  there is just a scan source; the node watches its folders and rescans 15 s after the last change.
+  Music uploaded or copied into your homeserver (Library › Add music) is played from the
+  homeserver's own files, read-only, with no second copy.
+- **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
+  published as its own repository (asked of the owner); add that repository's URL in Umbrel's
+  App Store › Community App Stores.
+- **The image:** until the first release tag, the app pins an `edge` build by digest
+  (multi-arch, amd64 and arm64); its version is that build's commit. Images are published to
+  `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
+  `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
 
 ## Reaching the node from outside the house
 
