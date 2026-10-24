@@ -93,7 +93,8 @@ stored = subprocess.run(["sudo", "cat", str(saved)], capture_output=True, text=T
 assert stored.strip() == token, "the token is in the folder cloudflared reads"
 assert saved.stat().st_mode & 0o777 == 0o600, f"the token's mode is {oct(saved.stat().st_mode & 0o777)}, not 0600"
 # cloudflared runs as the node's uid and still reads the 0600 token: "Starting tunnel" names the
-# tunnel ID from the token; "Failed to read token file" would mean it can't
+# tunnel ID from the token. Before the token existed it exited with "Failed to read token file …
+# no such file or directory" and restarted (with backoff), so only "permission denied" counts.
 since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 subprocess.run(["docker", "compose", "-p", project, "restart", "cloudflared"], check=True, capture_output=True)
 
@@ -102,11 +103,15 @@ def cloudflared_log():
     out = subprocess.run(["docker", "compose", "-p", project, "logs", "--no-color", "--since", since, "cloudflared"],
                          capture_output=True, text=True)
     text = out.stdout + out.stderr
-    assert "Failed to read token file" not in text, "cloudflared can't read the token the node saved"
-    return "tunnelID=00000000-0000-4000-8000-000000000000" in text
+    if "tunnelID=00000000-0000-4000-8000-000000000000" in text:
+        return True
+    denied = [l for l in text.splitlines() if "Failed to read token file" in l and "permission denied" in l]
+    if denied:
+        raise SystemExit(f"FAIL: cloudflared can't read the token the node saved: {denied[0]}")
+    return False
 
 
-until("cloudflared to start with the saved token", cloudflared_log, timeout=90)
+until("cloudflared to start with the saved token", cloudflared_log, timeout=180)
 t = api("/v1/remote/tunnel")
 assert t["configured"] and t["restart_needed"], t
 assert t["restart_command"] is None and "Umbrel" in (t["restart_hint"] or ""), t
