@@ -85,6 +85,17 @@ impl NodeSources {
         }
     }
 
+    /// Whether any zone (or the default) has loudness on: only then is measuring worth it.
+    pub fn loudness_on(&self) -> bool {
+        self.default_cfg.loudness != pm_audio::Loudness::Off
+            || self
+                .dsp
+                .read()
+                .expect("dsp lock")
+                .values()
+                .any(|c| c.loudness != pm_audio::Loudness::Off)
+    }
+
     /// The pipeline settings in force for `output`.
     pub fn dsp_for(&self, output: &OutputId) -> PipelineConfig {
         self.dsp
@@ -611,12 +622,28 @@ impl SourceFactory for NodeSources {
             file_item.id = item.id;
             self.files.open(&file_item)?
         };
+        // Without ReplayGain tags, the node's own measurement stands in (loudness.rs); the
+        // loudness stage applies either only when the zone has loudness on.
+        let (mut track_db, mut album_db) = (track.replaygain_track_gain_db, track.replaygain_album_gain_db);
+        if track_db.is_none() {
+            let lib = self.library.lock().expect("library poisoned");
+            track_db = lib
+                .loudness(TrackId(id))
+                .ok()
+                .flatten()
+                .map(|(lufs, peak)| pm_audio::loudness::gain_db(lufs, peak));
+            if album_db.is_none() {
+                album_db = track
+                    .album
+                    .as_ref()
+                    .and_then(|a| a.id)
+                    .and_then(|a| lib.album_loudness(a).ok().flatten())
+                    .map(|(lufs, peak)| pm_audio::loudness::gain_db(lufs, peak));
+            }
+        }
         Ok(Box::new(pm_zones::WithReplayGain {
             inner,
-            gain: pm_zones::ReplayGain {
-                track_db: track.replaygain_track_gain_db,
-                album_db: track.replaygain_album_gain_db,
-            },
+            gain: pm_zones::ReplayGain { track_db, album_db },
         }))
     }
 

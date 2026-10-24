@@ -27,6 +27,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 
 pub mod accounts;
 pub mod add_music;
+pub mod announce;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bandcamp;
@@ -50,6 +51,7 @@ pub mod jellyfin;
 pub mod lastfm;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod loudness;
 pub mod lrclib;
 pub mod mbproxy;
 pub mod new_releases;
@@ -201,6 +203,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             axum::routing::delete(remove_item).put(move_item),
         )
         .route("/zones/{id}/transport", post(transport))
+        .route("/zones/{id}/announce", post(announce::announce))
         .route("/zones/{id}/volume", post(volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
@@ -229,6 +232,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/search", get(search))
+        .route("/library/loudness", get(loudness::get))
+        .route("/library/loudness/measure", post(loudness::measure))
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
@@ -1294,6 +1299,13 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
             .collect()
     };
+    // BluOS players only (Bluesound, NAD): BluOS groups them itself (pm_out_bluos)
+    let bluos: Vec<Arc<pm_out_bluos::BluosOutput>> = {
+        let map = s.bluos_players.lock().expect("bluos lock");
+        ids.iter()
+            .filter_map(|id| map.get(&OutputId(id.clone())).cloned())
+            .collect()
+    };
     if members.len() > 1 && heos.len() == ids.len() {
         let renderers: Vec<pm_out_upnp::Renderer> = heos.iter().map(|o| o.renderer().clone()).collect();
         let ok = tokio::task::spawn_blocking(move || {
@@ -1311,6 +1323,10 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
         let mut sonos = sonos;
         let lead = sonos.remove(0);
         Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+    } else if bluos.len() == ids.len() {
+        let mut bluos = bluos;
+        let lead = bluos.remove(0);
+        Arc::new(pm_out_bluos::BluosGroup::new(body.name.trim(), lead, bluos))
     } else if heos.len() == ids.len() {
         let mut heos = heos;
         let lead = heos.remove(0);
@@ -1467,6 +1483,7 @@ async fn volume(
     // A zone's volume limit (DSP settings) caps absolute requests.
     let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
     zone.set_volume(cap_volume(body.volume, limit)).await?;
+    announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1976,7 +1993,11 @@ async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -
 }
 
 async fn artists(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<pm_library::ArtistSummary>> {
-    Ok(Json(s.library.lock().expect("library poisoned").list_artists()?))
+    let lib = s.library.lock().expect("library poisoned");
+    let mut all = lib.list_artists()?;
+    // Songs without any artist, as "Unknown artist" at the end (its page is `/artist/lib-0`)
+    all.extend(lib.unknown_artist()?);
+    Ok(Json(all))
 }
 
 async fn artist(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<ArtistDetail> {
@@ -6920,6 +6941,7 @@ mod tests {
             {
                 let mut t = untagged_track(dir.path().join(format!("{i}.flac")), title, "Someone");
                 t.genres = vec![genre.to_string()];
+                t.duration_ms = Some(200_000);
                 t.album = Some(pm_model::Album {
                     id: None,
                     title: format!("Album {i}"),
@@ -7010,6 +7032,87 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         let (_, list) = call(&app, "GET", "/v1/smart", None).await;
         assert!(list.as_array().unwrap().is_empty());
+        // Seeds: the playlist grows from songs like the seed (same genre first), the seed itself first
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "sort": "title"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            titles(&r),
+            ["Calm", "Fast", "Faster"],
+            "the whole library is reachable through genre, then artist: {r}"
+        );
+        // Exclusions: a genre, recently played songs, a song
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"genres": ["ambient"]}}))).await;
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"played_within_days": 1}}))).await;
+        assert_eq!(titles(&r), ["Calm", "Fast"], "Faster was played today");
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "exclude": {"tracks": [ids[0]], "artists": ["nobody"]}}))).await;
+        assert_eq!(titles(&r), ["Fast", "Faster"]);
+        // Rules still narrow a seeded pool; a length in minutes caps it
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "rules": [{"field": "favourite", "value": true}]}))).await;
+        assert_eq!(titles(&r), ["Fast"]);
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"seeds": [{"kind": "track", "id": ids[1]}], "minutes": 1, "sort": "title"}))).await;
+        assert_eq!(
+            r["tracks"].as_array().unwrap().len(),
+            1,
+            "one song fills a minute when lengths are unknown: {r}"
+        );
+        assert_eq!(r["matched"], 3);
+        // An artist seed, and a bad kind
+        let aid = s
+            .library
+            .lock()
+            .unwrap()
+            .list_artists()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "Someone")
+            .unwrap()
+            .id;
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "artist", "id": aid}]})),
+        )
+        .await;
+        assert_eq!(titles(&r), ["Calm", "Fast", "Faster"]);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"seeds": [{"kind": "mood", "id": 1}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Saved with its seeds and exclusions
+        let (st, p) = call(&app, "POST", "/v1/smart", Some(serde_json::json!({"name": "Like Fast", "seeds": [{"kind": "track", "id": ids[1], "label": "Fast"}], "exclude": {"genres": ["ambient"]}, "minutes": 90}))).await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(
+            (
+                p["seeds"][0]["label"].clone(),
+                p["minutes"].clone(),
+                p["exclude"]["genres"][0].clone()
+            ),
+            (
+                serde_json::json!("Fast"),
+                serde_json::json!(90),
+                serde_json::json!("ambient")
+            )
+        );
+        let (_, t) = call(
+            &app,
+            "GET",
+            &format!("/v1/smart/{}/tracks", p["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+        assert_eq!(titles(&t), ["Fast", "Faster"]);
     }
 
     /// Lyrics from LRCLIB for a streamed song and for a library song without its own; a song
@@ -10641,5 +10744,223 @@ exec sleep 300
         }
         assert!(removed);
         assert_eq!(s.zones.list().len(), 1);
+    }
+
+    /// Announcements: a chime and a clip play instead of the music, then the zone goes back to the
+    /// same track at the same position, playing or paused as it was, with the queue as it was.
+    #[tokio::test]
+    async fn an_announcement_interrupts_and_the_zone_comes_back() {
+        use pm_zones::outputs::NullOutput;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/song.flac",
+            get({
+                let f = flac.clone();
+                move || {
+                    let f = f.clone();
+                    async move { f }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        // A zone on a real-time null output, so positions mean something
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let lib = Library::open(&db).unwrap();
+        let outputs = OutputRegistry::new();
+        outputs.register(Arc::new(NullOutput::realtime()));
+        let s = NodeState::new(
+            NodeSettings {
+                name: "test".into(),
+                version: "0".into(),
+                db_path: db,
+                scan_folders: vec![dir.path().join("music")],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            lib,
+            outputs,
+        );
+        *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
+        s.zones_for_all_outputs();
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let zone = |app: &Router| {
+            let app = app.clone();
+            let zid = zid.clone();
+            async move { call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1 }
+        };
+        // Two songs, the first playing for a while
+        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+            {"uri": format!("{base}/song.flac"), "title": "A", "artist": "Band"},
+            {"uri": format!("{base}/song.flac"), "title": "B", "artist": "Band"}], "replace": true, "play": true}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let mut z = serde_json::Value::Null;
+        for _ in 0..60 {
+            z = zone(&app).await;
+            if z["transport"] == "playing" && z["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= 1200 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let saved = z["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(saved >= 1200, "{z}");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "needs a uri or a chime");
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": "ftp://x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // The announcement: a chime, then the clip
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(
+                serde_json::json!({"uri": format!("{base}/song.flac"), "chime": true, "volume_percent": 60}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(
+            (
+                a["resumes"].clone(),
+                a["items"].clone(),
+                a["volume_applied"].clone()
+            ),
+            (
+                serde_json::json!(true),
+                serde_json::json!(2),
+                serde_json::json!(false)
+            ),
+            "no hardware volume on a null output: {a}"
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"chime": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "one at a time");
+        let mut seen_chime = false;
+        let mut seen_clip = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen_chime |= t == "Chime";
+            seen_clip |= t == "Announcement";
+            if seen_clip && t != "Announcement" && t != "Chime" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            seen_chime && seen_clip,
+            "chime {seen_chime}, clip {seen_clip}: {z}"
+        );
+        // Back on A, near where it was, playing; the queue as before
+        let mut back = serde_json::Value::Null;
+        for _ in 0..40 {
+            back = zone(&app).await;
+            if back["now_playing"]["item"]["title"] == "A"
+                && back["transport"] == "playing"
+                && back["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= saved
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(back["now_playing"]["item"]["title"], "A", "{back}");
+        assert_eq!(back["transport"], "playing");
+        let pos = back["now_playing"]["position_ms"].as_u64().unwrap();
+        assert!(
+            pos >= saved && pos < saved + 2500,
+            "position {pos} vs saved {saved}"
+        );
+        assert_eq!(
+            back["queue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["title"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        // Paused before: paused again after
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "pause"})),
+        )
+        .await;
+        let (st, a) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/announce"),
+            Some(serde_json::json!({"uri": format!("{base}/song.flac"), "title": "Doorbell"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        let mut seen = false;
+        for _ in 0..80 {
+            z = zone(&app).await;
+            let t = z["now_playing"]["item"]["title"].as_str().unwrap_or("");
+            seen |= t == "Doorbell";
+            if seen && t != "Doorbell" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(seen, "{z}");
+        for _ in 0..30 {
+            back = zone(&app).await;
+            if back["transport"] == "paused" && back["now_playing"]["item"]["title"] == "A" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            (
+                back["transport"].clone(),
+                back["now_playing"]["item"]["title"].clone()
+            ),
+            (serde_json::json!("paused"), serde_json::json!("A")),
+            "{back}"
+        );
+        assert_eq!(back["queue"].as_array().unwrap().len(), 2);
+        // The chime file is a WAV in the data dir
+        assert!(s.data_dir().join("announce/chime.wav").is_file());
     }
 }

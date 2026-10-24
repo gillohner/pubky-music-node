@@ -13,13 +13,25 @@ A zone's `output` id starts with its protocol, which says what kind of device it
 | `upnp:` | a DLNA renderer or smart TV, or a Sonos player (`GET /v1/outputs`: name and caps) | TV / speaker |
 | `sonos-group:` | Sonos players grouped Sonos's own way | speakers |
 | `heos-group:` | HEOS players (Denon, Marantz) grouped HEOS's own way | speakers |
+| `bluos:` | a BluOS player (Bluesound, NAD), found over mDNS; it fetches the zone's stream | speaker |
+| `bluos-group:` | BluOS players grouped BluOS's own way (the first leads) | speakers |
 | `cast:` | Chromecast, Google TV, Nest speaker; names ending "(Cast group)" are Cast groups | cast |
 | `airplay:` | an AirPlay receiver | AirPlay |
+| `mpd:` | an MPD server listed in `[outputs] mpd`; it plays the zone's stream | speaker |
 | `snapcast:` | a Snapcast group of players | speakers |
 | `slim:` | a Squeezebox or squeezelite player | speaker |
 | `pull:` | an HTTP stream anyone can fetch | link |
 | `group:` | a node group of several outputs | speakers |
 | `null` | the null output (testing) | — |
+
+MPD servers aren't discovered; list them in the node's config, and each one that answers becomes a
+zone (it needs MPD's curl input, which standard builds have). The node adds its stream to MPD's
+playlist and removes it again when the zone stops, so the rest of that playlist stays:
+
+```toml
+[outputs]
+mpd = ["192.168.1.40", "password@study.local:6600"]
+```
 
 "This device" is the web UI's browser zone (`browser`, local to the page). In the app it is also the
 built-in player's `net:` zone, named "<this computer> · <DAC>" on a desktop and "<phone model> ·

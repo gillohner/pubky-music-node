@@ -16,3 +16,7 @@ header:
   subscription and episode-action sync (providers/gpodder).
 - crates/pm-out-upnp/src/heos.rs: grouping HEOS players with the HEOS CLI's
   set_group, the leader playing for the group (providers/heos).
+- crates/pm-out-bluos/src/lib.rs: BluOS players through the BluOS API
+  (/Play?url=, /AddSlave, /RemoveSlave), found over mDNS _musc._tcp
+  (providers/bluesound). The same calls as pyblu
+  (https://github.com/LouisChrist/pyblu), MIT licence.

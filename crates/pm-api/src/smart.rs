@@ -1,5 +1,9 @@
 //! Smart playlists (UX review #9): songs chosen by rules over your library and your own Pubky
 //! tags, worked out each time they're opened or played, so they change as the library does.
+//! A playlist can also start from **seeds** (songs, artists, albums, genres; compare-music-assistant
+//! #13): the pool is then the songs the library finds similar to them (the "keep playing" logic),
+//! the rules narrow it, and a length in minutes and exclusions (artists, genres, songs, recently
+//! played) trim it.
 //! The rules are kept on the node (`smart.<id>`) and travel to the homeserver with the owner's
 //! other settings; no new public object type.
 
@@ -29,10 +33,51 @@ pub struct Rule {
     pub to: Option<serde_json::Value>,
 }
 
+/// Something a playlist grows from: `{kind: track|artist|album|genre, id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Seed {
+    pub kind: String,
+    pub id: i64,
+    /// What the page showed for it (kept for the editor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// What to leave out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Exclude {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<i64>,
+    /// Songs played within this many days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played_within_days: Option<u32>,
+}
+
+impl Exclude {
+    fn is_empty(&self) -> bool {
+        self.artists.is_empty()
+            && self.genres.is_empty()
+            && self.tracks.is_empty()
+            && self.played_within_days.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Rules {
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Start from these; the pool is then what the library finds similar to them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seeds: Vec<Seed>,
+    /// Stop adding songs once this many minutes are reached (after sorting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Exclude::is_empty")]
+    pub exclude: Exclude,
     /// `all` (default) or `any`.
     #[serde(default = "all")]
     pub matches: String,
@@ -144,8 +189,10 @@ fn matches(rule: &Rule, t: &Track, f: &Facts) -> bool {
 }
 
 fn check(r: &Rules) -> Result<(), ApiError> {
-    if r.rules.is_empty() {
-        return Err(ApiError::bad_request("A smart playlist needs at least one rule"));
+    if r.rules.is_empty() && r.seeds.is_empty() {
+        return Err(ApiError::bad_request(
+            "A smart playlist needs at least one rule or a seed",
+        ));
     }
     if r.rules.len() > 20 {
         return Err(ApiError::bad_request("Up to 20 rules"));
@@ -181,22 +228,49 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
         now: pm_library::db::now_unix(),
     };
     let any = r.matches == "any";
-    let mut picked: Vec<Track> = Vec::new();
-    let mut after = None;
-    loop {
-        let page = lib.list_tracks(after, 1000)?;
-        if page.is_empty() {
-            break;
-        }
-        after = page.last().and_then(|t| t.id);
-        for t in page {
-            let ok = if any {
-                r.rules.iter().any(|rule| matches(rule, &t, &facts))
+    let keep = |t: &Track| -> bool {
+        let rules_ok = r.rules.is_empty()
+            || if any {
+                r.rules.iter().any(|rule| matches(rule, t, &facts))
             } else {
-                r.rules.iter().all(|rule| matches(rule, &t, &facts))
+                r.rules.iter().all(|rule| matches(rule, t, &facts))
             };
-            if ok {
+        rules_ok && !excluded(&r.exclude, t, &facts)
+    };
+    let mut picked: Vec<Track> = Vec::new();
+    if r.seeds.is_empty() {
+        let mut after = None;
+        loop {
+            let page = lib.list_tracks(after, 1000)?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().and_then(|t| t.id);
+            for t in page {
+                if keep(&t) {
+                    picked.push(t);
+                }
+            }
+        }
+    } else {
+        // The pool: what the library finds similar to the seeds (the "keep playing" logic), the
+        // seeds themselves first; each seed contributes up to its share of the limit
+        let seed_tracks = seed_tracks(&lib, &r.seeds)?;
+        let per_seed = (r.limit.clamp(1, 1000) * 2 / seed_tracks.len().max(1)).clamp(5, 200);
+        let mut seen: HashSet<i64> = HashSet::new();
+        let mut consider = |t: Track, picked: &mut Vec<Track>| {
+            let Some(id) = t.id.map(|i| i.0) else { return };
+            if seen.insert(id) && !r.exclude.tracks.contains(&id) && keep(&t) {
                 picked.push(t);
+            }
+        };
+        for t in &seed_tracks {
+            consider(t.clone(), &mut picked);
+        }
+        let exclude_ids: Vec<pm_model::TrackId> = seed_tracks.iter().filter_map(|t| t.id).collect();
+        for seed in &seed_tracks {
+            for t in lib.similar_tracks(seed, &exclude_ids, per_seed)? {
+                consider(t, &mut picked);
             }
         }
     }
@@ -218,10 +292,79 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
         _ => picked.shuffle(&mut rand::thread_rng()),
     }
     picked.truncate(r.limit.clamp(1, 1000));
+    if let Some(min) = r.minutes.filter(|m| *m > 0) {
+        let budget = u64::from(min) * 60_000;
+        let mut total = 0u64;
+        let mut n = 0;
+        for t in &picked {
+            if total >= budget {
+                break;
+            }
+            total += t.duration_ms.unwrap_or(240_000);
+            n += 1;
+        }
+        picked.truncate(n.max(1));
+    }
     Ok(SmartResult {
         matched,
         tracks: picked,
     })
+}
+
+/// The songs behind the seeds: a song as itself; an artist's, an album's or a genre's songs (a
+/// handful of each, so one big artist doesn't drown the rest).
+fn seed_tracks(lib: &pm_library::Library, seeds: &[Seed]) -> Result<Vec<Track>, ApiError> {
+    let mut out = Vec::new();
+    for s in seeds {
+        match s.kind.as_str() {
+            "track" => out.extend(lib.get_track(pm_model::TrackId(s.id))?),
+            "artist" => out.extend(lib.artist_tracks(s.id)?.into_iter().take(8)),
+            "album" => out.extend(lib.album_tracks(s.id)?.into_iter().take(8)),
+            "genre" => out.extend(lib.genre_tracks(s.id, 8)?),
+            k => {
+                return Err(ApiError::bad_request(format!(
+                    "seed kind {k}: track, artist, album or genre"
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn excluded(x: &Exclude, t: &Track, facts: &Facts) -> bool {
+    if x.is_empty() {
+        return false;
+    }
+    if let Some(id) = t.id.map(|i| i.0) {
+        if x.tracks.contains(&id) {
+            return true;
+        }
+        if let Some(days) = x.played_within_days {
+            if let Some((_, last)) = facts.plays.get(&id) {
+                if *last > 0 && facts.now - *last < i64::from(days) * 86_400 {
+                    return true;
+                }
+            }
+        }
+    }
+    let lower = |v: &str| v.to_lowercase();
+    if x.artists.iter().any(|a| {
+        let a = lower(a);
+        t.artists.iter().any(|ta| lower(&ta.name) == a)
+            || t.album
+                .as_ref()
+                .and_then(|al| al.album_artist.as_deref())
+                .is_some_and(|aa| lower(aa) == a)
+    }) {
+        return true;
+    }
+    if x.genres.iter().any(|g| {
+        let g = lower(g);
+        t.genres.iter().any(|tg| lower(tg) == g)
+    }) {
+        return true;
+    }
+    false
 }
 
 fn load_all(s: &NodeState) -> Vec<SmartPlaylist> {
