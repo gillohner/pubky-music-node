@@ -341,3 +341,91 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 pub fn refused(why: &str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, format!("Not for listeners: {why}."))
 }
+
+/// A listener's JSON answers show a library file by its name, not by where the owner keeps it
+/// (`file.path` of every track, in lists, albums, search and item pages alike).
+pub async fn listener_response(resp: axum::response::Response) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let json = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !json {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "reading the answer failed").into_response();
+    };
+    let rewritten = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|mut v| {
+            hide_file_paths(&mut v)
+                .then(|| serde_json::to_vec(&v).ok())
+                .flatten()
+        });
+    let body = match rewritten {
+        Some(b) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            axum::body::Body::from(b)
+        }
+        None => bytes.into(),
+    };
+    axum::response::Response::from_parts(parts, body)
+}
+
+/// Replaces the folder part of every library file's path (an object with `path`, `container`
+/// and `size_bytes`, i.e. a `pm_model::AudioFile`) with nothing, leaving the file name. Whether
+/// anything changed.
+pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    match v {
+        Value::Object(o) => {
+            let mut changed = false;
+            if o.contains_key("container") && o.contains_key("size_bytes") {
+                if let Some(Value::String(p)) = o.get_mut("path") {
+                    let name = p.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                    if name != *p {
+                        *p = name;
+                        changed = true;
+                    }
+                }
+            }
+            for x in o.values_mut() {
+                changed |= hide_file_paths(x);
+            }
+            changed
+        }
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_file_paths(x) | c),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listeners_see_file_names_only() {
+        let mut v = serde_json::json!({"tracks": [
+            {"title": "A", "file": {"path": "/srv/music/Owner/A.flac", "container": "flac", "size_bytes": 1}},
+            {"title": "B", "file": {"path": "webdav://nas/share/B.mp3", "container": "mp3", "size_bytes": 2}},
+            {"title": "C", "file": {"path": "C:\\Music\\C.flac", "container": "flac", "size_bytes": 3}},
+            {"title": "D", "file": {"path": "D.flac", "container": "flac", "size_bytes": 4}},
+        ], "folder": {"path": "/srv/music"}});
+        assert!(hide_file_paths(&mut v));
+        let names: Vec<_> = v["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["file"]["path"].clone())
+            .collect();
+        assert_eq!(names, ["A.flac", "B.mp3", "C.flac", "D.flac"]);
+        // Only library files: another object's `path` stays
+        assert_eq!(v["folder"]["path"], "/srv/music");
+        let mut plain = serde_json::json!({"file": {"path": "x.flac", "container": "flac", "size_bytes": 1}});
+        assert!(!hide_file_paths(&mut plain));
+    }
+}

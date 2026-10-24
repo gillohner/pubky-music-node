@@ -8,32 +8,24 @@ nothing is built.
 DLNA. A partial LMS emulation would mostly serve third-party LMS apps, and each of those leans on a different
 corner of LMS. Revisit only if the owner wants a specific app, such as iPeng, Squeezer or Material.
 
-**One small fix is worth doing now, in mn-infra's Slimproto crate.** Today the node's LMS discovery responder
-says it serves LMS JSON-RPC when it doesn't. Details in "What happens today" below.
-
 ## What happens today
 
 The node is already a Slimproto **server**: squeezelite and Squeezebox hardware connect to it on TCP 3483, and
-its UDP 3483 discovery responder answers their broadcasts. The responder answers with these TLVs:
+its UDP 3483 discovery responder answers their broadcasts with these TLVs:
 
 - `NAME` (the node's name);
-- `JSON` (the node's web port);
 - `VERS 7.9.0`;
-- `UUID`.
+- `UUID` (`pubky-music-node`).
 
-`JSON` tells controllers where LMS JSON-RPC lives, but the node has no `/jsonrpc.js`. I checked this with a real
-Home Assistant (2026.10.2) against the dev node:
+It leaves out `JSON`, which tells controllers where LMS JSON-RPC lives, because the node serves no
+`/jsonrpc.js`. Until 2026-10-24 (PR #85) it did answer `JSON`, and Home Assistant's *Squeezebox (Lyrion Music
+Server)* flow listed "Pubky Music Node" and then failed with "cannot connect" (checked with Home Assistant
+2026.10.2). Now pysqueezebox, which that flow uses, drops the reply as not having enough information to connect,
+so the node isn't offered. LMS controllers that discover servers behave the same way. Squeezelite only needs the
+reply's source address, so it finds the node as before. (pysqueezebox also skips a server whose `UUID` is exactly
+`slimproto`, so the value stays `pubky-music-node`.)
 
-1. Settings › Add integration › *Squeezebox (Lyrion Music Server)* › discovery lists **"Pubky Music Node
-   (172.17.0.15)"**.
-2. Choosing it fails with **"cannot connect"**.
-
-The same happens in any LMS controller that discovers servers. Squeezelite itself only needs the server's
-address, so it doesn't care.
-
-**Suggested fix (mn-infra, `pm-out-slimproto`):** answer `NAME` (and `UUID`) but not `JSON`, while there is no
-JSON-RPC. Home Assistant's flow then no longer offers the node, and nothing that works today breaks. I haven't
-changed it: the crate is mn-infra's, and the suggestion is in QUESTIONS.md.
+The estimate below for real LMS compatibility stands.
 
 ## What Home Assistant's `squeezebox` integration needs
 

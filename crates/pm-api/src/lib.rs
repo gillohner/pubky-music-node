@@ -717,8 +717,15 @@ async fn auth(
     if let Some(why) = refusal {
         return accounts::refused(why).into_response();
     }
+    // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
+    let not_owner = caller.role != accounts::Role::Owner;
     req.extensions_mut().insert(caller);
-    next.run(req).await
+    let resp = next.run(req).await;
+    if not_owner {
+        accounts::listener_response(resp).await
+    } else {
+        resp
+    }
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).
