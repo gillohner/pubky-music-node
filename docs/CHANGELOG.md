@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **Which sources may be kept offline** (STEWARD-DOWNLOADS.md): every source says `downloadable` in `GET /v1/sources`, and the app shows "keep offline" only there.
+  - Yes: the Internet Archive, Jamendo, podcasts, and the person's own Plex, Jellyfin, OpenSubsonic and Audiobookshelf.
+  - No: TIDAL, Qobuz, Deezer, Spotify and YouTube in either mode (their terms allow offline copies only in their own apps), radio, SoundCloud, Audius and Bandcamp streams.
+  - The library, Bandcamp purchases included, is always downloadable. The policy is one list (`streaming::DOWNLOADABLE`); the owner can change it.
 - **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
   - Signing a device out records it as revoked, in the device list and in the node's own `<data>/vault/revoked.json`, so the node never trusts it again even if the device writes the list back. Its Pubky session stays valid until it is revoked in Pubky Ring, and the answer says so.
   - Every sign-in the node can read gets a new data key the device doesn't have. The answer lists those the node can't read, for another device to rotate, and those it couldn't rotate now (busy or unreadable), which don't stop the others. Every later write leaves a signed-out device out.
