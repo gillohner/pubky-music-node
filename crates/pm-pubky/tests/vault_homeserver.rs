@@ -75,7 +75,7 @@ async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pu
 
 fn sign_in(token: &str) -> SignIn {
     serde_json::from_value(json!({
-        "service": "tidal", "way": "built-in", "label": "listener@example.org",
+        "service": "tidal", "way": "app", "label": "listener@example.org",
         "tokens": {"access_token": token, "refresh_token": format!("{token}-refresh")},
         "expires_at": 1761403600, "settings": {"quality": "lossless"}
     }))
