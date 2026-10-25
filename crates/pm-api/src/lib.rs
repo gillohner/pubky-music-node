@@ -73,6 +73,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod shared;
+pub mod signin;
 pub mod smart;
 pub mod soloist;
 pub mod soundcloud;
@@ -344,6 +345,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route(
             "/sources/{source}/enabled",
             axum::routing::put(streaming::set_enabled),
+        )
+        .route(
+            "/sources/{source}/signin",
+            get(signin::get).put(signin::put).delete(signin::sign_out),
         )
         .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
@@ -10994,5 +10999,152 @@ exec sleep 300
         assert_eq!(back["queue"].as_array().unwrap().len(), 2);
         // The chime file is a WAV in the data dir
         assert!(s.data_dir().join("announce/chime.wav").is_file());
+    }
+
+    /// Sources › TIDAL › Sign in: the ways side by side, the picked one remembered, what is in
+    /// use (user and expiry, never a token) and one line for the overview
+    /// (STEWARD-CREDENTIALS-REUSE.md).
+    #[tokio::test]
+    async fn tidal_sign_in_lists_the_ways_and_remembers_the_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "own-app".into(),
+            client_secret: String::new(),
+            scopes: String::new(),
+        };
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+        // A test build has no built-in device client: the way is listed, not available
+        let (st, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        let ids: Vec<&str> = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["app", "device", "own"]);
+        assert_eq!(si["ways"][0]["recommended"], true, "{si}");
+        assert_eq!(
+            si["ways"][0]["label"], "Your own TIDAL app",
+            "no project app in a test build"
+        );
+        assert_eq!(si["ways"][0]["available"], true);
+        assert_eq!(si["ways"][1]["available"], false);
+        assert!(
+            si["ways"][1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("device client"),
+            "{si}"
+        );
+        assert_eq!(si["ways"][2]["available"], true);
+        assert!(si["in_use"].is_null(), "{si}");
+        assert_eq!(si["line"], "Not signed in");
+        assert_eq!(si["details"]["unofficial"]["enabled"], false);
+        assert_eq!(si["details"]["status"]["signed_in"], false);
+        // A way that is not available, or not a way, is refused in plain words
+        let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("device client"), "{r}");
+        let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "nope"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("one of app, device, own"),
+            "{r}"
+        );
+        // Your own device client makes the device way available, labelled as yours; picking it is
+        // what the Full tracks switch used to do
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "dev-1", "client_secret": "s"})),
+        )
+        .await;
+        let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["chosen"], "device");
+        assert_eq!(r["ways"][1]["label"], "Your own device client");
+        assert_eq!(r["details"]["unofficial"]["enabled"], true, "{r}");
+        assert!(r["in_use"].is_null(), "picked, not signed in yet: {r}");
+        // The approval stores a session: it is in use, shown by user and expiry, never the token
+        {
+            let lib = s.library.lock().unwrap();
+            let mut m = tidal_unofficial::load(&lib);
+            m.session = Some(tidal_unofficial::Session {
+                access_token: "secret-token".into(),
+                refresh_token: Some("secret-refresh".into()),
+                expires_at: 4_000_000_000,
+                user_id: Some("4242".into()),
+                country: "DE".into(),
+                session_id: None,
+            });
+            lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
+                .unwrap();
+        }
+        let (_, r) = call(&app, "GET", signin, None).await;
+        assert_eq!(r["in_use"]["way"], "device", "{r}");
+        assert_eq!(r["in_use"]["user"], "4242");
+        assert_eq!(r["in_use"]["expires_at"], 4_000_000_000i64);
+        assert_eq!(r["in_use"]["gives"], "full tracks");
+        assert_eq!(r["line"], "Your own device client · full tracks");
+        assert!(!r.to_string().contains("secret-"), "{r}");
+        // The Sources overview carries the same line; a source without a sign-in has none
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let row = |id: &str| {
+            srcs.as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row("tidal")["sign_in"], "Your own device client · full tracks");
+        assert_eq!(
+            row("tidal")["status"],
+            "ready",
+            "the device sign-in counts: {srcs}"
+        );
+        assert!(row("deezer").get("sign_in").is_none(), "{srcs}");
+        // Picking the app way turns the device way off (its session is kept until Sign out)
+        let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "app"}))).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["details"]["unofficial"]["enabled"], false);
+        assert!(r["in_use"].is_null(), "{r}");
+        assert_eq!(r["line"], "Not signed in");
+        // The official sign-in on a third-party tier app: previews
+        {
+            let lib = s.library.lock().unwrap();
+            let u = tidal::UserSession {
+                access_token: "secret-official".into(),
+                refresh_token: None,
+                expires_at: 4_000_000_000,
+                user_id: Some("7".into()),
+                country: Some("DE".into()),
+                scope: String::new(),
+                access_tier: Some("THIRD_PARTY".into()),
+            };
+            lib.set_setting("tidal.user", &serde_json::to_string(&u).unwrap())
+                .unwrap();
+        }
+        let (_, r) = call(&app, "GET", signin, None).await;
+        assert_eq!(r["in_use"]["way"], "app", "{r}");
+        assert_eq!(r["in_use"]["gives"], "30-second previews, your collection");
+        assert_eq!(r["line"], "Your own TIDAL app · previews");
+        assert!(!r.to_string().contains("secret-"), "{r}");
+        // Sign out of the way in use; the picked way stays remembered
+        let (st, r) = call(&app, "DELETE", signin, None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r["in_use"].is_null(), "{r}");
+        assert_eq!(r["chosen"], "app");
+        assert_eq!(r["line"], "Not signed in");
+        assert_eq!(r["details"]["status"]["signed_in"], false);
+        // Sources without ways, and unknown ones
+        let (st, _) = call(&app, "GET", "/v1/sources/deezer/signin", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(&app, "GET", "/v1/sources/nope/signin", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }

@@ -131,7 +131,7 @@ fn save(lib: &pm_library::Library, st: &ModeState) {
     let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
 }
 
-fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) -> ModeState {
+pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) -> ModeState {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib);
     f(&mut st);
@@ -266,7 +266,7 @@ pub struct PendingView {
     pub expires_at: i64,
 }
 
-fn view(s: &NodeState) -> UnofficialStatus {
+pub(crate) fn view(s: &NodeState) -> UnofficialStatus {
     let lib = s.library.lock().expect("library poisoned");
     let st = load(&lib);
     let client_from = client_of(&lib).map(|c| c.from);

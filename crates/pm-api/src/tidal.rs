@@ -683,7 +683,8 @@ impl StreamingService for Tidal {
     fn info(&self, s: &NodeState) -> SourceInfo {
         let status = if !creds(s).configured() {
             "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()
-        } else if load_user(s).is_some() {
+        } else if load_user(s).is_some() || crate::tidal_unofficial::streams(s) {
+            // Either sign-in counts: the device way plays full tracks on its own
             "ready".to_string()
         } else {
             "needs sign-in".to_string()
@@ -1244,6 +1245,177 @@ pub(crate) async fn logout(
 ) -> ApiResult<TidalStatus> {
     store_user(&s, None)?;
     Ok(Json(status_view(&s, &headers)))
+}
+
+// ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md) ----
+
+pub(crate) const WAY_APP: &str = "app";
+pub(crate) const WAY_DEVICE: &str = "device";
+pub(crate) const WAY_OWN: &str = "own";
+
+/// The official app's name by where it comes from: the project's built-in one or the node's own.
+fn app_label(c: &TidalCredentials) -> &'static str {
+    let project = crate::project_apps::tidal_client_id().is_some_and(|id| id == c.client_id);
+    if project {
+        "Pubky Music's app"
+    } else {
+        "Your own TIDAL app"
+    }
+}
+
+/// The ways to sign in to TIDAL, which one is in use, and the overview line. The two sessions
+/// (the official app's and the device client's) can both exist: the device one plays full
+/// tracks, the official one serves the collection and playlist imports.
+pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+    use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
+    let c = creds(s);
+    // One lock, every read at once (two locks in one expression deadlock)
+    let (user, mode, device_client, chosen, playback_limit) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (
+            load_user_from(&lib),
+            crate::tidal_unofficial::load(&lib),
+            crate::tidal_unofficial::client_of(&lib),
+            crate::signin::chosen(&lib, SOURCE_ID),
+            lib.get_setting(PLAYBACK_LIMIT_KEY).ok().flatten(),
+        )
+    };
+    let app = app_label(&c);
+    let device_label = match device_client.as_ref().map(|d| d.from.as_str()) {
+        Some("builtin") => "tidal-dl-ng's client",
+        _ => "Your own device client",
+    };
+    let ways = vec![
+        Way {
+            id: WAY_APP.into(),
+            label: app.into(),
+            note: "Official API, sign in at TIDAL in this browser: search, albums, your collection and playlists. TIDAL plays 30-second previews to apps on its third-party developer tier.".into(),
+            action: "browser".into(),
+            recommended: true,
+            available: c.configured(),
+            reason: (!c.configured()).then(|| {
+                "This build has no built-in TIDAL app; add [tidal] client_id to the node config."
+                    .to_string()
+            }),
+        },
+        Way {
+            id: WAY_DEVICE.into(),
+            label: device_label.into(),
+            note: "Full tracks (unofficial): the device sign-in tidal-dl-ng and python-tidal use, with a code you enter at link.tidal.com. TIDAL has not approved this for other apps and can stop it at any time.".into(),
+            action: "code".into(),
+            recommended: false,
+            available: device_client.is_some(),
+            reason: device_client.is_none().then(|| {
+                "This build has no built-in device client; enter one under Your own app.".to_string()
+            }),
+        },
+        Way {
+            id: WAY_OWN.into(),
+            label: "Your own app".into(),
+            note: "A TIDAL device client id and secret you are allowed to use, entered here; or your own app from developer.tidal.com in the node config ([tidal] client_id and client_secret).".into(),
+            action: "setup".into(),
+            recommended: false,
+            available: true,
+            reason: None,
+        },
+    ];
+    let previews = playback_limit.is_some()
+        || user.as_ref().and_then(|u| u.access_tier.as_deref()) == Some("THIRD_PARTY");
+    let device_session = mode.session.as_ref().filter(|_| mode.enabled);
+    let device_in_use = || {
+        device_session.map(|d| InUse {
+            way: WAY_DEVICE.into(),
+            label: device_label.into(),
+            user: d.user_id.clone(),
+            expires_at: Some(d.expires_at),
+            gives: Some("full tracks".into()),
+        })
+    };
+    let app_in_use = || {
+        user.as_ref().map(|u| InUse {
+            way: WAY_APP.into(),
+            label: app.into(),
+            user: u.user_id.clone(),
+            expires_at: Some(u.expires_at),
+            gives: Some(
+                if previews {
+                    "30-second previews, your collection"
+                } else {
+                    "the official API, your collection"
+                }
+                .into(),
+            ),
+        })
+    };
+    // The picked way's sign-in when it has one, else whichever exists (the device one streams)
+    let in_use = match chosen.as_deref() {
+        Some(WAY_APP) => app_in_use().or_else(device_in_use),
+        _ => device_in_use().or_else(app_in_use),
+    };
+    let line = match &in_use {
+        None => NOT_SIGNED_IN.to_string(),
+        Some(u) if u.way == WAY_DEVICE => format!(
+            "{} · full tracks{}",
+            u.label,
+            if user.is_some() {
+                format!("; collection through {app}")
+            } else {
+                String::new()
+            }
+        ),
+        Some(u) => format!(
+            "{} · {}",
+            u.label,
+            if previews { "previews" } else { "signed in" }
+        ),
+    };
+    let details = match headers {
+        Some(h) => serde_json::json!({
+            "status": status_view(s, h),
+            "unofficial": crate::tidal_unofficial::view(s),
+        }),
+        None => serde_json::Value::Null,
+    };
+    SignIn {
+        source: SOURCE_ID.into(),
+        ways,
+        chosen,
+        in_use,
+        line,
+        details,
+    }
+}
+
+/// A way was picked. The device way is what the Full tracks switch used to turn on; the app way
+/// turns it off again (its session is kept until Sign out). Setting up your own client changes
+/// nothing yet.
+pub(crate) fn way_chosen(s: &NodeState, way: &str) {
+    match way {
+        WAY_DEVICE => {
+            crate::tidal_unofficial::update(s, |st| {
+                st.enabled = true;
+                st.health = None;
+            });
+        }
+        WAY_APP => {
+            crate::tidal_unofficial::update(s, |st| st.enabled = false);
+        }
+        _ => {}
+    }
+}
+
+/// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
+pub(crate) fn sign_out_of(s: &NodeState, way: &str) -> Result<(), ApiError> {
+    if way == WAY_DEVICE {
+        crate::tidal_unofficial::update(s, |st| {
+            st.session = None;
+            st.login = None;
+            st.enabled = false;
+        });
+        Ok(())
+    } else {
+        store_user(s, None)
+    }
 }
 
 // ---- the user's collection and playlists ----

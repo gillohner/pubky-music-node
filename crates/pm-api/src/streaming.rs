@@ -109,6 +109,10 @@ pub struct SourceRow {
     pub features: Vec<&'static str>,
     /// One of [`STAGES`].
     pub stage: &'static str,
+    /// Which sign-in way is in use, in one line, for sources that sign people in
+    /// (`crate::signin`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<String>,
 }
 
 impl SourceRow {
@@ -118,6 +122,7 @@ impl SourceRow {
             enabled,
             features: svc.features().to_vec(),
             stage: svc.stage(),
+            sign_in: crate::signin::line(s, svc.id()),
         }
     }
 }
