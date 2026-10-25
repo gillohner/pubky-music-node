@@ -249,6 +249,10 @@ pub struct RecordPlay {
     pub track_id: i64,
     #[serde(default)]
     pub zone: Option<String>,
+    /// When it was played (Unix seconds), for plays made offline and sent later; now when absent.
+    /// A play sent twice (same track, zone and time) is recorded once.
+    #[serde(default)]
+    pub played_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

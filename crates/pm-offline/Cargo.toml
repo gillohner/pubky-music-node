@@ -1,0 +1,22 @@
+[package]
+name = "pm-offline"
+description = "Offline music for the apps: the index of what a phone or laptop keeps, its downloads, the queue of plays and favourites made offline, and a local server for the web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
+getrandom = "0.3"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

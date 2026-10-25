@@ -503,6 +503,9 @@
   // the shared library on the zones the owner opened and has nothing of the owner's
   const isListener = () => !!(state.me && state.me.role === 'listener');
   const isOwner = () => !isListener();
+  // Offline (the app's local server, pm-offline): only what this device keeps, played here
+  const isOffline = () => !!(state.info && state.info.offline);
+  const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z))];
@@ -1088,8 +1091,8 @@
   };
   const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['people', 'People', 'artist'], ['remote', 'Remote access', 'external'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
-  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music'];
-  const VIEW_LABELS = { 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
+  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
+  const VIEW_LABELS = { downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
@@ -1193,6 +1196,7 @@
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
+    if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
@@ -2058,7 +2062,8 @@
     let note = '';
     if (on) {
       const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
-      if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
+      if (isOffline()) note = ' (sent to your node when it is back)';
+      else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
       else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
     } else await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
     await loadFavourites();
@@ -3512,7 +3517,54 @@
           };
           break;
         }
+        case 'downloads': {
+          // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
+          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<p class="muted">Songs kept for offline listening live in the Pubky Music app on your phone or laptop.</p>'; break; }
+          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'downloads') return;
+          const byId = new Map(d.tracks.map((t) => [t.id, t]));
+          const songsOf = (ids) => ids.map((i) => byId.get(i)).filter(Boolean);
+          const facts = [d.synced_at ? `Last synced ${ago(d.synced_at)}` : '', fileSize(d.bytes), d.queued ? `${countOf(d.queued, 'plays and hearts')} to send when your node is back` : ''].filter(Boolean).join(' · ');
+          const head = pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
+          if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
+          const lists = {};
+          const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
+          const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div></button>`;
+          let html = head;
+          if (albumOpen) {
+            lists.album = songsOf(albumOpen.track_ids);
+            html += `<section class="section"><div class="section-head"><h3>${esc(albumOpen.title)}</h3><div class="actions"><button class="btn sm primary" data-dlplay="album">${icon('play')} Play</button><button class="btn sm ghost" data-dlclose>All downloads</button></div></div>${trackRows(lists.album, { showAlbum: false, numbers: 'track', key: 'album' })}</section>`;
+          }
+          if (d.albums.length) html += `<section class="section"><div class="section-head"><h3>Albums <span class="muted small">${d.albums.length}</span></h3></div><div class="grid">${d.albums.map(albumTile).join('')}</div></section>`;
+          const pls = d.playlists.filter((p) => p.track_ids.length);
+          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Playlists</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Playlist')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${p.track_ids.length} of ${p.total} songs on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
+          const favs = songsOf(d.favourites.track_ids || []);
+          if (favs.length) { lists.fav = favs; html += `<section class="section"><div class="section-head"><h3>Favourites</h3><button class="btn sm ghost" data-dlplay="fav">${icon('play')} Play</button></div>${trackRows(favs, { key: 'fav' })}</section>`; }
+          lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
+          html += `<section class="section"><div class="section-head"><h3>All songs <span class="muted small">${d.tracks.length}</span></h3><button class="btn sm ghost" data-dlplay="all">${icon('shuffle')} Shuffle</button></div>${trackRows(lists.all, { key: 'all' })}</section>`;
+          main.innerHTML = html;
+          bindTrackRows(main, lists);
+          $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
+          const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
+          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = k === 'all' ? [...lists.all].sort(() => Math.random() - 0.5) : lists[k]; if (ts && ts.length) playTracks(ts, true); });
+          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true));
+          break;
+        }
         case 'settings': {
+          if (isOffline()) {
+            const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+            const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+            const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
+            let d = null; try { d = await api('GET', '/offline'); } catch { d = null; }
+            if (state.view !== 'settings') return;
+            main.innerHTML = pageHead('Settings', null)
+              + group('This device', row('Offline', `Your node is out of reach, so this app plays what it keeps. It reconnects by itself.${d && d.synced_at ? ` Last synced ${esc(ago(d.synced_at))}.` : ''}`, '')
+                + (d ? row('Kept here', `${countOf(d.tracks.length, 'songs')} · ${esc(fileSize(d.bytes))}${d.queued ? ` · ${countOf(d.queued, 'plays and hearts')} waiting to be sent` : ''}`, '<button class="btn" data-view-go="downloads">Downloads</button>') : ''))
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${l}</button>`).join('')}</div>`));
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+            $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
+            break;
+          }
           if (isListener()) {
             const me = state.me; const info = state.info || await api('GET', '/info');
             const [who] = await loadProfiles([me.key]);
@@ -4088,6 +4140,18 @@
   const connect = async () => {
     try {
       state.info = await api('GET', '/info');
+      document.body.classList.toggle('offline', isOffline());
+      if (isOffline()) {
+        // The app's local server: no zones, no events; the app switches back when the node is reachable
+        setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
+        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        state.sources = []; state.zones = {}; state.zone = BROWSER;
+        loadFavourites().catch(() => { state.favUris = new Set(); });
+        renderZoneName(); renderBar();
+        link.loaded = true;
+        if (!OFFLINE_VIEWS.has(state.view)) setView('downloads', undefined, 'replace'); else render();
+        return;
+      }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}`);
       watchScan(state.info);
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }

@@ -1132,3 +1132,17 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .chip-sk::before { content: "\00a0"; }
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
+
+/* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
+.nav-item.nav-offline { display: none; }
+body.offline .nav-item.nav-offline { display: flex; }
+body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
+body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
+body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
+body.offline .track .lnk[data-act="song"], body.offline .track .lnk[data-act="tartist"] { pointer-events: none; }
+body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
+body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip,
+body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
+.dl-note { margin-top: 4px; }
+body.offline [data-bnav="home"] { display: none; }
+body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }

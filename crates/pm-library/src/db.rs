@@ -1562,6 +1562,20 @@ impl Library {
         Ok(conn.last_insert_rowid())
     }
 
+    /// A play at a given time (a device that played offline reports it later). Times in the
+    /// future count as now. The same track, zone and time again is not recorded twice (a resent
+    /// report); returns whether it was new.
+    pub fn record_play_at(&self, track: TrackId, zone: Option<&str>, at: i64) -> Result<bool> {
+        let at = at.min(now_unix());
+        let conn = self.lock();
+        let n = conn.execute(
+            "INSERT INTO plays(track_id, zone, played_at) SELECT ?1, ?2, ?3
+             WHERE NOT EXISTS (SELECT 1 FROM plays WHERE track_id = ?1 AND zone IS ?2 AND played_at = ?3)",
+            params![track.0, zone, at],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Newest plays first.
     pub fn history(&self, limit: u32) -> Result<Vec<PlayEntry>> {
         let conn = self.lock();
@@ -2923,6 +2937,23 @@ mod tests {
 mod play_history_tests {
     use super::tests_support::sample_track;
     use super::*;
+
+    #[test]
+    fn plays_made_offline_keep_their_time_and_count_once() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
+        let then = now_unix() - 3600;
+        assert!(lib.record_play_at(a, Some("app"), then).unwrap());
+        // The same report again (the answer got lost): not a second play
+        assert!(!lib.record_play_at(a, Some("app"), then).unwrap());
+        // From the future: now
+        assert!(lib.record_play_at(a, None, now_unix() + 86_400).unwrap());
+        let h = lib.history(10).unwrap();
+        assert_eq!(h.len(), 2);
+        assert!(h[0].played_at <= now_unix());
+        assert_eq!(h[1].played_at, then);
+        assert_eq!(lib.play_count(a).unwrap(), 2);
+    }
 
     #[test]
     fn plays_feed_history_and_counts() {
