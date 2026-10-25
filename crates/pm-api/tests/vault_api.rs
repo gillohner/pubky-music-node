@@ -266,6 +266,29 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pulled"], json!(["tidal"]), "{r}");
     assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal_v2));
+    // Node 2 refreshes the old account while node 1 signs in to another one: node 1's wins (the
+    // person just acted there), and reaches node 2
+    let tidal_v3 = r#"{"access_token":"at-3","refresh_token":"rt-3","user_id":"7","country":"CH"}"#;
+    set(&n2, "tidal.user", tidal_v3);
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pushed"], json!(["tidal"]), "{r}");
+    let other = r#"{"access_token":"other-1","refresh_token":"other-r","user_id":"9","country":"DE"}"#;
+    set(&n1, "tidal.user", other);
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(
+        r["pushed"],
+        json!(["tidal"]),
+        "node 1's new account goes out: {r}"
+    );
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(other));
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal"]), "{r}");
+    assert_eq!(get(&n2, "tidal.user").as_deref(), Some(other));
+    let tidal_v2 = other;
+    // Settings sees the last sync
+    let (_, v) = call(&a2, "GET", "/v1/vault").await;
+    assert_eq!(v["last_sync"]["report"]["pulled"], json!(["tidal"]), "{v}");
+    assert!(v["last_sync"]["at"].as_i64().is_some());
     // Nothing changed: nothing moves
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(

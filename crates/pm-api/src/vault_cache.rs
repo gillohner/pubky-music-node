@@ -296,7 +296,14 @@ pub async fn sync(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, Vault
             (Some(m), Some(o)) => {
                 let h = hash(&m);
                 let seen = seen.unwrap_or_default();
-                if o.sign_in.revision > seen.revision {
+                // Both changed since the last sync, for different accounts: the person just signed
+                // in again on this node, so its sign-in wins over the vault's refresh of the old one
+                let ours = sign_in_from(b.service, &m, b.settings[0]);
+                let another_account = matches!(
+                    (&ours.user, &o.sign_in.user), (Some(x), Some(y)) if x.id != y.id
+                );
+                let node_wins = h != seen.hash && another_account;
+                if o.sign_in.revision > seen.revision && !node_wins {
                     // The vault moved on (another device refreshed or signed in again): it wins
                     match node_settings(&o.sign_in) {
                         Some(settings) => {
@@ -371,11 +378,20 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
     });
 }
 
-/// Register, share, sync: one round of [`start`].
+/// Where the last pass's report is kept (`GET /v1/vault` shows it).
+pub const LAST_SYNC_KEY: &str = "vault.last_sync";
+
+/// Register, share, sync: one round of [`start`]. The report is kept for Settings.
 pub async fn pass(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
     vault.touch(&s.name).await?;
     vault.share_with_trusted().await?;
-    sync(s, vault).await
+    let r = sync(s, vault).await?;
+    let lib = s.library.lock().expect("library poisoned");
+    let _ = lib.set_setting(
+        LAST_SYNC_KEY,
+        &json!({ "at": pm_library::db::now_unix(), "report": &r }).to_string(),
+    );
+    Ok(r)
 }
 
 #[cfg(test)]

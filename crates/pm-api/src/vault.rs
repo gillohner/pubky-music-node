@@ -72,6 +72,10 @@ pub struct VaultView {
     pub registered: bool,
     pub devices: Vec<Device>,
     pub sign_ins: Vec<VaultSignIn>,
+    /// The node's last sync with the vault: `{at, report: {migrated, pushed, pulled, signed_out,
+    /// not_readable}}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<serde_json::Value>,
 }
 
 async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
@@ -105,6 +109,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
         registered,
         devices,
         sign_ins,
+        last_sync: None,
     })
 }
 
@@ -113,7 +118,16 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView>
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let vault = Vault::new(sync.session(), &secret).device("node");
-    Ok(Json(view(&vault).await.map_err(vault_error)?))
+    let mut v = view(&vault).await.map_err(vault_error)?;
+    v.last_sync = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(crate::vault_cache::LAST_SYNC_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok());
+    Ok(Json(v))
 }
 
 /// `POST /v1/vault/register`: put the node in the device list (under its name) and give the

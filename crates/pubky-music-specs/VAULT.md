@@ -153,6 +153,10 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    still yours.
 3. Refresh, write the blob, then delete the lease.
 
+Until every source refreshes through this protocol, a client other than the node uses the tokens it reads
+and leaves refreshing to the node (the node pushes its own refreshes within 15 minutes); otherwise two
+clients holding one rotating refresh token would invalidate each other.
+
 The lease is its own file, not a member of the blob: writing a lease into the blob would race with another
 client's token write and could undo a rotated refresh token.
 
