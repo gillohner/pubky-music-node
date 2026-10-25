@@ -106,6 +106,8 @@ pub struct Vault<'a> {
     session: &'a PubkySession,
     owner: String,
     secret: &'a ClientSecret,
+    /// The device kind this client signs into its proof (`node`, `desktop`, …).
+    device: Option<&'static str>,
 }
 
 impl<'a> Vault<'a> {
@@ -114,7 +116,15 @@ impl<'a> Vault<'a> {
             session,
             owner: session.public_key().z32(),
             secret,
+            device: None,
         }
+    }
+
+    /// The kind of device this client is, signed into its proof: `node`, `desktop`, `android`,
+    /// `ios`, `browser`.
+    pub fn device(mut self, kind: &'static str) -> Self {
+        self.device = Some(kind);
+        self
     }
 
     /// The owner's z32 key (bound into every envelope).
@@ -328,11 +338,25 @@ pub struct TrustedClient {
     pub grant_id: String,
 }
 
+struct Checked {
+    problem: Option<String>,
+    grant_id: Option<String>,
+    device: Option<String>,
+    grant_expires_at: Option<u64>,
+}
+
 /// An entry of the device list, as Settings shows it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
     pub client_key: String,
+    /// The signed name (a trusted entry's name equals the one in its proof).
     pub name: String,
+    /// The signed device kind: `node`, `desktop`, `android`, `ios`, `browser`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// When its Ring grant expires (Unix seconds): past it, the device needs approving again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_expires_at: Option<u64>,
     pub authorised_at: u64,
     pub last_used_at: u64,
     /// Its proof checks out (and it isn't signed out).
@@ -391,6 +415,14 @@ impl Vault<'_> {
 
     /// Why an entry isn't trusted (`None` = trusted), with its grant id when the proof verified.
     fn check(&self, ix: &Index, e: &ClientEntry) -> (Option<String>, Option<String>) {
+        let c = self.checked(ix, e);
+        (c.problem, c.grant_id)
+    }
+
+    /// An entry's proof checked: why it isn't trusted (`None` = trusted), its grant id, its signed
+    /// device kind, and when its grant expires (readable even when it has).
+    fn checked(&self, ix: &Index, e: &ClientEntry) -> Checked {
+        let grant_expires_at = pubky::GrantClaims::decode(&e.proof.grant).ok().map(|c| c.exp);
         let creds = pubky::custom_pop::CustomPop {
             grant: e.proof.grant.clone(),
             pop: e.proof.pop.clone(),
@@ -400,17 +432,34 @@ impl Vault<'_> {
             pubky::custom_pop::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
         ) {
             Ok(v) => v,
-            Err(err) => return (Some(err.to_string()), None),
+            Err(err) => {
+                return Checked {
+                    problem: Some(err.to_string()),
+                    grant_id: None,
+                    device: None,
+                    grant_expires_at,
+                }
+            }
         };
         let caps: Vec<String> = v.grant_claims().caps.iter().map(|c| c.to_string()).collect();
         let jti = v.grant_claims().jti.to_string();
-        if let Some(p) = spec::client_entry_problem(e, &self.owner, &v.identity().z32(), &caps, v.data()) {
-            return (Some(p.to_string()), Some(jti));
+        let device = v
+            .data()
+            .get("device")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let problem = spec::client_entry_problem(e, &self.owner, &v.identity().z32(), &caps, v.data())
+            .map(str::to_string)
+            .or_else(|| {
+                ix.is_revoked(&e.client_key, Some(&jti))
+                    .then(|| "signed out".to_string())
+            });
+        Checked {
+            problem,
+            grant_id: Some(jti),
+            device,
+            grant_expires_at,
         }
-        if ix.is_revoked(&e.client_key, Some(&jti)) {
-            return (Some("signed out".into()), Some(jti));
-        }
-        (None, Some(jti))
     }
 
     /// The device list's entries that may open the vault: their proofs verify with the pubky SDK,
@@ -438,10 +487,13 @@ impl Vault<'_> {
             .clients
             .iter()
             .map(|e| {
-                let (problem, _) = self.check(&ix, e);
+                let c = self.checked(&ix, e);
+                let problem = c.problem;
                 Device {
                     client_key: e.client_key.to_hex(),
                     name: e.name.clone(),
+                    device: c.device,
+                    grant_expires_at: c.grant_expires_at,
                     authorised_at: e.authorised_at,
                     last_used_at: e.last_used_at,
                     trusted: problem.is_none(),
@@ -457,8 +509,11 @@ impl Vault<'_> {
     pub async fn register(&self, name: &str) -> Result<()> {
         let grant = self.session.as_grant().ok_or(VaultStoreError::NoGrant)?;
         let me = self.client_key();
-        let data = serde_json::to_value(ClientProofData::new(me, name))
-            .map_err(|_| VaultError::Format("proof data"))?;
+        let mut proof_data = ClientProofData::new(me, name);
+        if let Some(kind) = self.device {
+            proof_data = proof_data.device(kind);
+        }
+        let data = serde_json::to_value(proof_data).map_err(|_| VaultError::Format("proof data"))?;
         let pop = grant
             .create_custom_pop(data)
             .await
