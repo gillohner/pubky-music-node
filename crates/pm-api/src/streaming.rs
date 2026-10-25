@@ -42,18 +42,18 @@ pub trait StreamingService: Send + Sync {
 }
 
 /// The sources whose tracks may be kept offline on a person's devices (STEWARD-DOWNLOADS.md; the
-/// owner can override): free and open catalogues whose terms allow copies (the Internet Archive,
-/// Jamendo), podcasts, and the person's own media servers (Plex, Jellyfin, OpenSubsonic,
-/// Audiobookshelf: their own files, like a mount).
+/// owner can override): the Internet Archive (its files are there to be copied), podcasts, and the
+/// person's own media servers (Plex, Jellyfin, OpenSubsonic, Audiobookshelf: their own files, like
+/// a mount).
 ///
 /// Not downloadable: the subscription services (TIDAL, Qobuz, Deezer, Spotify, YouTube),
 /// official or unofficial mode, since their terms allow offline copies only in their own apps. A
-/// stream that isn't encrypted is still not ours to keep. Also not: radio (live), SoundCloud and
-/// Audius (only some tracks allow it, per track), and Bandcamp streams. Bandcamp purchases become
+/// stream that isn't encrypted is still not ours to keep. Also not: radio (live); Jamendo, SoundCloud
+/// and Audius, where downloads are allowed per track (Jamendo's `audiodownload_allowed`), until
+/// their hits carry that flag; and Bandcamp streams. Bandcamp purchases become
 /// library files, and the library is always downloadable (`/v1/library/tracks/{id}/download`).
 pub const DOWNLOADABLE: &[&str] = &[
     "archive",
-    "jamendo",
     "podcasts",
     "plex",
     "jellyfin",
@@ -337,16 +337,16 @@ mod tests {
             "spotify",
             "youtube",
             "radio",
+            "jamendo",
             "soundcloud",
             "audius",
             "bandcamp",
         ] {
             assert!(!downloadable(id), "{id} must not be downloadable");
         }
-        // Free catalogues, podcasts, the person's own servers
+        // The Internet Archive, podcasts, the person's own servers
         for id in [
             "archive",
-            "jamendo",
             "podcasts",
             "plex",
             "jellyfin",
