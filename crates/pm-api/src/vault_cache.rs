@@ -357,7 +357,7 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
             }
             match crate::vault::client_secret(&s) {
                 Ok(secret) => {
-                    let vault = Vault::new(sync.session(), &secret);
+                    let vault = Vault::new(sync.session(), &secret).device("node");
                     match pass(&s, &vault).await {
                         Ok(r) if r != CacheReport::default() => tracing::info!(?r, "vault: sign-ins synced"),
                         Ok(_) => {}

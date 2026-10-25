@@ -188,7 +188,7 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
 pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate::vault_cache::CacheReport> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret);
+    let vault = Vault::new(sync.session(), &secret).device("node");
     Ok(Json(
         crate::vault_cache::pass(&s, &vault).await.map_err(vault_error)?,
     ))
