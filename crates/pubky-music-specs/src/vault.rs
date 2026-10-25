@@ -306,8 +306,11 @@ pub struct ClientProofData {
     pub v: u32,
     /// The client's X25519 public key.
     pub client_key: ClientKey,
-    /// The same name as in the index.
+    /// The same name as in the index (readers show this one: it is signed).
     pub name: String,
+    /// What it is, for the icon: `node`, `desktop`, `android`, `ios`, `browser`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 impl ClientProofData {
@@ -318,7 +321,14 @@ impl ClientProofData {
             v: VERSION,
             client_key,
             name: name.into(),
+            device: None,
         }
+    }
+
+    /// With the kind of device (`node`, `desktop`, `android`, `ios`, `browser`).
+    pub fn device(mut self, device: impl Into<String>) -> Self {
+        self.device = Some(device.into());
+        self
     }
 }
 
@@ -347,6 +357,9 @@ pub fn client_entry_problem(
     }
     if d.client_key != entry.client_key {
         return Some("the proof is for another key");
+    }
+    if d.name != entry.name {
+        return Some("its name was changed outside its proof");
     }
     None
 }

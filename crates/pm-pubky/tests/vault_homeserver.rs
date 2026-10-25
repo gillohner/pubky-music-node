@@ -193,8 +193,12 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
         .map(|(s, k)| Vault::new(s, k))
         .collect();
 
-    // A and B register; both are trusted and each sees the other
-    v[0].register("Living room node").await.unwrap();
+    // A (a node, signing its kind) and B register; both are trusted and each sees the other
+    Vault::new(&sessions[0], &keys[0])
+        .device("node")
+        .register("Living room node")
+        .await
+        .unwrap();
     v[1].register("Phone").await.unwrap();
     v[1].touch("Phone").await.unwrap(); // fresh: nothing to do
     let ix = v[0].index().await.unwrap();
@@ -204,6 +208,19 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
     let devices = v[0].devices().await.unwrap();
     assert!(devices.iter().all(|d| d.trusted), "{devices:?}");
     assert_eq!(devices.iter().filter(|d| d.this_node).count(), 1);
+    // The signed kind, and when each grant expires (for "approve again in Ring")
+    assert_eq!(devices[0].device.as_deref(), Some("node"));
+    assert_eq!(devices[1].device, None);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        devices
+            .iter()
+            .all(|d| d.grant_expires_at.is_some_and(|e| e > now)),
+        "{devices:?}"
+    );
 
     // A writes for every trusted device; B reads, C (not registered) can't
     v[0].write_shared("tidal", &sign_in("shared-1")).await.unwrap();
@@ -274,6 +291,36 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
         problem(&borrowed.client_key)
     );
     assert!(!problem(&garbage.client_key).is_empty());
+    // - a trusted entry renamed on the homeserver ("Your phone" on the laptop): its name isn't
+    //   the signed one, so it isn't trusted until the laptop registers again
+    let mut ix = v[0].index().await.unwrap();
+    let laptop = ix
+        .clients
+        .iter_mut()
+        .find(|e| e.client_key == v[2].client_key())
+        .unwrap();
+    laptop.name = "Your phone".into();
+    sessions[0]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let devices = v[0].devices().await.unwrap();
+    let renamed = devices
+        .iter()
+        .find(|d| d.client_key == v[2].client_key().to_hex())
+        .unwrap();
+    assert!(
+        !renamed.trusted && renamed.problem.as_deref().unwrap_or_default().contains("name"),
+        "{renamed:?}"
+    );
+    v[2].register("Laptop").await.unwrap();
+    assert!(v[0]
+        .devices()
+        .await
+        .unwrap()
+        .iter()
+        .all(|d| d.client_key != v[2].client_key().to_hex() || d.trusted));
     // ...and share_with_trusted gives them nothing
     assert_eq!(v[0].share_with_trusted().await.unwrap(), 0);
     let env = v[0].envelope("tidal").await.unwrap().unwrap();

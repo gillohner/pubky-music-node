@@ -398,6 +398,20 @@ fn a_client_proof_verifies_with_the_pubky_sdk() {
     let mut forged = entry.clone();
     forged.proof.grant = claims(&["/priv/:rw"]).sign(&Keypair::from_secret(&bytes(0xc0)), GRANT_JWS_TYP);
     assert!(check(&forged).is_err());
+    // Renamed outside its proof (the homeserver can't sign a new name)
+    let mut renamed = entry.clone();
+    renamed.name = "Your phone".into();
+    assert_eq!(
+        check(&renamed),
+        Err("its name was changed outside its proof".into())
+    );
+    // The device kind is signed data, and optional
+    let with_kind =
+        serde_json::to_value(ClientProofData::new(vault_key, "Living room node").device("node")).unwrap();
+    assert_eq!(with_kind["device"], "node");
+    let mut kinded = entry.clone();
+    kinded.proof.pop = pop(with_kind);
+    assert_eq!(check(&kinded), Ok(()));
     // Proof data of another kind
     let mut kind = entry.clone();
     kind.proof.pop = pop(json!({"kind": "paykit", "v": 1, "client_key": vault_key, "name": "x"}));
