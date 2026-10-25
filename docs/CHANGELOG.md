@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **One front for the quality choice, and `healthy` on the Sources list** (mn-sources, for STEWARD-UX-PLAYER-SOURCES.md §1–2): `GET/PUT /v1/sources/{source}/quality` lists what a source lets you choose (TIDAL max/high for full tracks, Qobuz max/cd/mp3 with MP3 320 new, librespot 320/160/96 kbps new, applying on a restart), what is chosen and when a change applies; sources that send one format say so. Every `/v1/sources` row carries `healthy` (switched on and working).
 - **One Sign in for TIDAL, the ways side by side** (mn-sources, STEWARD-CREDENTIALS-REUSE.md step 1): Sources › TIDAL shows one Sign in group: a short list of ways labelled by where they come from (Pubky Music's app · tidal-dl-ng's client, the device sign-in tidal-dl-ng and python-tidal use · Your own app), the recommended one preselected, one button; once signed in, one status line with Change way and Sign out. Picking tidal-dl-ng's client is what the Full tracks switch used to do; quality and health stay under it. The Sources list says per source which way is in use. `GET/PUT/DELETE /v1/sources/{source}/signin`; `/v1/sources` rows carry `sign_in`. Sign-ins imported from other apps on the machine and a pasted token follow as further ways.
 
 ## 2026-10-24

@@ -66,8 +66,42 @@ pub struct ModeState {
     /// The zone librespot plays into when `output` is `zone`.
     #[serde(default)]
     pub zone_id: String,
+    /// `320`, `160` or `96` kbps (Ogg Vorbis); empty = 320.
+    #[serde(default)]
+    pub bitrate: String,
     #[serde(default)]
     pub health: Option<Health>,
+}
+
+/// The bitrate librespot is asked for, as a `--bitrate` value.
+pub fn bitrate_of(st: &ModeState) -> &'static str {
+    match st.bitrate.as_str() {
+        "160" => "160",
+        "96" => "96",
+        _ => "320",
+    }
+}
+
+/// Pick the bitrate (`crate::quality`); librespot restarts when it runs.
+pub(crate) async fn set_bitrate(s: &Arc<NodeState>, bitrate: &str) {
+    let enabled = {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut st = load(&lib);
+        st.bitrate = bitrate.into();
+        save(&lib, &st);
+        st.enabled
+    };
+    if enabled && running() {
+        let s2 = s.clone();
+        tokio::task::spawn_blocking(move || {
+            stop();
+            if let Err(e) = start(&s2) {
+                tracing::info!("librespot can't start yet: {e}");
+            }
+        })
+        .await
+        .ok();
+    }
 }
 
 fn now() -> i64 {
@@ -581,7 +615,7 @@ fn watch(
             .arg("--device-type")
             .arg("speaker")
             .arg("--bitrate")
-            .arg("320")
+            .arg(bitrate_of(&load(&lib.lock().expect("library poisoned"))))
             .arg("--cache")
             .arg(dir.join("cache"))
             .arg("--system-cache")
@@ -774,6 +808,8 @@ pub struct LibrespotStatus {
     /// `local` or `zone`.
     pub output: String,
     pub zone_id: String,
+    /// `320`, `160` or `96` kbps.
+    pub bitrate: String,
     pub zones: Vec<ZoneChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub librespot: Option<Binary>,
@@ -857,6 +893,7 @@ async fn view(s: &NodeState) -> LibrespotStatus {
         },
         output,
         zone_id: st.zone_id.clone(),
+        bitrate: bitrate_of(&st).into(),
         zones,
         librespot,
         running,

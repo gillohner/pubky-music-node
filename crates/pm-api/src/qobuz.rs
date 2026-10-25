@@ -157,7 +157,7 @@ fn save(lib: &pm_library::Library, st: &ModeState) {
     let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
 }
 
-fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
+pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib);
     f(&mut st);
@@ -621,8 +621,8 @@ pub(crate) async fn put(
     Json(u): Json<QobuzUpdate>,
 ) -> ApiResult<QobuzStatus> {
     if let Some(q) = &u.quality {
-        if q != "max" && q != "cd" {
-            return Err(ApiError::bad_request("quality is max or cd"));
+        if q != "max" && q != "cd" && q != "mp3" {
+            return Err(ApiError::bad_request("quality is max, cd or mp3"));
         }
     }
     if let Some(id) = &u.app_id {
@@ -784,9 +784,11 @@ fn file_url_query(app: &App, id: &str, format_id: u32, ts: i64) -> Vec<(&'static
     ]
 }
 
-/// FLAC 24-bit up to 192 kHz (27) or 16-bit/44.1 kHz (6).
+/// FLAC 24-bit up to 192 kHz (27), 16-bit/44.1 kHz (6), or MP3 320 kbps (5).
 fn format_id(st: &ModeState) -> u32 {
-    if st.quality == "cd" || st.session.as_ref().is_some_and(|x| !x.hires) {
+    if st.quality == "mp3" {
+        5
+    } else if st.quality == "cd" || st.session.as_ref().is_some_and(|x| !x.hires) {
         6
     } else {
         27

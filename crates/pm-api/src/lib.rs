@@ -66,6 +66,7 @@ pub mod podcasts;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
+pub mod quality;
 pub mod radio;
 pub mod radio_sources;
 pub mod remote;
@@ -350,6 +351,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/{source}/signin",
             get(signin::get).put(signin::put).delete(signin::sign_out),
         )
+        .route("/sources/{source}/quality", get(quality::get).put(quality::put))
         .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
         .route("/sources/tidal/login", get(tidal::login))
@@ -11146,5 +11148,111 @@ exec sleep 300
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&app, "GET", "/v1/sources/nope/signin", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    /// One front for the quality choice (STEWARD-UX-PLAYER-SOURCES.md §2): the options, the pick
+    /// kept in the source's own state, no choice where the service sends one format; and
+    /// `healthy` on the Sources list.
+    #[tokio::test]
+    async fn quality_is_one_front_per_source_and_sources_say_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let ids = |q: &serde_json::Value| {
+            q["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let (st, q) = call(&app, "GET", "/v1/sources/tidal/quality", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(ids(&q), ["max", "high"]);
+        assert_eq!(q["current"], "max");
+        assert_eq!(q["applies"], "next_track");
+        assert!(q["note"].as_str().unwrap().contains("device sign-in"), "{q}");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/quality",
+            Some(serde_json::json!({"id": "high"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["current"], "high");
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["quality"], "high", "the source's own state follows");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/quality",
+            Some(serde_json::json!({"id": "lossy"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("max, high"), "{r}");
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/quality", None).await;
+        assert_eq!(ids(&q), ["max", "cd", "mp3"]);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/qobuz/quality",
+            Some(serde_json::json!({"id": "mp3"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, u) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert_eq!(u["quality"], "mp3");
+        let (_, q) = call(&app, "GET", "/v1/sources/spotify/quality", None).await;
+        assert_eq!(ids(&q), ["320", "160", "96"]);
+        assert_eq!(q["current"], "320");
+        assert_eq!(q["applies"], "now");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/quality",
+            Some(serde_json::json!({"id": "160"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["current"], "160");
+        let (_, l) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
+        assert_eq!(l["bitrate"], "160");
+        let (st, q) = call(&app, "GET", "/v1/sources/deezer/quality", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert!(q["options"].as_array().unwrap().is_empty());
+        assert!(q["note"].as_str().unwrap().contains("previews"), "{q}");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/deezer/quality",
+            Some(serde_json::json!({"id": "x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&app, "GET", "/v1/sources/nope/quality", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // healthy: on and working
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let row = |srcs: &serde_json::Value, id: &str| {
+            srcs.as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row(&srcs, "deezer")["healthy"], true, "{srcs}");
+        assert_eq!(row(&srcs, "tidal")["healthy"], false, "not signed in: {srcs}");
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/deezer/enabled",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(row(&srcs, "deezer")["healthy"], false, "off: {srcs}");
     }
 }

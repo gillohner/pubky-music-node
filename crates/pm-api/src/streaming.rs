@@ -113,16 +113,29 @@ pub struct SourceRow {
     /// (`crate::signin`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<String>,
+    /// Switched on and working: configured or signed in, and the last check OK (the status
+    /// says `ready`, `signed in`, `previews`, `connected` or `browser`).
+    pub healthy: bool,
+}
+
+/// Whether a source's `status` is a working one.
+pub fn healthy_status(status: &str) -> bool {
+    ["ready", "signed in", "previews", "connected", "browser"]
+        .iter()
+        .any(|p| status.starts_with(p))
 }
 
 impl SourceRow {
     pub(crate) fn of(svc: &dyn StreamingService, s: &NodeState, enabled: bool) -> Self {
+        let info = svc.info(s);
+        let healthy = enabled && healthy_status(&info.status);
         Self {
-            info: svc.info(s),
+            info,
             enabled,
             features: svc.features().to_vec(),
             stage: svc.stage(),
             sign_in: crate::signin::line(s, svc.id()),
+            healthy,
         }
     }
 }
