@@ -6,6 +6,7 @@ One binary, three shapes. The homeserver is always a separate Pubky service the 
 
 ```sh
 sudo apt install libasound2-dev          # build only
+sudo apt install ffmpeg                  # smaller copies for phones (downloads); optional
 cargo build --release -p pm-node --features alsa
 pm-node config > node.toml               # edit: data_dir, [api] token (contact and folders can also be set later in Settings)
 pm-node -c node.toml scan
@@ -17,6 +18,8 @@ Free the DAC from PipeWire/PulseAudio on desktop systems (see `docs/HARDWARE-TES
 ## Docker
 
 `Dockerfile` builds the node with ALSA and runs it as an unprivileged user in the `audio` group.
+It includes ffmpeg (Debian's 5.1 series, pinned by `FFMPEG_VERSION`), so phones and laptops can
+download smaller copies (AAC, MP3, Opus) of songs, not only the originals.
 The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (see
 `deploy/docker/entrypoint.sh`).
 
@@ -114,7 +117,7 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 1. **PostgreSQL, users and folders**
 
    ```sh
-   sudo apt install postgresql openssl
+   sudo apt install postgresql openssl ffmpeg   # ffmpeg: smaller copies for phones (downloads)
    DB_PASSWORD=$(openssl rand -hex 24); ADMIN_PASSWORD=$(openssl rand -hex 24); TOKEN=$(openssl rand -hex 32)
    sudo -u postgres psql -c "CREATE ROLE pubky LOGIN PASSWORD '$DB_PASSWORD'" -c "CREATE DATABASE pubky_homeserver OWNER pubky"
    sudo groupadd --system pubky-files   # the homeserver's stored files, readable by the node
@@ -255,6 +258,8 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
   `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
   `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
 
+- **Downloads:** the image includes ffmpeg, so phones can keep smaller copies (AAC, MP3, Opus)
+  as well as the originals.
 ## Reaching the node from outside the house
 
 **Without any of the below:** once the node is signed in with Pubky Ring, the Pubky Music app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.

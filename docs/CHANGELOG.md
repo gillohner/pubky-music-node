@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.
+  - CI checks the image's encoders and transcodes a real file to each format.
 - **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
   - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
   - Listeners may download what they may play. The homeserver's files come through the node.
