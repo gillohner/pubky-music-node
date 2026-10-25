@@ -15,8 +15,11 @@
 //! the MusicBrainz URL first, then the ISRC URL, then the service URL. This crate does not pick
 //! them; it only requires that a review or listen names one.
 //!
-//! The crate depends on nothing but the social specs and serde, so it can live in its own
-//! repository like the Mapky and Eventky specs.
+//! The sources vault (`VAULT.md`), behind the `vault` feature: streaming sign-ins on the person's
+//! homeserver, encrypted to every client they authorised.
+//!
+//! Without features the crate depends on nothing but the social specs and serde, so it can live in
+//! its own repository like the Mapky and Eventky specs.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -24,6 +27,8 @@
 mod content;
 pub mod ext;
 mod kind;
+#[cfg(feature = "vault")]
+pub mod vault;
 
 pub use content::{
     is_service_name, MusicListenContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS,
