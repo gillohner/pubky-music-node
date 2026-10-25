@@ -787,7 +787,7 @@ pub struct LoginFlow {
 /// public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
 /// external links today), and the v1 social and music namespaces it moves to
 /// (`social/v1`, `music/v1`; STEWARD-PLAN step 3), so one approval covers both.
-pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
@@ -805,10 +805,13 @@ pub fn missing_capabilities<S: AsRef<str>>(granted: &[S], wanted: &str) -> Vec<S
             let Some((scope, actions)) = split(w) else {
                 return false;
             };
+            // The sources vault counts only when named itself (VAULT.md): a wider grant doesn't
+            // give a client the person's streaming sign-ins
+            let exact_only = scope == pubky_music_specs::vault::VAULT_DIR;
             !have.iter().any(|(hs, ha)| {
                 let parent =
-                    hs == "/" || (hs.ends_with('/') && scope.starts_with(hs.as_str())) || *hs == scope;
-                parent && actions.chars().all(|a| ha.contains(a))
+                    !exact_only && (hs == "/" || (hs.ends_with('/') && scope.starts_with(hs.as_str())));
+                (parent || *hs == scope) && actions.chars().all(|a| ha.contains(a))
             })
         })
         .map(|w| w.trim().to_string())
@@ -934,7 +937,15 @@ mod capability_tests {
         assert!(!missing.contains(&"/priv/pubky.app/:rw".to_string()));
         let full: Vec<&str> = LOGIN_CAPABILITIES.split(',').collect();
         assert!(missing_capabilities(&full, LOGIN_CAPABILITIES).is_empty());
-        assert!(missing_capabilities(&["/:rw"], LOGIN_CAPABILITIES).is_empty());
+        // Everything but the sources vault, which must be named itself (VAULT.md)
+        assert_eq!(
+            missing_capabilities(&["/:rw"], LOGIN_CAPABILITIES),
+            vec!["/priv/pubky.music/vault/:rw".to_string()]
+        );
+        assert!(
+            missing.contains(&"/priv/pubky.music/vault/:rw".to_string()),
+            "a session from before the vault asks again"
+        );
         assert_eq!(
             missing_capabilities(&["/pub/social/v1/:r"], "/pub/social/v1/:rw"),
             vec!["/pub/social/v1/:rw".to_string()],
