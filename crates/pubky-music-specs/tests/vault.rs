@@ -279,14 +279,17 @@ fn paths_and_capabilities() {
         assert!(blob_path(bad).is_none(), "{bad}");
     }
     for ok in [
-        "/:rw",
-        "/priv/:rw",
-        "/priv/pubky.music/:rwe",
+        "/priv/pubky.music/vault/:rw",
         "/priv/pubky.music/vault/:wr",
+        "/priv/pubky.music/vault/:rwe",
     ] {
         assert!(covers_vault(ok), "{ok}");
     }
+    // An ancestor isn't the vault: Ring showed the person "all your storage", not the sign-ins
     for no in [
+        "/:rw",
+        "/priv/:rw",
+        "/priv/pubky.music/:rwe",
         "/priv/pubky.music/vault/:r",
         "/priv/pubky.music/vault/tidal.json:rw",
         "/pub/:rw",
@@ -361,7 +364,7 @@ fn a_client_proof_verifies_with_the_pubky_sdk() {
         authorised_at: now,
         last_used_at: now,
         proof: Proof {
-            grant: claims(&["/priv/pubky.music/:rw"]).sign(&identity, GRANT_JWS_TYP),
+            grant: claims(&[VAULT_CAPABILITY]).sign(&identity, GRANT_JWS_TYP),
             pop: pop(data),
         },
         extra: Default::default(),
@@ -393,7 +396,11 @@ fn a_client_proof_verifies_with_the_pubky_sdk() {
     // A grant without the vault
     let mut narrow = entry.clone();
     narrow.proof.grant = claims(&["/pub/pubky.music/:rw"]).sign(&identity, GRANT_JWS_TYP);
-    assert!(check(&narrow).unwrap_err().contains("doesn't cover the vault"));
+    assert!(check(&narrow).unwrap_err().contains("doesn't name the vault"));
+    // A broad grant (all storage) is not a grant for the sign-ins
+    let mut broad = entry.clone();
+    broad.proof.grant = claims(&["/:rw"]).sign(&identity, GRANT_JWS_TYP);
+    assert!(check(&broad).unwrap_err().contains("doesn't name the vault"));
     // A grant signed by someone else, claiming to be the owner: the SDK refuses it
     let mut forged = entry.clone();
     forged.proof.grant = claims(&["/priv/:rw"]).sign(&Keypair::from_secret(&bytes(0xc0)), GRANT_JWS_TYP);
