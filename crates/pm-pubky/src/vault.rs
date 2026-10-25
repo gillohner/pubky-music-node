@@ -31,6 +31,8 @@ pub enum VaultStoreError {
     NoGrant,
     #[error("another device is changing {0}; try again in a moment")]
     Busy(String),
+    #[error("the service refused the refresh: {0}")]
+    Refresh(String),
 }
 
 impl From<pubky::Error> for VaultStoreError {
@@ -106,6 +108,8 @@ pub struct Vault<'a> {
     session: &'a PubkySession,
     owner: String,
     secret: &'a ClientSecret,
+    /// Coordinate refreshes with the lease file even where locks work (tests of the fallback).
+    lease_only: bool,
 }
 
 impl<'a> Vault<'a> {
@@ -114,7 +118,14 @@ impl<'a> Vault<'a> {
             session,
             owner: session.public_key().z32(),
             secret,
+            lease_only: false,
         }
+    }
+
+    /// Coordinate refreshes with the lease file only, as on a homeserver without locks (tests).
+    pub fn lease_only(mut self) -> Self {
+        self.lease_only = true;
+        self
     }
 
     /// The owner's z32 key (bound into every envelope).
@@ -567,6 +578,245 @@ impl Vault<'_> {
         }
         Ok(changed)
     }
+}
+
+/// How long a lease writer waits before reading its lease back (VAULT.md: 2 s).
+const LEASE_SETTLE: Duration = Duration::from_secs(2);
+/// How often a held lock is renewed while the service refreshes (a third of its life).
+const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
+/// How long a client waits for another one's refresh before giving up.
+const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
+
+/// What [`Vault::refresh`] did.
+#[derive(Debug)]
+pub enum Refreshed {
+    /// The tokens didn't need refreshing.
+    Current(SignIn),
+    /// Another client had refreshed them meanwhile: read under the lock, used as they are.
+    ByAnother(SignIn),
+    /// This client refreshed them and wrote them back.
+    ByUs(SignIn),
+}
+
+impl Refreshed {
+    pub fn sign_in(&self) -> &SignIn {
+        match self {
+            Self::Current(s) | Self::ByAnother(s) | Self::ByUs(s) => s,
+        }
+    }
+}
+
+/// The service refused the refresh (`String`: its words, never a token).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct RefreshFailed(pub String);
+
+impl Vault<'_> {
+    /// Refresh a service's tokens without racing the person's other clients (VAULT.md, "Refreshing
+    /// a token"). `refresh` gets the sign-in just read under the lock and returns it with new
+    /// tokens and `expires_at`; it's called only when the tokens are due (or `force`, after the
+    /// service refused them) and nobody refreshed them meanwhile. It never sees a token that wasn't
+    /// read under the lock (or the lease).
+    pub async fn refresh<F, Fut>(&self, service: &str, force: bool, refresh: F) -> Result<Refreshed>
+    where
+        F: FnOnce(SignIn) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<SignIn, RefreshFailed>>,
+    {
+        let path = Self::blob_path(service)?;
+        let Some(first) = self.read(service).await? else {
+            return Err(VaultError::Format("no sign-in to refresh").into());
+        };
+        if !force && !first.sign_in.needs_refresh(now()) {
+            return Ok(Refreshed::Current(first.sign_in));
+        }
+        let seen = first.sign_in.revision;
+        // Somebody else's fresh copy, read without the lock: good enough to use.
+        let by_another = |o: &Opened| o.sign_in.revision > seen && !o.sign_in.needs_refresh(now());
+        let deadline = tokio::time::Instant::now() + WAIT_FOR_OTHERS;
+        let held = loop {
+            let held = if self.lease_only {
+                Locked { lock: None }
+            } else {
+                match self.lock(&path).await {
+                    Ok(h) => h,
+                    Err(VaultStoreError::Busy(_)) if tokio::time::Instant::now() < deadline => {
+                        // Another client is refreshing: read again shortly
+                        tokio::time::sleep(Duration::from_millis(1000 + jitter_ms(1000))).await;
+                        if let Some(o) = self.read(service).await? {
+                            if by_another(&o) {
+                                return Ok(Refreshed::ByAnother(o.sign_in));
+                            }
+                        }
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            if held.lock.is_some() {
+                break held;
+            }
+            // No lock (405, or lease-only): the lease file
+            match self.take_lease(service).await? {
+                true => break held,
+                false if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(1000 + jitter_ms(1000))).await;
+                    if let Some(o) = self.read(service).await? {
+                        if by_another(&o) {
+                            return Ok(Refreshed::ByAnother(o.sign_in));
+                        }
+                    }
+                }
+                false => return Err(VaultStoreError::Busy(path.clone())),
+            }
+        };
+        self.refresh_held(held, service, &path, seen, refresh).await
+    }
+
+    async fn refresh_held<F, Fut>(
+        &self,
+        mut held: Locked,
+        service: &str,
+        path: &str,
+        seen: u64,
+        refresh: F,
+    ) -> Result<Refreshed>
+    where
+        F: FnOnce(SignIn) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<SignIn, RefreshFailed>>,
+    {
+        let leased = held.lock.is_none();
+        let release = |held: Locked| async move {
+            if leased {
+                self.drop_lease(service).await;
+            } else {
+                self.unlock(held).await;
+            }
+        };
+        // Read again under the lock: another client may have refreshed meanwhile
+        let cur = match self.read(service).await {
+            Ok(Some(o)) => o,
+            Ok(None) => {
+                release(held).await;
+                return Err(VaultError::Format("the sign-in was removed meanwhile").into());
+            }
+            Err(e) => {
+                release(held).await;
+                return Err(e);
+            }
+        };
+        // Even when the service refused our copy (force), a newer one another client wrote is the
+        // one to try first
+        if cur.sign_in.revision > seen && !cur.sign_in.needs_refresh(now()) {
+            release(held).await;
+            return Ok(Refreshed::ByAnother(cur.sign_in));
+        }
+        let recipients = cur.recipients.clone();
+        // The service call, with the lock renewed while it runs
+        let call = refresh(cur.sign_in.clone());
+        tokio::pin!(call);
+        let mut renew = tokio::time::interval(RENEW_EVERY);
+        renew.tick().await;
+        let mut lost = false;
+        let outcome = loop {
+            tokio::select! {
+                out = &mut call => break out,
+                _ = renew.tick() => {
+                    if let Some(l) = held.lock.as_mut() {
+                        if self.session.storage().refresh_lock(l, LOCK_FOR).await.is_err() {
+                            lost = true;
+                        }
+                    }
+                }
+            }
+        };
+        let mut fresh = match outcome {
+            Ok(s) => s,
+            Err(e) => {
+                release(held).await;
+                return Err(VaultStoreError::Refresh(e.0));
+            }
+        };
+        fresh.last_refresh = Some(spec::LastRefresh {
+            client: self.client_key(),
+            at: now(),
+        });
+        if lost {
+            // The lock lapsed while the service answered: take it again and write only if nobody
+            // wrote meanwhile; otherwise theirs stands and ours is dropped.
+            release(held).await;
+            held = self.lock(path).await?;
+            match self.read(service).await {
+                Ok(Some(o)) if o.sign_in.revision == cur.sign_in.revision => {}
+                Ok(Some(o)) => {
+                    self.unlock(held).await;
+                    return Ok(Refreshed::ByAnother(o.sign_in));
+                }
+                Ok(None) | Err(_) => {
+                    self.unlock(held).await;
+                    return Err(VaultStoreError::Busy(path.to_string()));
+                }
+            }
+        }
+        let others: Vec<ClientKey> = recipients
+            .into_iter()
+            .filter(|k| *k != self.client_key())
+            .collect();
+        let r = self.write_held(&held, service, path, &fresh, &others).await;
+        release(held).await;
+        let revision = r?;
+        fresh.revision = revision;
+        fresh.service = service.to_string();
+        Ok(Refreshed::ByUs(fresh))
+    }
+
+    /// Take the refresh lease (VAULT.md): `false` while another client's lease is live or ours
+    /// didn't stick.
+    async fn take_lease(&self, service: &str) -> Result<bool> {
+        let path =
+            spec::lease_path(service).ok_or_else(|| VaultStoreError::BadService(service.to_string()))?;
+        let me = self.client_key();
+        let read = || async {
+            Ok::<Option<spec::Lease>, VaultStoreError>(
+                self.read_bytes(&path, 1024)
+                    .await?
+                    .and_then(|b| serde_json::from_slice::<spec::Lease>(&b).ok()),
+            )
+        };
+        if let Some(l) = read().await? {
+            if l.client != me && l.until > now() {
+                return Ok(false);
+            }
+        }
+        let lease = spec::Lease {
+            client: me,
+            until: now() + spec::LOCK_SECONDS,
+        };
+        let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
+        self.session.storage().put(path.as_str(), body).await?;
+        tokio::time::sleep(LEASE_SETTLE).await;
+        Ok(read().await?.is_some_and(|l| l.client == me))
+    }
+
+    /// Give the lease back (only ours).
+    async fn drop_lease(&self, service: &str) {
+        let Some(path) = spec::lease_path(service) else {
+            return;
+        };
+        if let Ok(Some(b)) = self.read_bytes(&path, 1024).await {
+            if serde_json::from_slice::<spec::Lease>(&b).is_ok_and(|l| l.client == self.client_key()) {
+                let _ = self.session.storage().delete(path.as_str()).await;
+            }
+        }
+    }
+}
+
+/// 0..max milliseconds, so clients that collide don't collide again (not secret: the clock's
+/// nanoseconds are enough).
+fn jitter_ms(max: u64) -> u64 {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    n % max.max(1)
 }
 
 #[cfg(test)]

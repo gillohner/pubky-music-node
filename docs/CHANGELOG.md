@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **Vault refreshes don't race** (STEWARD-VAULT.md item 4). `Vault::refresh` takes the homeserver's WebDAV lock on the sign-in (30 s, renewed every 10 s while the service answers) and reads it again. If another client already refreshed it, it uses that; otherwise it refreshes the token it just read and writes it back with `last_refresh`.
+  - Where locks are refused it uses the lease file instead.
+  - A refused refresh is never written over the vault.
+  - Tested on a real homeserver against a fake service that rotates refresh tokens: two clients refresh at once, under the lock and with the lease file, and the service is asked once. A 12-second refresh keeps its lock.
 - **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
   - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
   - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.

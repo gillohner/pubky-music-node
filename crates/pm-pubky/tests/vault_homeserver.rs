@@ -317,3 +317,131 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
         "shared-2"
     );
 }
+
+/// A service that rotates refresh tokens, as TIDAL and Spotify do: each refresh token works once,
+/// so two clients refreshing the same copy would leave one of them signed out.
+struct RotatingService {
+    valid: std::sync::Mutex<String>,
+    calls: std::sync::atomic::AtomicUsize,
+    takes: std::time::Duration,
+}
+
+impl RotatingService {
+    fn new(first: &str, takes: std::time::Duration) -> Self {
+        Self {
+            valid: std::sync::Mutex::new(first.into()),
+            calls: Default::default(),
+            takes,
+        }
+    }
+
+    async fn refresh(&self, mut s: SignIn) -> Result<SignIn, pm_pubky::vault::RefreshFailed> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        tokio::time::sleep(self.takes).await;
+        let mut valid = self.valid.lock().unwrap();
+        if s.tokens["refresh_token"].as_str() != Some(valid.as_str()) {
+            return Err(pm_pubky::vault::RefreshFailed("invalid_grant".into()));
+        }
+        *valid = format!("rt-{n}");
+        s.tokens.insert("refresh_token".into(), json!(format!("rt-{n}")));
+        s.tokens.insert("access_token".into(), json!(format!("at-{n}")));
+        s.expires_at = Some(now() + 3600);
+        Ok(s)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn expired() -> SignIn {
+    serde_json::from_value(json!({
+        "service": "tidal", "tokens": {"access_token": "at-0", "refresh_token": "rt-0"},
+        "expires_at": now() - 10
+    }))
+    .unwrap()
+}
+
+/// Two clients find the same expired token at the same moment: one refreshes, the other uses
+/// what it wrote (STEWARD-VAULT.md items 4 and 7), with the homeserver's lock or the lease file.
+async fn two_clients_refresh_at_once(lease_only: bool, takes: std::time::Duration) {
+    use pm_pubky::vault::Refreshed;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let (ka, kb) = (ClientSecret::generate(), ClientSecret::generate());
+    let (mut va, mut vb) = (Vault::new(&sessions[0], &ka), Vault::new(&sessions[1], &kb));
+    if lease_only {
+        (va, vb) = (va.lease_only(), vb.lease_only());
+    }
+    va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
+    let svc = RotatingService::new("rt-0", takes);
+    let (ra, rb) = tokio::join!(
+        va.refresh("tidal", false, |s| svc.refresh(s)),
+        vb.refresh("tidal", false, |s| svc.refresh(s)),
+    );
+    let (ra, rb) = (ra.expect("A"), rb.expect("B"));
+    assert_eq!(svc.calls(), 1, "only one client asks the service");
+    let ours = [&ra, &rb]
+        .iter()
+        .filter(|r| matches!(r, Refreshed::ByUs(_)))
+        .count();
+    assert_eq!(ours, 1, "{ra:?} / {rb:?}");
+    // Both now hold the one valid token, and the vault has it too
+    assert_eq!(ra.sign_in().tokens["refresh_token"], "rt-1");
+    assert_eq!(rb.sign_in().tokens["refresh_token"], "rt-1");
+    let stored = vb.read("tidal").await.unwrap().unwrap().sign_in;
+    assert_eq!(stored.tokens["refresh_token"], "rt-1");
+    assert_eq!(stored.revision, 2);
+    assert!(stored.last_refresh.is_some());
+    // Fresh now: nobody calls the service
+    assert!(matches!(
+        va.refresh("tidal", false, |s| svc.refresh(s)).await.unwrap(),
+        Refreshed::Current(_)
+    ));
+    assert_eq!(svc.calls(), 1);
+    // The service refuses a token (force): the refused copy isn't written over the vault's
+    svc.valid
+        .lock()
+        .unwrap()
+        .replace_range(.., "revoked-at-the-service");
+    assert!(matches!(
+        va.refresh("tidal", true, |s| svc.refresh(s)).await,
+        Err(VaultStoreError::Refresh(e)) if e == "invalid_grant"
+    ));
+    assert_eq!(
+        va.read("tidal").await.unwrap().unwrap().sign_in.tokens["refresh_token"],
+        "rt-1"
+    );
+    // No lease is left behind
+    let lease = sessions[0]
+        .storage()
+        .get(pubky_music_specs::vault::lease_path("tidal").unwrap().as_str())
+        .await;
+    assert!(lease.is_err(), "a lease was left behind");
+}
+
+#[tokio::test]
+async fn two_clients_refresh_at_once_under_the_lock() {
+    two_clients_refresh_at_once(false, std::time::Duration::from_millis(300)).await;
+}
+
+#[tokio::test]
+async fn two_clients_refresh_at_once_with_the_lease_file() {
+    two_clients_refresh_at_once(true, std::time::Duration::from_millis(300)).await;
+}
+
+/// A slow service: the holder renews its lock while it waits, and the other client still waits.
+#[tokio::test]
+async fn a_slow_refresh_keeps_its_lock() {
+    two_clients_refresh_at_once(false, std::time::Duration::from_secs(12)).await;
+}
