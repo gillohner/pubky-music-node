@@ -1051,7 +1051,7 @@
     if (qs && (qs.options || []).length) {
       const when = qs.applies === 'now' ? 'Applies now.' : 'Applies from the next song.';
       box.classList.remove('muted');
-      box.innerHTML = `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>`;
+      box.innerHTML = `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>${qs.note ? `<span class="muted small qnote">${esc(qs.note)}</span>` : ''}`;
       $$('[data-qopt]', box).forEach((b) => b.onclick = async () => { try { await api('PUT', `/sources/${encodeURIComponent(svc)}/quality`, { id: b.dataset.qopt }); $$('[data-qopt]', box).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); toast(`${SERVICE_NAMES[svc] || srcName(svc)}: ${b.textContent}. ${when}`); } catch (e) { toast(e.message, 'error'); } });
     } else {
       box.innerHTML = f.preview ? `Previews only (30 s). Full songs need another service.${isOwner() ? ' ' + goSource : ''}` : qs && qs.note ? esc(qs.note) : svc === 'stream' || !isOwner() ? 'As the stream sends it.' : `Its quality is set in ${goSource}.`;

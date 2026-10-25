@@ -1140,3 +1140,4 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .qsheet .chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .npqual .qtext-long { font-weight: 550; }
+.qsheet .qnote { display: block; margin-top: 6px; }
