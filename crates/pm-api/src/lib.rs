@@ -34,6 +34,7 @@ pub mod bandcamp;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
+pub mod devices;
 pub mod discover;
 pub mod drives;
 pub mod events;
@@ -600,6 +601,15 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
+        .route("/devices", get(devices::list))
+        .route(
+            "/devices/{id}",
+            axum::routing::put(devices::register).delete(devices::forget),
+        )
+        .route(
+            "/devices/{id}/downloads",
+            get(devices::get_downloads).put(devices::put_downloads),
+        )
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",
