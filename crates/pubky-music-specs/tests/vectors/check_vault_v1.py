@@ -36,7 +36,7 @@ assert hchacha20(k, n).hex() == '82413b4227b27bfed30e42508a877d73a0f9e4d58a74a85
 
 v = json.load(open(sys.argv[1]))
 owner, path = v['owner'].encode(), v['path'].encode()
-clients = [(bytes.fromhex(c['secret']), bytes.fromhex(c['client_key'])) for c in v['clients']]
+clients = [(bytes.fromhex(c['x25519_scalar']), bytes.fromhex(c['client_key'])) for c in v['clients']]
 for sec, ck in clients: assert pub(sec) == ck, 'client key'
 for case in v['cases']:
     env, epoch = case['envelope'], case['epoch']

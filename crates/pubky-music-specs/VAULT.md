@@ -14,7 +14,9 @@ Python check of them (`tests/vectors/check_vault_v1.py`) for implementers in oth
 | `/priv/pubky.music/vault/<service>.json` | one sign-in, encrypted (the envelope below) |
 | `/priv/pubky.music/vault/<service>.lease.json` | refresh lease, only where locks are refused (below) |
 
-`<service>` is the source id the node uses (`tidal`, `qobuz`, …): 1–32 of `a-z`, `0-9`, `-`, never `index`.
+`<service>` names one sign-in: the source id the node uses (`tidal`, `qobuz`, …), with a suffix where a
+service has two kinds that coexist (`tidal-full` for TIDAL's device client, `spotify-librespot`). It is 1–32 of
+`a-z`, `0-9`, `-`, never `index`.
 
 ## Clients and their keys
 
@@ -79,15 +81,30 @@ Times are Unix seconds. `last_used_at` is written at most once a day per client.
 
 **Plaintext**, UTF-8 JSON. Members a reader doesn't know are kept when it rewrites the blob.
 ```json
-{ "service": "tidal", "label": "gil@example.org", "way": "built-in", "client_id": "…",
-  "tokens": { "access_token": "…", "refresh_token": "…", "token_type": "Bearer" },
+{ "service": "tidal", "label": "gil@example.org", "way": "app", "client_id": "…",
+  "tokens": { "access_token": "…", "refresh_token": "…", "token_type": "bearer" },
+  "user": { "id": "1234", "name": "Gil", "country": "CH" },
   "scopes": ["r_usr", "w_usr"], "expires_at": 1761403600, "created_by": "<hex>",
-  "last_refresh": { "client": "<hex>", "at": 1761400000 }, "revision": 12, "settings": { "quality": "lossless" } }
+  "last_refresh": { "client": "<hex>", "at": 1761400000 }, "revision": 12, "settings": { "quality": "max" } }
 ```
-- `way` says how the sign-in was made: `built-in`, `shared-app`, `own-app`, `imported` or `pasted`. Readers
-  that don't know a `way` still use the tokens.
+- `way` is the id of the Sign in chooser's way it was made with: `app` (the project's app), `device` (a
+  device-code client), `own` (the person's own app), `import` (with `from`, the app it came from, e.g.
+  `tidal-dl-ng`) or `paste`. Readers that don't know a `way` still use the tokens.
+- `tokens.token_type` is `bearer` (an OAuth access token, often with a `refresh_token`), `session_key` (Last.fm)
+  or `api_key` (a single key, e.g. YouTube Data). Sign-ins that sign every request with the person's own app
+  keep its secret in `client_secret`, next to `client_id` (Qobuz, Last.fm). That secret is the person's, in
+  their own vault; built-in apps' secrets are never written here.
+- `user`: the account as the service names it (`id`, and `name`, `country` where it has them).
+- `expires_at` absent or `null`: the token doesn't expire (Qobuz, Last.fm session keys).
+- A client that can't refresh this sign-in, because it lacks the issuing app's credentials (a browser
+  client with a device-client sign-in), uses the tokens until `expires_at` and leaves the refresh to another
+  client.
 - `revision` goes up by one at every write.
-- `settings` holds what should follow the person across clients, such as the quality choice.
+- `settings` holds what should follow the person across clients: `quality` takes the ids of
+  `GET/PUT /v1/sources/<id>/quality` (TIDAL `max|high`, Qobuz `max|cd|mp3`, …).
+- `label` can be an e-mail address. It stays in the blob: the device list's `name` is a device's name, never
+  copied from `label`.
+- Credentials kept as a whole file on one device (librespot's `credentials.json`) stay on that device in v1.
 
 ## Adding a device, revocation
 
