@@ -26,7 +26,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// The plaintext of the vectors: exact bytes, so they go in the file as a string.
-const SIGN_IN: &str = r#"{"service":"tidal","label":"listener@example.org","way":"built-in","client_id":"example-client","tokens":{"access_token":"at-1","refresh_token":"rt-1","token_type":"Bearer"},"scopes":["r_usr","w_usr"],"expires_at":1761403600,"revision":1,"settings":{"quality":"lossless"}}"#;
+const SIGN_IN: &str = r#"{"service":"tidal","label":"listener@example.org","way":"app","client_id":"example-client","tokens":{"access_token":"at-1","refresh_token":"rt-1","token_type":"bearer"},"scopes":["r_usr","w_usr"],"expires_at":1761403600,"revision":1,"settings":{"quality":"max"}}"#;
 
 struct Case {
     name: &'static str,
@@ -96,7 +96,8 @@ fn build() -> Value {
         "about": "pubky-music-specs VAULT.md v1. Hex for raw inputs; the envelope as written to the homeserver.",
         "owner": OWNER,
         "path": path,
-        "clients": secrets.iter().map(|s| json!({"secret": hex(&s.to_bytes()), "client_key": s.public()})).collect::<Vec<_>>(),
+        // The X25519 scalars are public test inputs (byte ramps), never real keys
+        "clients": secrets.iter().map(|s| json!({"x25519_scalar": hex(&s.to_bytes()), "client_key": s.public()})).collect::<Vec<_>>(),
         "plaintext": SIGN_IN,
         "cases": out,
     })
@@ -119,8 +120,11 @@ fn vectors_v1() {
     for case in file["cases"].as_array().unwrap() {
         let env: Envelope = serde_json::from_value(case["envelope"].clone()).unwrap();
         for c in file["clients"].as_array().unwrap() {
-            let secret =
-                ClientSecret::from_bytes(ClientKey::from_hex(c["secret"].as_str().unwrap()).unwrap().0);
+            let secret = ClientSecret::from_bytes(
+                ClientKey::from_hex(c["x25519_scalar"].as_str().unwrap())
+                    .unwrap()
+                    .0,
+            );
             let key: ClientKey = serde_json::from_value(c["client_key"].clone()).unwrap();
             match open(OWNER, path, &env, &secret) {
                 Ok((_, plain)) => {
@@ -244,6 +248,18 @@ fn sign_in_keeps_what_it_does_not_know_and_hides_tokens() {
     let s: SignIn = serde_json::from_value(v.clone()).unwrap();
     assert_eq!(serde_json::to_value(&s).unwrap(), v);
     assert!(!format!("{s:?}").contains("rt-1"));
+    // The person's own app secret and the account round-trip, and the secret stays out of Debug
+    let own: SignIn = serde_json::from_value(json!({
+        "service": "qobuz", "way": "own", "client_id": "app-id", "client_secret": "own-app-secret",
+        "tokens": {"user_auth_token": "u", "token_type": "bearer"},
+        "user": {"id": "42", "name": "Gil", "country": "CH", "plan": "studio"}, "expires_at": null
+    }))
+    .unwrap();
+    assert!(!format!("{own:?}").contains("own-app-secret"));
+    assert_eq!(own.user.as_ref().unwrap().country.as_deref(), Some("CH"));
+    assert_eq!(own.user.as_ref().unwrap().extra["plan"], "studio");
+    assert_eq!(own.expires_at, None);
+    assert!(!own.needs_refresh(u64::MAX / 2));
     assert!(s.needs_refresh(1761403600 - 30));
     assert!(!s.needs_refresh(1761403600 - 120));
     assert!(!format!("{:?}", ClientSecret::generate()).contains(|c: char| c.is_ascii_digit()));
