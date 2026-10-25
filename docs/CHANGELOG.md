@@ -4,7 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-24
 
-- **Listeners no longer see where the owner keeps files** (mn-app, QUESTIONS.md): in a listener's (or party guest's) JSON answers every track's `file.path` is just the file name (track lists, albums, search, item pages); the owner's answers are unchanged.
+- **Listeners no longer see where the owner keeps files** (mn-app, QUESTIONS.md): in a listener's (or party guest's) JSON answers every track's `file.path`, and the song page's File detail, is just the file name (track lists, albums, search, item pages); the owner's answers are unchanged.
 - **Home Assistant no longer lists the node as a broken LMS server** (mn-sources, QUESTIONS.md): the Slimproto discovery reply leaves out the `JSON` (LMS JSON-RPC port) field, since there is no JSON-RPC; squeezelite finds the node as before.
 - **Settings › Accounts says where things are, without the sync controls** (STEWARD-BUNDLED-HOMESERVER.md §7, after #76):
   - **Saved:** one line, "Everything is saved on your homeserver" (with when), "Saving 3 changes…", or the error with **Try again** (`GET /v1/storage`, `POST /v1/storage/save`).

@@ -94,10 +94,22 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
     for uri in [
         "/v1/library/tracks".to_string(),
         format!("/v1/library/tracks/{id}"),
+        // The song page: its About section has a "File" fact
+        format!("/v1/item/song/lib-{id}"),
     ] {
         let (st, body) = call(&app, &listener, "GET", &uri, None).await;
         assert_eq!(st, StatusCode::OK, "{uri}: {body}");
-        assert!(body.contains("\"path\":\"A.flac\""), "{uri}: {body}");
+        if uri.starts_with("/v1/item/") {
+            // The About section's File fact shows the file name only
+            let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let file = page["about"]
+                .as_array()
+                .and_then(|a| a.iter().find(|f| f["label"] == "File"))
+                .unwrap_or_else(|| panic!("no File fact: {body}"));
+            assert_eq!(file["value"], "A.flac", "{body}");
+        } else {
+            assert!(body.contains("\"path\":\"A.flac\""), "{uri}: {body}");
+        }
         assert!(!body.contains("Owner's music"), "{uri}: {body}");
         let (_, owner) = call(&app, OWNER, "GET", &uri, None).await;
         assert!(

@@ -347,6 +347,8 @@ pub fn refused(why: &str) -> ApiError {
 pub async fn listener_response(resp: axum::response::Response) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
+    // Only application/json answers are rewritten: streams (search's NDJSON, events, audio, covers)
+    // pass as they are, so a stream that ever carries file paths needs its own filtering.
     let json = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -376,21 +378,26 @@ pub async fn listener_response(resp: axum::response::Response) -> axum::response
     axum::response::Response::from_parts(parts, body)
 }
 
-/// Replaces the folder part of every library file's path (an object with `path`, `container`
-/// and `size_bytes`, i.e. a `pm_model::AudioFile`) with nothing, leaving the file name. Whether
-/// anything changed.
+/// Replaces the folder part of every library file's path with nothing, leaving the file name:
+/// in objects shaped like `pm_model::AudioFile` (`path`, `container`, `size_bytes`) and in the
+/// song page's "File" fact (`{label: "File", value}`, item.rs). Whether anything changed.
 pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
     use serde_json::Value;
     match v {
         Value::Object(o) => {
             let mut changed = false;
-            if o.contains_key("container") && o.contains_key("size_bytes") {
-                if let Some(Value::String(p)) = o.get_mut("path") {
-                    let name = p.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
-                    if name != *p {
-                        *p = name;
-                        changed = true;
-                    }
+            let field = if o.contains_key("container") && o.contains_key("size_bytes") {
+                Some("path")
+            } else if o.get("label").and_then(Value::as_str) == Some("File") {
+                Some("value")
+            } else {
+                None
+            };
+            if let Some(Value::String(p)) = field.and_then(|f| o.get_mut(f)) {
+                let name = p.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                if name != *p {
+                    *p = name;
+                    changed = true;
                 }
             }
             for x in o.values_mut() {
@@ -414,7 +421,8 @@ mod tests {
             {"title": "B", "file": {"path": "webdav://nas/share/B.mp3", "container": "mp3", "size_bytes": 2}},
             {"title": "C", "file": {"path": "C:\\Music\\C.flac", "container": "flac", "size_bytes": 3}},
             {"title": "D", "file": {"path": "D.flac", "container": "flac", "size_bytes": 4}},
-        ], "folder": {"path": "/srv/music"}});
+        ], "folder": {"path": "/srv/music"},
+           "about": [{"label": "Format", "value": "FLAC 16/44.1"}, {"label": "File", "value": "/srv/music/Owner/A.flac"}]});
         assert!(hide_file_paths(&mut v));
         let names: Vec<_> = v["tracks"]
             .as_array()
@@ -423,6 +431,9 @@ mod tests {
             .map(|t| t["file"]["path"].clone())
             .collect();
         assert_eq!(names, ["A.flac", "B.mp3", "C.flac", "D.flac"]);
+        // The song page's File fact too; other facts stay
+        assert_eq!(v["about"][1]["value"], "A.flac");
+        assert_eq!(v["about"][0]["value"], "FLAC 16/44.1");
         // Only library files: another object's `path` stays
         assert_eq!(v["folder"]["path"], "/srv/music");
         let mut plain = serde_json::json!({"file": {"path": "x.flac", "container": "flac", "size_bytes": 1}});
