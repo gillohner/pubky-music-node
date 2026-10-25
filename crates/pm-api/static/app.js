@@ -1909,7 +1909,8 @@
   const srcName = (src) => (src === 'library' ? 'Library' : src === 'pubky' ? 'Pubky' : SERVICE_NAMES[src] || (state.sources || []).find((x) => x.id === src)?.name || src);
   // One order for every list of services (STEWARD-UX-PLAYER-SOURCES §1): services switched on
   // and working first, in the owner's play order; then the rest. Your library always works.
-  const HEALTHY_STATUS = /^(ready|previews|connected|signed in|ok)\b/i;
+  // Matched by prefix ("signed in · user", "ready · …"); "browser" plays in This browser with no set-up
+  const HEALTHY_STATUS = /^(ready|previews|connected|signed in|ok|browser)\b/i;
   const srcHealthy = (x) => !!x && x.enabled !== false && (typeof x.healthy === 'boolean' ? x.healthy : HEALTHY_STATUS.test(String(x.status || '')));
   const loadSvcRank = async () => {
     if (!isOwner()) return null;
