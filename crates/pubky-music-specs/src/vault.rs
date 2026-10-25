@@ -378,19 +378,30 @@ pub struct SignIn {
     /// The account name the service shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// How it was made: `built-in`, `shared-app`, `own-app`, `imported`, `pasted`.
+    /// The Sign in chooser's way it was made with: `app`, `device`, `own`, `import`, `paste`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub way: Option<String>,
-    /// The OAuth client id used.
+    /// For `import`: the app it came from (`tidal-dl-ng`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The client id used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    /// The service's tokens (`access_token`, `refresh_token`, `token_type`, …).
+    /// The person's own app secret, where it signs every request (Qobuz, Last.fm). Never a
+    /// built-in app's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// The service's tokens (`access_token`, `refresh_token`, `token_type`: `bearer`,
+    /// `session_key` or `api_key`, …).
     #[serde(default)]
     pub tokens: Map<String, Value>,
+    /// The account as the service names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<ServiceUser>,
     /// Granted scopes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
-    /// When the access token expires, Unix seconds.
+    /// When the access token expires, Unix seconds; absent or `null`: it doesn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     /// The client that made the sign-in.
@@ -417,6 +428,10 @@ impl std::fmt::Debug for SignIn {
             .field("way", &self.way)
             .field("revision", &self.revision)
             .field("tokens", &"<redacted>")
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -426,6 +441,22 @@ impl SignIn {
     pub fn needs_refresh(&self, now: u64) -> bool {
         self.expires_at.is_some_and(|e| now + REFRESH_AHEAD_SECONDS >= e)
     }
+}
+
+/// The account as the service names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceUser {
+    /// The service's id for the account.
+    pub id: String,
+    /// Its display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its country (TIDAL's API calls take it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// Members this reader doesn't know, kept on rewrite.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Who refreshed last, and when (Unix seconds).
