@@ -112,7 +112,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
 pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret);
+    let vault = Vault::new(sync.session(), &secret).device("node");
     Ok(Json(view(&vault).await.map_err(vault_error)?))
 }
 
@@ -121,7 +121,7 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView>
 pub(crate) async fn register(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret);
+    let vault = Vault::new(sync.session(), &secret).device("node");
     vault.touch(&s.name).await.map_err(vault_error)?;
     vault.share_with_trusted().await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
@@ -151,7 +151,7 @@ pub(crate) async fn sign_out_device(
             "this is the node itself: use Sign out everywhere, or sign the node out of Pubky",
         ));
     }
-    let vault = Vault::new(sync.session(), &secret);
+    let vault = Vault::new(sync.session(), &secret).device("node");
     let report = vault
         .sign_out_device(&device, |service, _| async move {
             tracing::info!(service, "vault: rotated past a signed-out device");
@@ -169,7 +169,7 @@ pub(crate) async fn sign_out_device(
 pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiResult<serde_json::Value> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret);
+    let vault = Vault::new(sync.session(), &secret).device("node");
     let removed = vault
         .sign_out_everywhere(|service, _| async move {
             tracing::info!(service, "vault: sign-in removed");
