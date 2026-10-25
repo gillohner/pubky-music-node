@@ -432,6 +432,21 @@ mod tests {
     }
 
     #[test]
+    fn a_bridge_for_a_source_uses_its_source_id() {
+        let sources: Vec<&str> = crate::streaming::services().iter().map(|s| s.id()).collect();
+        // Sign-ins of sources are named by the source's id (VAULT.md); the rest are integrations
+        for b in BRIDGES {
+            let base = b.service.split('-').next().unwrap_or(b.service);
+            let integration = ["lastfm", "listenbrainz", "drives", "gpodder"].contains(&b.service);
+            assert!(
+                integration || sources.contains(&base),
+                "{} is not a source id",
+                b.service
+            );
+        }
+    }
+
+    #[test]
     fn bridges_are_valid_vault_ids_and_unique() {
         let mut seen = std::collections::HashSet::new();
         for b in BRIDGES {
