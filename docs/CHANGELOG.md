@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
+  - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
+  - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Vault files are written under the homeserver's WebDAV lock.
+  - Tested on a real homeserver with forged, borrowed and garbage entries.
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
   - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
   - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.

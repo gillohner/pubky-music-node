@@ -8,9 +8,11 @@
 use crate::homeserver::{is_not_found, HomeserverError};
 use pubky::PubkySession;
 use pubky_music_specs::vault::{
-    self as spec, ClientKey, ClientSecret, DataKey, Envelope, SignIn, VaultError,
+    self as spec, ClientEntry, ClientKey, ClientProofData, ClientSecret, DataKey, Envelope, Index, Proof,
+    SignIn, VaultError,
 };
 use std::path::Path;
+use std::time::Duration;
 
 /// What can go wrong reading or writing the vault.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +25,12 @@ pub enum VaultStoreError {
     BadService(String),
     #[error("the sign-in for {0} was made on a device this node can't read for; sign out of it there, or delete it, first")]
     NotOurs(String),
+    #[error("this node was signed out of the vault; approve it again in Pubky Ring as a new device")]
+    Revoked,
+    #[error("this sign-in can't prove itself to other devices; sign the node in again with Pubky Ring")]
+    NoGrant,
+    #[error("another device is changing {0}; try again in a moment")]
+    Busy(String),
 }
 
 impl From<pubky::Error> for VaultStoreError {
@@ -182,6 +190,21 @@ impl<'a> Vault<'a> {
     ///   lose a sign-in made elsewhere.
     pub async fn write(&self, service: &str, sign_in: &SignIn, others: &[ClientKey]) -> Result<u64> {
         let path = Self::blob_path(service)?;
+        let held = self.lock(&path).await?;
+        let r = self.write_held(&held, service, &path, sign_in, others).await;
+        self.unlock(held).await;
+        r
+    }
+
+    /// [`Vault::write`] under a lock already held on `path`.
+    async fn write_held(
+        &self,
+        held: &Locked,
+        service: &str,
+        path: &str,
+        sign_in: &SignIn,
+        others: &[ClientKey],
+    ) -> Result<u64> {
         let me = self.client_key();
         let mut recipients = vec![me];
         for k in others {
@@ -215,9 +238,9 @@ impl<'a> Vault<'a> {
         }
         let plain =
             zeroize::Zeroizing::new(serde_json::to_vec(&s).map_err(|_| VaultError::Format("sign-in"))?);
-        let env = spec::seal(&self.owner, &path, epoch, &data_key, &plain, &recipients)?;
+        let env = spec::seal(&self.owner, path, epoch, &data_key, &plain, &recipients)?;
         let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
-        self.session.storage().put(path.as_str(), body).await?;
+        self.put_locked(held, path, body).await?;
         Ok(revision)
     }
 
@@ -267,6 +290,282 @@ impl<'a> Vault<'a> {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+}
+
+/// How long a write lock is asked for (the homeserver caps it at 60 s).
+const LOCK_FOR: Duration = Duration::from_secs(spec::LOCK_SECONDS);
+/// Tries at a locked path before giving up (with a growing pause, about 2 s in all).
+const LOCK_TRIES: u32 = 8;
+/// `last_used_at` is written at most this often.
+const TOUCH_EVERY_SECONDS: u64 = 24 * 3600;
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn status(e: &pubky::Error) -> Option<reqwest::StatusCode> {
+    match e {
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }) => Some(*status),
+        _ => None,
+    }
+}
+
+/// A write lock on one vault file, or none where the homeserver has no locks (405).
+pub(crate) struct Locked {
+    lock: Option<pubky::StorageLock>,
+}
+
+/// A trusted device-list entry: verified proof, owner's grant, not signed out.
+#[derive(Debug, Clone)]
+pub struct TrustedClient {
+    pub client_key: ClientKey,
+    pub name: String,
+    pub last_used_at: u64,
+    /// The grant's id (`jti`), what "Sign out this device" records.
+    pub grant_id: String,
+}
+
+/// An entry of the device list, as Settings shows it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Device {
+    pub client_key: String,
+    pub name: String,
+    pub authorised_at: u64,
+    pub last_used_at: u64,
+    /// Its proof checks out (and it isn't signed out).
+    pub trusted: bool,
+    /// Why not, when it isn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// This node.
+    pub this_node: bool,
+}
+
+impl Vault<'_> {
+    /// Take the write lock on `path`: waits a little at a locked path, then [`VaultStoreError::Busy`].
+    /// A homeserver without locks answers 405: then `Locked` holds none and writes go unlocked.
+    pub(crate) async fn lock(&self, path: &str) -> Result<Locked> {
+        let storage = self.session.storage();
+        for attempt in 1..=LOCK_TRIES {
+            match storage.lock(path, LOCK_FOR).await {
+                Ok(l) => return Ok(Locked { lock: Some(l) }),
+                Err(e) if status(&e) == Some(reqwest::StatusCode::METHOD_NOT_ALLOWED) => {
+                    return Ok(Locked { lock: None })
+                }
+                Err(e) if status(&e) == Some(reqwest::StatusCode::LOCKED) => {
+                    tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(VaultStoreError::Busy(path.to_string()))
+    }
+
+    /// Write under a lock taken with [`Vault::lock`].
+    pub(crate) async fn put_locked(&self, held: &Locked, path: &str, body: Vec<u8>) -> Result<()> {
+        let storage = self.session.storage();
+        match &held.lock {
+            Some(l) => storage.put_locked(l, body).await?,
+            None => storage.put(path, body).await?,
+        };
+        Ok(())
+    }
+
+    /// Release a lock (an expired one is fine: it lapses by itself).
+    pub(crate) async fn unlock(&self, held: Locked) {
+        if let Some(l) = held.lock {
+            let _ = self.session.storage().unlock(&l).await;
+        }
+    }
+
+    /// The device list (an empty one when there is none yet).
+    pub async fn index(&self) -> Result<Index> {
+        match self.read_bytes(spec::INDEX_PATH, spec::MAX_INDEX_BYTES).await? {
+            Some(b) => Ok(Index::parse(&b)?),
+            None => Ok(Index::default()),
+        }
+    }
+
+    /// Why an entry isn't trusted (`None` = trusted), with its grant id when the proof verified.
+    fn check(&self, ix: &Index, e: &ClientEntry) -> (Option<String>, Option<String>) {
+        let creds = pubky::custom_pop::CustomPop {
+            grant: e.proof.grant.clone(),
+            pop: e.proof.pop.clone(),
+        };
+        let v = match pubky::custom_pop::verify_custom_grant_pop(
+            &creds,
+            pubky::custom_pop::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
+        ) {
+            Ok(v) => v,
+            Err(err) => return (Some(err.to_string()), None),
+        };
+        let caps: Vec<String> = v.grant_claims().caps.iter().map(|c| c.to_string()).collect();
+        let jti = v.grant_claims().jti.to_string();
+        if let Some(p) = spec::client_entry_problem(e, &self.owner, &v.identity().z32(), &caps, v.data()) {
+            return (Some(p.to_string()), Some(jti));
+        }
+        if ix.is_revoked(&e.client_key, Some(&jti)) {
+            return (Some("signed out".into()), Some(jti));
+        }
+        (None, Some(jti))
+    }
+
+    /// The device list's entries that may open the vault: their proofs verify with the pubky SDK,
+    /// the grant is the owner's and covers the vault, and they weren't signed out.
+    pub fn trusted(&self, ix: &Index) -> Vec<TrustedClient> {
+        ix.clients
+            .iter()
+            .filter_map(|e| match self.check(ix, e) {
+                (None, Some(jti)) => Some(TrustedClient {
+                    client_key: e.client_key,
+                    name: e.name.clone(),
+                    last_used_at: e.last_used_at,
+                    grant_id: jti,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The device list for Settings: every entry, trusted or not, and why not.
+    pub async fn devices(&self) -> Result<Vec<Device>> {
+        let ix = self.index().await?;
+        let me = self.client_key();
+        Ok(ix
+            .clients
+            .iter()
+            .map(|e| {
+                let (problem, _) = self.check(&ix, e);
+                Device {
+                    client_key: e.client_key.to_hex(),
+                    name: e.name.clone(),
+                    authorised_at: e.authorised_at,
+                    last_used_at: e.last_used_at,
+                    trusted: problem.is_none(),
+                    problem,
+                    this_node: e.client_key == me,
+                }
+            })
+            .collect())
+    }
+
+    /// Put this node in the device list as `name`, with a fresh proof of its key (made with the
+    /// session's grant: Ring's approval binds it to the person). Refused when it was signed out.
+    pub async fn register(&self, name: &str) -> Result<()> {
+        let grant = self.session.as_grant().ok_or(VaultStoreError::NoGrant)?;
+        let me = self.client_key();
+        let data = serde_json::to_value(ClientProofData::new(me, name))
+            .map_err(|_| VaultError::Format("proof data"))?;
+        let pop = grant
+            .create_custom_pop(data)
+            .await
+            .map_err(|_| VaultStoreError::NoGrant)?;
+        let held = self.lock(spec::INDEX_PATH).await?;
+        let r = async {
+            let mut ix = self.index().await?;
+            let entry_jti = pubky::GrantClaims::decode(&pop.grant)
+                .ok()
+                .map(|c| c.jti.to_string());
+            if ix.is_revoked(&me, entry_jti.as_deref()) {
+                return Err(VaultStoreError::Revoked);
+            }
+            let t = now();
+            let proof = Proof {
+                grant: pop.grant.clone(),
+                pop: pop.pop.clone(),
+            };
+            match ix.clients.iter_mut().find(|e| e.client_key == me) {
+                Some(e) => {
+                    e.name = name.to_string();
+                    e.last_used_at = t;
+                    e.proof = proof;
+                }
+                None => {
+                    if ix.clients.len() >= spec::MAX_CLIENTS {
+                        return Err(VaultError::TooLarge.into());
+                    }
+                    ix.clients.push(ClientEntry {
+                        client_key: me,
+                        name: name.to_string(),
+                        authorised_at: t,
+                        last_used_at: t,
+                        proof,
+                        extra: Default::default(),
+                    })
+                }
+            }
+            let body = serde_json::to_vec(&ix).map_err(|_| VaultError::Format("index"))?;
+            self.put_locked(&held, spec::INDEX_PATH, body).await
+        }
+        .await;
+        self.unlock(held).await;
+        r
+    }
+
+    /// Register when this node isn't listed (or its proof no longer verifies), or once a day to
+    /// keep `last_used_at` current.
+    pub async fn touch(&self, name: &str) -> Result<()> {
+        let ix = self.index().await?;
+        let me = self.client_key();
+        let fresh = ix.clients.iter().find(|e| e.client_key == me).is_some_and(|e| {
+            now().saturating_sub(e.last_used_at) < TOUCH_EVERY_SECONDS && self.check(&ix, e).0.is_none()
+        });
+        if fresh {
+            return Ok(());
+        }
+        self.register(name).await
+    }
+
+    /// Write a sign-in for every trusted device (and this node).
+    pub async fn write_shared(&self, service: &str, sign_in: &SignIn) -> Result<u64> {
+        let ix = self.index().await?;
+        let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+        self.write(service, sign_in, &others).await
+    }
+
+    /// Give every trusted device that has no key yet the blobs this node can open (a new device:
+    /// same data key, same epoch). Returns how many blobs changed.
+    pub async fn share_with_trusted(&self) -> Result<usize> {
+        let ix = self.index().await?;
+        let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+        let mut changed = 0;
+        for service in self.services().await? {
+            let path = Self::blob_path(&service)?;
+            let Some(env) = self.envelope(&service).await? else {
+                continue;
+            };
+            if !env.has_recipient(&self.client_key()) || trusted.iter().all(|k| env.has_recipient(k)) {
+                continue;
+            }
+            let held = self.lock(&path).await?;
+            let r = async {
+                // Read again under the lock
+                let Some(mut env) = self.envelope(&service).await? else {
+                    return Ok(false);
+                };
+                let mut added = false;
+                for k in &trusted {
+                    if !env.has_recipient(k) {
+                        spec::add_recipient(&self.owner, &path, &mut env, self.secret, k)?;
+                        added = true;
+                    }
+                }
+                if added {
+                    let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
+                    self.put_locked(&held, &path, body).await?;
+                }
+                Ok::<bool, VaultStoreError>(added)
+            }
+            .await;
+            self.unlock(held).await;
+            if r? {
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 }
 

@@ -175,3 +175,145 @@ async fn two_clients_share_a_sign_in_the_homeserver_only_sees_encrypted() {
         Err(VaultStoreError::BadService(_))
     ));
 }
+
+/// The device list (item 3): clients prove their keys with their grants; only trusted entries get
+/// keys; a new device is added by one that can read; forged, borrowed and signed-out entries don't.
+#[tokio::test]
+async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
+    use pubky_music_specs::vault::{ClientEntry, Index, Proof, Revoked, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let keys: Vec<ClientSecret> = (0..3).map(|_| ClientSecret::generate()).collect();
+    let v: Vec<Vault> = sessions
+        .iter()
+        .zip(&keys)
+        .map(|(s, k)| Vault::new(s, k))
+        .collect();
+
+    // A and B register; both are trusted and each sees the other
+    v[0].register("Living room node").await.unwrap();
+    v[1].register("Phone").await.unwrap();
+    v[1].touch("Phone").await.unwrap(); // fresh: nothing to do
+    let ix = v[0].index().await.unwrap();
+    assert_eq!(ix.clients.len(), 2);
+    let trusted: Vec<_> = v[1].trusted(&ix).into_iter().map(|t| t.client_key).collect();
+    assert_eq!(trusted, [v[0].client_key(), v[1].client_key()]);
+    let devices = v[0].devices().await.unwrap();
+    assert!(devices.iter().all(|d| d.trusted), "{devices:?}");
+    assert_eq!(devices.iter().filter(|d| d.this_node).count(), 1);
+
+    // A writes for every trusted device; B reads, C (not registered) can't
+    v[0].write_shared("tidal", &sign_in("shared-1")).await.unwrap();
+    assert_eq!(
+        v[1].read("tidal").await.unwrap().unwrap().sign_in.tokens["access_token"],
+        "shared-1"
+    );
+    assert!(v[2].read("tidal").await.is_err());
+
+    // C registers; A adds it to what A can read, keeping the epoch
+    v[2].register("Laptop").await.unwrap();
+    assert_eq!(v[0].share_with_trusted().await.unwrap(), 1);
+    assert_eq!(v[0].share_with_trusted().await.unwrap(), 0, "only once");
+    let c_sees = v[2].read("tidal").await.unwrap().unwrap();
+    assert_eq!(
+        (c_sees.epoch, c_sees.sign_in.tokens["access_token"].as_str()),
+        (1, Some("shared-1"))
+    );
+
+    // Entries that don't prove themselves get nothing:
+    // - another person's client, with its own (valid) grant and proof;
+    let (_other, other_sessions) = person_with_clients(&a, 1).await;
+    let ok = ClientSecret::generate();
+    let ov = Vault::new(&other_sessions[0], &ok);
+    ov.register("Someone else's laptop").await.unwrap();
+    let foreign: ClientEntry = ov.index().await.unwrap().clients.remove(0);
+    // - A's proof copied onto a key A's proof doesn't name;
+    let mut borrowed: ClientEntry = ix.clients[0].clone();
+    let stranger = ClientSecret::generate();
+    borrowed.client_key = stranger.public();
+    borrowed.name = "Borrowed".into();
+    // - garbage.
+    let mut garbage = borrowed.clone();
+    garbage.client_key = ClientSecret::generate().public();
+    garbage.proof = Proof {
+        grant: "x.y.z".into(),
+        pop: "a.b.c".into(),
+    };
+    let mut ix = v[0].index().await.unwrap();
+    ix.clients
+        .extend([foreign.clone(), borrowed.clone(), garbage.clone()]);
+    sessions[0]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let ix = v[0].index().await.unwrap();
+    let trusted: Vec<_> = v[0].trusted(&ix).into_iter().map(|t| t.client_key).collect();
+    assert_eq!(trusted, [v[0].client_key(), v[1].client_key(), v[2].client_key()]);
+    let devices = v[0].devices().await.unwrap();
+    let problem = |k: &pubky_music_specs::vault::ClientKey| {
+        devices
+            .iter()
+            .find(|d| d.client_key == k.to_hex())
+            .unwrap()
+            .problem
+            .clone()
+            .unwrap_or_default()
+    };
+    assert!(
+        problem(&foreign.client_key).contains("someone else's"),
+        "{}",
+        problem(&foreign.client_key)
+    );
+    assert!(
+        problem(&borrowed.client_key).contains("another key"),
+        "{}",
+        problem(&borrowed.client_key)
+    );
+    assert!(!problem(&garbage.client_key).is_empty());
+    // ...and share_with_trusted gives them nothing
+    assert_eq!(v[0].share_with_trusted().await.unwrap(), 0);
+    let env = v[0].envelope("tidal").await.unwrap().unwrap();
+    assert_eq!(env.recipients.len(), 3);
+    assert!(!env.has_recipient(&stranger.public()));
+
+    // B is signed out (by grant id): no longer trusted, and it can't register again
+    let b_jti = v[0]
+        .trusted(&ix)
+        .into_iter()
+        .find(|t| t.client_key == v[1].client_key())
+        .unwrap()
+        .grant_id;
+    let mut ix: Index = v[0].index().await.unwrap();
+    ix.revoked.push(Revoked {
+        client_key: None,
+        grant_id: Some(b_jti),
+        at: 1,
+    });
+    sessions[0]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let ix = v[0].index().await.unwrap();
+    assert!(!v[0]
+        .trusted(&ix)
+        .iter()
+        .any(|t| t.client_key == v[1].client_key()));
+    assert!(matches!(
+        v[1].register("Phone").await,
+        Err(VaultStoreError::Revoked)
+    ));
+    // The next shared write leaves B out (and rotates, since B held a key)
+    v[0].write_shared("tidal", &sign_in("shared-2")).await.unwrap();
+    let after = v[0].read("tidal").await.unwrap().unwrap();
+    assert_eq!(after.epoch, 2);
+    assert!(v[1].read("tidal").await.is_err());
+    assert_eq!(
+        v[2].read("tidal").await.unwrap().unwrap().sign_in.tokens["access_token"],
+        "shared-2"
+    );
+}
