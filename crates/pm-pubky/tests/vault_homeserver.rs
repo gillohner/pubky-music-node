@@ -364,3 +364,63 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
         "shared-2"
     );
 }
+
+/// mn-app's review of #91: an app the person approved for all their storage (`/:rw`) is not a
+/// vault client. It can't register, and an entry it writes itself, with its own valid proof, isn't
+/// trusted, so `share_with_trusted` gives it nothing.
+#[tokio::test]
+async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
+    use pubky_music_specs::vault::{ClientEntry, ClientProofData, Proof, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (signer, sessions) = person_with_clients(&a, 1).await;
+    let node = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let flow = node.start_login_with("backup-tool.example", "/:rw").unwrap();
+    signer.approve_auth(flow.url()).await.expect("approve");
+    let broad = flow.await_approval().await.expect("session");
+    let (kn, kb) = (ClientSecret::generate(), ClientSecret::generate());
+    let vn = Vault::new(&sessions[0], &kn);
+    vn.register("Node").await.unwrap();
+    vn.write_shared("tidal", &sign_in("t")).await.unwrap();
+
+    let vb = Vault::new(&broad, &kb);
+    assert!(matches!(
+        vb.register("Backup tool").await,
+        Err(VaultStoreError::NeedsVaultGrant)
+    ));
+    // It writes an entry itself, with a proof its grant really signs
+    let data = serde_json::to_value(ClientProofData::new(kb.public(), "Backup tool")).unwrap();
+    let pop = broad.as_grant().unwrap().create_custom_pop(data).await.unwrap();
+    let mut ix = vn.index().await.unwrap();
+    ix.clients.push(ClientEntry {
+        client_key: kb.public(),
+        name: "Backup tool".into(),
+        authorised_at: 1,
+        last_used_at: 1,
+        proof: Proof {
+            grant: pop.grant.clone(),
+            pop: pop.pop.clone(),
+        },
+        extra: Default::default(),
+    });
+    broad
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let ix = vn.index().await.unwrap();
+    assert!(!vn.trusted(&ix).iter().any(|t| t.client_key == kb.public()));
+    let d = vn.devices().await.unwrap();
+    let e = d.iter().find(|d| d.client_key == kb.public().to_hex()).unwrap();
+    assert!(
+        e.problem
+            .as_deref()
+            .unwrap_or_default()
+            .contains("doesn't name the vault"),
+        "{e:?}"
+    );
+    assert_eq!(vn.share_with_trusted().await.unwrap(), 0);
+    assert!(vb.read("tidal").await.is_err());
+}

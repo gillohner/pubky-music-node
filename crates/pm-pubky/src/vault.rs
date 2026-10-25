@@ -31,6 +31,8 @@ pub enum VaultStoreError {
     NoGrant,
     #[error("another device is changing {0}; try again in a moment")]
     Busy(String),
+    #[error("this node's Pubky sign-in doesn't include your streaming sign-ins yet; sign it in again with Pubky Ring")]
+    NeedsVaultGrant,
 }
 
 impl From<pubky::Error> for VaultStoreError {
@@ -83,8 +85,16 @@ pub fn load_or_create_client_secret(path: &Path) -> std::io::Result<ClientSecret
             f.sync_all()?;
             Ok(secret)
         }
-        // Another process made it first: use theirs
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(path),
+        // Another process made it first: use theirs, once it has finished writing it
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            for _ in 0..40 {
+                if std::fs::metadata(path).is_ok_and(|m| m.len() == 32) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            read(path)
+        }
         Err(e) => Err(e),
     }
 }
@@ -463,7 +473,7 @@ impl Vault<'_> {
     }
 
     /// The device list's entries that may open the vault: their proofs verify with the pubky SDK,
-    /// the grant is the owner's and covers the vault, and they weren't signed out.
+    /// the grant is the owner's and names the vault itself, and they weren't signed out.
     pub fn trusted(&self, ix: &Index) -> Vec<TrustedClient> {
         ix.clients
             .iter()
@@ -508,6 +518,11 @@ impl Vault<'_> {
     /// session's grant: Ring's approval binds it to the person). Refused when it was signed out.
     pub async fn register(&self, name: &str) -> Result<()> {
         let grant = self.session.as_grant().ok_or(VaultStoreError::NoGrant)?;
+        // Other devices trust only a grant that names the vault itself
+        let caps = crate::homeserver::session_capabilities(self.session);
+        if !caps.iter().any(|c| spec::covers_vault(c)) {
+            return Err(VaultStoreError::NeedsVaultGrant);
+        }
         let me = self.client_key();
         let mut proof_data = ClientProofData::new(me, name);
         if let Some(kind) = self.device {

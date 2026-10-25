@@ -347,7 +347,7 @@ pub fn client_entry_problem(
         return Some("the grant is someone else's");
     }
     if !caps.iter().any(|c| covers_vault(c)) {
-        return Some("the grant doesn't cover the vault with read and write");
+        return Some("its grant doesn't name the vault (an app with access to a wider folder isn't trusted with the sign-ins)");
     }
     let Ok(d) = serde_json::from_value::<ClientProofData>(data.clone()) else {
         return Some("the proof's data isn't a vault client's");
@@ -364,13 +364,18 @@ pub fn client_entry_problem(
     None
 }
 
-/// Whether a capability (`<scope>:<actions>`) covers [`VAULT_DIR`] with `r` and `w`.
+/// Whether a capability (`<scope>:<actions>`) names [`VAULT_DIR`] itself with `r` and `w`. An
+/// ancestor (`/:rw`, `/priv/pubky.music/:rw`) doesn't count: the person approved that app for a
+/// wider folder in Ring, not for their streaming sign-ins.
 pub fn covers_vault(cap: &str) -> bool {
     let Some((scope, actions)) = cap.rsplit_once(':') else {
         return false;
     };
-    scope.ends_with('/') && VAULT_DIR.starts_with(scope) && actions.contains('r') && actions.contains('w')
+    scope == VAULT_DIR && actions.contains('r') && actions.contains('w')
 }
+
+/// The capability a vault client asks Ring for.
+pub const VAULT_CAPABILITY: &str = "/priv/pubky.music/vault/:rw";
 
 /// `<service>.lease.json`: who refreshes, until when (Unix seconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
