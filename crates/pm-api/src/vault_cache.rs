@@ -83,7 +83,7 @@ pub const BRIDGES: &[Bridge] = &[
         settings: &["jellyfin.server"],
     },
     Bridge {
-        service: "opensubsonic",
+        service: "subsonic",
         settings: &["opensubsonic.server"],
     },
     Bridge {
