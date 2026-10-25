@@ -63,6 +63,12 @@ pub struct SignIn {
     pub in_use: Option<InUse>,
     /// One line for the Sources overview ("tidal-dl-ng's client · full tracks", "Not signed in").
     pub line: String,
+    /// Sign-ins found in other apps' files on this machine (`crate::imports`), usable or not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<crate::imports::Found>,
+    /// Where the node looked ("tidal-dl-ng: ~/.config/tidal_dl_ng/token.json", …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<String>,
     /// The source's own status views, so the tab needs one request.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub details: serde_json::Value,
@@ -144,6 +150,65 @@ pub(crate) async fn put(
     if source == crate::tidal::SOURCE_ID {
         crate::tidal::way_chosen(&s, &b.way);
     }
+    Ok(Json(describe(&s, &source, Some(&headers))?))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ImportBody {
+    /// A `Found::id` from the answer's `imports`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Or a pasted token file / bare token.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// `POST /v1/sources/{source}/signin/import {id}` or `{text}`: use a sign-in found in another
+/// app's files, or a pasted one. Refused in plain words when it cannot work (expired, not a
+/// token file); nothing is changed then.
+pub(crate) async fn import(
+    State(s): State<Arc<NodeState>>,
+    Path(source): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<ImportBody>,
+) -> ApiResult<SignIn> {
+    crate::streaming::find(&source)?;
+    if source != crate::tidal::SOURCE_ID {
+        return Err(ApiError::not_found(format!(
+            "{source} has no sign-in imports yet"
+        )));
+    }
+    let (imp, way) = match (b.text.as_deref().map(str::trim), b.id.as_deref()) {
+        (Some(text), _) if !text.is_empty() => (
+            crate::imports::pasted_tidal(text)
+                .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
+            crate::tidal::WAY_PASTE,
+        ),
+        (_, Some(id)) => {
+            let imp = crate::imports::scan_tidal()
+                .into_iter()
+                .find(|i| i.found.id == id)
+                .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
+            if !imp.found.usable {
+                return Err(ApiError::bad_request(format!(
+                    "{}'s sign-in is not usable: {}",
+                    imp.found.app,
+                    imp.found.reason.clone().unwrap_or_default()
+                )));
+            }
+            (imp, crate::tidal::WAY_IMPORT)
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "Say which sign-in (id) or paste one (text)",
+            ))
+        }
+    };
+    crate::tidal::import_sign_in(&s, imp.session);
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(&way_key(&source), way)?;
     Ok(Json(describe(&s, &source, Some(&headers))?))
 }
 
