@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
+  - After every sign-in, at startup and every 15 minutes, the node's sign-ins (TIDAL, TIDAL full, Spotify, Qobuz, SoundCloud, Bandcamp, YouTube key, Last.fm, ListenBrainz, Jamendo, Plex, Jellyfin, your server, Audiobookshelf, drives, gPodder) are kept in step with the person's vault. A sign-in only on the node moves in once; one only in the vault (from another node) fills the node; then the newer side wins.
+  - Each blob carries the node's settings as they are, plus the standard token members where there's an OAuth session, for the person's other clients.
+  - Nothing is deleted from the node's settings: "Sign out everywhere" moves the node's copies aside.
+  - `POST /v1/vault/sync` runs it now.
+  - librespot's, Soloist's and yt-dlp's machine state stay local.
+  - Tested with two nodes of one person on a real homeserver.
 - **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
   - Signing a device out records it as revoked, so it can't come back. Every sign-in the node can read gets a new data key the device doesn't have; the answer lists those the node can't read, for another device to rotate.
   - Revoking tokens at the services comes with each source's vault integration, and the answer says so.

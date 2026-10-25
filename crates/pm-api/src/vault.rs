@@ -176,7 +176,20 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
         })
         .await
         .map_err(vault_error)?;
+    // The node's own copies go aside now, not at the next sync
+    let cache = crate::vault_cache::sync(&s, &vault).await.map_err(vault_error)?;
+    Ok(Json(serde_json::json!({
+        "removed": removed, "revoked_at_service": [], "signed_out_here": cache.signed_out
+    })))
+}
+
+/// `POST /v1/vault/sync`: register, share, and sync the node's sign-ins with the vault now (it
+/// also runs after every sign-in and every 15 minutes). Answers what moved, by service.
+pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate::vault_cache::CacheReport> {
+    let sync = signed_in(&s)?;
+    let secret = client_secret(&s)?;
+    let vault = Vault::new(sync.session(), &secret);
     Ok(Json(
-        serde_json::json!({ "removed": removed, "revoked_at_service": [] }),
+        crate::vault_cache::pass(&s, &vault).await.map_err(vault_error)?,
     ))
 }

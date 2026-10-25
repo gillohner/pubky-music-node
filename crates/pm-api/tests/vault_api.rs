@@ -201,3 +201,93 @@ async fn the_device_list_and_signing_out_through_the_api() {
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["sign_ins"], json!([]));
 }
+
+/// Item 6: two nodes of one person. The first one's sign-ins move into the vault; the second
+/// gets them once it's shared; a local refresh on either reaches the other; "Sign out
+/// everywhere" moves them aside on both, without deleting anything.
+#[tokio::test]
+async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let token = admin_call(
+        &a,
+        reqwest::Method::POST,
+        "/generate_signup_token",
+        Some(json!({"storage_quota_mb": "unlimited"})),
+    )
+    .await;
+    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+    let homeserver = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (n1, n2) = (node(d1.path()), node(d2.path()));
+    for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
+        let flow = homeserver.start_login(id).unwrap();
+        signer.approve_auth(flow.url()).await.unwrap();
+        let session = flow.await_approval().await.unwrap();
+        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap(),
+            session,
+        )));
+    }
+    let (a1, a2) = (router(n1.clone()), router(n2.clone()));
+    let tidal_v1 = r#"{"access_token":"at-1","refresh_token":"rt-1","user_id":"7","country":"CH"}"#;
+    let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
+    let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    set(&n1, "tidal.user", tidal_v1);
+    set(&n1, "youtube.api_key", "AIza-test-key");
+
+    // Node 1: its two sign-ins move into the vault
+    let (st, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["migrated"], json!(["tidal", "youtube"]), "{r}");
+    // ...and stay where they were on the node
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal_v1));
+
+    // Node 2 joins: it can't read them until node 1 shares them
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["not_readable"], json!(["tidal", "youtube"]), "{r}");
+    call(&a1, "POST", "/v1/vault/sync").await;
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal", "youtube"]), "{r}");
+    assert_eq!(get(&n2, "tidal.user").as_deref(), Some(tidal_v1));
+    assert_eq!(get(&n2, "youtube.api_key").as_deref(), Some("AIza-test-key"));
+
+    // Node 2's source refreshes TIDAL locally: it reaches node 1
+    let tidal_v2 = r#"{"access_token":"at-2","refresh_token":"rt-2","user_id":"7","country":"CH"}"#;
+    set(&n2, "tidal.user", tidal_v2);
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pushed"], json!(["tidal"]), "{r}");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal"]), "{r}");
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal_v2));
+    // Nothing changed: nothing moves
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(
+        r,
+        json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "not_readable": []})
+    );
+
+    // Sign out everywhere from node 1: aside on node 1 now, on node 2 at its next sync
+    let (st, r) = call(&a1, "POST", "/v1/vault/sign-out-everywhere").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["removed"], json!(["tidal", "youtube"]));
+    assert_eq!(r["signed_out_here"], json!(["tidal", "youtube"]));
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["signed_out"], json!(["tidal", "youtube"]), "{r}");
+    for n in [&n1, &n2] {
+        assert_eq!(get(n, "tidal.user"), None, "the node no longer uses it");
+        assert_eq!(
+            get(n, "vault.signed_out.tidal.user").as_deref(),
+            Some(tidal_v2),
+            "kept aside"
+        );
+    }
+    // ...and nothing comes back on the next pass
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!([]), "{r}");
+}
