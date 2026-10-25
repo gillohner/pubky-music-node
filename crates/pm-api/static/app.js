@@ -1907,6 +1907,26 @@
   const searchWords = (x) => String(x || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const closeMatch = (h, q) => { const want = searchWords(q); const have = new Set(searchWords(`${h.title} ${h.subtitle || ''}`)); return want.length > 0 && want.every((w) => have.has(w) || [...have].some((x) => x.startsWith(w))); };
   const srcName = (src) => (src === 'library' ? 'Library' : src === 'pubky' ? 'Pubky' : SERVICE_NAMES[src] || (state.sources || []).find((x) => x.id === src)?.name || src);
+  // One order for every list of services (STEWARD-UX-PLAYER-SOURCES §1): services switched on
+  // and working first, in the owner's play order; then the rest. Your library always works.
+  const HEALTHY_STATUS = /^(ready|previews|connected|signed in|ok)\b/i;
+  const srcHealthy = (x) => !!x && x.enabled !== false && (typeof x.healthy === 'boolean' ? x.healthy : HEALTHY_STATUS.test(String(x.status || '')));
+  const loadSvcRank = async () => {
+    if (!isOwner()) return null;
+    if (state.svcRank && Date.now() - state.svcRank.at < 60000) return state.svcRank;
+    try {
+      const [srcs, po] = await Promise.all([api('GET', '/sources'), api('GET', '/play-order').catch(() => ({ order: [] }))]);
+      state.sources = srcs;
+      state.svcRank = { at: Date.now(), healthy: new Set(['library', ...srcs.filter(srcHealthy).map((x) => x.id)]), off: new Set(srcs.filter((x) => x.enabled === false).map((x) => x.id)), order: po.order || [] };
+    } catch { state.svcRank = null; }
+    return state.svcRank;
+  };
+  // Sort anything that names a service (`svc(x)` gives its id): healthy first, then by play order
+  const rankSvc = (list, svc = (x) => x, r = state.svcRank) => {
+    if (!r) return list;
+    const pos = (id) => { const i = r.order.indexOf(id); return i < 0 ? 999 : i; };
+    return list.map((x, k) => [x, k]).sort(([a, i], [b, j]) => (r.healthy.has(svc(a)) ? 0 : 1) - (r.healthy.has(svc(b)) ? 0 : 1) || pos(svc(a)) - pos(svc(b)) || i - j).map(([x]) => x);
+  };
   // Merge hits across sources: one row per song (Pinakes group, ISRC, UPC, MBID), best source first.
   const mergeSearch = (run) => {
     const byKind = Object.fromEntries(SEARCH_KINDS.map(([k]) => [k, []]));
@@ -2647,6 +2667,7 @@
           break;
         }
         case 'playlist': {
+          loadSvcRank(); // for the "Play this song from" menu's order
           loading();
           const plId = state.viewArg;
           await pubkyUser();
@@ -2723,7 +2744,7 @@
           const pin = async (k, body, msg) => { try { await api('PUT', `/playlists/${d.summary.id}/items/${k}/source`, body); state.plPf = null; toast(msg); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-psrc]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); const k = Number(b.dataset.psrc); const t = songs[k]; const pinnedNow = t.pinned || t.pinLost;
-            const opts = (t.sources || []).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
+            const opts = rankSvc(t.sources || [], (x) => x.service).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
             showMenu(b, [{ title: t.unavailable ? t.unavailable : 'Play this song from' }, { label: 'Auto (follow the playlist)', icon: 'shuffle', on: !pinnedNow, note: t.plays && !pinnedNow ? `now: ${srcName(t.plays.service)}` : null, run: () => pin(k, { service: null }, 'Follows the playlist again') }, ...opts,
               ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
@@ -2769,7 +2790,9 @@
           const srcSwitch = (x, where) => `<input type="checkbox" class="switch" role="switch" data-src-on="${esc(x.id)}" ${x.enabled ? 'checked' : ''} aria-label="${esc(x.name)}${where}">`;
           const tabRow = (x) => { const st = srcState(x); return `<div class="src-tabrow ${x.enabled ? '' : 'off'}"><button class="set-tab ${active === x.id ? 'on' : ''}" id="srctab-${esc(x.id)}" ${active === x.id ? 'aria-current="page"' : ''} data-srctab="${esc(x.id)}">${mark(x)}<span class="src-tname"><span class="src-t1">${esc(x.name)}</span>${x.sign_in ? `<span class="src-tsub" title="${esc(x.sign_in)}">${esc(x.sign_in)}</span>` : ''}</span><span class="src-dot ${st.cls}" title="${esc(st.label)}"></span><span class="sr-only">${esc(st.label)}</span>${icon('chevron', 'ic chev')}</button>${x.id === 'library' ? '<span class="src-noswitch" aria-hidden="true"></span>' : srcSwitch(x, ' on')}</div>`; };
           const lib = { id: 'library', name: 'Your library', status: 'ready', enabled: true };
-          const on = srcs.filter((x) => x.enabled); const off = srcs.filter((x) => !x.enabled);
+          // Working services first, in the owner's play order (STEWARD-UX-PLAYER-SOURCES §1)
+          await loadSvcRank(); if (state.view !== 'sources') return;
+          const on = rankSvc(srcs.filter((x) => x.enabled), (x) => x.id); const off = srcs.filter((x) => !x.enabled);
           const nav = `<nav class="set-nav src-nav" aria-label="Sources">${[lib, ...on].map(tabRow).join('')}${off.length ? (off.length > 2 ? `<details class="src-offgroup" ${off.some((x) => x.id === active) ? 'open' : ''}><summary>Turned off · ${off.length}</summary>${off.map(tabRow).join('')}</details>` : off.map(tabRow).join('')) : ''}</nav>`;
           const panelHead = (x) => `${phone ? `<button class="btn ghost set-back" data-src-back>${icon('back')} Sources</button>` : ''}<h2 class="set-title">${esc(x.name)}</h2>${x.description ? `<p class="muted small src-desc">${esc(x.description)}</p>` : ''}`;
           // TIDAL: one request carries the sign-in ways and both status views (STEWARD-CREDENTIALS-REUSE.md)
@@ -3211,7 +3234,7 @@
           const { kind, id } = state.viewArg;
           loading();
           let pg;
-          try { pg = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); }
+          try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}`), loadSvcRank()]); }
           catch (e) { main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           // The node leaves empty lists out of its answer.
@@ -3250,10 +3273,17 @@
           const songsTitle = kind === 'artist' ? 'Top songs' : kind === 'song' ? 'Song' : 'Songs';
           const songsInfo = songs.length ? `${songs.length} song${songs.length === 1 ? '' : 's'}${pg.total_ms ? ' · ' + mins(pg.total_ms) : ''}` : '';
           const instName = (v) => (v.source === 'library' ? 'Your library' : SERVICE_NAMES[v.source] || String(v.label || v.source).split(' · ')[0]);
-          // "Also on": the same recording elsewhere, each a link to its own page, with play and the service's site
-          // The source row: this page's own source first and highlighted, then the same recording elsewhere
-          const ownPill = `<span class="also here" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<strong>${esc(ownName)}</strong><span class="muted small">this page</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
-          const alsoLine = `<div class="alsoon" id="ialso">${isGlobal ? '' : ownPill}${pg.also_on.length ? `<span class="muted small">${isGlobal ? 'On' : 'Also on'}</span>${pg.also_on.map((v, k) => `<span class="also">${svcBadge(v.source === 'library' ? 'library' : v.source)}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`).join('')}` : ''}</div>`
+          // The source line (STEWARD-UX-PLAYER-SOURCES §1): a quiet line under the title. This page's
+          // own source first; then the same recording on services that are on and working, in the
+          // owner's play order; the rest behind "more". Services switched off are left out.
+          const rk = state.svcRank;
+          const alsoSvc = (v) => (v.source === 'library' ? 'library' : v.source);
+          const alsoAll = rankSvc(pg.also_on.map((v, k) => ({ v, k })).filter(({ v }) => !(rk && rk.off.has(alsoSvc(v)))), ({ v }) => alsoSvc(v));
+          const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
+          const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
+          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
+          const alsoLine = (isGlobal && !alsoAll.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && alsoFirst.length ? '<span class="muted">· also</span>' : ''}${alsoFirst.map(alsoItem).join('')}${alsoMore.length ? `<button class="lnk srcmore" data-srcmore aria-expanded="false">${alsoFirst.length || !isGlobal ? `${alsoMore.length} more` : `${alsoMore.length} services`}</button><span class="srcrest" hidden>${alsoMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
@@ -3324,6 +3354,7 @@
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
+          const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a, button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));

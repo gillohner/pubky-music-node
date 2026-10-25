@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **Quieter source switching, working services first** (STEWARD-UX-PLAYER-SOURCES.md §1):
+  - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
+  - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
+  - Sources and a playlist song's "Play this song from" menu use the same order.
 - **One Sign in for TIDAL, the ways side by side** (mn-sources, STEWARD-CREDENTIALS-REUSE.md step 1): Sources › TIDAL shows one Sign in group: a short list of ways labelled by where they come from (Pubky Music's app · tidal-dl-ng's client, the device sign-in tidal-dl-ng and python-tidal use · Your own app), the recommended one preselected, one button; once signed in, one status line with Change way and Sign out. Picking tidal-dl-ng's client is what the Full tracks switch used to do; quality and health stay under it. The Sources list says per source which way is in use. `GET/PUT/DELETE /v1/sources/{source}/signin`; `/v1/sources` rows carry `sign_in`. Sign-ins imported from other apps on the machine and a pasted token follow as further ways.
 
 ## 2026-10-24
