@@ -810,6 +810,126 @@ impl Vault<'_> {
     }
 }
 
+/// What signing a device out did to one sign-in.
+enum Rotation {
+    Gone,
+    NeverHad,
+    NotReadableHere,
+    Rotated,
+}
+
+/// What "Sign out this device" did.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct SignOutReport {
+    /// Sign-ins rotated past the device (new data key, epoch + 1).
+    pub rotated: Vec<String>,
+    /// Sign-ins this node can't read, so another device must rotate them.
+    pub not_readable_here: Vec<String>,
+}
+
+impl Vault<'_> {
+    /// Sign a device out (VAULT.md, "Revocation"): it moves to `revoked` (by key and grant id, so
+    /// it can't add itself back), and every sign-in this node can read gets a new data key wrapped
+    /// only to the remaining trusted devices. `after` runs per rotated sign-in (the service-side
+    /// part: a forced refresh, a token revocation, where the service allows it). This node can't
+    /// sign itself out here: that would lock it out of its own vault.
+    pub async fn sign_out_device<F, Fut>(&self, device: &ClientKey, after: F) -> Result<SignOutReport>
+    where
+        F: Fn(String, SignIn) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        if *device == self.client_key() {
+            return Err(VaultError::Format("this node can't sign itself out of the vault").into());
+        }
+        // 1. The device list: out of `clients`, into `revoked`
+        let held = self.lock(spec::INDEX_PATH).await?;
+        let r = async {
+            let mut ix = self.index().await?;
+            let jti = ix.clients.iter().find(|e| e.client_key == *device).and_then(|e| {
+                self.check(&ix, e).1.or_else(|| {
+                    pubky::GrantClaims::decode(&e.proof.grant)
+                        .ok()
+                        .map(|c| c.jti.to_string())
+                })
+            });
+            ix.clients.retain(|e| e.client_key != *device);
+            if !ix.is_revoked(device, jti.as_deref()) {
+                ix.revoked.push(spec::Revoked {
+                    client_key: Some(*device),
+                    grant_id: jti,
+                    at: now(),
+                });
+            }
+            let body = serde_json::to_vec(&ix).map_err(|_| VaultError::Format("index"))?;
+            self.put_locked(&held, spec::INDEX_PATH, body).await?;
+            Ok::<Index, VaultStoreError>(ix)
+        }
+        .await;
+        self.unlock(held).await;
+        let ix = r?;
+        // 2. Every sign-in: rotate past it
+        let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+        let mut report = SignOutReport::default();
+        for service in self.services().await? {
+            let path = Self::blob_path(&service)?;
+            let held = self.lock(&path).await?;
+            let r = async {
+                let Some(env) = self.envelope(&service).await? else {
+                    return Ok(Rotation::Gone);
+                };
+                if !env.has_recipient(device) {
+                    return Ok(Rotation::NeverHad);
+                }
+                let Ok((_, sign_in)) = spec::open_sign_in(&self.owner, &path, &env, self.secret) else {
+                    return Ok(Rotation::NotReadableHere);
+                };
+                let others: Vec<ClientKey> = trusted
+                    .iter()
+                    .copied()
+                    .filter(|k| k != device && *k != self.client_key())
+                    .collect();
+                self.write_held(&held, &service, &path, &sign_in, &others).await?;
+                Ok::<Rotation, VaultStoreError>(Rotation::Rotated)
+            }
+            .await;
+            self.unlock(held).await;
+            match r? {
+                Rotation::Rotated => {
+                    if let Some(o) = self.read(&service).await.ok().flatten() {
+                        after(service.clone(), o.sign_in).await;
+                    }
+                    report.rotated.push(service);
+                }
+                Rotation::NotReadableHere => report.not_readable_here.push(service),
+                Rotation::Gone | Rotation::NeverHad => {}
+            }
+        }
+        Ok(report)
+    }
+
+    /// "Sign out everywhere": delete every sign-in (and its lease); the device list stays, so the
+    /// devices can take new sign-ins. `before` runs per sign-in this node can read, before it goes
+    /// (the service-side revocation). Returns the services removed.
+    pub async fn sign_out_everywhere<F, Fut>(&self, before: F) -> Result<Vec<String>>
+    where
+        F: Fn(String, SignIn) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let mut gone = Vec::new();
+        for service in self.services().await? {
+            if let Some(o) = self.read(&service).await.ok().flatten() {
+                before(service.clone(), o.sign_in).await;
+            }
+            self.delete(&service).await?;
+            if let Some(lp) = spec::lease_path(&service) {
+                let _ = self.session.storage().delete(lp.as_str()).await;
+            }
+            gone.push(service);
+        }
+        Ok(gone)
+    }
+}
+
 /// 0..max milliseconds, so clients that collide don't collide again (not secret: the clock's
 /// nanoseconds are enough).
 fn jitter_ms(max: u64) -> u64 {

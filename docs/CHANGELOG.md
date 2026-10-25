@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
+  - Signing a device out records it as revoked, so it can't come back. Every sign-in the node can read gets a new data key the device doesn't have; the answer lists those the node can't read, for another device to rotate.
+  - Revoking tokens at the services comes with each source's vault integration, and the answer says so.
+  - The screens are mn-app's.
 - **Vault refreshes don't race** (STEWARD-VAULT.md item 4). `Vault::refresh` takes the homeserver's WebDAV lock on the sign-in (30 s, renewed every 10 s while the service answers) and reads it again. If another client already refreshed it, it uses that; otherwise it refreshes the token it just read and writes it back with `last_refresh`.
   - Where locks are refused it uses the lease file instead.
   - A refused refresh is never written over the vault.

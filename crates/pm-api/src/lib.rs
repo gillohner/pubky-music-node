@@ -90,6 +90,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod vault;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -598,6 +599,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
+        .route("/vault", get(vault::get))
+        .route("/vault/register", post(vault::register))
+        .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
+        .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",

@@ -262,6 +262,7 @@ jobs:
           cargo test -p pm-api --test bundled_homeserver
           # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
           cargo test -p pm-pubky --test vault_homeserver
+          cargo test -p pm-api --test vault_api
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)

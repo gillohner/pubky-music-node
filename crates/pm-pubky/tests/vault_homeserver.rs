@@ -445,3 +445,82 @@ async fn two_clients_refresh_at_once_with_the_lease_file() {
 async fn a_slow_refresh_keeps_its_lock() {
     two_clients_refresh_at_once(false, std::time::Duration::from_secs(12)).await;
 }
+
+/// Revocation (item 5): "Sign out this device" rotates past it and keeps it out; a sign-in this
+/// node can't read is reported for another device to rotate; "Sign out everywhere" removes them.
+#[tokio::test]
+async fn signing_a_device_out_and_signing_out_everywhere() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let keys: Vec<ClientSecret> = (0..3).map(|_| ClientSecret::generate()).collect();
+    let v: Vec<Vault> = sessions
+        .iter()
+        .zip(&keys)
+        .map(|(s, k)| Vault::new(s, k))
+        .collect();
+    for (i, name) in ["Node", "Phone", "Old laptop"].iter().enumerate() {
+        v[i].register(name).await.unwrap();
+    }
+    v[0].write_shared("tidal", &sign_in("t")).await.unwrap();
+    v[0].write_shared("qobuz", &sign_in("q")).await.unwrap();
+    // One A can't read: the phone wrote it for itself and the laptop only
+    v[1].write("deezer", &sign_in("d"), &[v[2].client_key()])
+        .await
+        .unwrap();
+    assert!(v[2].read("tidal").await.unwrap().is_some());
+
+    // The node can't sign itself out
+    assert!(v[0]
+        .sign_out_device(&v[0].client_key(), |_, _| async {})
+        .await
+        .is_err());
+
+    // Sign the old laptop out
+    let called = std::sync::Mutex::new(Vec::new());
+    let report = v[0]
+        .sign_out_device(&v[2].client_key(), |service, s| {
+            called.lock().unwrap().push((service, s.revision));
+            async {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.rotated, ["qobuz", "tidal"]);
+    assert_eq!(report.not_readable_here, ["deezer"]);
+    assert_eq!(
+        called
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect::<Vec<_>>(),
+        ["qobuz", "tidal"]
+    );
+    // It reads nothing written from now on, the phone still does, and it can't come back
+    for service in ["tidal", "qobuz"] {
+        assert!(v[2].read(service).await.is_err(), "{service}");
+        assert_eq!(v[1].read(service).await.unwrap().unwrap().epoch, 2, "{service}");
+    }
+    assert!(matches!(
+        v[2].register("Old laptop").await,
+        Err(VaultStoreError::Revoked)
+    ));
+    let ix = v[0].index().await.unwrap();
+    assert_eq!(ix.clients.len(), 2);
+    assert!(ix.is_revoked(&v[2].client_key(), None));
+    // The phone, which can read deezer, rotates it past the laptop too
+    let r = v[1]
+        .sign_out_device(&v[2].client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    assert!(r.rotated.contains(&"deezer".to_string()), "{r:?}");
+    assert!(v[2].read("deezer").await.is_err());
+
+    // Sign out everywhere: every sign-in goes, the device list stays
+    let removed = v[0].sign_out_everywhere(|_, _| async {}).await.unwrap();
+    assert_eq!(removed, ["deezer", "qobuz", "tidal"]);
+    assert!(v[0].services().await.unwrap().is_empty());
+    assert_eq!(v[0].index().await.unwrap().clients.len(), 2);
+}
