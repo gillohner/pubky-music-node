@@ -259,7 +259,7 @@ fn paths_and_capabilities() {
         lease_path("tidal").as_deref(),
         Some("/priv/pubky.music/vault/tidal.lease.json")
     );
-    for bad in ["", "Tidal", "../index", "a/b", "x.json", &"a".repeat(33)] {
+    for bad in ["", "index", "Tidal", "../index", "a/b", "x.json", &"a".repeat(33)] {
         assert!(blob_path(bad).is_none(), "{bad}");
     }
     for ok in [

@@ -14,7 +14,7 @@ Python check of them (`tests/vectors/check_vault_v1.py`) for implementers in oth
 | `/priv/pubky.music/vault/<service>.json` | one sign-in, encrypted (the envelope below) |
 | `/priv/pubky.music/vault/<service>.lease.json` | refresh lease, only where locks are refused (below) |
 
-`<service>` is the source id the node uses (`tidal`, `qobuz`, …): 1–32 of `a-z`, `0-9`, `-`.
+`<service>` is the source id the node uses (`tidal`, `qobuz`, …): 1–32 of `a-z`, `0-9`, `-`, never `index`.
 
 ## Clients and their keys
 

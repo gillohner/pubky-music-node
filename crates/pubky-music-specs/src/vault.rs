@@ -42,9 +42,11 @@ pub const REFRESH_AHEAD_SECONDS: u64 = 60;
 const BLOB_DOMAIN: &[u8] = b"pubky.music/vault/v1/blob";
 const WRAP_DOMAIN: &[u8] = b"pubky.music/vault/v1/wrap";
 
-/// A service id: 1–32 of `a-z`, `0-9`, `-` (the source ids the node uses).
+/// A service id: 1–32 of `a-z`, `0-9`, `-` (the source ids the node uses), except `index`, the
+/// device list's name.
 pub fn is_service_id(s: &str) -> bool {
-    (1..=32).contains(&s.len())
+    s != "index"
+        && (1..=32).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
