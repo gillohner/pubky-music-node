@@ -23,8 +23,10 @@ service has two kinds that coexist (`tidal-full` for TIDAL's device client, `spo
 Every client (node, desktop app, phone, browser app) makes a random X25519 static key once and keeps the
 secret on the device. It is authorised by the person's identity, without ever holding the identity secret:
 
-1. The person approves the client in Pubky Ring with a grant whose capabilities cover the vault (a capability
-   on `/priv/pubky.music/vault/` or an ancestor, with `r` and `w`).
+1. The person approves the client in Pubky Ring with a grant that names the vault: the capability
+   `/priv/pubky.music/vault/:rw`. An ancestor (`/:rw`, `/priv/pubky.music/:rw`) is not enough. Ring showed the
+   person "all your storage" for such an app, not "your streaming sign-ins", so a broad grant never makes an
+   app a vault client.
 2. The client signs a **custom proof** with its grant's client key (pubky SDK
    `GrantSessionView::create_custom_pop`), with this data:
    `{"kind": "pubky.music.vault-client", "v": 1, "client_key": "<hex X25519 public key>", "name": "<label>",
@@ -37,7 +39,7 @@ A reader trusts an entry only if all of these hold:
 - `verify_custom_grant_pop` accepts the proof (both signatures, the grant bound to the proof, the grant
   not expired);
 - the grant's `iss` is the vault's owner;
-- the grant's capabilities cover the vault with `r` and `w`;
+- the grant's capabilities include `/priv/pubky.music/vault/` itself with `r` and `w`;
 - `data.kind` and `data.v` are as above;
 - `data.client_key` equals the entry's `client_key`;
 - `data.name` equals the entry's `name`.
