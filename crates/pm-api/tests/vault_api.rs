@@ -139,6 +139,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     assert_eq!(v["registered"], true);
     assert_eq!(v["devices"][0]["name"], "Living room node");
     assert_eq!(v["devices"][0]["this_node"], true);
+    assert_eq!(v["devices"][0]["device"], "node");
     let node_key = v["this_device"].as_str().unwrap().to_string();
     #[cfg(unix)]
     {
