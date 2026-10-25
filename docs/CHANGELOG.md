@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **The player says what it is streaming** (STEWARD-UX-PLAYER-SOURCES.md §2):
+  - **The label:** the player bar and Now playing show what is arriving: "FLAC 44.1/16 · local file", "FLAC 96/24 → 48 kHz · TIDAL Max", "MP3 128 kbps · preview", "AAC 320 kbps · Qobuz". It says "→ 48 kHz" when the node converts for the zone.
+  - **The quality sheet:** tapping the label opens it. It shows what arrives, how the zone plays it and why (from the signal path), the service's quality choice (with when it applies), and links to the Play from order and the zone's output and DSP.
+  - **API:** `now_playing.format` `{codec, bitrate_kbps?, lossless, service, tier?, preview}`. Library files and streams report their codec (lossy files with their average bitrate). The service's tier and the per-service `GET/PUT /v1/sources/<id>/quality` come from mn-sources.
 - **One Sign in for TIDAL, the ways side by side** (mn-sources, STEWARD-CREDENTIALS-REUSE.md step 1): Sources › TIDAL shows one Sign in group: a short list of ways labelled by where they come from (Pubky Music's app · tidal-dl-ng's client, the device sign-in tidal-dl-ng and python-tidal use · Your own app), the recommended one preselected, one button; once signed in, one status line with Change way and Sign out. Picking tidal-dl-ng's client is what the Full tracks switch used to do; quality and health stay under it. The Sources list says per source which way is in use. `GET/PUT/DELETE /v1/sources/{source}/signin`; `/v1/sources` rows carry `sign_in`. Sign-ins imported from other apps on the machine and a pasted token follow as further ways.
 
 ## 2026-10-24

@@ -1132,3 +1132,11 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .chip-sk::before { content: "\00a0"; }
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
+
+/* Now playing's quality line and the quality sheet (STEWARD-UX-PLAYER-SOURCES §2) */
+.npqual { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; font-size: 14px; color: var(--fg-2, var(--fg)); font-variant-numeric: tabular-nums; }
+.qsheet { max-width: 520px; }
+.qsheet .set-rows { border: 1px solid var(--line); border-radius: 12px; margin: 12px 0; }
+.qsheet .chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.npqual .qtext-long { font-weight: 550; }

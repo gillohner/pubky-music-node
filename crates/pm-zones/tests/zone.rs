@@ -96,6 +96,13 @@ impl FrameSource for PatternSource {
         Some(true)
     }
 
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(pm_zones::StreamInfo {
+            codec: "FLAC".into(),
+            lossless: true,
+            ..Default::default()
+        })
+    }
     fn stream_title(&mut self) -> Option<String> {
         if self.pos >= 2 * BLOCK {
             return self.title.take();
@@ -698,4 +705,21 @@ async fn crossfade_stops_when_its_track_is_removed_during_the_fade() {
         ["start:a:false", "end:a", "start:c:true", "end:c", "stopped"]
     );
     assert_eq!(r.zone.queue().len(), 2);
+}
+
+#[tokio::test]
+async fn now_playing_says_what_is_arriving() {
+    let r = rig(&[("tidal:track:7", RATE, 1000)]);
+    r.zone.enqueue(vec![QueueItem::new("tidal:track:7")], Insert::End);
+    r.zone.play();
+    wait_for(|| r.zone.state().now_playing.is_some()).await;
+    let f = r.zone.state().now_playing.unwrap().format.expect("format");
+    assert_eq!(f.codec, "FLAC");
+    assert!(f.lossless);
+    assert_eq!(
+        f.service, "tidal",
+        "the engine fills the service from the queue item"
+    );
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
 }

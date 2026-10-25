@@ -868,6 +868,12 @@ impl Engine {
             },
             members: self.sink.as_ref().map(|s| s.members()).unwrap_or_default(),
             stream_title: c.stream_title.clone(),
+            format: c.source.stream_info().map(|mut f| {
+                if f.service.is_empty() {
+                    f.service = service_of(&c.item.uri).to_string();
+                }
+                f
+            }),
         });
         self.state.send_modify(|s| {
             s.transport = self.transport;
@@ -905,5 +911,29 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
             Poll::Ready(v) => return v,
             Poll::Pending => std::thread::park(),
         }
+    }
+}
+
+/// The service a queue item plays from, by its uri: `track:<id>` and paths are the library,
+/// `tidal:…` is TIDAL, a bare http(s) URL is a stream.
+fn service_of(uri: &str) -> &str {
+    if uri.starts_with('/') || uri.starts_with("file:") || uri.starts_with("track:") {
+        return "library";
+    }
+    match uri.split_once(':') {
+        Some(("http" | "https", _)) => "stream",
+        Some((scheme, _)) if !scheme.is_empty() => scheme,
+        _ => "library",
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    #[test]
+    fn service_of_uris() {
+        assert_eq!(super::service_of("track:12"), "library");
+        assert_eq!(super::service_of("/music/a.flac"), "library");
+        assert_eq!(super::service_of("tidal:track:1"), "tidal");
+        assert_eq!(super::service_of("https://x/y.mp3"), "stream");
     }
 }
