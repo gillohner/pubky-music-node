@@ -27,7 +27,9 @@ secret on the device. It is authorised by the person's identity, without ever ho
    on `/priv/pubky.music/vault/` or an ancestor, with `r` and `w`).
 2. The client signs a **custom proof** with its grant's client key (pubky SDK
    `GrantSessionView::create_custom_pop`), with this data:
-   `{"kind": "pubky.music.vault-client", "v": 1, "client_key": "<hex X25519 public key>", "name": "<label>"}`.
+   `{"kind": "pubky.music.vault-client", "v": 1, "client_key": "<hex X25519 public key>", "name": "<label>",
+   "device": "node"}`. `device` is optional: `node`, `desktop`, `android`, `ios` or `browser` (for the icon;
+   readers that don't know a value show a generic one).
    The result, `{grant, pop}`, is the root-signed grant JWS (it names the client key in `cnf`) and the proof JWS.
 3. It adds itself to `index.json`.
 
@@ -37,10 +39,14 @@ A reader trusts an entry only if all of these hold:
 - the grant's `iss` is the vault's owner;
 - the grant's capabilities cover the vault with `r` and `w`;
 - `data.kind` and `data.v` are as above;
-- `data.client_key` equals the entry's `client_key`.
+- `data.client_key` equals the entry's `client_key`;
+- `data.name` equals the entry's `name`.
 
-The homeserver can't forge an entry. A client re-publishes its proof when its grant is renewed. An entry whose
-grant has expired stays listed but gets no new keys.
+The homeserver can't forge an entry, and the last rule stops it from renaming one ("Living room node" shown as
+"Your phone" on the entry the person then signs out). Readers show the signed `data.name` and `data.device`;
+`last_used_at` isn't signed and is only a hint. A client re-publishes its proof when its grant is renewed. An
+entry whose grant has expired stays listed but gets no new keys; clients may show the grant's `exp` (in the
+grant JWS) to say it needs approving again in Ring.
 
 Why not Paykit's record (`paykit.noise_key_authorization`): it is signed by the identity key itself, so some
 app must hold the root secret. A grant proof gives the same identity binding with only what Ring already does.
