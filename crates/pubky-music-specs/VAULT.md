@@ -142,6 +142,9 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    `last_refresh` (`PUT` with the lock's `If` header), then unlocks.
 4. A client that finds the blob locked (`423`) waits 1–2 s and reads it again. It never refreshes a token it
    didn't just read under the lock.
+5. If renewing the lock fails while the service answers, the client locks again and writes only if nobody
+   wrote meanwhile. At a service that rotates refresh tokens this can cost one refresh: the other client's
+   call fails at the service, and its next read picks up the winner.
 
 **Where `LOCK` is refused** (`405`, an older homeserver), the lease file takes its place:
 1. Read `<service>.lease.json` (`{"client": "<hex>", "until": <unix s>}`). If another client's lease is live,
