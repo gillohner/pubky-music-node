@@ -113,16 +113,22 @@ pub fn tidal_places_text() -> Vec<String> {
         .collect()
 }
 
-fn tidal_paths(home: &Path) -> Vec<(&'static str, &'static str, PathBuf, String)> {
+/// Where each app's file may be: under `XDG_CONFIG_HOME` when that is set, then the fixed path
+/// under the home directory; the first that exists is read.
+/// `(id, app, candidate paths with how each is shown)`.
+type Place = (&'static str, &'static str, Vec<(PathBuf, String)>);
+
+fn tidal_paths(home: &Path) -> Vec<Place> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     TIDAL_PLACES
         .iter()
         .map(|(id, app, rel)| {
-            let (path, shown) = match (&xdg, rel.strip_prefix(".config/")) {
-                (Some(x), Some(under)) => (x.join(under), format!("$XDG_CONFIG_HOME/{under}")),
-                _ => (home.join(rel), format!("~/{rel}")),
-            };
-            (*id, *app, path, shown)
+            let mut candidates = Vec::new();
+            if let (Some(x), Some(under)) = (&xdg, rel.strip_prefix(".config/")) {
+                candidates.push((x.join(under), format!("$XDG_CONFIG_HOME/{under}")));
+            }
+            candidates.push((home.join(rel), format!("~/{rel}")));
+            (*id, *app, candidates)
         })
         .collect()
 }
@@ -134,8 +140,10 @@ pub(crate) fn scan_tidal() -> Vec<Import> {
     };
     tidal_paths(&home)
         .into_iter()
-        .filter_map(|(id, app, path, shown)| {
-            let text = std::fs::read_to_string(&path).ok()?;
+        .filter_map(|(id, app, candidates)| {
+            let (text, shown) = candidates
+                .into_iter()
+                .find_map(|(path, shown)| Some((std::fs::read_to_string(&path).ok()?, shown)))?;
             Some(match parse_tidal(id, &text) {
                 Ok(session) => import_of(id, app, &shown, session),
                 Err(e) => Import {
