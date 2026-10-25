@@ -409,7 +409,7 @@ fn artist_json(a: &pm_library::ArtistSummary) -> Value {
     })
 }
 
-fn mime_for(container: &str) -> (&'static str, &'static str) {
+pub(crate) fn mime_for(container: &str) -> (&'static str, &'static str) {
     match container {
         "flac" => ("audio/flac", "flac"),
         "wav" => ("audio/wav", "wav"),
