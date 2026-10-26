@@ -382,6 +382,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::drives::spawn_rescans(&state);
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     state.set_return_page(&cfg.auth.return_page);
+    state.set_passport_origin(&cfg.auth.passport_origin);
     // Tests point TIDAL at a mock (tools/ui-tidal-login.js); never needed in use
     {
         let var = |k: &str| {

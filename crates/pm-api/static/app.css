@@ -1132,3 +1132,6 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .chip-sk::before { content: "\00a0"; }
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
+/* Ring and Passport side by side: Ring first on phones, Passport first on computers */
+.signin-ways { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+@media (pointer: fine) and (min-width: 721px) { .signin-ways .pp { order: -1; } }

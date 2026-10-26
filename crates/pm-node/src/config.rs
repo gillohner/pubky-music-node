@@ -149,6 +149,9 @@ impl std::fmt::Debug for SoundcloudConfig {
 pub struct AuthConfig {
     /// The return page; empty = the project's (`pm_api::project_apps::RETURN_PAGE`).
     pub return_page: String,
+    /// The web signer that approves sign-ins next to Pubky Ring ("Sign in with Passport"); empty
+    /// = `https://passport.pubky.app`. Another origin for a staging Passport.
+    pub passport_origin: String,
 }
 
 /// Remote access over iroh (ADR 0013): the owner's apps reach the node from anywhere by its key,

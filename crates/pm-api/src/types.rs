@@ -29,6 +29,9 @@ pub struct Info {
     /// What the last scan did, and the files it could not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan: Option<LastScan>,
+    /// Pubky Passport's origin, for "Sign in with Passport" next to Pubky Ring.
+    #[serde(default)]
+    pub passport_origin: String,
 }
 
 /// The last library scan, for "your library is up to date" and the files it skipped.
@@ -1441,6 +1444,10 @@ pub struct ControllerLoginStarted {
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qr_svg: Option<String>,
+    /// Pubky Passport's origin, for "Sign in with Passport" on the same `url` (the page can't
+    /// read `/v1/info` before it has a token).
+    #[serde(default)]
+    pub passport_origin: String,
 }
 
 /// `GET /v1/auth/pubky/poll?id=`.

@@ -69,6 +69,9 @@ pub struct NodeSettings {
     pub jamendo: crate::jamendo::JamendoCredentials,
 }
 
+/// Pubky Passport, the web signer (STEWARD-PASSPORT-SIGNIN.md).
+pub const PASSPORT_ORIGIN: &str = "https://passport.pubky.app";
+
 pub struct NodeState {
     /// The config file the node was started with (a backup carries it, encrypted).
     config_file: Mutex<Option<PathBuf>>,
@@ -88,6 +91,8 @@ pub struct NodeState {
     pub sync_activity: Mutex<crate::types::SyncActivity>,
     /// The static sign-in return page for the project's apps (`[auth] return_page`).
     return_page: std::sync::RwLock<String>,
+    /// Pubky Passport's origin (`[auth] passport_origin`), for "Sign in with Passport".
+    passport_origin: std::sync::RwLock<String>,
     /// What the last scan did (shown when it ends, and in Settings).
     pub last_scan: Mutex<Option<crate::types::LastScan>>,
     pub name: String,
@@ -426,6 +431,7 @@ impl NodeState {
             music_uploads: Default::default(),
             sync_activity: Mutex::new(Default::default()),
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
+            passport_origin: std::sync::RwLock::new(PASSPORT_ORIGIN.to_string()),
             last_scan: Mutex::new(None),
         })
     }
@@ -1400,6 +1406,24 @@ impl NodeState {
     /// Where the project's apps send a sign-in back to (a static page that forwards to this node).
     pub fn return_page(&self) -> String {
         self.return_page.read().expect("return page lock").clone()
+    }
+
+    /// Pubky Passport's origin, as the web UI opens it (no trailing slash).
+    pub fn passport_origin(&self) -> String {
+        self.passport_origin.read().expect("passport origin lock").clone()
+    }
+
+    /// Point "Sign in with Passport" at another Passport (staging); an empty value keeps the default.
+    /// Only an `https://` origin (or `http://localhost` for development) is taken.
+    pub fn set_passport_origin(&self, origin: &str) {
+        let o = origin.trim().trim_end_matches('/');
+        let host = o.strip_prefix("https://").or_else(|| {
+            o.strip_prefix("http://")
+                .filter(|h| h.starts_with("localhost") || h.starts_with("127.0.0.1"))
+        });
+        if host.is_some_and(|h| !h.is_empty() && !h.contains('/')) {
+            *self.passport_origin.write().expect("passport origin lock") = o.to_string();
+        }
     }
 
     pub fn set_return_page(&self, url: &str) {

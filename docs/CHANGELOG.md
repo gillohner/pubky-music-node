@@ -2,6 +2,14 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-26
+
+- **Sign in with Passport** (STEWARD-PASSPORT-SIGNIN.md): next to every "Sign in with Pubky Ring" (the login dialog, Settings › Accounts), "Sign in with Passport" opens Pubky Passport, the web signer, on the same authorization URL, and the node polls the relay as for Ring.
+  - The popup opens from the click; the desktop and Android app open Passport in the system browser.
+  - Passport's messages are accepted only from its exact origin and our own popup, are acknowledged, and never count as a sign-in. Cancel or error ends the attempt. A closed window gets a few seconds' grace, in case the approval is already on its way.
+  - Ring comes first on phones, Passport on computers. Creating an account on the node's homeserver stays Ring-only (Passport can't sign up with an invite yet).
+  - `[auth] passport_origin` points at a staging Passport; the node never sets `Cross-Origin-Opener-Policy: same-origin` (tested).
+
 ## 2026-10-25
 
 - **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:

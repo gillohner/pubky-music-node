@@ -394,25 +394,71 @@
     new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
   }
   const login = () => { const d = $('#login'); if (!d.open) { $('#tok').value = state.token; d.showModal(); } };
+  // Sign in with Passport (STEWARD-PASSPORT-SIGNIN.md; pubky-passport docs/integration.md): the
+  // web signer approves the same authorization URL the node made for Ring, and the node keeps
+  // polling the relay exactly as for Ring. Passport's messages only describe its window; the
+  // sign-in is what the node's poll says. Call passportAttempt() from the click itself (popup).
+  const passportOrigin = () => (state.info && state.info.passport_origin) || 'https://passport.pubky.app';
+  const passportUrl = (authUrl) => `${passportOrigin()}/authorize#d=${encodeURIComponent(authUrl)}`;
+  const passportAttempt = (onEnd) => {
+    const inApp = !!window.pmDesktop; // the app has no popups: the system browser opens Passport
+    let origin = passportOrigin(); // the node's answer to the start may name another (staging)
+    const popup = inApp ? null : window.open('about:blank', `pubky-passport-${Date.now()}`, 'popup');
+    if (!inApp && !popup) return null; // blocked: the caller shows a link instead
+    let ended = false; let succeeded = false; let grace = null;
+    const end = (why) => {
+      if (ended) return; ended = true;
+      window.removeEventListener('message', onMsg); clearInterval(watch); clearTimeout(grace);
+      try { if (popup && !popup.closed) popup.close(); } catch { /* cross-origin: best effort */ }
+      if (why) onEnd(why);
+    };
+    const onMsg = (ev) => {
+      if (!popup || ev.source !== popup || ev.origin !== origin) return;
+      const d = ev.data;
+      if (!d || typeof d !== 'object' || d.type !== 'pubky-passport.authorization-outcome' || d.version !== 1 || typeof d.messageId !== 'string' || !['success', 'error', 'cancel'].includes(d.outcome)) return;
+      popup.postMessage({ type: 'pubky-passport.authorization-outcome-ack', version: 1, messageId: d.messageId }, origin);
+      if (d.outcome === 'success') succeeded = true; // the approval reached the relay: keep polling
+      else end(d.outcome === 'cancel' ? 'Cancelled in Passport.' : 'Passport could not approve the request.');
+    };
+    window.addEventListener('message', onMsg);
+    // Closed without a word: abandoned, unless an approval arrives within a few seconds (without
+    // callbacks, Passport shows its own result screen and sends no message)
+    const watch = popup ? setInterval(() => { if (popup.closed && !succeeded && !grace) grace = setTimeout(() => end('The Passport window was closed.'), 10000); }, 500) : null;
+    return {
+      go: (authUrl, from) => { if (ended) return; if (from) origin = from; const href = `${origin}/authorize#d=${encodeURIComponent(authUrl)}`; if (popup) popup.location.replace(href); else window.open(href, '_blank'); },
+      done: () => end(null),
+      fail: (why) => end(why),
+    };
+  };
   // Pubky Ring sign-in: the node starts a flow, we show the link (and a QR when the device has a camera elsewhere), poll until the owner approves, and keep the token it hands out.
   let ringPoll = null;
-  $('#ringstart').onclick = async () => {
-    const out = $('#ringout'); $('#ringstart').disabled = true; out.innerHTML = 'Starting…';
+  const loginBtns = (on) => { $('#ringstart').disabled = !on; const pb = $('#passportstart'); if (pb) pb.disabled = !on; };
+  // via: null (Ring), a Passport attempt, or 'link' (Passport, popup blocked: a link to click)
+  const startNodeLogin = async (via) => {
+    const out = $('#ringout'); loginBtns(false); out.innerHTML = 'Starting…';
     try {
       const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json(); if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      out.innerHTML = `<div class="qrbox">${j.qr_svg ? `<div class="qr">${j.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or <a href="${esc(j.url)}">open it in Ring on this device</a>.</p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p></div></div>`;
+      if (via && via !== 'link') { via.go(j.url, j.passport_origin); out.innerHTML = `<p>Approve in Passport${window.pmDesktop ? ', in your browser' : ', in the window that opened'}. This page connects by itself.</p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p>`; }
+      else if (via === 'link') out.innerHTML = `<p>Your browser blocked the Passport window. <a href="${esc(`${j.passport_origin || passportOrigin()}/authorize#d=${encodeURIComponent(j.url)}`)}" target="_blank" rel="opener">Open Passport</a> and approve; this page connects by itself.</p>`;
+      else out.innerHTML = `<div class="qrbox">${j.qr_svg ? `<div class="qr">${j.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or <a href="${esc(j.url)}">open it in Ring on this device</a>.</p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p></div></div>`;
       clearInterval(ringPoll);
       ringPoll = setInterval(async () => {
         try {
           const p = await (await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(j.id)}`)).json();
           if (p.status === 'pending') return;
-          clearInterval(ringPoll); $('#ringstart').disabled = false;
-          if (p.status === 'ok') { state.token = p.token || ''; localStorage.setItem('pm.token', state.token); $('#login').close(); toast('Connected with Pubky Ring'); connect(); }
+          clearInterval(ringPoll); loginBtns(true);
+          if (via && via !== 'link') via.done();
+          if (p.status === 'ok') { state.token = p.token || ''; localStorage.setItem('pm.token', state.token); $('#login').close(); toast(via ? 'Connected with Passport' : 'Connected with Pubky Ring'); connect(); }
           else if (p.status === 'denied') out.innerHTML = `<p class="warn">That was a different Pubky identity (${esc((p.user || '').slice(0, 12))}…). Only the node's owner can connect.</p>`;
           else out.innerHTML = '<p class="warn">The sign-in expired. Try again.</p>';
-        } catch (e) { clearInterval(ringPoll); $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+        } catch (e) { clearInterval(ringPoll); loginBtns(true); if (via && via !== 'link') via.fail(null); out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
       }, 2000);
-    } catch (e) { $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+    } catch (e) { loginBtns(true); if (via && via !== 'link') via.fail(null); out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+  };
+  $('#ringstart').onclick = () => startNodeLogin(null);
+  const pps = $('#passportstart'); if (pps) pps.onclick = () => {
+    const att = passportAttempt((why) => { clearInterval(ringPoll); loginBtns(true); $('#ringout').innerHTML = `<p class="warn">${esc(why)}</p>`; });
+    startNodeLogin(att || 'link');
   };
   $('#login form').addEventListener('submit', () => {
     state.token = $('#tok').value.trim();
@@ -3594,7 +3640,7 @@
             + '<div id="pkfiles" class="muted small set-note">Loading homeserver files…</div></details>';
           const accounts = group('Pubky', pk ? (
               (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
-              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
+              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button><button class="btn ghost pp" id="pkpassport" title="Approve this node again in Pubky Passport">With Passport</button>` : `<span class="signin-ways"><button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky Ring</button><button class="btn ghost pp" id="pkpassport" title="Pubky Passport: your Pubky identity in the browser">Sign in with Passport</button></span>`)
               + (pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : '')
               + '<div id="pkurl"></div>'
               + (pk.user ? (stor ? savedRows : legacyRows) : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
@@ -3919,9 +3965,16 @@
           };
           // Pubky Ring: a QR and link, then wait for the approval (a sign-in, or creating the owner's
           // account on the bundled homeserver, which signs the node in the same way)
-          const ringFlow = async (path, what) => {
+          const ringFlow = async (path, what, via) => {
             try {
               const r = await api('POST', path);
+              if (via) {
+                if (via !== 'link') via.go(r.url);
+                $('#pkurl').innerHTML = `<div class="notice" style="margin-top:12px" role="status">${via === 'link' ? `Your browser blocked the Passport window. <a href="${esc(passportUrl(r.url))}" target="_blank" rel="opener">Open Passport</a> and approve.` : `Approve in Passport${window.pmDesktop ? ', in your browser' : ', in the window that opened'}.`} This page updates by itself.</div>`;
+                const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); if (via !== 'link') via.done(); state.pubkyUser = undefined; toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); if (via !== 'link') via.fail(null); toast(e.message, 'error'); } }, 2000);
+                state.passportPoll = t;
+                return;
+              }
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(r.url)}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
               $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
@@ -3929,6 +3982,10 @@
             } catch (e) { toast(e.message, 'error'); }
           };
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
+          const pp = $('#pkpassport'); if (pp) pp.onclick = () => {
+            const att = passportAttempt((why) => { clearInterval(state.passportPoll); $('#pkurl').innerHTML = `<p class="warn small" style="margin-top:12px">${esc(why)}</p>`; });
+            ringFlow('/pubky/login', '', att || 'link');
+          };
           const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
           if (state.autoCreate && hc) { state.autoCreate = false; hc.click(); hc.scrollIntoView({ block: 'center' }); }
           loadPeople(); loadRemote();

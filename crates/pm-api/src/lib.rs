@@ -894,6 +894,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         outputs: s.outputs.len(),
         scanning: s.is_scanning(),
         last_scan: s.last_scan.lock().expect("last scan lock").clone(),
+        passport_origin: s.passport_origin(),
     }))
 }
 
@@ -2599,6 +2600,7 @@ async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<Co
         url,
         owner,
         qr_svg,
+        passport_origin: s.passport_origin(),
     }))
 }
 
@@ -10731,6 +10733,41 @@ exec sleep 300
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             assert!(std::str::from_utf8(&body).unwrap().contains(needle), "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn passport_sign_in_needs_its_origin_and_an_open_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, info) = call(&app, "GET", "/v1/info", None).await;
+        assert_eq!(info["passport_origin"], "https://passport.pubky.app");
+        // A staging Passport; nothing but an origin is taken
+        s.set_passport_origin("https://passport.staging.pubky.app/");
+        assert_eq!(s.passport_origin(), "https://passport.staging.pubky.app");
+        for bad in [
+            "http://evil.example",
+            "https://x.example/path",
+            "javascript:alert(1)",
+            "https://",
+        ] {
+            s.set_passport_origin(bad);
+            assert_eq!(s.passport_origin(), "https://passport.staging.pubky.app", "{bad}");
+        }
+        s.set_passport_origin("http://localhost:5173");
+        assert_eq!(s.passport_origin(), "http://localhost:5173");
+        // The web UI must not sever the Passport popup (Cross-Origin-Opener-Policy: same-origin)
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let coop = resp
+            .headers()
+            .get("cross-origin-opener-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_ne!(coop, "same-origin", "the popup would lose its opener");
     }
 
     #[tokio::test]
