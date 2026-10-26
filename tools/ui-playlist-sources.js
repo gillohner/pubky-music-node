@@ -61,13 +61,13 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       const o1 = await orderOf();
       await p.click('#plorder [data-odown="0"]'); await p.waitForFunction((first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() !== first; }, o1[0], { timeout: 30000 }).catch(() => {});
       const o2 = await orderOf();
-      check(o2[0] === o1[1] && o2[1] === o1[0] && !(await checkedOf(p, '#plownorder')), `arrow button moves it: ${o1.join('›')} → ${o2.join('›')}, own order`);
+      check(o2[0] === o1[1] && o2[1] === o1[0] && (await checkedOf(p, '#plownorder')) === false, `arrow button moves it: ${o1.join('›')} → ${o2.join('›')}, own order`);
       await p.focus('#plorder [data-ogrip="1"]'); await p.keyboard.press('Alt+ArrowUp');
       await p.waitForFunction((first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() === first; }, o1[0], { timeout: 30000 }).catch(() => {});
       check((await orderOf())[0] === o1[0], 'Alt+↑ on the grip moves it back');
       if (OUT) { await p.$eval('#plorder', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/playlist-play-from-1280-dark.png` }); }
       await p.click('#plownorder'); await p.waitForFunction(() => document.querySelector('#plownorder') && document.querySelector('#plownorder').checked, null, { timeout: 30000 }).catch(() => {});
-      check(await checkedOf(p, '#plownorder'), '"Use my node’s order" goes back to the global order');
+      check((await checkedOf(p, '#plownorder')) === true, '"Use my node’s order" goes back to the global order');
       // global order in Settings
       await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);

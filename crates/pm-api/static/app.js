@@ -1528,8 +1528,13 @@
     }).join('');
     return bare ? rows : `<div class="tracks" data-list="${key}">${rows}</div>`;
   };
-  const bindTrackRows = (container, lists) => {
+  // Track rows on #main: one listener, bound once, reading the current page's lists (every render
+  // used to add another, so ⋯ ran once per visit with the lists of pages left behind)
+  let rowLists = {}; let rowsBound = false;
+  const bindTrackRows = (container, pageLists) => {
+    rowLists = pageLists; if (rowsBound) return; rowsBound = true;
     container.addEventListener('click', async (e) => {
+      const lists = rowLists;
       const btn = e.target.closest('[data-act]');
       // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
       if (!btn) {
@@ -1717,24 +1722,27 @@
   // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
   // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
   {
-    let sw = null; let lastCtx = 0;
-    document.addEventListener('contextmenu', () => { lastCtx = Date.now(); }, true);
+    let sw = null; let lastCtx = 0; let lastLong = 0;
+    document.addEventListener('contextmenu', (e) => { lastCtx = Date.now(); if (Date.now() - lastLong < 2000 && e.target.closest && e.target.closest('.srow, .track, [data-srow]')) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+    // the click a long press leaves on release (iOS) must not play the row
+    document.addEventListener('click', (e) => { if (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]')) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; } }, true);
     const ROWS = '.srow, .track, [data-srow]';
     const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
     const reset = (row) => { row.style.transform = ''; row.classList.remove('swiping', 'swipe-ready'); delete row.dataset.swipeLabel; };
     document.addEventListener('touchstart', (e) => {
+      if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); }
       const row = e.target.closest && e.target.closest(ROWS);
       if (!row || e.touches.length !== 1 || e.target.closest('input, textarea, [data-qgrip], [draggable="true"]') || row.closest('.selecting') || !moreOf(row)) { sw = null; return; }
       const t = e.touches[0];
       sw = { row, x: t.clientX, y: t.clientY, dx: 0, on: false, moved: false };
-      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; moreOf(row).click(); } }, 600);
+      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; lastLong = Date.now(); moreOf(row).click(); } }, 600);
     }, { passive: true });
     document.addEventListener('touchmove', (e) => {
       if (!sw) return; const t = e.touches[0]; const dx = t.clientX - sw.x; const dy = t.clientY - sw.y;
-      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) sw.moved = true;
-      if (!sw.on && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.5) { sw.on = true; sw.row.classList.add('swiping'); }
-      if (!sw.on) return;
-      sw.dx = Math.max(-140, Math.min(140, dx));
+      if (!sw.dir && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { sw.moved = true; sw.dir = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y'; } // locked on the first move
+      if (sw.dir !== 'x') return;
+      if (!sw.on) { sw.on = true; sw.row.classList.add('swiping'); }
+      sw.dx = Math.max(isListener() ? 0 : -140, Math.min(140, dx)); // listeners have no playlists to add to
       sw.row.style.transform = `translateX(${sw.dx}px)`;
       sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to playlist';
       sw.row.classList.toggle('swipe-ready', Math.abs(sw.dx) >= 80);
@@ -1743,7 +1751,7 @@
       if (!sw) return; clearTimeout(sw.timer); const s2 = sw; sw = null;
       if (!s2.on) return;
       reset(s2.row);
-      if (Math.abs(s2.dx) >= 80) { menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now() }; moreOf(s2.row).click(); }
+      if (Math.abs(s2.dx) >= 80) { const more = moreOf(s2.row); menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now(), anchor: more }; more.click(); }
     };
     document.addEventListener('touchend', end, { passive: true });
     document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
@@ -1753,10 +1761,11 @@
   const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
-    if (menuPick) {
-      const want = menuPick; menuPick = null;
-      if (Date.now() - want.at < 2000) {
+    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+    if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
+    else if (menuPick) {
+      const want = menuPick; menuPick = null; closeMenu();
+      {
         const it = items.find((x) => !x.title && !x.disabled && String(x.label || '').replace(/…$/, '') === want.label);
         if (it) Promise.resolve(it.run()); else toast(`${want.label} isn't available for this row`);
         return;
@@ -2278,7 +2287,7 @@
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
-    + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<label class="switch"><input type="checkbox" id="densepick" ${densePref() ? 'checked' : ''}><span class="sr-only">Dense lists</span></label>`));
+    + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
   const bindLayoutPick = () => {
     $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
       try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
@@ -4205,7 +4214,7 @@
       bindResign(main);
 
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
-      if (Object.keys(lists).length) bindTrackRows(main, lists);
+      bindTrackRows(main, lists);
     } catch (e) {
       main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;
     }
