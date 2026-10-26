@@ -1,0 +1,753 @@
+ugen0.5: bcdUSB=0x0200 bDeviceClass=0x00ef bDeviceSubClass=0x0002 bDeviceProtocol=0x0001 idVendor=0x2972 idProduct=0x0093 bcdDevice=0x0225 iManufacturer=0x0001 iProduct=0x0003 iSerialNumber=0x0002 bNumConfigurations=0x0002 vendor='FiiO Electronics Technology' product='FIIO KA17'
+
+
+ Configuration index 0
+
+    bLength = 0x0009
+    bDescriptorType = 0x0002
+    wTotalLength = 0x0155
+    bNumInterfaces = 0x0005
+    bConfigurationValue = 0x0001
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x0080
+    bMaxPower = 0x0000
+
+    Additional Descriptor
+
+    bLength = 0x08
+    bDescriptorType = 0x0b
+    bDescriptorSubType = 0x00
+     RAW dump:
+     0x00 | 0x08, 0x0b, 0x00, 0x02, 0x01, 0x00, 0x20, 0x00
+
+
+    Interface 0
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0000
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0001
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0003  <FIIO KA17>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x09, 0x24, 0x01, 0x00, 0x02, 0x08, 0x48, 0x00,
+       0x08 | 0x00
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x0a
+       RAW dump:
+       0x00 | 0x08, 0x24, 0x0a, 0x29, 0x03, 0x07, 0x00, 0x09
+
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x0b
+       RAW dump:
+       0x00 | 0x08, 0x24, 0x0b, 0x28, 0x01, 0x29, 0x03, 0x08
+
+
+      Additional Descriptor
+
+      bLength = 0x11
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x11, 0x24, 0x02, 0x02, 0x01, 0x01, 0x00, 0x28,
+       0x08 | 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
+       0x10 | 0x06
+
+      Additional Descriptor
+
+      bLength = 0x12
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x06
+       RAW dump:
+       0x00 | 0x12, 0x24, 0x06, 0x0a, 0x02, 0x0f, 0x00, 0x00,
+       0x08 | 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x10 | 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x0c
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x03
+       RAW dump:
+       0x00 | 0x0c, 0x24, 0x03, 0x14, 0x01, 0x03, 0x00, 0x0a,
+       0x08 | 0x28, 0x00, 0x00, 0x00
+
+
+
+    Interface 1
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+
+    Interface 1 Alt 1
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0001
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x01, 0x00,
+       0x08 | 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x04, 0x20
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0308
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 1 Alt 2
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0002
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x01, 0x00,
+       0x08 | 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x02, 0x10
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0184
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 1 Alt 3
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0003
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00,
+       0x08 | 0x00, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x04, 0x20
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0308
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 2
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0002
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x00fe  <Application specific>
+      bInterfaceSubClass = 0x0001
+      bInterfaceProtocol = 0x0001
+      iInterface = 0x000a  <GuangZhou FIIO Electronics Co.,Ltd DFU>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x07
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x07, 0xfa, 0x00, 0x40, 0x00, 0x10,
+       0x08 | 0x01
+
+
+    Interface 3
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0003
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0001
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0000
+      bInterfaceProtocol = 0x0000
+      iInterface = 0x000e  <FIIO KA17 (MQA HID)>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x10
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x10, 0x01, 0x00, 0x01, 0x22, 0x15,
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0083  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 4
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0004
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0000
+      bInterfaceProtocol = 0x0000
+      iInterface = 0x0006  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x11
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x40,
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0084  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0002  <OUT>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+=====
+ugen0.5: bcdUSB=0x0200 bDeviceClass=0x00ef bDeviceSubClass=0x0002 bDeviceProtocol=0x0001 idVendor=0x2972 idProduct=0x0093 bcdDevice=0x0225 iManufacturer=0x0001 iProduct=0x0003 iSerialNumber=0x0002 bNumConfigurations=0x0002 vendor='FiiO Electronics Technology' product='FIIO KA17'
+
+
+ Configuration index 0
+
+    bLength = 0x0009
+    bDescriptorType = 0x0002
+    wTotalLength = 0x0155
+    bNumInterfaces = 0x0005
+    bConfigurationValue = 0x0001
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x0080
+    bMaxPower = 0x0000
+
+    Additional Descriptor
+
+    bLength = 0x08
+    bDescriptorType = 0x0b
+    bDescriptorSubType = 0x00
+     RAW dump:
+     0x00 | 0x08, 0x0b, 0x00, 0x02, 0x01, 0x00, 0x20, 0x00
+
+
+    Interface 0
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0000
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0001
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0003  <FIIO KA17>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x09, 0x24, 0x01, 0x00, 0x02, 0x08, 0x48, 0x00,
+       0x08 | 0x00
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x0a
+       RAW dump:
+       0x00 | 0x08, 0x24, 0x0a, 0x29, 0x03, 0x07, 0x00, 0x09
+
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x0b
+       RAW dump:
+       0x00 | 0x08, 0x24, 0x0b, 0x28, 0x01, 0x29, 0x03, 0x08
+
+
+      Additional Descriptor
+
+      bLength = 0x11
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x11, 0x24, 0x02, 0x02, 0x01, 0x01, 0x00, 0x28,
+       0x08 | 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
+       0x10 | 0x06
+
+      Additional Descriptor
+
+      bLength = 0x12
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x06
+       RAW dump:
+       0x00 | 0x12, 0x24, 0x06, 0x0a, 0x02, 0x0f, 0x00, 0x00,
+       0x08 | 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x10 | 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x0c
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x03
+       RAW dump:
+       0x00 | 0x0c, 0x24, 0x03, 0x14, 0x01, 0x03, 0x00, 0x0a,
+       0x08 | 0x28, 0x00, 0x00, 0x00
+
+
+
+    Interface 1
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+
+    Interface 1 Alt 1
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0001
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x01, 0x00,
+       0x08 | 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x04, 0x20
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0308
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 1 Alt 2
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0002
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x01, 0x00,
+       0x08 | 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x02, 0x10
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0184
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 1 Alt 3
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0001
+      bAlternateSetting = 0x0003
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0001  <Audio device>
+      bInterfaceSubClass = 0x0002
+      bInterfaceProtocol = 0x0020
+      iInterface = 0x0004  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x10
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x10, 0x24, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00,
+       0x08 | 0x00, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0b
+
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump:
+       0x00 | 0x06, 0x24, 0x02, 0x01, 0x04, 0x20
+
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0005  <ASYNC-ISOCHRONOUS>
+        wMaxPacketSize = 0x0308
+        bInterval = 0x0001
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+      Additional Descriptor
+
+      bLength = 0x08
+      bDescriptorType = 0x25
+      bDescriptorSubType = 0x01
+       RAW dump:
+       0x00 | 0x08, 0x25, 0x01, 0x00, 0x00, 0x02, 0x08, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0011  <ISOCHRONOUS>
+        wMaxPacketSize = 0x0004
+        bInterval = 0x0004
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 2
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0002
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0000
+      bInterfaceClass = 0x00fe  <Application specific>
+      bInterfaceSubClass = 0x0001
+      bInterfaceProtocol = 0x0001
+      iInterface = 0x000a  <GuangZhou FIIO Electronics Co.,Ltd DFU>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x07
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x07, 0xfa, 0x00, 0x40, 0x00, 0x10,
+       0x08 | 0x01
+
+
+    Interface 3
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0003
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0001
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0000
+      bInterfaceProtocol = 0x0000
+      iInterface = 0x000e  <FIIO KA17 (MQA HID)>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x10
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x10, 0x01, 0x00, 0x01, 0x22, 0x15,
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0083  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+
+    Interface 4
+      bLength = 0x0009
+      bDescriptorType = 0x0004
+      bInterfaceNumber = 0x0004
+      bAlternateSetting = 0x0000
+      bNumEndpoints = 0x0002
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0000
+      bInterfaceProtocol = 0x0000
+      iInterface = 0x0006  <FIIO KA17 >
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x11
+       RAW dump:
+       0x00 | 0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x40,
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0084  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000
+
+     Endpoint 1
+        bLength = 0x0007
+        bDescriptorType = 0x0005
+        bEndpointAddress = 0x0002  <OUT>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0040
+        bInterval = 0x0008
+        bRefresh = 0x0000
+        bSynchAddress = 0x0000

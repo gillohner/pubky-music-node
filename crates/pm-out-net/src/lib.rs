@@ -105,6 +105,10 @@ impl Output for NetOutput {
         format!("{} · {}", self.endpoint_name, self.remote.name)
     }
 
+    fn device(&self) -> Option<pm_zones::OutputDevice> {
+        self.remote.device.clone()
+    }
+
     fn caps(&self) -> &OutputCaps {
         &self.remote.caps
     }

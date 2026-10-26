@@ -1,0 +1,10 @@
+[package]
+name = "pm-usb-audio"
+description = "USB Audio Class 1/2 descriptors: what a USB DAC takes (the Android app's DAC support)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }

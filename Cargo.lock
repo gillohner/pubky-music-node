@@ -4021,6 +4021,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-usb-audio"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "pm-zones"
 version = "0.1.0"
 dependencies = [

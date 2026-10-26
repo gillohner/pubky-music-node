@@ -31,6 +31,27 @@ pub struct CpalOutput {
     caps: OutputCaps,
 }
 
+/// The USB DAC Android routes to, as the app describes it (STEWARD-ANDROID-USB-DAC.md step 1;
+/// `None`: the phone's speaker or headphones). Set by the app when a DAC comes or goes.
+#[cfg(target_os = "android")]
+static ANDROID_DAC: std::sync::Mutex<Option<pm_zones::OutputDevice>> = std::sync::Mutex::new(None);
+
+/// Say which USB DAC is attached (the app's USB watcher). Returns whether it changed.
+#[cfg(target_os = "android")]
+pub fn set_android_dac(d: Option<pm_zones::OutputDevice>) -> bool {
+    let mut cur = ANDROID_DAC.lock().unwrap_or_else(|e| e.into_inner());
+    if *cur == d {
+        return false;
+    }
+    *cur = d;
+    true
+}
+
+#[cfg(target_os = "android")]
+fn android_dac() -> Option<pm_zones::OutputDevice> {
+    ANDROID_DAC.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Android's mixer rate on nearly every phone (`PROPERTY_OUTPUT_SAMPLE_RATE`).
 #[cfg(target_os = "android")]
 const ANDROID_RATES: [u32; 2] = [44_100, 48_000];
@@ -138,7 +159,19 @@ impl Output for CpalOutput {
     }
 
     fn name(&self) -> String {
+        // The id stays the phone's (the zone is the same one); the name says what it plays through
+        #[cfg(target_os = "android")]
+        if let Some(d) = android_dac() {
+            return format!("{} ({}, shared mode)", d.name, host_label());
+        }
         format!("{} ({}, shared mode)", self.device_name, host_label())
+    }
+
+    fn device(&self) -> Option<pm_zones::OutputDevice> {
+        #[cfg(target_os = "android")]
+        return android_dac();
+        #[cfg(not(target_os = "android"))]
+        None
     }
 
     fn caps(&self) -> &OutputCaps {

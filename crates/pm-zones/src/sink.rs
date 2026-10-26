@@ -38,6 +38,39 @@ pub struct OutputInfo {
     pub name: String,
     pub protocol: String,
     pub caps: OutputCaps,
+    /// The hardware behind it, when the output knows (a phone's USB DAC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<OutputDevice>,
+}
+
+/// The hardware an output plays through, as it describes itself: a USB DAC on a phone
+/// (STEWARD-ANDROID-USB-DAC.md). What the output does with it now is in `caps`; this is what the
+/// device itself takes, and how the app may drive it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OutputDevice {
+    /// "FiiO KA17".
+    pub name: String,
+    /// One line for the picker: "FiiO KA17 · PCM up to 768 kHz / 32 bit · DSD · hardware volume".
+    pub summary: String,
+    /// PCM rates the device takes, ascending (empty while unknown).
+    #[serde(default)]
+    pub rates: Vec<u32>,
+    #[serde(default)]
+    pub max_bits: u8,
+    #[serde(default)]
+    pub dsd: bool,
+    #[serde(default)]
+    pub hardware_volume: bool,
+    /// How the app can drive it: `shared` (through the system mixer), `bit-perfect` (Android
+    /// 14's mixer attributes), `exclusive` (the app's own USB driver).
+    #[serde(default)]
+    pub modes: Vec<String>,
+    /// The mode in use.
+    #[serde(default)]
+    pub mode: String,
+    /// USB ids, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<(u16, u16)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -207,7 +240,13 @@ pub trait Output: Send + Sync {
             name: self.name(),
             protocol: self.id().protocol().to_string(),
             caps: self.caps().clone(),
+            device: self.device(),
         }
+    }
+
+    /// The hardware behind this output, when it knows (see [`OutputDevice`]).
+    fn device(&self) -> Option<OutputDevice> {
+        None
     }
 
     /// Open the output in exactly `fmt`. Implementations must not convert:
