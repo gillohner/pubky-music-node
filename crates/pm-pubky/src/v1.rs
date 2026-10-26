@@ -684,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn plays_are_private_listens() {
+    fn plays_are_listens_under_either_root() {
         let a = Activity {
             uri: SONG.into(),
             played_at: t0(),
@@ -693,8 +693,11 @@ mod tests {
         };
         let id = id_of(a.played_at);
         let v1 = to_v1(&MusicContent::Activity(a.clone())).unwrap();
-        v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
-        assert!(v1.version_path(&id, None, Root::Pub, &owner()).is_err());
+        let path = v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
+        assert!(path.starts_with("/priv/music/v1/posts/"), "{path}");
+        // A public history writes the same listen under /pub/
+        let path = v1.version_path(&id, None, Root::Pub, &owner()).unwrap();
+        assert!(path.starts_with("/pub/music/v1/posts/"), "{path}");
         let V1Post::Music(post) = &v1 else { panic!() };
         let listen = pubky_music_specs::read_listen(post).unwrap();
         assert_eq!(listen.played_at, a.played_at / 1000);

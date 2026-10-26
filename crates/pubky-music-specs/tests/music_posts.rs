@@ -111,7 +111,7 @@ fn unknown_kind_reads_and_fails_validation() {
 }
 
 #[test]
-fn listen_is_private_only() {
+fn listen_is_private_or_public() {
     let source = MusicSource::new("tidal", "https://tidal.com/track/50850120");
     let post = listen(PLAYED, Some(213_000), Some(source.clone()), SONG.into());
     let minted = create_version(&post, Root::Priv, &owner()).unwrap();
@@ -123,14 +123,29 @@ fn listen_is_private_only() {
     assert_eq!(content.duration_ms, Some(213_000));
     assert_eq!(content.source, Some(source));
 
+    // A public history: the same listen under /pub/
+    let minted = create_version(&post, Root::Pub, &owner()).unwrap();
+    assert!(minted.path.starts_with("/pub/music/v1/posts/"), "{}", minted.path);
+    let back = written(&post, Root::Pub).unwrap();
+    assert_eq!(read_listen(&back).unwrap().played_at, PLAYED);
+
     // A source known only by its service
     let post = listen(PLAYED, None, Some(MusicSource::service("library")), SONG.into());
     let back = written(&post, Root::Priv).unwrap();
     assert_eq!(read_listen(&back).unwrap().source.unwrap().uri, None);
+    written(&post, Root::Pub).unwrap();
+    assert!(read_review(&back).is_err());
+}
 
+#[test]
+fn a_public_listen_never_points_at_a_private_object() {
+    // The person's own private file is fine in a private history
+    let mine = MusicSource::new("library", format!("pubky://{OWNER}/priv/social/v1/files/0033SCZXVEPNG"));
+    let post = listen(PLAYED, None, Some(mine), SONG.into());
+    written(&post, Root::Priv).unwrap();
+    // and refused under /pub/, where everyone reads it
     let err = written(&post, Root::Pub).unwrap_err();
     assert!(err.contains("private"), "{err}");
-    assert!(read_review(&back).is_err());
 }
 
 #[test]

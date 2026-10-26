@@ -60,8 +60,9 @@ pub fn review(rating: u8, text: Option<String>, embed: String) -> MusicPost {
     PostEnvelope::new(content, MusicPostKind::Review, None, Some(embed), Vec::new())
 }
 
-/// A listen of the music at `embed`, played at `played_at_ms` (Unix milliseconds). Listens are
-/// private: they validate only under the `priv` root. Infallible; validate before writing.
+/// A listen of the music at `embed`, played at `played_at_ms` (Unix milliseconds). A listen
+/// validates under either root: `/priv/` for a private history, `/pub/` for a public one.
+/// Infallible; validate before writing.
 pub fn listen(
     played_at_ms: i64,
     duration_ms: Option<i64>,

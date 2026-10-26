@@ -3,7 +3,7 @@
 use std::fmt;
 
 use pubky_social_specs::{
-    AllowedSchemes, ContentReference, PostEnvelope, PostKind, Root, ValidationCtx, VALIDATION_LIMITS,
+    AllowedSchemes, ContentReference, PostEnvelope, PostKind, ValidationCtx, VALIDATION_LIMITS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,8 @@ pub enum MusicPostKind {
     /// A rating of 1 to 10 with optional text; `embed` is the reviewed music URL.
     #[default]
     Review,
-    /// One play of the music at `embed`. Private only.
+    /// One play of the music at `embed`, under `/priv/` (a private history) or `/pub/` (a public
+    /// one); the person chooses.
     Listen,
     /// A kind a newer writer used, kept with its spelling.
     Unknown(String),
@@ -62,7 +63,7 @@ impl PostKind for MusicPostKind {
         !matches!(self, MusicPostKind::Unknown(_))
     }
 
-    fn validate_content(&self, post: &PostEnvelope<Self>, ctx: &ValidationCtx) -> Result<(), String> {
+    fn validate_content(&self, post: &PostEnvelope<Self>, _ctx: &ValidationCtx) -> Result<(), String> {
         // Both kinds are about one piece of music, named by `embed`. A reply to a review is a
         // social post with `parent` set to the review, not another review.
         if post.embed.is_none() {
@@ -76,9 +77,9 @@ impl PostKind for MusicPostKind {
         match self {
             MusicPostKind::Review => content::parse_review(&post.content).map(|_| ()),
             MusicPostKind::Listen => {
-                if ctx.root != Root::Priv {
-                    return Err("Validation Error: a listen is private, under /priv/ only".into());
-                }
+                // Either root: the person picks a private or a public history. A public listen's
+                // source passes the reference gate under the public root, so it never points
+                // at a private object.
                 if !post.attachments.is_empty() || post.lock.is_some() {
                     return Err("Validation Error: a listen has no attachments and no lock".into());
                 }

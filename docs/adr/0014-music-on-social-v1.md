@@ -22,7 +22,7 @@ Music uses the shared social objects and only adds what is musical.
 | Comments, threads | social `post`, `embed` or `parent` = the music URL | `/{pub,priv}/social/v1/posts/` |
 | Playlists | social `collection` post, `layout: list`; items `{uri, note?, ext.music.source?}`; the collection's `ext.music.source_order` | `/{pub,priv}/social/v1/posts/` |
 | Ratings and reviews | music kind `review`: `{rating: 1–10, text?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` |
-| Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/priv/music/v1/posts/` only |
+| Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` (amended 2026-10-26, below) |
 
 - **`crates/pubky-music-specs`** owns the two music kinds (`MusicPostKind { Review, Listen }` on
   `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
@@ -36,7 +36,8 @@ Music uses the shared social objects and only adds what is musical.
   anything else silently. A bad hint never makes a playlist unreadable. Writers keep every other
   member of `ext` and `ext.music`. The universal reference tier is not used for sources because it
   admits any scheme, and a source is a link people open.
-- **A listen is private only**; validation refuses it under `/pub/`.
+- ~~**A listen is private only**; validation refuses it under `/pub/`.~~ A listen validates under
+  either root since 2026-10-26 (amendment below).
 - **Canonical music URLs** stay ADR 0001: MusicBrainz first, then the ISRC URL, then the service URL.
 - **Tags stay at `/pub/pubky.music/tags/`** until the Nexus behind Pinakes indexes `social/v1/tags`
   (question to the steward, 2026-10-21). They then move with the same one-time migration.
@@ -67,3 +68,19 @@ caps it at 10,000 songs.
   that keep the cap may refuse such a collection; the node never does.
 - Playlists kept in the old private format before this are written as v1 collections on the next
   sync; the old files stay.
+
+## Amendment (2026-10-26): a listen may be public
+
+The owner's decision: listen history is an option, private or public. `pubky-music-specs` accepts a
+`listen` under `/pub/music/v1/posts/` as well as `/priv/`. Every other listen rule stays: `embed`
+names the music, no `parent`, no attachments, no lock, `played_at` in milliseconds after 2000,
+`duration_ms` at most a day, and `source` well formed. A public listen's `source.uri` passes the
+reference gate under the public root, so it cannot point at a private object.
+
+- The person chooses where the node writes listens: off (nothing is written), private (the default)
+  or public (`listens.history`, Settings > You). Changing it does not move older listens; moving or
+  deleting the history is its own request (`docs/api.md`, Listen history).
+- Why not tags? A tag's id is a hash of `uri:label`, so a song can carry the tag "listened" once:
+  no play time, no repeat plays, and public only. A history needs one listen post per play.
+- Other people's public listens are read through Pinakes (not built yet). In our Nexus fork a
+  `listen` gets a graph node; the live `listening` kind is feed-only and expires.
