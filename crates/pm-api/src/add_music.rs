@@ -25,6 +25,11 @@ use std::time::{Duration, Instant};
 pub const FULL: &str =
     "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota";
 
+/// Whether a store error is the homeserver being full.
+pub(crate) fn is_full_error(e: &str) -> bool {
+    e.ends_with(FULL)
+}
+
 /// What a chunk may be at most; the route takes a little more.
 pub const CHUNK: u64 = 4 << 20;
 pub const CHUNK_LIMIT: usize = 8 << 20;
@@ -483,7 +488,7 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
         }
         Err(e) => set(&|u| {
             u.state = "failed".into();
-            u.full = e.ends_with(FULL);
+            u.full = is_full_error(&e);
             u.error = Some(e.clone());
         }),
     }
@@ -612,6 +617,14 @@ pub(crate) async fn import(
                     j.skipped += 1;
                     j.bytes_done += size;
                 }),
+                // Full: every further file would be sent whole only to be refused
+                Err(e) if is_full_error(&e) => {
+                    set(&|j| {
+                        j.failed += 1;
+                        j.errors.push(format!("{e}; the files after it were not copied"));
+                    });
+                    break;
+                }
                 Err(e) => set(&|j| {
                     j.failed += 1;
                     j.errors.push(e.clone());

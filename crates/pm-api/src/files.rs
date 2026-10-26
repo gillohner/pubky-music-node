@@ -129,9 +129,17 @@ pub(crate) async fn upload(
         .map_err(|e| ApiError::bad_request(format!("read {}: {e}", local.display())))?;
     let size = bytes.len() as u64;
     let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &local));
-    sync.upload_private(&remote, bytes)
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Err(e) = sync.upload_private(&remote, bytes).await {
+        if e.is_full() {
+            crate::storage::note_full(&s, true);
+            return Err(ApiError::new(
+                StatusCode::INSUFFICIENT_STORAGE,
+                crate::add_music::FULL,
+            ));
+        }
+        return Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
+    }
+    crate::storage::note_full(&s, false);
     Ok(Json(UploadedFile { path: remote, size }))
 }
 
@@ -266,27 +274,43 @@ pub(crate) async fn upload_many(
                 .await
             {
                 // Check what the homeserver kept
-                Ok(()) => match sync.stat_private(&remote).await {
-                    Ok(Some(kept)) if kept == len => set(&|j| {
-                        j.done += 1;
-                        j.bytes_done += size;
-                    }),
-                    Ok(kept) => {
-                        let msg = format!(
-                            "{name}: the homeserver kept {} of {len} bytes; run the copy again",
-                            kept.unwrap_or(0)
-                        );
-                        set(&|j| {
-                            j.failed += 1;
-                            j.errors.push(msg.clone());
-                        });
+                Ok(()) => {
+                    crate::storage::note_full(&s2, false);
+                    match sync.stat_private(&remote).await {
+                        Ok(Some(kept)) if kept == len => set(&|j| {
+                            j.done += 1;
+                            j.bytes_done += size;
+                        }),
+                        Ok(kept) => {
+                            let msg = format!(
+                                "{name}: the homeserver kept {} of {len} bytes; run the copy again",
+                                kept.unwrap_or(0)
+                            );
+                            set(&|j| {
+                                j.failed += 1;
+                                j.errors.push(msg.clone());
+                            });
+                        }
+                        // Could not check: count it as sent
+                        Err(_) => set(&|j| {
+                            j.done += 1;
+                            j.bytes_done += size;
+                        }),
                     }
-                    // Could not check: count it as sent
-                    Err(_) => set(&|j| {
-                        j.done += 1;
-                        j.bytes_done += size;
-                    }),
-                },
+                }
+                // Full: every further file would be sent whole only to be refused
+                Err(e) if e.is_full() => {
+                    crate::storage::note_full(&s2, true);
+                    let msg = format!(
+                        "{name}: {}; the files after it were not copied",
+                        crate::add_music::FULL
+                    );
+                    set(&|j| {
+                        j.failed += 1;
+                        j.errors.push(msg.clone());
+                    });
+                    break;
+                }
                 Err(e) => {
                     let msg = format!("{name}: {e}");
                     set(&|j| {
@@ -761,6 +785,8 @@ pub(crate) async fn remove(
             .await
             .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("{p}: {e}")))?;
     }
+    // Space was freed: no longer "full" until the homeserver says so again
+    crate::storage::note_full(&s, false);
     let files = sync
         .list_private_files()
         .await

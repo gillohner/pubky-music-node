@@ -1047,7 +1047,7 @@ impl PubkySync {
         self.homeserver
             .write_prefs(&self.session, &v)
             .await
-            .map_err(|e| SyncError::Store(e.to_string()))
+            .map_err(SyncError::from)
     }
 
     /// Snapshot the owner's settings into the private folder (after every
