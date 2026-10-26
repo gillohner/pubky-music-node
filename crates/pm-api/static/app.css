@@ -37,6 +37,9 @@
 /* Light: follows the system unless Settings › Appearance picks one (data-theme on <html>) */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
+  --pl-accent: var(--src-l, var(--accent));
+  --pl-strong: color-mix(in srgb, var(--src-l, var(--accent-strong)) 78%, #000);
+  --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 94% / 0.5);
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -65,6 +68,9 @@
   }
 }
 :root[data-theme="light"] {
+  --pl-accent: var(--src-l, var(--accent));
+  --pl-strong: color-mix(in srgb, var(--src-l, var(--accent-strong)) 78%, #000);
+  --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 94% / 0.5);
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -1234,3 +1240,13 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 :where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
 :where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
+
+/* Colour from where it plays (docs/ux/responsive.md §6): the player bar and Now playing take the
+   source's accent (--src-l / --src-d, set on <html> with data-src); lists keep the app's theme */
+:root { --pl-accent: var(--src-d, var(--accent)); --pl-strong: color-mix(in srgb, var(--src-d, var(--accent-strong)) 75%, #fff); --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 12% / 0.5); }
+html[data-src] .player, html[data-src] #nowplaying { --accent: var(--pl-accent); --accent-strong: var(--pl-strong); --accent-soft: color-mix(in srgb, var(--pl-accent) 16%, transparent); }
+html[data-src] .player .icon-btn.play, html[data-src] #nowplaying .icon-btn.play { background: var(--accent); color: var(--on-accent); }
+html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); }
+html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
+/* and a soft gradient from the cover behind Now playing */
+html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }
