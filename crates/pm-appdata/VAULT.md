@@ -3,7 +3,7 @@
 A person's streaming sign-ins (TIDAL, Qobuz, Spotify, …) live on their own homeserver, encrypted on the
 device, so every client they authorise plays from the same sign-ins. The homeserver only stores ciphertext:
 `/priv/` is access-controlled, not encrypted, and its operator can read it. Reference code:
-`pubky_music_specs::vault` (feature `vault`); vectors: `tests/vectors/vault-v1.json`, with an independent
+`pm_appdata::vault`; vectors: `tests/vectors/vault-v1.json`, with an independent
 Python check of them (`tests/vectors/check_vault_v1.py`) for implementers in other languages.
 
 ## Paths

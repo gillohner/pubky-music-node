@@ -695,12 +695,12 @@ impl NodeHomeserver {
 }
 
 /// Where the user's own audio files live on the homeserver: private, never `/pub/`.
-pub const PRIVATE_FILES_DIR: &str = "/priv/pubky.music/files/";
+pub const PRIVATE_FILES_DIR: &str = pm_appdata::paths::FILES_DIR;
 /// Where a node publishes how to reach it, readable only by the owner (ADR 0008).
-pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
+pub const NODE_RECORD_PATH: &str = pm_appdata::paths::NODE_RECORD_PATH;
 /// The node's settings (contact, folders, streaming sessions, renderers, DSP)
 /// so a reinstalled or replaced node restores them after one Ring sign-in.
-pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
+pub const NODE_SETTINGS_PATH: &str = pm_appdata::paths::NODE_SETTINGS_PATH;
 
 /// How the user's own devices find their node (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

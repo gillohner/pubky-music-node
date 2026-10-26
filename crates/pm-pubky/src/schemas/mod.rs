@@ -35,7 +35,7 @@ use serde::de::DeserializeOwned;
 
 /// The envelope type prefix; handoff §11 leaves the final app name open and
 /// this is the one place to change it.
-pub const APP_NAMESPACE: &str = "pubky.music";
+pub const APP_NAMESPACE: &str = pm_appdata::paths::APP_NAMESPACE;
 pub const PROTOCOL: &str = "pubky://";
 
 /// Limits, in one place like `pubky_app_specs::VALIDATION_LIMITS`.
@@ -144,7 +144,7 @@ pub(crate) fn validate_image_url(url: &str, max: usize) -> Result<(), SchemaErro
 /// names no music namespace, so the node uses its own.
 pub const TAG_NAMESPACE: &str = "pubky.music";
 /// `/pub/pubky.music/tags/`: where the node writes tags.
-pub const TAG_DIR: &str = "/pub/pubky.music/tags/";
+pub const TAG_DIR: &str = pm_appdata::paths::TAG_DIR;
 /// Where the node wrote tags before 2026-10-21 (Nexus never indexed these;
 /// they are moved to [`TAG_DIR`] by the sync).
 pub const LEGACY_TAG_DIR: &str = "/pub/pubky.app/tags/";

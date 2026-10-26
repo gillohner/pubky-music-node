@@ -16,6 +16,7 @@ futures-util = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
 pubky-music-specs = { workspace = true }
+pm-appdata = { workspace = true }
 pubky-social-specs = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
