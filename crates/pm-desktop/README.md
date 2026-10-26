@@ -8,6 +8,13 @@ DACs become zones on the node.
 It is outside the Cargo workspace because Tauri needs WebKitGTK on Linux, which the node's build
 machines do not have.
 
+## Offline
+
+Music kept on the device lives in the app's local data folder (`offline/`, crate `pm-offline`).
+While the node is reachable, the app syncs it every 15 minutes. When the node can't be reached
+and music is kept, the connect page opens Downloads from a local server on `127.0.0.1`. The app
+then tries the node every 30 s and goes back to it when it answers.
+
 ## Develop
 
 Linux needs the WebKitGTK headers:

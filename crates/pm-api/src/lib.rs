@@ -28,23 +28,28 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 pub mod accounts;
 pub mod add_music;
 pub mod announce;
+pub mod apps;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bandcamp;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
+pub mod devices;
 pub mod discover;
+pub mod downloads;
 pub mod drives;
 pub mod events;
 pub mod favourites;
 pub mod files;
 pub mod first_run;
 pub mod gpodder;
+pub mod groups;
 pub mod health;
 pub mod hls;
 pub mod home;
 pub mod identify;
+pub mod imports;
 pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
@@ -63,6 +68,7 @@ pub mod play_from;
 pub mod playlists;
 pub mod plex;
 pub mod podcasts;
+pub mod prefs;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
@@ -91,6 +97,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod vault;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -186,6 +193,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
         .route("/health", get(health::health))
+        .route("/node", get(groups::index))
+        .route("/node/apps", get(apps::get))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
@@ -234,6 +243,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/backup/schedule/run", post(backup::run_schedule))
         .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
+        .route("/library/tracks/{id}/download", get(downloads::download))
         .route("/library/search", get(search))
         .route("/library/loudness", get(loudness::get))
         .route("/library/loudness/measure", post(loudness::measure))
@@ -352,6 +362,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(signin::get).put(signin::put).delete(signin::sign_out),
         )
         .route("/sources/{source}/quality", get(quality::get).put(quality::put))
+        .route("/sources/{source}/signin/import", post(signin::import))
         .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
         .route("/sources/tidal/login", get(tidal::login))
@@ -558,6 +569,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/countries", get(radio_sources::countries))
         .route("/radio/tags", get(radio_sources::tags))
         .route("/homeserver/bundled", get(bundled::status))
+        // Everything about the bundled homeserver lives under it ("This homeserver" in Settings);
+        // `/v1/remote/tunnel` stays as an alias for one release
+        .route(
+            "/homeserver/bundled/tunnel",
+            get(tunnel::status).put(tunnel::setup).delete(tunnel::remove),
+        )
         .route("/homeserver/bundled/owner-signup", post(bundled::owner_signup))
         .route(
             "/remote/tunnel",
@@ -597,9 +614,26 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
+        .route("/me/prefs", get(prefs::get).put(prefs::put))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
+        .route("/devices", get(devices::list))
+        .route(
+            "/devices/{id}",
+            axum::routing::put(devices::register).delete(devices::forget),
+        )
+        .route(
+            "/devices/{id}/downloads",
+            get(devices::get_downloads).put(devices::put_downloads).layer(
+                axum::extract::DefaultBodyLimit::max(devices::DOWNLOADS_BODY_LIMIT),
+            ),
+        )
+        .route("/vault", get(vault::get))
+        .route("/vault/register", post(vault::register))
+        .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
+        .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
+        .route("/vault/new-key", post(vault::new_key))
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",
@@ -2181,7 +2215,14 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
     if lib.get_track(TrackId(req.track_id))?.is_none() {
         return Err(ApiError::not_found(format!("track {}", req.track_id)));
     }
-    lib.record_play(TrackId(req.track_id), req.zone.as_deref())?;
+    match req.played_at {
+        Some(at) => {
+            lib.record_play_at(TrackId(req.track_id), req.zone.as_deref(), at)?;
+        }
+        None => {
+            lib.record_play(TrackId(req.track_id), req.zone.as_deref())?;
+        }
+    }
     let plays = lib.history(1)?;
     Ok(Json(History { plays }))
 }
@@ -11026,22 +11067,22 @@ exec sleep 300
             .iter()
             .map(|w| w["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["app", "device", "own"]);
+        assert_eq!(ids, ["app", "import", "device", "own", "paste"]);
         assert_eq!(si["ways"][0]["recommended"], true, "{si}");
         assert_eq!(
             si["ways"][0]["label"], "Your own TIDAL app",
             "no project app in a test build"
         );
         assert_eq!(si["ways"][0]["available"], true);
-        assert_eq!(si["ways"][1]["available"], false);
+        assert_eq!(si["ways"][2]["available"], false);
         assert!(
-            si["ways"][1]["reason"]
+            si["ways"][2]["reason"]
                 .as_str()
                 .unwrap()
                 .contains("device client"),
             "{si}"
         );
-        assert_eq!(si["ways"][2]["available"], true);
+        assert_eq!(si["ways"][3]["available"], true);
         assert!(si["in_use"].is_null(), "{si}");
         assert_eq!(si["line"], "Not signed in");
         assert_eq!(si["details"]["unofficial"]["enabled"], false);
@@ -11053,7 +11094,10 @@ exec sleep 300
         let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "nope"}))).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
         assert!(
-            r["error"].as_str().unwrap().contains("one of app, device, own"),
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("one of app, import, device, own, paste"),
             "{r}"
         );
         // Your own device client makes the device way available, labelled as yours; picking it is
@@ -11068,7 +11112,7 @@ exec sleep 300
         let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["chosen"], "device");
-        assert_eq!(r["ways"][1]["label"], "Your own device client");
+        assert_eq!(r["ways"][2]["label"], "Your own device client");
         assert_eq!(r["details"]["unofficial"]["enabled"], true, "{r}");
         assert!(r["in_use"].is_null(), "picked, not signed in yet: {r}");
         // The approval stores a session: it is in use, shown by user and expiry, never the token
@@ -11082,6 +11126,7 @@ exec sleep 300
                 user_id: Some("4242".into()),
                 country: "DE".into(),
                 session_id: None,
+                from: None,
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
                 .unwrap();
@@ -11254,5 +11299,140 @@ exec sleep 300
         .await;
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
         assert_eq!(row(&srcs, "deezer")["healthy"], false, "off: {srcs}");
+    }
+
+    /// Sources › TIDAL › Sign in › from another app on this machine: the known places are read,
+    /// what was found is listed by user and expiry (never a token), a usable one is imported on
+    /// a click, an unusable one is refused in plain words, the other app's file is untouched,
+    /// and a pasted token works too (STEWARD-CREDENTIALS-REUSE.md step 2).
+    #[tokio::test]
+    async fn tidal_sign_ins_from_other_apps_are_listed_imported_or_refused() {
+        use base64::Engine;
+        let jwt = |uid: i64, exp: i64| {
+            let b = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+            format!(
+                "{}.{}.{}",
+                b(r#"{"alg":"RS256"}"#),
+                b(&format!(r#"{{"uid":{uid},"cc":"DE","exp":{exp}}}"#)),
+                b("s")
+            )
+        };
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".config/tidal_dl_ng")).unwrap();
+        std::fs::write(
+            home.path().join(".config/tidal_dl_ng/token.json"),
+            format!(
+                r#"{{"token_type": {{"data": "Bearer"}}, "access_token": {{"data": "{}"}}, "refresh_token": {{"data": "secret-refresh"}}, "is_pkce": {{"data": false}}, "expiry_time": {{"data": "2096-01-01T00:00:00"}}}}"#,
+                jwt(4242, 4_000_000_000)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join(".tidal-dl.token.json"),
+            base64::engine::general_purpose::STANDARD.encode(format!(
+                r#"{{"userid": 7, "countryCode": "US", "accessToken": "{}", "refreshToken": "r", "expiresAfter": 1000}}"#,
+                jwt(7, 1000)
+            )),
+        )
+        .unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+        let import = "/v1/sources/tidal/signin/import";
+        let (st, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        let found = si["imports"].as_array().unwrap();
+        assert_eq!(found.len(), 2, "{si}");
+        assert_eq!(found[0]["id"], "tidal-dl-ng");
+        assert_eq!(found[0]["user"], "4242");
+        assert_eq!(found[0]["usable"], true);
+        assert_eq!(found[0]["renews"], true, "python-tidal's client is ours");
+        assert_eq!(found[1]["id"], "tidal-dl");
+        assert_eq!(found[1]["usable"], false);
+        assert!(found[1]["reason"].as_str().unwrap().contains("expired"), "{si}");
+        assert!(
+            si["places"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p.as_str().unwrap().starts_with("Music Assistant: not read")),
+            "{si}"
+        );
+        assert_eq!(si["ways"][1]["id"], "import");
+        assert_eq!(si["ways"][1]["available"], true);
+        assert!(
+            si["ways"][1]["note"]
+                .as_str()
+                .unwrap()
+                .contains("tidal-dl-ng (user 4242)"),
+            "{si}"
+        );
+        let text = si.to_string();
+        assert!(
+            !text.contains("secret-refresh") && !text.contains(&jwt(4242, 4_000_000_000)),
+            "{si}"
+        );
+        // Refused in plain words; nothing changes
+        let (st, r) = call(&app, "POST", import, Some(serde_json::json!({"id": "tidal-dl"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("expired"), "{r}");
+        let (st, _) = call(&app, "POST", import, Some(serde_json::json!({"id": "nope"}))).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, r) = call(&app, "POST", import, Some(serde_json::json!({"text": "hello"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().starts_with("Not usable"), "{r}");
+        let (_, r) = call(&app, "GET", signin, None).await;
+        assert!(r["in_use"].is_null(), "{r}");
+        // Used on a click: the device-way session, named after the app
+        let (st, r) = call(
+            &app,
+            "POST",
+            import,
+            Some(serde_json::json!({"id": "tidal-dl-ng"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "import");
+        assert_eq!(r["in_use"]["label"], "tidal-dl-ng's sign-in");
+        assert_eq!(r["in_use"]["user"], "4242");
+        assert_eq!(r["chosen"], "import");
+        assert_eq!(r["line"], "tidal-dl-ng's sign-in · full tracks");
+        assert_eq!(r["details"]["unofficial"]["enabled"], true);
+        assert_eq!(r["details"]["unofficial"]["from"], "tidal-dl-ng");
+        assert!(!r.to_string().contains("secret-refresh"), "{r}");
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let t = srcs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "tidal")
+            .unwrap();
+        assert_eq!(t["sign_in"], "tidal-dl-ng's sign-in · full tracks");
+        assert_eq!(t["status"], "ready");
+        assert!(
+            std::fs::read_to_string(home.path().join(".config/tidal_dl_ng/token.json"))
+                .unwrap()
+                .contains("secret-refresh"),
+            "the other app's file is only read"
+        );
+        // Sign out, then a pasted token with its refresh token on the next line
+        let (_, r) = call(&app, "DELETE", signin, None).await;
+        assert!(r["in_use"].is_null(), "{r}");
+        let (st, r) = call(
+            &app,
+            "POST",
+            import,
+            Some(serde_json::json!({"text": format!("{}\nmy-refresh", jwt(5, 4_000_000_000))})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "paste");
+        assert_eq!(r["in_use"]["label"], "Pasted token");
+        assert_eq!(r["in_use"]["user"], "5");
+        assert_eq!(r["chosen"], "paste");
+        assert!(!r.to_string().contains("my-refresh"), "{r}");
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 }

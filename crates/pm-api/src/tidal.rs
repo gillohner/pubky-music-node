@@ -159,6 +159,11 @@ pub(crate) fn connected(s: &NodeState) -> bool {
     creds(s).configured() && load_user(s).is_some()
 }
 
+/// The public client id the node's TIDAL sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(creds(s).client_id).filter(|c| !c.trim().is_empty())
+}
+
 fn creds(s: &NodeState) -> TidalCredentials {
     endpoints(s).creds
 }
@@ -681,11 +686,12 @@ impl StreamingService for Tidal {
     }
 
     fn info(&self, s: &NodeState) -> SourceInfo {
-        let status = if !creds(s).configured() {
-            "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()
-        } else if load_user(s).is_some() || crate::tidal_unofficial::streams(s) {
-            // Either sign-in counts: the device way plays full tracks on its own
+        // Either sign-in counts: the device way (or a sign-in imported from another app) plays
+        // full tracks on its own, even on a build without the project's app
+        let status = if load_user(s).is_some() || crate::tidal_unofficial::streams(s) {
             "ready".to_string()
+        } else if !creds(s).configured() {
+            "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()
         } else {
             "needs sign-in".to_string()
         };
@@ -1250,8 +1256,10 @@ pub(crate) async fn logout(
 // ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md) ----
 
 pub(crate) const WAY_APP: &str = "app";
+pub(crate) const WAY_IMPORT: &str = "import";
 pub(crate) const WAY_DEVICE: &str = "device";
 pub(crate) const WAY_OWN: &str = "own";
+pub(crate) const WAY_PASTE: &str = "paste";
 
 /// The official app's name by where it comes from: the project's built-in one or the node's own.
 fn app_label(c: &TidalCredentials) -> &'static str {
@@ -1285,6 +1293,39 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
         Some("builtin") => "tidal-dl-ng's client",
         _ => "Your own device client",
     };
+    // Other apps' files are looked at for the tab, not for the overview line
+    let found = if headers.is_some() {
+        crate::imports::scan_tidal()
+    } else {
+        Vec::new()
+    };
+    let usable: Vec<&crate::imports::Import> = found.iter().filter(|i| i.found.usable).collect();
+    let import_note = if found.is_empty() {
+        format!(
+            "Nothing in the known places on this machine ({}). From another machine, pick the file or paste it below.",
+            crate::imports::tidal_places_text()
+                .iter()
+                .map(|p| p.split(':').next().unwrap_or(p).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!(
+            "Found: {}. The other app's file is only read; the sign-in is kept here like the node's own.",
+            found
+                .iter()
+                .map(|i| {
+                    let f = &i.found;
+                    match (&f.user, &f.reason) {
+                        (_, Some(_)) => format!("{} (not usable)", f.app),
+                        (Some(u), None) => format!("{} (user {u})", f.app),
+                        (None, None) => f.app.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        )
+    };
     let ways = vec![
         Way {
             id: WAY_APP.into(),
@@ -1296,6 +1337,21 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             reason: (!c.configured()).then(|| {
                 "This build has no built-in TIDAL app; add [tidal] client_id to the node config."
                     .to_string()
+            }),
+        },
+        Way {
+            id: WAY_IMPORT.into(),
+            label: "A sign-in from another app on this machine".into(),
+            note: import_note,
+            action: "import".into(),
+            recommended: false,
+            available: !usable.is_empty(),
+            reason: usable.is_empty().then(|| {
+                if found.is_empty() {
+                    "Nothing found in the known places; pick the file or paste it instead.".to_string()
+                } else {
+                    "What was found is not usable; pick a newer file or paste one instead.".to_string()
+                }
             }),
         },
         Way {
@@ -1318,17 +1374,34 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             available: true,
             reason: None,
         },
+        Way {
+            id: WAY_PASTE.into(),
+            label: "Paste a token".into(),
+            note: "The contents of one of those apps' token files, or a bare TIDAL access token (a refresh token on the next line keeps it alive). Nothing is shown again once saved.".into(),
+            action: "paste".into(),
+            recommended: false,
+            available: true,
+            reason: None,
+        },
     ];
     let previews = playback_limit.is_some()
         || user.as_ref().and_then(|u| u.access_tier.as_deref()) == Some("THIRD_PARTY");
     let device_session = mode.session.as_ref().filter(|_| mode.enabled);
+    // An imported session is its own way, named after the app it came from
     let device_in_use = || {
-        device_session.map(|d| InUse {
-            way: WAY_DEVICE.into(),
-            label: device_label.into(),
-            user: d.user_id.clone(),
-            expires_at: Some(d.expires_at),
-            gives: Some("full tracks".into()),
+        device_session.map(|d| {
+            let (way, label) = match d.from.as_deref() {
+                Some("pasted") => (WAY_PASTE, "Pasted token".to_string()),
+                Some(app) => (WAY_IMPORT, format!("{}'s sign-in", crate::imports::app_name(app))),
+                None => (WAY_DEVICE, device_label.to_string()),
+            };
+            InUse {
+                way: way.into(),
+                label,
+                user: d.user_id.clone(),
+                expires_at: Some(d.expires_at),
+                gives: Some("full tracks".into()),
+            }
         })
     };
     let app_in_use = || {
@@ -1354,7 +1427,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
     };
     let line = match &in_use {
         None => NOT_SIGNED_IN.to_string(),
-        Some(u) if u.way == WAY_DEVICE => format!(
+        Some(u) if u.way != WAY_APP => format!(
             "{} · full tracks{}",
             u.label,
             if user.is_some() {
@@ -1382,8 +1455,26 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
         chosen,
         in_use,
         line,
+        imports: found.into_iter().map(|i| i.found).collect(),
+        places: if headers.is_some() {
+            crate::imports::tidal_places_text()
+        } else {
+            Vec::new()
+        },
         details,
     }
+}
+
+/// A sign-in from another app's file or a paste becomes the device-way session: full tracks,
+/// kept like the node's own (`tidal.unofficial`, sealed in backups), renewed by the node where
+/// the refresh token came from the client this build carries.
+pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Session) {
+    crate::tidal_unofficial::update(s, |st| {
+        st.session = Some(session);
+        st.login = None;
+        st.enabled = true;
+        st.health = None;
+    });
 }
 
 /// A way was picked. The device way is what the Full tracks switch used to turn on; the app way
@@ -1391,7 +1482,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
 /// nothing yet.
 pub(crate) fn way_chosen(s: &NodeState, way: &str) {
     match way {
-        WAY_DEVICE => {
+        WAY_DEVICE | WAY_IMPORT | WAY_PASTE => {
             crate::tidal_unofficial::update(s, |st| {
                 st.enabled = true;
                 st.health = None;
@@ -1406,7 +1497,7 @@ pub(crate) fn way_chosen(s: &NodeState, way: &str) {
 
 /// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
 pub(crate) fn sign_out_of(s: &NodeState, way: &str) -> Result<(), ApiError> {
-    if way == WAY_DEVICE {
+    if way != WAY_APP {
         crate::tidal_unofficial::update(s, |st| {
             st.session = None;
             st.login = None;

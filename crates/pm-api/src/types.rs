@@ -249,6 +249,10 @@ pub struct RecordPlay {
     pub track_id: i64,
     #[serde(default)]
     pub zone: Option<String>,
+    /// When it was played (Unix seconds), for plays made offline and sent later; now when absent.
+    /// A play sent twice (same track, zone and time) is recorded once.
+    #[serde(default)]
+    pub played_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +271,10 @@ pub struct FavouriteRef {
     pub album_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_id: Option<i64>,
+    /// When the change was made (Unix seconds), for a change a device made offline and sends
+    /// later (`PUT`/`DELETE /v1/favourites`): a clear older than the node's heart is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
 }
 
 impl FavouriteRef {

@@ -159,6 +159,8 @@
   const api = async (method, path, body) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
+    // Switching a service on or off, signing in or out, or a new play order changes the ranking
+    if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r;
     try {
       r = await fetch('/v1' + path, {
@@ -279,6 +281,13 @@
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
+  // One design at three sizes (docs/ux/responsive.md): phone under 600 px (bottom tabs and a mini
+  // player), tablet to 1024 px (a rail), desktop above (the sidebar). Settings › Appearance › Layout
+  // can force Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop).
+  const layoutPref = () => { try { return localStorage.getItem('pm.layout') || 'auto'; } catch { return 'auto'; } };
+  const shellFor = (w, pref) => (pref === 'compact' || w < 600 ? 'phone' : pref === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop');
+  const shellMode = () => document.documentElement.dataset.shell || 'desktop';
+  const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
   // A button that needs text in a field: disabled (with the reason) until there is some.
   const needsText = (input, btn) => { if (!input || !btn) return; const sync = () => { const empty = !input.value.trim(); btn.disabled = empty; btn.title = empty ? `Type in “${input.placeholder || 'the field'}” first` : ''; }; input.addEventListener('input', sync); sync(); };
@@ -503,6 +512,9 @@
   // the shared library on the zones the owner opened and has nothing of the owner's
   const isListener = () => !!(state.me && state.me.role === 'listener');
   const isOwner = () => !isListener();
+  // Offline (the app's local server, pm-offline): only what this device keeps, played here
+  const isOffline = () => !!(state.info && state.info.offline);
+  const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z))];
@@ -785,56 +797,53 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { search.focus(); if (search.value.trim()) runSearch(); return; } setView(k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
+  $('#me').onclick = () => setView('settings');
+  $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); closeJobPop(); if ($('#sidebar').classList.contains('open')) closeSheet(); };
-  // The menu button: phones open the sidebar as a sheet (closes on back, outside tap, Esc or a pick);
-  // wider screens collapse it to icons (or expand it on tablets), remembered per browser.
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); };
+  // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
+  // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
+  const applyShell = () => {
+    const now = shellFor(window.innerWidth, layoutPref());
+    document.documentElement.dataset.shell = now;
+    if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
+    const up = $('#upstreams');
+    if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
+  };
+  window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
+  applyShell();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
-  const phone = () => mq('(max-width: 720px)');
   const tablet = () => mq('(max-width: 1100px)');
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
   applySide();
   // Icon-only nav items keep their names as tooltips and accessible labels.
   $$('.nav-item').forEach((b) => { const t = (b.querySelector('span') || {}).textContent; if (t) { b.title = t; b.setAttribute('aria-label', t); } });
-  const sheetOpen = () => $('#sidebar').classList.contains('open');
-  let sheetBack = false;
-  const closeSheet = (fromBack) => { if (!sheetOpen()) return; sheetBack = !!fromBack; $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; $('#menu').setAttribute('aria-expanded', 'false'); if (!fromBack && history.state && history.state.sheet) history.back(); };
   $('#menu').setAttribute('aria-expanded', 'false');
   $('#menu').onclick = () => {
-    if (phone()) {
-      if (sheetOpen()) { closeSheet(); return; }
-      $('#sidebar').classList.add('open'); $('#scrim').hidden = false; $('#menu').setAttribute('aria-expanded', 'true');
-      // A transient history entry, so back closes the sheet instead of leaving the page.
-      try { history.pushState({ ...(history.state || {}), sheet: true }, '', location.pathname + location.search); } catch { /* sandboxed */ }
-      return;
-    }
     const collapsedNow = shell.classList.contains('collapsed') || (tablet() && !shell.classList.contains('expanded'));
     const next = collapsedNow ? (tablet() ? 'names' : 'auto') : 'icons';
     try { localStorage.setItem('pm.sidebar', next); } catch { /* no storage */ }
     applySide();
     $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(tablet() && next === 'auto')));
   };
-  window.addEventListener('popstate', () => { if (sheetOpen()) closeSheet(true); });
   // Menus, popovers and dialogs close on back and the page stays (STEWARD-UX-BRIEF-2 navigation).
   // Opening one adds a transient history entry; back pops it and closes them. Closing one any
   // other way pops it too, and opening a page from inside one replaces it (setView).
   const transients = []; // { open: () => bool, close: (fromBack) => void }
   let popHandled = false; let selfPop = false; let popPending = null; let popResolve = null;
-  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true, sheet: false }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
+  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
   // Popping is asynchronous: a page opened right after waits for it (setView), or the pop would undo it.
   const popTransient = () => { if (transients.some((t) => t.open())) return; if (history.state && history.state.transient && !selfPop) { selfPop = true; popPending = new Promise((r) => { popResolve = r; setTimeout(() => { popPending = null; popResolve = null; r(); }, 600); }); history.back(); } };
   window.addEventListener('popstate', () => {
     if (selfPop) { selfPop = false; popHandled = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
-    if (sheetOpen() || sheetBack) return;
     const open = transients.filter((t) => t.open()); if (!open.length) return;
     open.forEach((t) => t.close(true)); popHandled = true;
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOpen()) closeSheet(); });
 
   // ---- player bar ----------------------------------------------------------
   const ORDER = { bit_perfect: 0, enhanced: 1, lossless: 2, lossy: 3 };
@@ -890,9 +899,72 @@
       const ps = $('#dashpos'); if (ps) ps.textContent = fmt(pos); const ds = $('#dashdur'); if (ds) ds.textContent = dur ? fmt(dur) : '';
     }
   };
+  // Colour from where it plays (docs/ux/responsive.md §6). The player surfaces take the source's
+  // accent: [light, dark], each checked in its theme (as text on the page ≥ 4.5:1, and the play
+  // button's ink on it ≥ 4.5:1). Our own files and the homeserver keep ours. A tint only: no logos,
+  // layouts or fonts of theirs, and lists keep the app's theme.
+  const SRC_ACCENT = {
+    spotify: ['#13803B', '#1ED760'], tidal: ['#007C89', '#33E8E0'], qobuz: ['#1F5BD6', '#6E9BFF'],
+    deezer: ['#9B35F4', '#B35CFF'], youtube: ['#E00000', '#FF3232'], soundcloud: ['#C94300', '#FF5500'],
+    bandcamp: ['#167A94', '#1DA0C3'], plex: ['#936608', '#E5A00D'], jellyfin: ['#9852AF', '#B26BC8'],
+    jamendo: ['#CE364D', '#F24560'], audius: ['#C00ED3', '#D741E7'], archive: ['#3774A9', '#428BCA'], subsonic: ['#086ED5', '#0A84FF'],
+  };
+  const colourOn = (k) => { try { return localStorage.getItem(k) !== 'off'; } catch { return true; } };
+  const svcOfItem = (it) => {
+    const u = String((it && it.uri) || ''); const m = /^([a-z]+)[:-]/.exec(u);
+    if (m && SRC_ACCENT[m[1]]) return m[1];
+    if (/^https?:/.test(u)) { try { const k = srcSvc(new URL(u).hostname); return SRC_ACCENT[k] ? k : null; } catch { return null; } }
+    return null;
+  };
+  let lastSrc;
+  const setSourceColour = (np) => {
+    const root = document.documentElement;
+    // the node's own word on the service once now-playing carries it (#94), else the item's uri
+    const svc = np && colourOn('pm.srcColour') ? (np.format && np.format.service ? srcSvc(np.format.service) : svcOfItem(np.item)) : null;
+    if (svc === lastSrc) return; // renderBar runs several times a second: touch <html> only on a change
+    lastSrc = svc;
+    const a = svc && SRC_ACCENT[svc];
+    if (a) { root.dataset.src = svc; root.style.setProperty('--src-l', a[0]); root.style.setProperty('--src-d', a[1]); }
+    else { delete root.dataset.src; root.style.removeProperty('--src-l'); root.style.removeProperty('--src-d'); }
+  };
+  // Now playing's background: a soft gradient from the cover (its average colour, read through a small
+  // canvas; a cover from another site that does not allow that gets none)
+  const artTints = new Map();
+  const setArtTint = () => {
+    const root = document.documentElement; const img = $('#nowplaying .np-big img');
+    const clear = () => { delete root.dataset.art; root.style.removeProperty('--np-h'); root.style.removeProperty('--np-s'); };
+    if (!img || !colourOn('pm.artColour')) { clear(); return; }
+    const src = img.currentSrc || img.src;
+    const apply = (c) => { if (c) { root.dataset.art = '1'; root.style.setProperty('--np-h', String(c[0])); root.style.setProperty('--np-s', `${c[1]}%`); } else clear(); };
+    if (artTints.has(src)) { const c = artTints.get(src); if (c === 'pending') clear(); else apply(c); return; }
+    clear(); artTints.set(src, 'pending');
+    if (artTints.size > 200) artTints.delete(artTints.keys().next().value);
+    const probe = new Image(); probe.crossOrigin = 'anonymous';
+    probe.onload = () => {
+      let c = null;
+      try {
+        const cv = document.createElement('canvas'); cv.width = 12; cv.height = 12; const g = cv.getContext('2d');
+        g.drawImage(probe, 0, 0, 12, 12); const d = g.getImageData(0, 0, 12, 12).data;
+        let r = 0; let gr = 0; let b = 0; let n = 0;
+        for (let i = 0; i < d.length; i += 4) { const hi = Math.max(d[i], d[i + 1], d[i + 2]); const lo = Math.min(d[i], d[i + 1], d[i + 2]); if (hi < 24 || lo > 235) continue; r += d[i]; gr += d[i + 1]; b += d[i + 2]; n += 1; }
+        if (n) {
+          // hue and saturation only: the lightness is set per theme, so text on it keeps its contrast
+          const R = r / n / 255; const G = gr / n / 255; const B = b / n / 255; const hi = Math.max(R, G, B); const lo = Math.min(R, G, B); const l = (hi + lo) / 2; const dl = hi - lo;
+          const sat = dl ? dl / (1 - Math.abs(2 * l - 1)) : 0;
+          const hue = !dl ? 0 : hi === R ? 60 * (((G - B) / dl) % 6) : hi === G ? 60 * ((B - R) / dl + 2) : 60 * ((R - G) / dl + 4);
+          c = [Math.round((hue + 360) % 360), Math.round(Math.min(1, sat) * 100)];
+        }
+      } catch { c = null; }
+      artTints.set(src, c);
+      const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) apply(c);
+    };
+    probe.onerror = () => { artTints.set(src, null); const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) clear(); };
+    probe.src = src;
+  };
   const renderBar = () => {
     markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
+    setSourceColour(np);
     const playing = z && z.transport === 'playing';
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
     $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -920,80 +992,222 @@
   $('#quality').onclick = () => toggleNowPlaying(true);
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
-  const fillNpPubky = async (it) => {
-    const box = $('#nppubky'); if (!box) return;
+  // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
+  // from the known favourites; an answer that comes back after a newer render is dropped.
+  let npGen = 0;
+  const fillNpPubky = async (it, gen = npGen) => {
+    const live = () => gen === npGen;
     const tid = it.track_id ?? (/^track:(\d+)$/.exec(it.uri || '') || [])[1];
     const songPage = npPageId(it.uri);
-    let t = null; if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } }
     const pageUri = songPage && !/^lib-/.test(songPage) ? uriOf('song', songPage) : null;
+    let t = null;
+    let fav = tid != null ? state.favUris.has(`track:${tid}`) : pageUri ? state.favUris.has(pageUri) : false;
+    const ref = () => (tid != null ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null);
+    const drawHeart = () => {
+      const h = $('#npheart', overlay); if (!h || !live()) return;
+      if (!ref()) { h.innerHTML = ''; return; }
+      const word = fav ? 'In favourites' : 'Add to favourites';
+      const had = document.activeElement && document.activeElement.id === 'npfav';
+      h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
+      $('#npfav', overlay).onclick = async () => { try { await setFavourite(ref(), !fav); fav = !fav; drawHeart(); } catch (e) { toast(e.message, 'error'); } };
+      if (had) $('#npfav', overlay).focus({ preventScroll: true });
+      npRestore();
+    };
+    drawHeart();
+    if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } if (!live()) return; if (t) { fav = isFav(t); drawHeart(); } }
+    if (!$('#nppubky', overlay)) return;
     const target = t ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
-    let tags = []; if (target && isOwner()) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
-    if (!$('#nppubky')) return;
-    const fav = t ? isFav(t) : pageUri ? state.favUris.has(pageUri) : false;
-    box.innerHTML = `<div class="np-pubky-row">${target || t ? `<button class="btn ${fav ? 'primary' : 'ghost'}" id="npfav" aria-pressed="${fav}">${icon(fav ? 'heart-fill' : 'heart')} ${fav ? 'In favourites' : 'Add to favourites'}</button>` : ''}${songPage ? `<button class="btn ghost" id="nppage">${icon('compass')} Song page: sources, versions, tags</button>` : ''}</div>`
-      + (target ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>` : (t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>' : ''));
-    const fb = $('#npfav'); if (fb) fb.onclick = async () => { try { await setFavourite(t ? { track_id: t.id } : target, !fav); fillNpPubky(it); } catch (e) { toast(e.message, 'error'); } };
-    const pb = $('#nppage'); if (pb) pb.onclick = () => { toggleNowPlaying(); setView('item', { kind: 'song', id: songPage }); };
-    $$('[data-np-tag]', box).forEach((b) => b.onclick = () => { toggleNowPlaying(); setView('tag', b.dataset.npTag); });
-    const ta = $('#nptagadd'); if (ta) ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
+    const pageRow = songPage ? `<div class="np-pubky-row"><button class="btn ghost sm" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : '';
+    let tags = [];
+    if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
+    const box = $('#nppubky', overlay); if (!box || !live()) return;
+    box.innerHTML = pageRow + (target
+      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
+      : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
+        : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
+    const pb = $('#nppage', overlay); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
+    $$('[data-np-tag]', box).forEach((x) => x.onclick = () => setView('tag', x.dataset.npTag));
+    const ta = $('#nptagadd', overlay);
+    if (ta) {
+      // A half-typed tag survives re-renders while the song stays the same
+      if (state.npTagDraft && state.npTagDraft.id === it.id) ta.value = state.npTagDraft.value;
+      ta.oninput = () => { state.npTagDraft = { id: it.id, value: ta.value }; };
+      npRestore();
+      ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); state.npTagDraft = null; fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
+    }
   };
+  const np2Stream = (it) => !!(it && it.album === 'Internet radio');
   // ---- Now Playing overlay -------------------------------------------------
   const overlay = $('#nowplaying');
-  const toggleNowPlaying = (force) => {
-    const open = force === true ? true : overlay.hidden;
+  // Back closes it like a menu; opening a page from it takes its history entry (setView)
+  const npTr = { open: () => !overlay.hidden, close: (fromBack) => toggleNowPlaying(false, fromBack) };
+  const toggleNowPlaying = (force, fromBack) => {
+    const open = force === true ? true : force === false ? false : overlay.hidden;
+    const was = !overlay.hidden;
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
-    if (open) renderNowPlaying();
+    if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
+    const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
+    if (npCompact()) state.npSheet = null;
+    if (was && fromBack !== true) popTransient();
+  };
+  // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it
+  {
+    let y0 = null; let d0 = null;
+    const player = $('.player');
+    player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
+    player.addEventListener('touchend', (e) => { if (y0 != null && y0 - e.changedTouches[0].clientY > 40 && overlay.hidden) toggleNowPlaying(true); y0 = null; });
+    overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input, .np-sheet') ? e.touches[0].clientY : null; }, { passive: true });
+    overlay.addEventListener('touchend', (e) => { if (d0 != null && e.changedTouches[0].clientY - d0 > 80 && !overlay.hidden) toggleNowPlaying(); d0 = null; });
+  }
+  // Now playing on one screen (docs/ux/responsive.md, build step 2): the player, and five sheets
+  // (Queue, Lyrics, Details, Sources, Tags). Phones open a sheet over the player from the bottom row;
+  // tablets and desktops keep one open beside it. The open sheet survives re-renders (state.npSheet).
+  const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
+  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
+  // Compact: the phone arrangement (sheets over the player), also on tablets narrower than two columns need
+  const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
+  const npSheetNow = () => { const k = npSheets().some(([x]) => x === state.npSheet) ? state.npSheet : null; return npCompact() ? k : k || 'queue'; };
+  // What a re-render keeps: the sheet's scroll and the focused control
+  const npKeep = () => {
+    const a = document.activeElement; const body = $('.np-sheet-body', overlay);
+    let focus = null;
+    if (a && overlay.contains(a)) {
+      const where = a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
+      if (a.id) focus = '#' + a.id;
+      else for (const k of ['npsheet', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
+    }
+    const lines = $('.lyric-lines', overlay);
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus };
   };
   const renderNowPlaying = () => {
+    const keep = npKeep(); npGen += 1; const gen = npGen;
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
-      overlay.innerHTML = `<div class="np-page"><div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
+      setTimeout(setArtTint, 0); // no cover: no tint
+      overlay.innerHTML = `<div class="np-page np2"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
+      $('#npq').onclick = () => setView('queue');
       return;
     }
     const it = np.item;
-    const albumId = albumIdOf(it);
     const q = (isBrowser() ? state.browserQueue : state.queue) || [];
-    const idx = q.findIndex((x) => x.id === it.id);
-    const next = idx >= 0 ? q.slice(idx + 1, idx + 7) : [];
+    const idx = z.queue_index != null && q[z.queue_index] && q[z.queue_index].id === it.id ? z.queue_index : q.findIndex((x) => x.id === it.id);
+    const rest = idx >= 0 ? q.slice(idx + 1) : [];
     const h = np.signal_path ? headline(np.signal_path) : null;
     const colour = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
-    overlay.innerHTML = `
-      <div class="np-page">
-        <div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="muted">Now playing on ${esc(z.name)}</span><span class="spacer"></span><button class="btn ghost" id="npdash" title="A full-screen now playing for a TV or tablet (opens in a new tab)">${icon('external')} Dashboard</button><button class="btn ghost" id="npsleep" title="Pause this zone after a while">${icon('moon')} ${sleepLabel()}</button>${isBrowser() ? '' : `<button class="btn ghost" id="npdsp">DSP</button>`}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div>
-        <div class="np-hero">
-          <div class="np-big">${itemArt(it)}</div>
-          <div class="np-meta">
-            <div class="eyebrow">${esc(np.stream_title ? 'Live · ' + (it.title || '') : it.album ? 'From ' + it.album : 'Track')}</div>
-            <h1>${np.stream_title ? esc(np.stream_title) : npLinksHtml(it, null).title}</h1>
-            <div class="artist">${np.stream_title ? esc(it.artist || '') : npLinksHtml(it, null).artistsHtml}</div>
-            ${np.stream_title ? '' : '<div class="np-pubky" id="nppubky" aria-live="polite"></div>'}
-            <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
-            <div class="path">
-              <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
-              ${np.signal_path ? np.signal_path.stages.map((s) => `<div class="path-row"><span class="pd" style="background:${colour[s.quality]}"></span><span class="pn">${esc(s.name)}</span><span class="pf">${esc(fmtFormat(s.in_format))} → ${esc(fmtFormat(s.out_format))}</span>${s.note ? `<span class="pnote">${esc(s.note)}</span>` : ''}</div>`).join('') : `<div class="path-row"><span class="pd" style="background:var(--muted)"></span><span class="pn">browser</span><span class="pf">the original file, decoded by this browser</span></div>`}
+    const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
+    const sheet = npSheetNow();
+    const songPage = npPageId(it.uri);
+    const links = np.stream_title ? null : npLinksHtml(it, null);
+    const sheetBody = (k) => {
+      if (k === 'queue') {
+        return `<p class="muted small np-sheet-meta">${rest.length ? `Playing next · ${countOf(rest.length, 'songs')}` : 'Nothing after this song'}</p>`
+          + (rest.length ? `<div class="list np-queue">${rest.slice(0, 100).map((n, k2) => `<button class="list-row np-qitem" data-npqi="${idx + 1 + k2}" title="Play this now"><span class="grow"><span class="name">${esc(n.title || n.uri)}</span><span class="sub">${esc(n.artist || '')}</span></span><span class="muted small">${n.duration_ms ? fmt(n.duration_ms) : ''}</span></button>`).join('')}</div>` : '')
+          + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npqfull">${icon('queue')} Reorder or clear the queue</button></div>`;
+      }
+      if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
+      if (k === 'details') {
+        return `<div class="path">
+              <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
+              ${np.signal_path ? np.signal_path.stages.map((st) => `<div class="path-row"><span class="pd" style="background:${colour[st.quality]}"></span><span class="pn">${esc(st.name)}</span><span class="pf">${esc(fmtFormat(st.in_format))} → ${esc(fmtFormat(st.out_format))}</span>${st.note ? `<span class="pnote">${esc(st.note)}</span>` : ''}</div>`).join('') : ''}
             </div>
-            <div class="lyrics" id="nplyrics" hidden></div>
-            ${next.length ? `<div class="upnext"><h3>Up next</h3><div class="list">${next.map((n) => `<div class="list-row"><div class="grow"><div class="name">${esc(n.title || n.uri)}</div><div class="sub">${esc(n.artist || '')}</div></div><span class="muted small">${n.duration_ms ? fmt(n.duration_ms) : ''}</span></div>`).join('')}</div></div>` : ''}
-          </div>
+            <dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
+      }
+      if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
+      return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';
+    };
+    const tab = ([k, l, ic], cls) => { const on = sheet === k ? ' on' : ''; return `<button class="${cls === 'chip' ? 'chip' : 'np-tab'}${on}" data-npsheet="${k}" ${cls === 'chip' ? `role="tab" id="nptab-${k}" aria-controls="npsheetpanel" aria-selected="${sheet === k}" tabindex="${sheet === k ? 0 : -1}"` : `aria-pressed="${sheet === k}"`}>${cls === 'chip' ? '' : icon(ic)}<span>${l}</span></button>`; };
+    const title = np.stream_title ? esc(np.stream_title) : links.title;
+    const artist = np.stream_title ? esc(it.artist || '') : links.artistsHtml;
+    overlay.innerHTML = `
+      <div class="np-page np2${sheet ? ' has-sheet' : ''}${npCompact() ? ' compact' : ''}">
+        <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-body">
+          <section class="np-player" aria-label="Now playing">
+            <div class="np-big">${itemArt(it)}</div>
+            <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
+            <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}</span></button>
+            <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
+            <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
+          </section>
+          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
+            <div class="np-strip"><div class="np-strip-art">${itemArt(it)}</div><div class="np-strip-text"><div class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</div><div class="sub">${esc(it.artist || '')}</div></div><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button></div>
+            <div class="np-sheet-head"><span class="grab" aria-hidden="true"></span><div class="chips np-sheet-tabs" role="tablist" aria-label="More about this song">${npSheets().map((t) => tab(t, 'chip')).join('')}</div><button class="icon-btn np-sheet-close" id="npsheetclose" aria-label="Close the sheet" title="Close">${icon('close')}</button></div>
+            <div class="np-sheet-body" role="tabpanel" id="npsheetpanel" ${sheet ? `aria-labelledby="nptab-${sheet}"` : ''} tabindex="-1">${sheet ? sheetBody(sheet) : ''}</div>
+          </section>
         </div>
       </div>`;
-    const s = $('#npseek'); setFill(s);
+    const sk = $('#npseek'); setFill(sk);
     // Now playing's own transport (phones: the mini player hides behind it)
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
-    s.addEventListener('input', () => { s.dataset.dragging = '1'; setFill(s); $('#nppos').textContent = fmt((s.value / 1000) * (np.duration_ms || 0)); });
-    s.addEventListener('change', () => { delete s.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((s.value / 1000) * (np.duration_ms || 0)) }); });
+    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
+    sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     $('#npclose').onclick = () => toggleNowPlaying();
+    $('#npzone').onclick = () => $('#zonebtn').click();
+    const openSheet = (k) => { state.npSheet = k; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${k}"]`, overlay); if (f) f.focus(); };
+    $$('[data-npsheet]', overlay).forEach((b) => b.onclick = () => openSheet(b.dataset.npsheet));
+    // Tabs: arrow keys move between them (WAI-ARIA tabs)
+    $('.np-sheet-tabs', overlay).onkeydown = (e) => {
+      const ks = npSheets().map(([k]) => k); const i = ks.indexOf(sheet); if (i < 0) return;
+      const j = e.key === 'ArrowRight' ? (i + 1) % ks.length : e.key === 'ArrowLeft' ? (i - 1 + ks.length) % ks.length : e.key === 'Home' ? 0 : e.key === 'End' ? ks.length - 1 : -1;
+      if (j >= 0) { e.preventDefault(); e.stopPropagation(); openSheet(ks[j]); }
+    };
+    $('#npsheetclose').onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
+    $('#npquality').onclick = () => openSheet('details');
+    {
+      // Phones: drag the sheet's head down to close it
+      let y0 = null; const head = $('.np-sheet-head', overlay);
+      head.addEventListener('touchstart', (e) => { y0 = e.touches[0].clientY; }, { passive: true });
+      head.addEventListener('touchend', (e) => { e.stopPropagation(); if (y0 != null && e.changedTouches[0].clientY - y0 > 60 && npCompact()) { state.npSheet = null; renderNowPlaying(); } y0 = null; });
+    }
+    $('#npmore').onclick = (e) => { const b = e.currentTarget; showMenu(b, [
+      { label: 'Dashboard', note: 'Full screen, for a TV or tablet', icon: 'external', run: () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener') },
+      { label: sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel(), icon: 'moon', run: () => setTimeout(() => showMenu(b, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]), 0) },
+      ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
+      ...(songPage ? [{ label: 'Song page', note: 'Sources, versions, tags', icon: 'compass', run: () => setView('item', { kind: 'song', id: songPage }) }] : []),
+    ]); };
     bindNpLinks(overlay, it, () => toggleNowPlaying());
-    fillNpPubky(it);
-    $('#npq').onclick = () => { toggleNowPlaying(); setView('queue'); };
-    const npd = $('#npdsp'); if (npd) npd.onclick = () => { toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
-    const npdb = $('#npdash'); if (npdb) npdb.onclick = () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener');
-    const nps = $('#npsleep'); if (nps) nps.onclick = () => showMenu(nps, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]);
+    $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
+    const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
+    overlay.dataset.sheet = sheet || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
+    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
+    npRestore();
+    if (sheet === 'sources' && songPage) fillNpSources(songPage, gen);
+    fillNpPubky(it, gen);
     loadLyrics(it);
+    setArtTint();
+    npRestore();
     refreshSleep();
+  };
+  // Put back what the last render had (scroll, focus) once the content it needs is there; for that
+  // render only, and only in its first seconds so a late answer never yanks the view
+  const npRestore = () => {
+    const w = state.npWant; if (!w || w.gen !== npGen || Date.now() - w.at > 3000) return;
+    const body = $('.np-sheet-body', overlay); if (body && w.scroll != null && body.scrollHeight - body.clientHeight >= w.scroll) { body.scrollTop = w.scroll; w.scroll = null; }
+    const lines = $('.lyric-lines', overlay); if (lines && w.lyric != null) { lines.scrollTop = w.lyric; w.lyric = null; }
+    const free = !document.activeElement || document.activeElement === document.body || !overlay.contains(document.activeElement); // never take focus someone has moved since
+    if (w.focus && free) { const f = $(w.focus, overlay); if (f) { f.focus({ preventScroll: true }); if (f.id === 'nptagadd') f.setSelectionRange(f.value.length, f.value.length); w.focus = null; } }
+  };
+  // A change of arrangement (rotating a phone, resizing a window) redraws an open Now playing
+  window.addEventListener('resize', () => { if (!overlay.hidden && overlay.dataset.layout && overlay.dataset.layout !== `${shellMode()}-${npCompact()}`) renderNowPlaying(); });
+  // The Sources sheet: where else this song plays (the song page's "also on")
+  const npSrcCache = new Map(); const npSrcPending = new Map();
+  const fillNpSources = async (songPage, gen = npGen) => {
+    let pg = npSrcCache.get(songPage);
+    if (!pg) {
+      let req = npSrcPending.get(songPage);
+      if (!req) { req = api('GET', `/item/song/${encodeURIComponent(songPage)}`).catch(() => null).finally(() => npSrcPending.delete(songPage)); npSrcPending.set(songPage, req); }
+      pg = await req;
+      if (pg && !pg.reading && !pg.pending) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
+    }
+    const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
+    const also = (pg && pg.also_on) || [];
+    box.innerHTML = (also.length ? `<div class="list">${rankSvc(also, (v) => srcSvc(v.source)).map((v) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${v.url ? `<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+      + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
+    $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
+    npRestore();
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -1007,12 +1221,15 @@
   };
   const refreshSleep = async () => {
     if (isBrowser()) return;
-    try { const v = await api('GET', `/zones/${encodeURIComponent(state.zone)}/sleep`); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; const b = $('#npsleep'); if (b) b.innerHTML = `${icon('moon')} ${sleepLabel()}`; } catch { /* keep */ }
+    try { const v = await api('GET', `/zones/${encodeURIComponent(state.zone)}/sleep`); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; } catch { /* keep */ }
   };
   // Lyrics for the playing library track (tags or a sidecar .lrc); synced lines follow the position.
   const trackIdOf = (it) => { const m = /^track:(\d+)$/.exec(it && it.uri || ''); return m ? Number(m[1]) : null; };
   const renderLyrics = (l) => {
     const box = $('#nplyrics'); if (!box) return;
+    const none = $('#nplyricsnone'); if (none) none.hidden = !!l;
+    const ld = $('#nplyricsload'); if (ld) ld.hidden = true;
+    setTimeout(npRestore, 0);
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
@@ -1060,7 +1277,7 @@
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
   const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
@@ -1088,8 +1305,8 @@
   };
   const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['people', 'People', 'artist'], ['remote', 'Remote access', 'external'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
-  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music'];
-  const VIEW_LABELS = { 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
+  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
+  const VIEW_LABELS = { downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
@@ -1193,6 +1410,7 @@
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
+    if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
@@ -1201,22 +1419,23 @@
       // Changing a query or tab inside the same page replaces; opening another page pushes.
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
-      const replace = how === 'replace' || !!cur.sheet || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { sheet: false, transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const replace = how === 'replace' || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
+      const entry = { transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    // The phone's bottom bar: Home, Search, Library (every library view and item page), Queue
-    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'radio', 'person'];
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'albums' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Zones, Settings
+    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
+    if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    if ($('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false'); } $('#scrim').hidden = true; closePop();
+    $('#scrim').hidden = true; closePop();
+    if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
     return render();
   };
   window.addEventListener('popstate', async (e) => {
-    if (sheetBack) { sheetBack = false; return; } // back only closed the sidebar sheet
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
@@ -1378,8 +1597,13 @@
     }).join('');
     return bare ? rows : `<div class="tracks" data-list="${key}">${rows}</div>`;
   };
-  const bindTrackRows = (container, lists) => {
+  // Track rows on #main: one listener, bound once, reading the current page's lists (every render
+  // used to add another, so ⋯ ran once per visit with the lists of pages left behind)
+  let rowLists = {}; let rowsBound = false;
+  const bindTrackRows = (container, pageLists) => {
+    rowLists = pageLists; if (rowsBound) return; rowsBound = true;
     container.addEventListener('click', async (e) => {
+      const lists = rowLists;
       const btn = e.target.closest('[data-act]');
       // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
       if (!btn) {
@@ -1563,11 +1787,63 @@
   const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
   // Long-press on a touch screen (and right-click) on a song row opens its ⋯ menu
   document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); more.click(); });
+  // Song rows on touch screens (docs/ux/responsive.md, build step 3): swipe right to play next, left to
+  // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
+  // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
+  {
+    let sw = null; let lastCtx = 0; let lastLong = 0; let longEnd = 0;
+    document.addEventListener('contextmenu', (e) => { lastCtx = Date.now(); if (Date.now() - lastLong < 2000 && e.target.closest && e.target.closest('.srow, .track, [data-srow]')) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+    // the click a long press leaves on release (iOS) must not play the row
+    document.addEventListener('click', (e) => {
+      // the click iOS sends on releasing a long press: whatever is under the finger then (a row, the menu sheet)
+      if (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]'))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
+    }, true);
+    const ROWS = '.srow, .track, [data-srow]';
+    const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
+    const reset = (row) => { row.style.transform = ''; row.classList.remove('swiping', 'swipe-ready'); delete row.dataset.swipeLabel; };
+    document.addEventListener('touchstart', (e) => {
+      if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); }
+      const row = e.target.closest && e.target.closest(ROWS);
+      if (!row || e.touches.length !== 1 || e.target.closest('input, textarea, [data-qgrip], [draggable="true"]') || row.closest('.selecting') || !moreOf(row)) { sw = null; return; }
+      const t = e.touches[0];
+      sw = { row, x: t.clientX, y: t.clientY, dx: 0, on: false, moved: false };
+      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; lastLong = Date.now(); moreOf(row).click(); } }, 600);
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!sw) return; const t = e.touches[0]; const dx = t.clientX - sw.x; const dy = t.clientY - sw.y;
+      if (!sw.dir && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { sw.moved = true; sw.dir = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y'; } // locked on the first move
+      if (sw.dir !== 'x') return;
+      if (!sw.on) { sw.on = true; sw.row.classList.add('swiping'); }
+      sw.dx = Math.max(isListener() ? 0 : -140, Math.min(140, dx)); // listeners have no playlists to add to
+      sw.row.style.transform = `translateX(${sw.dx}px)`;
+      sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to playlist';
+      sw.row.classList.toggle('swipe-ready', Math.abs(sw.dx) >= 80);
+    }, { passive: true });
+    const end = () => {
+      if (!sw) return; clearTimeout(sw.timer); const s2 = sw; sw = null;
+      if (s2.long) longEnd = Date.now();
+      if (!s2.on) return;
+      reset(s2.row);
+      if (Math.abs(s2.dx) >= 80) { const more = moreOf(s2.row); menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now(), anchor: more }; more.click(); }
+    };
+    document.addEventListener('touchend', end, { passive: true });
+    document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
+  }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) return; }
+    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+    if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
+    else if (menuPick) {
+      const want = menuPick; menuPick = null; closeMenu();
+      {
+        const it = items.find((x) => !x.title && !x.disabled && String(x.label || '').replace(/…$/, '') === want.label);
+        if (it) Promise.resolve(it.run()); else toast(`${want.label} isn't available for this row`);
+        return;
+      }
+    }
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
     $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(items[Number(b.dataset.mi)].run()).finally(popTransient); });
@@ -1577,7 +1853,7 @@
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
     menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
     // Phones: a sheet from the bottom, not a dropdown that runs off the screen (UX review #3)
-    menuEl.classList.toggle('sheet', !!(window.matchMedia && matchMedia('(max-width: 720px)').matches));
+    menuEl.classList.toggle('sheet', shellMode() === 'phone');
     if (menuEl.classList.contains('sheet')) { menuEl.style.left = '0px'; menuEl.style.right = '0px'; menuEl.style.top = 'auto'; menuEl.style.bottom = '0px'; menuEl.style.width = 'auto'; }
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
@@ -1907,6 +2183,41 @@
   const searchWords = (x) => String(x || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const closeMatch = (h, q) => { const want = searchWords(q); const have = new Set(searchWords(`${h.title} ${h.subtitle || ''}`)); return want.length > 0 && want.every((w) => have.has(w) || [...have].some((x) => x.startsWith(w))); };
   const srcName = (src) => (src === 'library' ? 'Library' : src === 'pubky' ? 'Pubky' : SERVICE_NAMES[src] || (state.sources || []).find((x) => x.id === src)?.name || src);
+  // One order for every list of services (STEWARD-UX-PLAYER-SOURCES §1): services switched on
+  // and working first, in the owner's play order; then the rest. Your library always works.
+  // Matched by prefix ("signed in · user", "ready · …"); "browser" plays in This browser with no set-up
+  const HEALTHY_STATUS = /^(ready|previews|connected|signed in|ok|browser)\b/i;
+  const srcHealthy = (x) => !!x && x.enabled !== false && (typeof x.healthy === 'boolean' ? x.healthy : HEALTHY_STATUS.test(String(x.status || '')));
+  const loadSvcRank = async () => {
+    if (!isOwner()) return null;
+    if (state.svcRank && Date.now() - state.svcRank.at < 60000) return state.svcRank.failed ? null : state.svcRank;
+    if (state.svcRankLoading) return state.svcRankLoading;
+    const gen = state.svcRankGen || 0;
+    const load = (async () => {
+      try {
+        const [srcs, po] = await Promise.all([api('GET', '/sources'), api('GET', '/play-order').catch(() => ({ order: [], services: [] }))]);
+        state.sources = srcs;
+        // The play order knows who can play right now; fall back to each service's status
+        const connected = new Map((po.services || []).map((x) => [x.id, x.connected]));
+        const ok = (x) => srcHealthy(x) && connected.get(x.id) !== false;
+        const rank = { at: Date.now(), healthy: new Set(['library', ...srcs.filter(ok).map((x) => x.id)]), off: new Set(srcs.filter((x) => x.enabled === false).map((x) => x.id)), order: po.order || [] };
+        // A change saved while this was loading wins: keep nothing from before it
+        if (gen === (state.svcRankGen || 0)) state.svcRank = rank;
+        return rank;
+      } catch { if (gen === (state.svcRankGen || 0)) state.svcRank = { at: Date.now(), failed: true }; return null; } finally { if (state.svcRankLoading === load) state.svcRankLoading = null; }
+    })();
+    state.svcRankLoading = load;
+    return load;
+  };
+  // A source row's service id: Pinakes names sites by slug or host ("youtube-music", "listen.tidal.com");
+  // a host counts by its main domain
+  const srcSvc = (src) => { const v = String(src || '').toLowerCase(); if (v === 'library') return 'library'; const parts = v.split('.'); return serviceKey(parts.length > 1 ? parts[parts.length - 2] : v); };
+  // Sort anything that names a service (`svc(x)` gives its id): healthy first, then by play order
+  const rankSvc = (list, svc = (x) => x, r = state.svcRank) => {
+    if (!r || r.failed) return list;
+    const pos = (id) => { const i = r.order.indexOf(id); return i < 0 ? 999 : i; };
+    return list.map((x, k) => [x, k]).sort(([a, i], [b, j]) => (r.healthy.has(svc(a)) ? 0 : 1) - (r.healthy.has(svc(b)) ? 0 : 1) || pos(svc(a)) - pos(svc(b)) || i - j).map(([x]) => x);
+  };
   // Merge hits across sources: one row per song (Pinakes group, ISRC, UPC, MBID), best source first.
   const mergeSearch = (run) => {
     const byKind = Object.fromEntries(SEARCH_KINDS.map(([k]) => [k, []]));
@@ -2047,7 +2358,33 @@
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => window.open(it.uri, '_blank', 'noopener') }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
-  const pageHead = (title, count, actions = '') => `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
+  const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
+  const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
+    + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
+  const colourGroup = (group, row) => group('Colour', row('Colour from where it plays', 'The player takes a tint from the service: TIDAL, Qobuz, Spotify…; your own files keep ours.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.srcColour" ${colourOn('pm.srcColour') ? 'checked' : ''} aria-label="Colour from where it plays">`)
+    + row('Colour from the cover', 'Now playing takes a soft gradient from the album art.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.artColour" ${colourOn('pm.artColour') ? 'checked' : ''} aria-label="Colour from the cover">`));
+  const bindLayoutPick = () => {
+    $$('[data-colour-pick]', main).forEach((c) => c.onchange = () => {
+      try { if (c.checked) localStorage.removeItem(c.dataset.colourPick); else localStorage.setItem(c.dataset.colourPick, 'off'); } catch { /* no storage */ }
+      const z = currentZone(); lastSrc = undefined; setSourceColour(z && z.now_playing); setArtTint();
+    });
+    $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
+      try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
+      $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
+      applyShell();
+    });
+    const dp = $('#densepick', main);
+    if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
+  };
+  // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
+  const LIB_TOP = [['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
+  const libNav = () => {
+    if (!LIB_TOP.some(([k]) => k === state.view)) return '';
+    const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
+    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
+    return `<nav class="libnav chips" aria-label="Library">${items.map(([k, l]) => `<button class="chip ${k === state.view ? 'on' : ''}" data-libnav="${k}" ${k === state.view ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
+  };
+  const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
@@ -2058,7 +2395,8 @@
     let note = '';
     if (on) {
       const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
-      if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
+      if (isOffline()) note = ' (sent to your node when it is back)';
+      else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
       else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
     } else await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
     await loadFavourites();
@@ -2647,6 +2985,7 @@
           break;
         }
         case 'playlist': {
+          loadSvcRank(); // for the "Play this song from" menu's order
           loading();
           const plId = state.viewArg;
           await pubkyUser();
@@ -2723,7 +3062,7 @@
           const pin = async (k, body, msg) => { try { await api('PUT', `/playlists/${d.summary.id}/items/${k}/source`, body); state.plPf = null; toast(msg); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-psrc]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); const k = Number(b.dataset.psrc); const t = songs[k]; const pinnedNow = t.pinned || t.pinLost;
-            const opts = (t.sources || []).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
+            const opts = rankSvc([...(t.sources || [])], (x) => x.service).sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0)).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
             showMenu(b, [{ title: t.unavailable ? t.unavailable : 'Play this song from' }, { label: 'Auto (follow the playlist)', icon: 'shuffle', on: !pinnedNow, note: t.plays && !pinnedNow ? `now: ${srcName(t.plays.service)}` : null, run: () => pin(k, { service: null }, 'Follows the playlist again') }, ...opts,
               ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
@@ -2755,7 +3094,7 @@
           try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
           const srcs = state.sources;
-          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
@@ -2769,7 +3108,9 @@
           const srcSwitch = (x, where) => `<input type="checkbox" class="switch" role="switch" data-src-on="${esc(x.id)}" ${x.enabled ? 'checked' : ''} aria-label="${esc(x.name)}${where}">`;
           const tabRow = (x) => { const st = srcState(x); return `<div class="src-tabrow ${x.enabled ? '' : 'off'}"><button class="set-tab ${active === x.id ? 'on' : ''}" id="srctab-${esc(x.id)}" ${active === x.id ? 'aria-current="page"' : ''} data-srctab="${esc(x.id)}">${mark(x)}<span class="src-tname"><span class="src-t1">${esc(x.name)}</span>${x.sign_in ? `<span class="src-tsub" title="${esc(x.sign_in)}">${esc(x.sign_in)}</span>` : ''}</span><span class="src-dot ${st.cls}" title="${esc(st.label)}"></span><span class="sr-only">${esc(st.label)}</span>${icon('chevron', 'ic chev')}</button>${x.id === 'library' ? '<span class="src-noswitch" aria-hidden="true"></span>' : srcSwitch(x, ' on')}</div>`; };
           const lib = { id: 'library', name: 'Your library', status: 'ready', enabled: true };
-          const on = srcs.filter((x) => x.enabled); const off = srcs.filter((x) => !x.enabled);
+          // Working services first, in the owner's play order (STEWARD-UX-PLAYER-SOURCES §1)
+          await loadSvcRank(); if (state.view !== 'sources') return;
+          const on = rankSvc(srcs.filter((x) => x.enabled), (x) => x.id); const off = srcs.filter((x) => !x.enabled);
           const nav = `<nav class="set-nav src-nav" aria-label="Sources">${[lib, ...on].map(tabRow).join('')}${off.length ? (off.length > 2 ? `<details class="src-offgroup" ${off.some((x) => x.id === active) ? 'open' : ''}><summary>Turned off · ${off.length}</summary>${off.map(tabRow).join('')}</details>` : off.map(tabRow).join('')) : ''}</nav>`;
           const panelHead = (x) => `${phone ? `<button class="btn ghost set-back" data-src-back>${icon('back')} Sources</button>` : ''}<h2 class="set-title">${esc(x.name)}</h2>${x.description ? `<p class="muted small src-desc">${esc(x.description)}</p>` : ''}`;
           // TIDAL: one request carries the sign-in ways and both status views (STEWARD-CREDENTIALS-REUSE.md)
@@ -2841,7 +3182,7 @@
               const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="tidalway" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="tway-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="tway-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
               rows.push(block(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to TIDAL">${ways}</div><div class="way-action" id="tsiaction"></div>`));
             }
-            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
+            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.${u.from ? ' That sign-in came from ' + esc(u.from === 'pasted' ? 'a pasted token' : u.from) + '; pick another way below, or a newer file.' : ''}<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
             if (deviceOn) {
               rows.push(row('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
               if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
@@ -2858,6 +3199,10 @@
               const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; if (await choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } fillTidalSignin(); };
               const cf = $('#tfclient'); if (cf) cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } fillTidalSignin(); };
               const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { await putU({ client_id: '' }, u.builtin ? 'Using tidal-dl-ng’s device client' : 'Device client forgotten'); fillTidalSignin(); };
+              const useImport = async (body, what) => { try { const r = await api('POST', '/sources/tidal/signin/import', body); toast(`Signed in with ${r.in_use ? r.in_use.label : what}`); state.tidalChangeWay = false; render(); } catch (e) { toast(e.message, 'error'); } };
+              $$('[data-import]', tsi).forEach((b) => b.onclick = async () => { b.disabled = true; await useImport({ id: b.dataset.import }, b.dataset.import); b.disabled = false; });
+              const ff = $('#tsifile'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the token file first', 'error'); return; } useImport({ text: await file.text() }, 'the file'); };
+              const pf = $('#tsipaste'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); useImport({ text: pf.querySelector('textarea').value }, 'the pasted token'); };
             };
             const renderAction = () => {
               if (!act) return;
@@ -2872,6 +3217,13 @@
                 if (u.pending) act.innerHTML = `<p class="muted small">On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.</p><div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(u.pending.uri)}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`;
                 else if (u.signed_in) act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tsiuse">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${u.user ? ' as user ' + esc(u.user) : ''}.</span></div>${client}`;
                 else act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tfin">Sign in with a code</button><span class="muted small">A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
+              } else if (pick === 'import') {
+                // What other apps on this machine hold, read-only; or the file itself (STEWARD-CREDENTIALS-REUSE.md step 2)
+                const found = si.imports || []; const places = si.places || [];
+                const when = (f) => f.usable ? (f.renews ? 'the node renews it' : f.expires_at ? 'until ' + new Date(f.expires_at * 1000).toLocaleDateString() : '') : f.reason;
+                act.innerHTML = `${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', when(f), f.place].filter(Boolean).join(' \u00b7 '))}</div></div>${f.usable ? `<button class="btn primary sm" data-import="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="tsifile"><p class="muted small">${found.length ? 'Or the token file itself' : 'The token file itself'} (${esc(places.filter((p) => !/not read/.test(p)).map((p) => p.split(':')[0]).join(', '))}); it is only read.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Token file" accept=".json,.toml,.txt,application/json"><button class="btn primary sm" type="submit">Use this file</button></div></form><details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>`;
+              } else if (pick === 'paste') {
+                act.innerHTML = `<form class="stack" id="tsipaste"><textarea class="input" name="text" rows="3" aria-label="Token file contents or access token" placeholder="Token file contents, or an access token (a refresh token on the next line)" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">Kept like the node\u2019s own sign-in; never shown again.</span></div></form>`;
               } else {
                 act.innerHTML = `<form class="stack" id="tfclient"><p class="muted small">A TIDAL <b>device client</b> id and secret you are allowed to use; the node keeps them like a sign-in and signs you in with a code. An app from TIDAL’s developer portal is not a device client: put that one’s id and secret in the node config (<code>[tidal] client_id</code>, <code>client_secret</code>) and it appears above as your own TIDAL app.</p><div class="toolbar"><input class="input" name="id" placeholder="Device client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Device client secret" autocomplete="off" aria-label="Device client secret"><button class="btn primary" type="submit">Save and sign in with a code</button></div></form>`;
               }
@@ -3211,7 +3563,7 @@
           const { kind, id } = state.viewArg;
           loading();
           let pg;
-          try { pg = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); }
+          try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}`), loadSvcRank()]); }
           catch (e) { main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           // The node leaves empty lists out of its answer.
@@ -3250,10 +3602,17 @@
           const songsTitle = kind === 'artist' ? 'Top songs' : kind === 'song' ? 'Song' : 'Songs';
           const songsInfo = songs.length ? `${songs.length} song${songs.length === 1 ? '' : 's'}${pg.total_ms ? ' · ' + mins(pg.total_ms) : ''}` : '';
           const instName = (v) => (v.source === 'library' ? 'Your library' : SERVICE_NAMES[v.source] || String(v.label || v.source).split(' · ')[0]);
-          // "Also on": the same recording elsewhere, each a link to its own page, with play and the service's site
-          // The source row: this page's own source first and highlighted, then the same recording elsewhere
-          const ownPill = `<span class="also here" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<strong>${esc(ownName)}</strong><span class="muted small">this page</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
-          const alsoLine = `<div class="alsoon" id="ialso">${isGlobal ? '' : ownPill}${pg.also_on.length ? `<span class="muted small">${isGlobal ? 'On' : 'Also on'}</span>${pg.also_on.map((v, k) => `<span class="also">${svcBadge(v.source === 'library' ? 'library' : v.source)}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`).join('')}` : ''}</div>`
+          // The source line (STEWARD-UX-PLAYER-SOURCES §1): a quiet line under the title. This page's
+          // own source first; then the same recording on services that are on and working, in the
+          // owner's play order; the rest behind "more". Services switched off are left out.
+          const rk = state.svcRank && !state.svcRank.failed ? state.svcRank : null;
+          const alsoSvc = (v) => srcSvc(v.source);
+          const alsoAll = rankSvc(pg.also_on.map((v, k) => ({ v, k })).filter(({ v }) => !(rk && rk.off.has(alsoSvc(v)))), ({ v }) => alsoSvc(v));
+          const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
+          const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
+          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
+          const alsoLine = (isGlobal && !alsoAll.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && alsoFirst.length ? '<span class="muted">· also</span>' : ''}${alsoFirst.map(alsoItem).join('')}${alsoMore.length ? `${!isGlobal && !alsoFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${alsoMore.length} more source${alsoMore.length === 1 ? '' : 's'}">${alsoFirst.length || !isGlobal ? `${alsoMore.length} more` : `${alsoMore.length} services`}</button><span class="srcrest" hidden>${alsoMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
@@ -3324,6 +3683,7 @@
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
+          const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
@@ -3501,7 +3861,54 @@
           };
           break;
         }
+        case 'downloads': {
+          // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
+          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<p class="muted">Songs kept for offline listening live in the Pubky Music app on your phone or laptop.</p>'; break; }
+          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (state.view !== 'downloads') return;
+          const byId = new Map(d.tracks.map((t) => [t.id, t]));
+          const songsOf = (ids) => ids.map((i) => byId.get(i)).filter(Boolean);
+          const facts = [d.synced_at ? `Last synced ${ago(d.synced_at)}` : '', fileSize(d.bytes), d.queued ? `${countOf(d.queued, 'plays and hearts')} to send when your node is back` : ''].filter(Boolean).join(' · ');
+          const head = pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
+          if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
+          const lists = {};
+          const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
+          const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div></button>`;
+          let html = head;
+          if (albumOpen) {
+            lists.album = songsOf(albumOpen.track_ids);
+            html += `<section class="section"><div class="section-head"><h3>${esc(albumOpen.title)}</h3><div class="actions"><button class="btn sm primary" data-dlplay="album">${icon('play')} Play</button><button class="btn sm ghost" data-dlclose>All downloads</button></div></div>${trackRows(lists.album, { showAlbum: false, numbers: 'track', key: 'album' })}</section>`;
+          }
+          if (d.albums.length) html += `<section class="section"><div class="section-head"><h3>Albums <span class="muted small">${d.albums.length}</span></h3></div><div class="grid">${d.albums.map(albumTile).join('')}</div></section>`;
+          const pls = d.playlists.filter((p) => p.track_ids.length);
+          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Playlists</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Playlist')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${p.track_ids.length} of ${p.total} songs on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
+          const favs = songsOf(d.favourites.track_ids || []);
+          if (favs.length) { lists.fav = favs; html += `<section class="section"><div class="section-head"><h3>Favourites</h3><button class="btn sm ghost" data-dlplay="fav">${icon('play')} Play</button></div>${trackRows(favs, { key: 'fav' })}</section>`; }
+          lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
+          html += `<section class="section"><div class="section-head"><h3>All songs <span class="muted small">${d.tracks.length}</span></h3><button class="btn sm ghost" data-dlplay="all">${icon('shuffle')} Shuffle</button></div>${trackRows(lists.all, { key: 'all' })}</section>`;
+          main.innerHTML = html;
+          bindTrackRows(main, lists);
+          $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
+          const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
+          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = k === 'all' ? [...lists.all].sort(() => Math.random() - 0.5) : lists[k]; if (ts && ts.length) playTracks(ts, true); });
+          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true));
+          break;
+        }
         case 'settings': {
+          if (isOffline()) {
+            const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+            const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+            const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
+            let d = null; try { d = await api('GET', '/offline'); } catch { d = null; }
+            if (state.view !== 'settings') return;
+            main.innerHTML = pageHead('Settings', null)
+              + group('This device', row('Offline', `Your node is out of reach, so this app plays what it keeps. It reconnects by itself.${d && d.synced_at ? ` Last synced ${esc(ago(d.synced_at))}.` : ''}`, '')
+                + (d ? row('Kept here', `${countOf(d.tracks.length, 'songs')} · ${esc(fileSize(d.bytes))}${d.queued ? ` · ${countOf(d.queued, 'plays and hearts')} waiting to be sent` : ''}`, '<button class="btn" data-view-go="downloads">Downloads</button>') : ''))
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${l}</button>`).join('')}</div>`));
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+            $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
+            break;
+          }
           if (isListener()) {
             const me = state.me; const info = state.info || await api('GET', '/info');
             const [who] = await loadProfiles([me.key]);
@@ -3512,8 +3919,8 @@
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), '<button class="btn" id="lsignout">Sign out of this device</button>')
                 + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
-              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
-            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             $('#lsignout').onclick = async () => { try { await api('DELETE', '/me/token'); } catch { /* signed out either way */ } state.token = ''; try { localStorage.removeItem('pm.token'); } catch { /* no storage */ } location.reload(); };
             break;
           }
@@ -3599,7 +4006,7 @@
             + group('Every day or week, to a folder', block('', '', '<div id="bksched"><div class="skeleton" style="height:60px"></div></div>'))
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
-          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
+          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
@@ -3687,7 +4094,7 @@
           const ca = $('#pkcopyall'); if (ca) ca.onclick = () => startUpload({ all: true });
           const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; await bringFiles(); mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+          $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
           // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
           const roonRun = async (dry) => {
             const files = [...($('#roonfiles').files || [])]; const out = $('#roonout');
@@ -3934,7 +4341,7 @@
       bindResign(main);
 
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
-      if (Object.keys(lists).length) bindTrackRows(main, lists);
+      bindTrackRows(main, lists);
     } catch (e) {
       main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;
     }
@@ -3983,10 +4390,15 @@
   };
   const scheduleRetry = () => {
     clearTimeout(link.retry);
-    const d = Math.min(30000, 500 * 2 ** Math.min(link.attempt, 10));
+    // Short retries while it matters: someone waits on a held change, or the node has only just gone
+    // (a restart is back within seconds); the long backoff after that spares a node that is really off
+    const urgent = link.waiters.length > 0 || (link.downSince && Date.now() - link.downSince < 20000);
+    const d = Math.min(urgent ? 1500 : 30000, 500 * 2 ** Math.min(link.attempt, 10));
     const wait = Math.round(d / 2 + Math.random() * d / 2);
-    link.attempt++; link.retryAt = Date.now() + wait;
-    link.retry = setTimeout(() => { link.retry = null; reconnect(); }, wait);
+    link.attempt = urgent ? Math.min(link.attempt + 1, 2) : link.attempt + 1; // after the fast phase: 2 → 4 → 8 → 16 → 30 s
+    link.retryAt = Date.now() + wait;
+    const conn = $('#conn'); if (conn) conn.dataset.retryAt = String(link.retryAt); // when the next retry is due (for tests)
+    link.retry = setTimeout(() => { link.retry = null; clearRetryAt(); reconnect(); }, wait);
   };
   const goneDown = () => {
     link.up = false; clearInterval(link.ping); link.awaiting = false;
@@ -3995,10 +4407,15 @@
   };
   // Drop the socket without waiting for its close handshake (a dead peer may never answer).
   const dropSocket = () => { const ws = link.ws; link.ws = null; if (ws) { ws.onclose = ws.onmessage = ws.onerror = null; try { ws.close(); } catch {} } };
-  const retryNow = () => { clearTimeout(link.retry); link.retry = null; link.attempt = 0; reconnect(); };
+  const clearRetryAt = () => { const c = $('#conn'); if (c) delete c.dataset.retryAt; };
+  const retryNow = () => { clearTimeout(link.retry); link.retry = null; clearRetryAt(); link.attempt = 0; reconnect(); };
+  let reconnectGen = 0; // only the latest attempt may report its result
   const reconnect = async () => {
     if (!link.loaded) return connect();
-    try { state.info = await api('GET', '/info'); } catch { goneDown(); return; }
+    const gen = ++reconnectGen;
+    let info = null; try { info = await api('GET', '/info'); } catch { if (gen === reconnectGen && !link.up) goneDown(); return; }
+    if (link.up) return; // a success from an older attempt still counts
+    state.info = info;
     openEvents();
   };
   const sendPing = () => {
@@ -4077,6 +4494,18 @@
   const connect = async () => {
     try {
       state.info = await api('GET', '/info');
+      document.body.classList.toggle('offline', isOffline());
+      if (isOffline()) {
+        // The app's local server: no zones, no events; the app switches back when the node is reachable
+        setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
+        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        state.sources = []; state.zones = {}; state.zone = BROWSER;
+        loadFavourites().catch(() => { state.favUris = new Set(); });
+        renderZoneName(); renderBar();
+        link.loaded = true;
+        if (!OFFLINE_VIEWS.has(state.view)) setView('downloads', undefined, 'replace'); else render();
+        return;
+      }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'tracks')}`);
       watchScan(state.info);
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
@@ -4098,7 +4527,7 @@
     }
   };
   const openEvents = () => {
-    clearTimeout(link.retry); link.retry = null;
+    clearTimeout(link.retry); link.retry = null; clearRetryAt();
     dropSocket();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/v1/events${tokenQ()}`);

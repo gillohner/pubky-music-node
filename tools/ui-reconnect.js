@@ -66,7 +66,12 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   await startNode();
   const tUp = Date.now();
   const resync = await Promise.all(pages.map((p) => until(`${p.name} back`, async () => (await connState(p)) === 'connected', 30000)));
-  check(Math.max(...resync) < 5000, `both controllers resync after the restart (${resync.join(' / ')} ms after the node was back; ${tUp - t0} ms outage)`);
+  // While an outage is young (its first 20 s) or a change is held, the controllers retry at most
+  // 1.5 s apart (app.js scheduleRetry, the fast phase): the retry that finds the node back is at most
+  // 1.5 s away, so 3 s covers it and the connect. That holds only while the outage stays inside the
+  // fast phase: checked first, so a slower start fails on its own line.
+  check(tUp - t0 < 18000, `the outage stays inside the controllers' fast retry phase (${tUp - t0} ms)`);
+  check(Math.max(...resync) < 3000, `both controllers resync after the restart (${resync.join(' / ')} ms after the node was back; ${tUp - t0} ms outage)`);
   await pressed;
   // The node restores the queue stopped; the held toggle starts it again, and both controllers show it.
   const played = await Promise.all(pages.map((p) => until(`${p.name} sees the held toggle`, async () => (await toggleLabel(p)) === 'Pause', 10000).catch(() => -1)));

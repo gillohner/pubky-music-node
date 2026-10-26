@@ -21,6 +21,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// What an upload says when the homeserver is full (507).
+pub const FULL: &str =
+    "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota";
+
+/// Whether a store error is the homeserver being full.
+pub(crate) fn is_full_error(e: &str) -> bool {
+    e.ends_with(FULL)
+}
+
 /// What a chunk may be at most; the route takes a little more.
 pub const CHUNK: u64 = 4 << 20;
 pub const CHUNK_LIMIT: usize = 8 << 20;
@@ -40,6 +49,9 @@ pub struct Upload {
     pub state: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// It failed because the homeserver is full.
+    #[serde(default)]
+    pub full: bool,
     /// The homeserver path it was stored at.
     #[serde(default)]
     pub stored_as: Option<String>,
@@ -170,9 +182,17 @@ pub(crate) async fn store(
     // To the node's own homeserver there is no uplink to spare; to another one, pace the copy.
     let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
     let keep_local = (!bundled).then(|| bytes.clone());
-    sync.upload_private_paced(&remote, bytes, (rate > 0).then_some(rate))
+    if let Err(e) = sync
+        .upload_private_paced(&remote, bytes, (rate > 0).then_some(rate))
         .await
-        .map_err(|e| format!("{name}: {e}"))?;
+    {
+        if e.is_full() {
+            crate::storage::note_full(s, true);
+            return Err(format!("{name}: {FULL}"));
+        }
+        return Err(format!("{name}: {e}"));
+    }
+    crate::storage::note_full(s, false);
     match sync.stat_private(&remote).await {
         Ok(Some(kept)) if kept != len => {
             return Err(format!(
@@ -308,6 +328,7 @@ pub(crate) async fn start(
             offset: 0,
             state: "receiving".into(),
             error: None,
+            full: false,
             stored_as: None,
             touched: Some(Instant::now()),
             writing: false,
@@ -467,6 +488,7 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
         }
         Err(e) => set(&|u| {
             u.state = "failed".into();
+            u.full = is_full_error(&e);
             u.error = Some(e.clone());
         }),
     }
@@ -595,6 +617,14 @@ pub(crate) async fn import(
                     j.skipped += 1;
                     j.bytes_done += size;
                 }),
+                // Full: every further file would be sent whole only to be refused
+                Err(e) if is_full_error(&e) => {
+                    set(&|j| {
+                        j.failed += 1;
+                        j.errors.push(format!("{e}; the files after it were not copied"));
+                    });
+                    break;
+                }
                 Err(e) => set(&|j| {
                     j.failed += 1;
                     j.errors.push(e.clone());

@@ -15,7 +15,7 @@ bytes = { workspace = true }
 futures-util = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
-pubky-music-specs = { workspace = true }
+pubky-music-specs = { workspace = true, features = ["vault"] }
 pubky-social-specs = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
@@ -24,6 +24,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 tracing = { workspace = true }
 url = { workspace = true }
+zeroize = "1"
 
 [dev-dependencies]
+# The vault client key must be the Noise static key pubky-noise derives from the same secret
+pubky-noise = "=0.1.0"
+tempfile = "3"
 tokio = { workspace = true }

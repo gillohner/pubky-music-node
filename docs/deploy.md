@@ -6,6 +6,7 @@ One binary, three shapes. The homeserver is always a separate Pubky service the 
 
 ```sh
 sudo apt install libasound2-dev          # build only
+sudo apt install ffmpeg                  # smaller copies for phones (downloads); optional
 cargo build --release -p pm-node --features alsa
 pm-node config > node.toml               # edit: data_dir, [api] token (contact and folders can also be set later in Settings)
 pm-node -c node.toml scan
@@ -17,6 +18,8 @@ Free the DAC from PipeWire/PulseAudio on desktop systems (see `docs/HARDWARE-TES
 ## Docker
 
 `Dockerfile` builds the node with ALSA and runs it as an unprivileged user in the `audio` group.
+It includes ffmpeg (Debian's 5.1 series, pinned by `FFMPEG_VERSION`), so phones and laptops can
+download smaller copies (AAC, MP3, Opus) of songs, not only the originals.
 The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (see
 `deploy/docker/entrypoint.sh`).
 
@@ -114,7 +117,7 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 1. **PostgreSQL, users and folders**
 
    ```sh
-   sudo apt install postgresql openssl
+   sudo apt install postgresql openssl ffmpeg   # ffmpeg: smaller copies for phones (downloads)
    DB_PASSWORD=$(openssl rand -hex 24); ADMIN_PASSWORD=$(openssl rand -hex 24); TOKEN=$(openssl rand -hex 32)
    sudo -u postgres psql -c "CREATE ROLE pubky LOGIN PASSWORD '$DB_PASSWORD'" -c "CREATE DATABASE pubky_homeserver OWNER pubky"
    sudo groupadd --system pubky-files   # the homeserver's stored files, readable by the node
@@ -224,6 +227,10 @@ only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for
 
 ## Umbrel
 
+**Install:** in umbrelOS, App Store › ⋯ › Community App Stores, add
+`https://github.com/gillohner/pubky-music-umbrel`, open the "Pubky Music" store and install Pubky Music
+Node. That repository mirrors `deploy/umbrel/` (the `umbrel-mirror` workflow; docs/RELEASING.md).
+
 `deploy/umbrel/` is an Umbrel community app store (`umbrel-app-store.yml`, store id `pubky-music`)
 with one app, `pubky-music-node`: the node with its own Pubky homeserver inside, as in the compose
 bundle (PostgreSQL, pubky-homeserver v0.16.2 with Pubky's config wrapper, cloudflared). Umbrel's
@@ -248,12 +255,14 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
   Music uploaded or copied into your homeserver (Library › Add music) is played from the
   homeserver's own files, read-only, with no second copy.
 - **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
-  published as its own repository (asked of the owner); add that repository's URL in Umbrel's
-  App Store › Community App Stores.
-- **The image:** until the first release tag, the app pins an `edge` build by digest
-  (multi-arch, amd64 and arm64); its version is that build's commit. Images are published to
-  `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
-  `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
+  published as its own repository, [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel);
+  add `https://github.com/gillohner/pubky-music-umbrel` in Umbrel's App Store › Community App Stores.
+- **The image:** the app pins a release image by digest (now `0.1.0`), multi-arch (amd64 and
+  arm64). Images are published to `ghcr.io/gillohner/pubky-music-node` by
+  `.github/workflows/release.yml`: every `v*` tag gives `<version>`, `<major.minor>` and `latest`,
+  and every push to main `edge`. A new release updates the pin (docs/RELEASING.md).
+- **Downloads:** the image includes ffmpeg, so phones can keep smaller copies (AAC, MP3, Opus)
+  as well as the originals.
 
 ## Reaching the node from outside the house
 
@@ -299,8 +308,11 @@ Open Sources › TIDAL › Connect TIDAL.
 - **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
   secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
   here are scrobbled; artist pages show similar artists.
-- **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
-  always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
+  (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
+  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
+  in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
+  rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
   `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).

@@ -76,6 +76,10 @@ pub struct Session {
     pub country: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The app this sign-in was imported from (`tidal-dl-ng`, `pasted`, …); none for the node's
+    /// own device sign-in (`crate::imports`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -214,6 +218,7 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
         user_id: previous.and_then(|p| p.user_id.clone()),
         country: previous.map(|p| p.country.clone()).unwrap_or_default(),
         session_id: previous.and_then(|p| p.session_id.clone()),
+        from: previous.and_then(|p| p.from.clone()),
     })
 }
 
@@ -246,6 +251,9 @@ pub struct UnofficialStatus {
     pub signed_in: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// The app the sign-in was imported from, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     pub quality: String,
     /// A sign-in waiting for the code to be entered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +283,7 @@ pub(crate) fn view(s: &NodeState) -> UnofficialStatus {
         enabled: st.enabled,
         signed_in: st.session.is_some(),
         user: st.session.as_ref().and_then(|x| x.user_id.clone()),
+        from: st.session.as_ref().and_then(|x| x.from.clone()),
         quality: if st.quality.is_empty() {
             "max".into()
         } else {

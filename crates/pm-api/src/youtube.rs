@@ -45,6 +45,11 @@ fn api_base() -> String {
         .unwrap_or_else(|| API_BASE.into())
 }
 
+/// Whether a YouTube Data key is set (the node's list of apps; the key itself is never shown).
+pub(crate) fn has_key(s: &NodeState) -> bool {
+    api_key(s).is_some()
+}
+
 fn api_key(s: &NodeState) -> Option<String> {
     let lib = s.library.lock().expect("library poisoned");
     lib.get_setting(KEY_SETTING)

@@ -75,8 +75,8 @@ services:
       start_period: 120s
 
   node:
-    # A pinned edge build (main @ a432705) until the first release tag publishes a version image.
-    image: ghcr.io/gillohner/pubky-music-node:edge@sha256:67cf0368d91ab188a24f1560d94942e0eb038f9c2d8162680b30f1836d1dc55e
+    # The v0.1.0 release image (multi-arch), pinned by digest.
+    image: ghcr.io/gillohner/pubky-music-node:0.1.0@sha256:821ae8aca3b16c728905489cd43ab68bbd726f9e51079c5caff05a71b8e80447
     restart: on-failure
     stop_grace_period: 10s
     network_mode: host
