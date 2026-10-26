@@ -260,9 +260,10 @@ pub struct History {
     pub plays: Vec<pm_library::PlayEntry>,
 }
 
-/// A favourite by canonical URL or by library id (one of them).
+/// An item by canonical URL or by library id (one of them): what a bookmark, a tag or a review
+/// targets.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct FavouriteRef {
+pub struct ItemRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +278,7 @@ pub struct FavouriteRef {
     pub at: Option<i64>,
 }
 
-impl FavouriteRef {
+impl ItemRef {
     pub fn uri(uri: impl Into<String>) -> Self {
         Self {
             uri: Some(uri.into()),
@@ -304,16 +305,16 @@ impl FavouriteRef {
     }
 }
 
-/// Favourites joined to the library; `other` are canonical URLs the library
-/// has no object for (favourited elsewhere, or not scanned here).
+/// Bookmarks joined to the library; `other` are canonical URLs the library
+/// has no object for (bookmarked elsewhere, or not scanned here).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Favourites {
+pub struct Bookmarks {
     pub tracks: Vec<Track>,
     pub albums: Vec<Album>,
     pub artists: Vec<ArtistSummary>,
     #[serde(default)]
     pub other: Vec<String>,
-    /// Every favourited canonical URL, for quick "is this a favourite" checks.
+    /// Every bookmarked canonical URL, for quick "is this bookmarked" checks.
     #[serde(default)]
     pub uris: Vec<String>,
 }
@@ -419,14 +420,30 @@ pub struct Reviews {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FavouriteChanged {
+pub struct BookmarkChanged {
     pub uri: String,
+    pub bookmarked: bool,
+    /// The same as `bookmarked`, for clients of the deprecated `/v1/favourites`.
+    #[serde(default)]
     pub favourite: bool,
+}
+
+impl BookmarkChanged {
+    pub fn new(uri: String, bookmarked: bool) -> Self {
+        Self {
+            uri,
+            bookmarked,
+            favourite: bookmarked,
+        }
+    }
 }
 
 /// What the Home screen shows: the Roon-style landing page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomePage {
+    #[serde(default)]
+    pub bookmarked_albums: Vec<Album>,
+    /// The same as `bookmarked_albums`, for one release (deprecated name).
     #[serde(default)]
     pub favourite_albums: Vec<Album>,
     pub recently_added: Vec<Album>,
@@ -435,7 +452,7 @@ pub struct HomePage {
     pub most_played: Vec<pm_library::PlayedTrack>,
     pub history: Vec<pm_library::PlayEntry>,
     pub stats: pm_library::LibraryStats,
-    /// Favourite songs not played for two months (or never), the longest-unplayed first.
+    /// Bookmarked songs not played for two months (or never), the longest-unplayed first.
     #[serde(default)]
     pub forgotten: Vec<Track>,
 }
@@ -1087,9 +1104,9 @@ pub struct ItemPage {
     /// The canonical URL or the service link the page is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-    /// What tags, ratings and favourites attach to (`{track_id}`, `{album_id}`,
+    /// What tags, ratings and bookmarks attach to (`{track_id}`, `{album_id}`,
     /// `{artist_id}` or `{uri}`), for the existing `/v1/tags`, `/v1/reviews`
-    /// and `/v1/favourites` calls.
+    /// and `/v1/bookmarks` calls.
     pub target: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1778,9 +1795,9 @@ pub struct RoonImportQuery {
     /// Only report (default true).
     #[serde(default)]
     pub dry_run: Option<bool>,
-    /// Roon favourites into Favourites (default true).
-    #[serde(default)]
-    pub favourites: Option<bool>,
+    /// Roon favourites into bookmarks (default true). `favourites=` is the deprecated name.
+    #[serde(default, alias = "favourites")]
+    pub bookmarks: Option<bool>,
     /// Roon tags as public tags on Pubky (default false: they become public).
     #[serde(default)]
     pub tags: Option<bool>,
@@ -1803,9 +1820,11 @@ pub struct RoonImportReport {
     pub rows: usize,
     pub matched: usize,
     pub unmatched: usize,
-    /// Matched, but without the canonical identity a favourite, tag or playlist item needs.
+    /// Matched, but without the canonical identity a bookmark, tag or playlist item needs.
     pub not_identified: usize,
-    /// Favourites added (or that would be, in a dry run).
+    /// Bookmarks added (or that would be, in a dry run).
+    pub bookmarks: usize,
+    /// The same as `bookmarks`, for one release (deprecated name).
     pub favourites: usize,
     pub tags_added: usize,
     /// Roon tags Pubky cannot hold (too long, odd characters).

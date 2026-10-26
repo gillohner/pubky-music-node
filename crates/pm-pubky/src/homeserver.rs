@@ -14,7 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, Favourite, MusicPost, Playlist, Review, Visibility};
+use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
 use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
@@ -173,17 +173,17 @@ impl NodeHomeserver {
 
     /// The signed-in user's v1 bookmarks of music URLs: `(path, uri, created_at)`. Bookmarks of
     /// anything else, and invalid ones, are skipped.
-    pub async fn read_v1_favourites(
+    pub async fn read_v1_bookmarks(
         &self,
         session: &PubkySession,
     ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
-        self.read_v1_favourites_except(session, &Default::default()).await
+        self.read_v1_bookmarks_except(session, &Default::default()).await
     }
 
     /// The same, without downloading the bookmarks the caller already knows: `known` maps a
     /// bookmark's file name to its music URL and time, and a listed file of that name is taken
-    /// from it. A sync then costs a listing, not one request per favourite.
-    pub async fn read_v1_favourites_except(
+    /// from it. A sync then costs a listing, not one request per bookmark.
+    pub async fn read_v1_bookmarks_except(
         &self,
         session: &PubkySession,
         known: &std::collections::HashMap<String, (pm_model::MusicUri, i64)>,
@@ -209,7 +209,7 @@ impl NodeHomeserver {
             .fetch_many(&user, unknown, Visibility::Private, Some(session))
             .await?
         {
-            if let Some((uri, created_at)) = crate::v1::favourite_from_bookmark(&path, &bytes) {
+            if let Some((uri, created_at)) = crate::v1::music_bookmark(&path, &bytes) {
                 out.push((path, uri, created_at));
             }
         }
@@ -331,23 +331,23 @@ impl NodeHomeserver {
         Ok(out)
     }
 
-    /// The user's favourites (music bookmarks) under `visibility`; other
+    /// The user's older `pubky.app` bookmarks of music URLs under `visibility`; other
     /// bookmarks (of posts) are skipped.
-    pub async fn read_favourites(
+    pub async fn read_legacy_bookmarks(
         &self,
         user_z32: &str,
         visibility: Visibility,
         session: Option<&PubkySession>,
-    ) -> Result<Vec<(String, Favourite)>, HomeserverError> {
+    ) -> Result<Vec<(String, Bookmark)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        let dir = Favourite::dir(visibility);
+        let dir = Bookmark::dir(visibility);
         let mut out = Vec::new();
         let paths = self.list_dir(&user, &dir, visibility, session).await?;
         for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
             match serde_json::from_slice::<pubky_app_specs::PubkyAppBookmark>(&bytes) {
                 Ok(b) => {
-                    if let Some(f) = Favourite::from_bookmark(&id, &b) {
+                    if let Some(f) = Bookmark::from_bookmark(&id, &b) {
                         out.push((path, f));
                     }
                 }

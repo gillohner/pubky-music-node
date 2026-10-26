@@ -786,7 +786,7 @@ impl NodeClient {
     // ---- tags ----
 
     /// My tags on one object (`Some(r)`) or all of them (`None`).
-    pub async fn tags(&self, r: Option<&FavouriteRef>) -> Result<Tags> {
+    pub async fn tags(&self, r: Option<&ItemRef>) -> Result<Tags> {
         let mut q: Vec<(&str, String)> = Vec::new();
         if let Some(r) = r {
             if let Some(u) = &r.uri {
@@ -806,7 +806,7 @@ impl NodeClient {
     }
 
     /// Add or remove one tag label on an object.
-    pub async fn set_tag(&self, r: &FavouriteRef, label: &str, on: bool) -> Result<TagChanged> {
+    pub async fn set_tag(&self, r: &ItemRef, label: &str, on: bool) -> Result<TagChanged> {
         let req = TagRef {
             uri: r.uri.clone(),
             track_id: r.track_id,
@@ -842,7 +842,7 @@ impl NodeClient {
     // ---- reviews ----
 
     /// My review of one object (`Some(r)`) or all my reviews (`None`).
-    pub async fn reviews(&self, r: Option<&FavouriteRef>) -> Result<Reviews> {
+    pub async fn reviews(&self, r: Option<&ItemRef>) -> Result<Reviews> {
         let mut q: Vec<(&str, String)> = Vec::new();
         if let Some(r) = r {
             if let Some(u) = &r.uri {
@@ -862,7 +862,7 @@ impl NodeClient {
     }
 
     /// Create or replace my review of an object.
-    pub async fn set_review(&self, r: &FavouriteRef, rating: Option<u8>, text: &str) -> Result<ReviewEntry> {
+    pub async fn set_review(&self, r: &ItemRef, rating: Option<u8>, text: &str) -> Result<ReviewEntry> {
         let req = ReviewRef {
             uri: r.uri.clone(),
             track_id: r.track_id,
@@ -874,7 +874,7 @@ impl NodeClient {
         self.send(reqwest::Method::PUT, "reviews", Some(&req)).await
     }
 
-    pub async fn delete_review(&self, r: &FavouriteRef) -> Result<()> {
+    pub async fn delete_review(&self, r: &ItemRef) -> Result<()> {
         let mut url = self.url("reviews");
         {
             let mut q = url.query_pairs_mut();
@@ -895,18 +895,18 @@ impl NodeClient {
         Self::finish::<Reviews>(resp).await.map(|_| ())
     }
 
-    // ---- favourites ----
+    // ---- bookmarks ----
 
-    pub async fn favourites(&self) -> Result<Favourites> {
-        self.get("favourites", &[]).await
+    pub async fn bookmarks(&self) -> Result<Bookmarks> {
+        self.get("bookmarks", &[]).await
     }
 
-    /// Heart or un-heart a track, album, artist or canonical URL.
-    pub async fn set_favourite(&self, r: &FavouriteRef, on: bool) -> Result<FavouriteChanged> {
+    /// Bookmark or unbookmark a track, album, artist or canonical URL.
+    pub async fn set_bookmark(&self, r: &ItemRef, on: bool) -> Result<BookmarkChanged> {
         if on {
-            self.send(reqwest::Method::PUT, "favourites", Some(r)).await
+            self.send(reqwest::Method::PUT, "bookmarks", Some(r)).await
         } else {
-            let mut url = self.url("favourites");
+            let mut url = self.url("bookmarks");
             {
                 let mut q = url.query_pairs_mut();
                 if let Some(u) = &r.uri {
@@ -975,7 +975,7 @@ impl NodeClient {
     }
 
     /// The Pubky view (tags, taggers) of a library object or canonical URL.
-    pub async fn on_pubky(&self, r: &FavouriteRef) -> Result<OnPubky> {
+    pub async fn on_pubky(&self, r: &ItemRef) -> Result<OnPubky> {
         let mut q: Vec<(&str, String)> = Vec::new();
         if let Some(u) = &r.uri {
             q.push(("uri", u.clone()));

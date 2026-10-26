@@ -691,7 +691,7 @@ pub(crate) async fn logout(
 }
 
 /// `POST /v1/sources/jamendo/collection/import`: the tracks the user liked or added to favourites
-/// on Jamendo, as favourites on this node (by their Jamendo link).
+/// on Jamendo, as bookmarks on this node (by their Jamendo link).
 pub(crate) async fn import_collection(
     axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
 ) -> crate::ApiResult<crate::tidal::ImportReport> {
@@ -729,7 +729,7 @@ pub(crate) async fn import_collection(
     for id in ids {
         match pm_model::MusicUri::parse(&page_url("track", &id)) {
             Ok(uri) => {
-                crate::favourites::add(&lib, uri)?;
+                crate::bookmarks::add(&lib, uri)?;
                 report.imported += 1;
             }
             Err(_) => report.skipped += 1,

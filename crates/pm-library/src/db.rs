@@ -28,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("migrations/0012_fts_rowid.sql")),
     (13, include_str!("migrations/0013_file_hashes.sql")),
     (14, include_str!("migrations/0014_loudness.sql")),
+    (15, include_str!("migrations/0015_bookmarks.sql")),
 ];
 
 pub struct Library {
@@ -57,7 +58,9 @@ pub struct BackupCounts {
     pub identified: u64,
     pub albums: u64,
     pub playlists: u64,
-    pub favourites: u64,
+    /// Bookmarks. The manifest keeps the older `favourites` name: it is a file format.
+    #[serde(rename = "favourites")]
+    pub bookmarks: u64,
     pub tags: u64,
     pub plays: u64,
     pub folders: u64,
@@ -104,9 +107,9 @@ pub struct IdentityCounts {
     pub unchecked: u64,
 }
 
-/// A favourite as stored locally (a v1 bookmark of a canonical music URL).
+/// A bookmark as stored locally (a social v1 bookmark of a canonical music URL).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FavouriteRow {
+pub struct BookmarkRow {
     pub id: String,
     pub uri: String,
     /// Microseconds.
@@ -818,86 +821,83 @@ impl Library {
         v.into_iter().collect()
     }
 
-    // ----- favourites -------------------------------------------------------
+    // ----- bookmarks --------------------------------------------------------
 
-    /// Add (or revive) a favourite; returns the row. Idempotent: a live favourite keeps its time,
+    /// Add (or revive) a bookmark; returns the row. Idempotent: a live bookmark keeps its time,
     /// a revived one (cleared, not yet synced) takes the new time.
-    pub fn add_favourite(&self, id: &str, uri: &str, created_at: i64) -> Result<FavouriteRow> {
+    pub fn add_bookmark(&self, id: &str, uri: &str, created_at: i64) -> Result<BookmarkRow> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO favourites(id, uri, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, NULL, 0)
+            "INSERT INTO bookmarks(id, uri, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, NULL, 0)
              ON CONFLICT(uri) DO UPDATE SET deleted = 0,
-                 created_at = CASE WHEN favourites.deleted = 1 THEN excluded.created_at ELSE favourites.created_at END,
-                 synced_at = CASE WHEN favourites.deleted = 1 THEN NULL ELSE favourites.synced_at END",
+                 created_at = CASE WHEN bookmarks.deleted = 1 THEN excluded.created_at ELSE bookmarks.created_at END,
+                 synced_at = CASE WHEN bookmarks.deleted = 1 THEN NULL ELSE bookmarks.synced_at END",
             params![id, uri, created_at],
         )?;
         drop(conn);
-        Ok(self.favourite_by_uri(uri)?.expect("just inserted"))
+        Ok(self.bookmark_by_uri(uri)?.expect("just inserted"))
     }
 
-    /// Tombstone a favourite until the remote delete succeeds. `false` when unknown.
-    pub fn remove_favourite(&self, uri: &str) -> Result<bool> {
+    /// Tombstone a bookmark until the remote delete succeeds. `false` when unknown.
+    pub fn remove_bookmark(&self, uri: &str) -> Result<bool> {
         let conn = self.lock();
         let n = conn.execute(
-            "UPDATE favourites SET deleted = 1, synced_at = NULL WHERE uri = ?1 AND deleted = 0",
+            "UPDATE bookmarks SET deleted = 1, synced_at = NULL WHERE uri = ?1 AND deleted = 0",
             params![uri],
         )?;
         Ok(n > 0)
     }
 
-    pub fn favourite_by_uri(&self, uri: &str) -> Result<Option<FavouriteRow>> {
+    pub fn bookmark_by_uri(&self, uri: &str) -> Result<Option<BookmarkRow>> {
         let conn = self.lock();
         conn.query_row(
-            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE uri = ?1",
+            "SELECT id, uri, created_at, synced_at, deleted FROM bookmarks WHERE uri = ?1",
             params![uri],
-            row_to_favourite,
+            row_to_bookmark,
         )
         .optional()
         .map_err(Into::into)
     }
 
-    /// Live favourites, newest first.
-    pub fn list_favourites(&self) -> Result<Vec<FavouriteRow>> {
+    /// Live bookmarks, newest first.
+    pub fn list_bookmarks(&self) -> Result<Vec<BookmarkRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE deleted = 0 ORDER BY created_at DESC",
+            "SELECT id, uri, created_at, synced_at, deleted FROM bookmarks WHERE deleted = 0 ORDER BY created_at DESC",
         )?;
         let v = stmt
-            .query_map([], row_to_favourite)?
+            .query_map([], row_to_bookmark)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     /// Rows to push: never synced, changed since, or tombstoned.
-    pub fn unsynced_favourites(&self) -> Result<Vec<FavouriteRow>> {
+    pub fn unsynced_bookmarks(&self) -> Result<Vec<BookmarkRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, uri, created_at, synced_at, deleted FROM favourites WHERE synced_at IS NULL ORDER BY created_at",
+            "SELECT id, uri, created_at, synced_at, deleted FROM bookmarks WHERE synced_at IS NULL ORDER BY created_at",
         )?;
         let v = stmt
-            .query_map([], row_to_favourite)?
+            .query_map([], row_to_bookmark)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
-    /// Queue a live favourite for another push (the v1 migration).
-    pub fn mark_favourite_unsynced(&self, id: &str) -> Result<()> {
+    /// Queue a live bookmark for another push (the v1 migration).
+    pub fn mark_bookmark_unsynced(&self, id: &str) -> Result<()> {
         self.lock().execute(
-            "UPDATE favourites SET synced_at = NULL WHERE id = ?1 AND deleted = 0",
+            "UPDATE bookmarks SET synced_at = NULL WHERE id = ?1 AND deleted = 0",
             params![id],
         )?;
         Ok(())
     }
 
     /// Mark pushed; a pushed tombstone is purged.
-    pub fn mark_favourite_synced(&self, id: &str, at_micros: i64) -> Result<()> {
+    pub fn mark_bookmark_synced(&self, id: &str, at_micros: i64) -> Result<()> {
         let conn = self.lock();
+        conn.execute("DELETE FROM bookmarks WHERE id = ?1 AND deleted = 1", params![id])?;
         conn.execute(
-            "DELETE FROM favourites WHERE id = ?1 AND deleted = 1",
-            params![id],
-        )?;
-        conn.execute(
-            "UPDATE favourites SET synced_at = ?2 WHERE id = ?1",
+            "UPDATE bookmarks SET synced_at = ?2 WHERE id = ?1",
             params![id, at_micros],
         )?;
         Ok(())
@@ -982,7 +982,7 @@ impl Library {
             playlists: n(
                 "SELECT COUNT(*) FROM music_posts WHERE kind = 'pubky.music/playlist' AND deleted = 0",
             )?,
-            favourites: n("SELECT COUNT(*) FROM favourites WHERE deleted = 0")?,
+            bookmarks: n("SELECT COUNT(*) FROM bookmarks WHERE deleted = 0")?,
             tags: n("SELECT COUNT(*) FROM tags WHERE deleted = 0")?,
             plays: n("SELECT COUNT(*) FROM plays")?,
             folders: n("SELECT COUNT(*) FROM folders")?,
@@ -2593,8 +2593,8 @@ fn row_to_tag(r: &Row<'_>) -> rusqlite::Result<TagRow> {
     })
 }
 
-fn row_to_favourite(r: &Row<'_>) -> rusqlite::Result<FavouriteRow> {
-    Ok(FavouriteRow {
+fn row_to_bookmark(r: &Row<'_>) -> rusqlite::Result<BookmarkRow> {
+    Ok(BookmarkRow {
         id: r.get(0)?,
         uri: r.get(1)?,
         created_at: r.get(2)?,
@@ -2831,7 +2831,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 14);
+        assert_eq!(lib.schema_version().unwrap(), 15);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -3009,36 +3009,36 @@ mod play_history_tests {
     }
 
     #[test]
-    fn favourites_lifecycle() {
+    fn bookmarks_lifecycle() {
         let lib = Library::open_in_memory().unwrap();
         let t = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
         let track = lib.get_track(t).unwrap().unwrap();
         let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
-        assert!(lib.list_favourites().unwrap().is_empty());
-        let row = lib.add_favourite("id1", uri, 1_000).unwrap();
+        assert!(lib.list_bookmarks().unwrap().is_empty());
+        let row = lib.add_bookmark("id1", uri, 1_000).unwrap();
         assert_eq!(row.synced_at, None);
-        assert_eq!(lib.unsynced_favourites().unwrap().len(), 1);
-        lib.mark_favourite_synced("id1", 2_000).unwrap();
-        assert!(lib.unsynced_favourites().unwrap().is_empty());
+        assert_eq!(lib.unsynced_bookmarks().unwrap().len(), 1);
+        lib.mark_bookmark_synced("id1", 2_000).unwrap();
+        assert!(lib.unsynced_bookmarks().unwrap().is_empty());
         // Adding again is a no-op that keeps the sync state.
-        let again = lib.add_favourite("id1", uri, 5_000).unwrap();
+        let again = lib.add_bookmark("id1", uri, 5_000).unwrap();
         assert_eq!(again.created_at, 1_000);
         assert_eq!(again.synced_at, Some(2_000));
-        assert_eq!(lib.list_favourites().unwrap().len(), 1);
+        assert_eq!(lib.list_bookmarks().unwrap().len(), 1);
         // Remove → tombstone → push → purged.
-        assert!(lib.remove_favourite(uri).unwrap());
-        assert!(!lib.remove_favourite(uri).unwrap());
-        assert!(lib.list_favourites().unwrap().is_empty());
-        let pending = lib.unsynced_favourites().unwrap();
+        assert!(lib.remove_bookmark(uri).unwrap());
+        assert!(!lib.remove_bookmark(uri).unwrap());
+        assert!(lib.list_bookmarks().unwrap().is_empty());
+        let pending = lib.unsynced_bookmarks().unwrap();
         assert!(pending[0].deleted);
-        lib.mark_favourite_synced("id1", 3_000).unwrap();
-        assert!(lib.favourite_by_uri(uri).unwrap().is_none());
+        lib.mark_bookmark_synced("id1", 3_000).unwrap();
+        assert!(lib.bookmark_by_uri(uri).unwrap().is_none());
         // Re-adding after a purge starts fresh.
-        let fresh = lib.add_favourite("id1", uri, 9_000).unwrap();
+        let fresh = lib.add_bookmark("id1", uri, 9_000).unwrap();
         assert_eq!(fresh.created_at, 9_000);
         // Hearted again while the clear waits to be pushed: the new time
-        assert!(lib.remove_favourite(uri).unwrap());
-        let revived = lib.add_favourite("id1", uri, 12_000).unwrap();
+        assert!(lib.remove_bookmark(uri).unwrap());
+        let revived = lib.add_bookmark("id1", uri, 12_000).unwrap();
         assert_eq!(revived.created_at, 12_000);
         assert!(!revived.deleted);
         // Album / artist lookups by MBID.
@@ -3310,5 +3310,51 @@ mod identify_tests {
         assert_eq!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
         std::fs::write(dir.path().join("y.bin"), vec![8u8; 3 << 20]).unwrap();
         assert_ne!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
+    }
+
+    /// Migration 15: the favourites table and its node-only settings become bookmarks, rows kept.
+    #[test]
+    fn favourites_become_bookmarks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 14) {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                    params![version],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO favourites(id, uri, created_at, synced_at, deleted) VALUES ('f1', 'https://musicbrainz.org/release/1', 7, 9, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES ('favourites.local', '[3]'), ('favourites.local.albums', '[4]')",
+                [],
+            )
+            .unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        assert_eq!(lib.schema_version().unwrap(), MIGRATIONS.last().unwrap().0);
+        let rows = lib.list_bookmarks().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].id.as_str(), rows[0].created_at, rows[0].synced_at),
+            ("f1", 7, Some(9))
+        );
+        assert_eq!(
+            lib.get_setting("bookmarks.local").unwrap().as_deref(),
+            Some("[3]")
+        );
+        assert_eq!(
+            lib.get_setting("bookmarks.local.albums").unwrap().as_deref(),
+            Some("[4]")
+        );
+        assert_eq!(lib.get_setting("favourites.local").unwrap(), None);
+        assert_eq!(lib.backup_counts().unwrap().bookmarks, 1);
     }
 }

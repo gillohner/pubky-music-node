@@ -406,11 +406,11 @@ async fn old_private_objects_move_to_v1_once() {
             .await
             .unwrap();
     }
-    let fav = pm_pubky::Favourite::new(mb.clone());
+    let fav = pm_pubky::Bookmark::new(mb.clone());
     homeserver
         .write_object(
             &session,
-            &pm_pubky::Favourite::path(&fav.id, Visibility::Private),
+            &pm_pubky::Bookmark::path(&fav.id, Visibility::Private),
             &fav.to_bookmark(),
         )
         .await
@@ -449,7 +449,7 @@ async fn old_private_objects_move_to_v1_once() {
     .unwrap();
     assert_eq!(body["kind"], "review");
     assert_eq!(body["embed"], song);
-    let favs = homeserver.read_v1_favourites(sync.session()).await.unwrap();
+    let favs = homeserver.read_v1_bookmarks(sync.session()).await.unwrap();
     assert_eq!(favs.len(), 1);
     assert_eq!(favs[0].1, mb);
     // The old files are still there
@@ -973,8 +973,8 @@ async fn many_favourites_sync_in_batches() {
                 "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
             ))
             .unwrap();
-            lib.add_favourite(
-                &pm_pubky::Favourite::id_for(&uri),
+            lib.add_bookmark(
+                &pm_pubky::Bookmark::id_for(&uri),
                 &uri.to_url(),
                 1_700_000_000_000_000 + i as i64,
             )
@@ -1000,10 +1000,7 @@ async fn many_favourites_sync_in_batches() {
     let fresh = node(dir.path(), "fresh");
     let r = sync.sync(&fresh.library).await.unwrap();
     assert_eq!(r.pulled, 450, "{r:?}");
-    assert_eq!(
-        fresh.library.lock().unwrap().list_favourites().unwrap().len(),
-        450
-    );
+    assert_eq!(fresh.library.lock().unwrap().list_bookmarks().unwrap().len(), 450);
 }
 
 /// One Pubky client for the node's lifetime (STEWARD-FIX-pubky-signin-speed.md): the node builds
@@ -1037,8 +1034,8 @@ async fn one_client_and_a_batched_first_sync() {
                 "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
             ))
             .unwrap();
-            lib.add_favourite(
-                &pm_pubky::Favourite::id_for(&uri),
+            lib.add_bookmark(
+                &pm_pubky::Bookmark::id_for(&uri),
                 &uri.to_url(),
                 1_700_000_000_000_000 + i as i64,
             )

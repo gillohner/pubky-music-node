@@ -210,7 +210,7 @@ async fn owner_token(s: &NodeState) -> Result<String, ApiError> {
 /// homeserver". The node mints the owner's signup token (unlimited storage) and starts a sign-up
 /// for Pubky Ring: Ring creates the account on the bundled homeserver and approves the node's
 /// access. Poll `GET /v1/pubky/login` as for a sign-in; the node is then signed in as the owner,
-/// and playlists, favourites and files go to this homeserver.
+/// and playlists, bookmarks and files go to this homeserver.
 pub(crate) async fn owner_signup(State(s): State<Arc<NodeState>>) -> ApiResult<crate::types::LoginStarted> {
     if let Some(h) = s.sync_handle() {
         return Err(ApiError::new(

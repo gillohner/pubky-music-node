@@ -36,6 +36,11 @@ Newest first. Dates are when the change landed on `main`.
   - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
   - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
 
+- **Bookmarks, by name** (mn-social, STEWARD-SOCIAL-V1-MUSIC.md Part A.1): favourites are called bookmarks, as in social specs v1.
+  - The API is `/v1/bookmarks`; answers say `bookmarked`. `/v1/favourites` answers the same for one release, with a `Deprecation` header (docs/api.md, Deprecated).
+  - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
+  - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.
+  - The homeserver format does not change (`/priv/social/v1/bookmarks/`).
 - **The music spec stays generic; Pubky Music's own data moved into the node** (STEWARD-SPEC-SPLIT.md, no change in behaviour).
   - `pubky-music-specs` holds only the music kinds, their rules and the `ext.music` playlist hints (`/pub|priv/music/v1/`). A test fails if it ever names a `pubky.music/` path or depends on a node crate.
   - The sources vault (module, VAULT.md, tests, vectors) moved to the new `pm-appdata` crate, with every app path in `pm_appdata::paths`.

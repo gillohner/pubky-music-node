@@ -1,6 +1,6 @@
 //! Moving from Roon: one export at a time (tracks, albums or a playlist, as Roon's Export writes
 //! them), matched to this library and reported plainly: what matched, what did not, and why.
-//! A dry run first; then what the user chose: Roon favourites into Favourites, playlists into
+//! A dry run first; then what the user chose: Roon favourites into bookmarks, playlists into
 //! playlists, and, only when asked, Roon tags as public tags on Pubky.
 
 use crate::state::NodeState;
@@ -56,7 +56,8 @@ fn find_album(lib: &Library, r: &RoonRow) -> Result<Option<Album>, ApiError> {
     }))
 }
 
-/// `POST /v1/import/roon?file=&dry_run=&favourites=&tags=&playlist=` with the export as the body.
+/// `POST /v1/import/roon?file=&dry_run=&bookmarks=&tags=&playlist=` with the export as the body
+/// (`favourites=` is the deprecated name of `bookmarks=`).
 pub(crate) async fn import(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<RoonImportQuery>,
@@ -90,7 +91,7 @@ pub(crate) async fn import(
     if export.kind == RoonKind::Playlist {
         return playlist(&s, &export, report, &q).await;
     }
-    let want_favs = q.favourites.unwrap_or(true);
+    let want_favs = q.bookmarks.unwrap_or(true);
     let want_tags = q.tags.unwrap_or(false);
     {
         let lib = s.library.lock().expect("library poisoned");
@@ -136,9 +137,10 @@ pub(crate) async fn import(
                 continue;
             };
             if want_favs && r.favorite {
+                report.bookmarks += 1;
                 report.favourites += 1;
                 if !dry {
-                    crate::favourites::add(&lib, uri.clone())?;
+                    crate::bookmarks::add(&lib, uri.clone())?;
                 }
             }
             if want_tags {

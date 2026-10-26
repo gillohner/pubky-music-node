@@ -1,7 +1,7 @@
-//! Favourites ("hearts") are v1 `PubkyAppBookmark`s: `{uri, created_at}` at
-//! `bookmarks/<id>` where the id is the spec's hash of the URI. The URI is a
-//! canonical music URL (`pm_model::MusicUri`). Private by default, under
-//! `/priv/pubky.app/bookmarks/`, the same way posts are (ADR 0006).
+//! Bookmarks (once "favourites" or "hearts") of canonical music URLs (`pm_model::MusicUri`). The
+//! node's id for one is the pubky-app-specs `PubkyAppBookmark` hash of the URI. They are written
+//! as social v1 bookmarks (`/priv/social/v1/bookmarks/`, see [`crate::v1`]); the older
+//! `/priv/pubky.app/bookmarks/<id>` form below is read once for the move to v1 (ADR 0006, 0014).
 
 use super::Visibility;
 use pm_model::MusicUri;
@@ -10,16 +10,16 @@ use pubky_app_specs::PubkyAppBookmark;
 
 pub const BOOKMARKS_DIR: &str = "pubky.app/bookmarks/";
 
-/// A favourite as the node stores it.
+/// A bookmark as the node stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Favourite {
+pub struct Bookmark {
     pub id: String,
     pub uri: MusicUri,
     /// Microseconds.
     pub created_at: i64,
 }
 
-impl Favourite {
+impl Bookmark {
     pub fn new(uri: MusicUri) -> Self {
         let b = PubkyAppBookmark::new(uri.to_url());
         Self {
@@ -75,24 +75,24 @@ mod tests {
     #[test]
     fn ids_follow_the_spec_and_paths_mirror_posts() {
         let mbid = Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
-        let f = Favourite::new(MusicUri::Recording { mbid });
-        assert_eq!(f.id, Favourite::id_for(&MusicUri::Recording { mbid }));
+        let f = Bookmark::new(MusicUri::Recording { mbid });
+        assert_eq!(f.id, Bookmark::id_for(&MusicUri::Recording { mbid }));
         assert_eq!(
             f.id,
             f.to_bookmark().create_id(),
             "id is a pure function of the URI"
         );
         assert_eq!(
-            Favourite::path(&f.id, Visibility::Private),
+            Bookmark::path(&f.id, Visibility::Private),
             format!("/priv/pubky.app/bookmarks/{}", f.id)
         );
         assert_eq!(
-            Favourite::path(&f.id, Visibility::Public),
+            Bookmark::path(&f.id, Visibility::Public),
             pubky_app_specs::PubkyAppBookmark::create_path(&f.id)
         );
-        let back = Favourite::from_bookmark(&f.id, &f.to_bookmark()).unwrap();
+        let back = Bookmark::from_bookmark(&f.id, &f.to_bookmark()).unwrap();
         assert_eq!(back, f);
         let other = PubkyAppBookmark::new("pubky://x/pub/pubky.app/posts/1".into());
-        assert!(Favourite::from_bookmark("y", &other).is_none());
+        assert!(Bookmark::from_bookmark("y", &other).is_none());
     }
 }

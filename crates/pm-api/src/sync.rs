@@ -12,7 +12,7 @@ use crate::types::SyncReport;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_PLAYLIST, TYPE_REVIEW};
-use pm_pubky::{v1, Favourite, MusicContent, MusicPost, Network, Visibility};
+use pm_pubky::{v1, Bookmark, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -44,7 +44,7 @@ pub struct PubkySync {
     pass: tokio::sync::Mutex<()>,
 }
 
-/// At most this many writes and deletes per sync pass: a big change (thousands of favourites from
+/// At most this many writes and deletes per sync pass: a big change (thousands of bookmarks from
 /// an import) goes out in bounded batches with a pause between them, and every object is marked
 /// synced as it lands, so a sync cut short carries on where it stopped.
 pub const WRITES_PER_PASS: usize = 200;
@@ -80,7 +80,7 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
         }
         // The sign-ins in the person's vault, then every 15 minutes (vault_cache)
         crate::vault_cache::start(&s, sync.clone());
-        step(&s, "Syncing your playlists, favourites and tags");
+        step(&s, "Syncing your playlists, bookmarks and tags");
         let result = sync.sync(&s.library).await;
         let ms = started.elapsed().as_millis() as u64;
         {
@@ -456,21 +456,21 @@ impl PubkySync {
                 heads.0.insert((is_pub(root), ns), found);
             }
         }
-        // Favourites the node has are listed, not downloaded again
+        // Bookmarks the node has are listed, not downloaded again
         let known_favs: std::collections::HashMap<String, (pm_model::MusicUri, i64)> = library
             .lock()
             .expect("library poisoned")
-            .list_favourites()?
+            .list_bookmarks()?
             .into_iter()
             .filter_map(|f| {
                 let uri = pm_model::MusicUri::parse(&f.uri).ok()?;
-                let path = v1::favourite_bookmark_path(&uri).ok()?;
+                let path = v1::bookmark_path(&uri).ok()?;
                 Some((path.rsplit('/').next()?.to_string(), (uri, f.created_at)))
             })
             .collect();
         let remote_favs = self
             .homeserver
-            .read_v1_favourites_except(&self.session, &known_favs)
+            .read_v1_bookmarks_except(&self.session, &known_favs)
             .await?;
 
         // The migration: queue every object the homeserver has only in the old format.
@@ -484,9 +484,9 @@ impl PubkySync {
                 }
             }
             let on_v1: HashSet<String> = remote_favs.iter().map(|(_, u, _)| u.to_url()).collect();
-            for f in lib.list_favourites()? {
+            for f in lib.list_bookmarks()? {
                 if !on_v1.contains(&f.uri) {
-                    lib.mark_favourite_unsynced(&f.id)?;
+                    lib.mark_bookmark_unsynced(&f.id)?;
                     queued += 1;
                 }
             }
@@ -506,20 +506,20 @@ impl PubkySync {
             }
         }
         self.push_posts(library, &owner, &mut heads, &mut report).await?;
-        let removed_favs = self.push_favourites(library, &mut report).await?;
+        let removed_favs = self.push_bookmarks(library, &mut report).await?;
         self.pull_v1(library, &heads, &mut report).await?;
 
-        // Favourites the homeserver has and this node does not.
+        // Bookmarks the homeserver has and this node does not.
         {
             let lib = library.lock().expect("library poisoned");
             for (_, uri, created_at) in remote_favs {
                 let url = uri.to_url();
-                if removed_favs.contains(&url) || lib.favourite_by_uri(&url)?.is_some() {
+                if removed_favs.contains(&url) || lib.bookmark_by_uri(&url)?.is_some() {
                     continue;
                 }
-                let id = Favourite::id_for(&uri);
-                lib.add_favourite(&id, &url, created_at)?;
-                lib.mark_favourite_synced(&id, now_micros())?;
+                let id = Bookmark::id_for(&uri);
+                lib.add_bookmark(&id, &url, created_at)?;
+                lib.mark_bookmark_synced(&id, now_micros())?;
                 report.pulled += 1;
             }
             if !migrated && report.errors.is_empty() && report.pending == 0 {
@@ -539,7 +539,7 @@ impl PubkySync {
     ) -> Result<(), SyncError> {
         let remote_favs = self
             .homeserver
-            .read_favourites(&self.z32, Visibility::Private, Some(&self.session))
+            .read_legacy_bookmarks(&self.z32, Visibility::Private, Some(&self.session))
             .await?;
         let remote = self
             .homeserver
@@ -548,9 +548,9 @@ impl PubkySync {
         let lib = library.lock().expect("library poisoned");
         for (_, f) in remote_favs {
             let url = f.uri.to_url();
-            if lib.favourite_by_uri(&url)?.is_none() {
-                lib.add_favourite(&f.id, &url, f.created_at)?;
-                lib.mark_favourite_synced(&f.id, now_micros())?;
+            if lib.bookmark_by_uri(&url)?.is_none() {
+                lib.add_bookmark(&f.id, &url, f.created_at)?;
+                lib.mark_bookmark_synced(&f.id, now_micros())?;
                 report.pulled += 1;
             }
         }
@@ -683,15 +683,15 @@ impl PubkySync {
         Ok(())
     }
 
-    /// Push favourites as v1 bookmarks. Returns the URLs removed, so the pull does not bring
+    /// Push bookmarks as social v1 bookmarks. Returns the URLs removed, so the pull does not bring
     /// them back from the listing taken before.
-    async fn push_favourites(
+    async fn push_bookmarks(
         &self,
         library: &Arc<Mutex<Library>>,
         report: &mut SyncReport,
     ) -> Result<HashSet<String>, SyncError> {
         let mut removed = HashSet::new();
-        let pending = library.lock().expect("library poisoned").unsynced_favourites()?;
+        let pending = library.lock().expect("library poisoned").unsynced_bookmarks()?;
         let total = pending.len();
         for (done, row) in pending.into_iter().enumerate() {
             if spent(report) {
@@ -705,10 +705,10 @@ impl PubkySync {
                 continue;
             };
             if row.deleted {
-                let legacy = Favourite::path(&row.id, Visibility::Private);
+                let legacy = Bookmark::path(&row.id, Visibility::Private);
                 let mut failed = false;
                 let mut paths = vec![legacy];
-                match v1::favourite_bookmark_path(&uri) {
+                match v1::bookmark_path(&uri) {
                     Ok(p) => paths.push(p),
                     Err(e) => report.errors.push(format!("{}: {e}", row.uri)),
                 }
@@ -724,7 +724,7 @@ impl PubkySync {
                 removed.insert(row.uri.clone());
                 report.deleted += 1;
             } else {
-                let (bookmark, path) = match v1::favourite_bookmark(&uri, row.created_at) {
+                let (bookmark, path) = match v1::bookmark_of(&uri, row.created_at) {
                     Ok(b) => b,
                     Err(e) => {
                         report.errors.push(format!("{}: {e}", row.uri));
@@ -749,7 +749,7 @@ impl PubkySync {
             library
                 .lock()
                 .expect("library poisoned")
-                .mark_favourite_synced(&row.id, now_micros())?;
+                .mark_bookmark_synced(&row.id, now_micros())?;
         }
         Ok(removed)
     }

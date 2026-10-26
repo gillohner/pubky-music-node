@@ -887,7 +887,7 @@ async fn dispatch(
                     all.truncate(size as usize);
                     all
                 }
-                "starred" => crate::favourites::collect(&lib)
+                "starred" => crate::bookmarks::collect(&lib)
                     .map_err(|e| SubErr::new(0, e.message))?
                     .albums
                     .into_iter()
@@ -1024,7 +1024,7 @@ async fn dispatch(
                 "starred"
             };
             let lib = s.library.lock().expect("library poisoned");
-            let f = crate::favourites::collect(&lib).map_err(|e| SubErr::new(0, e.message))?;
+            let f = crate::bookmarks::collect(&lib).map_err(|e| SubErr::new(0, e.message))?;
             let albums = f
                 .albums
                 .iter()
@@ -1042,13 +1042,13 @@ async fn dispatch(
         "star" | "unstar" => {
             let mut refs = Vec::new();
             if let Some(id) = p.get("id").and_then(|v| v.parse::<i64>().ok()) {
-                refs.push(crate::types::FavouriteRef::track(id));
+                refs.push(crate::types::ItemRef::track(id));
             }
             if let Some(id) = p.get("albumId").and_then(|v| parse_id(v, "al-")) {
-                refs.push(crate::types::FavouriteRef::album(id));
+                refs.push(crate::types::ItemRef::album(id));
             }
             if let Some(id) = p.get("artistId").and_then(|v| parse_id(v, "ar-")) {
-                refs.push(crate::types::FavouriteRef::artist(id));
+                refs.push(crate::types::ItemRef::artist(id));
             }
             if refs.is_empty() {
                 return Err(SubErr::new(10, "Required parameter is missing"));
@@ -1056,7 +1056,7 @@ async fn dispatch(
             {
                 let lib = s.library.lock().expect("library poisoned");
                 for r in &refs {
-                    crate::favourites::set(&lib, r, method == "star")
+                    crate::bookmarks::set(&lib, r, method == "star")
                         .map_err(|e| SubErr::new(70, e.message))?;
                 }
             }

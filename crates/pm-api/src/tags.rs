@@ -4,7 +4,7 @@
 //! `tags` table and pushes it with the sync. Pinakes indexes them, which is
 //! what Discover reads back.
 
-use crate::favourites::canonical_for;
+use crate::bookmarks::canonical_for;
 use crate::state::NodeState;
 use crate::types::*;
 use crate::{ApiError, ApiResult};
@@ -27,8 +27,8 @@ pub(crate) fn make_tag(uri: &MusicUri, label: &str) -> Result<(PubkyAppTag, Stri
     Ok((tag, id))
 }
 
-fn target(r: &TagRef) -> FavouriteRef {
-    FavouriteRef {
+fn target(r: &TagRef) -> ItemRef {
+    ItemRef {
         uri: r.uri.clone(),
         track_id: r.track_id,
         album_id: r.album_id,

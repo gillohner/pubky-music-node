@@ -7,7 +7,7 @@
 //! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` |
 //! | [`Activity`] | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` |
 //! | music tag | `PubkyAppTag` (reused as-is) | `/pub/pubky.music/tags/<id>` ([`TAG_DIR`]) |
-//! | favourite | `PubkyAppBookmark` (reused as-is) | `/priv/pubky.app/bookmarks/<hash id>` |
+//! | bookmark | `PubkyAppBookmark` (reused as-is) | `/priv/pubky.app/bookmarks/<hash id>` |
 //!
 //! Ids are Timestamp IDs like every post. Objects follow the pubky-app-specs
 //! conventions: sanitize, then validate; lengths count Unicode scalar
@@ -23,7 +23,7 @@ pub mod post;
 mod review;
 
 pub use activity::{Activity, ActivitySource};
-pub use bookmark::Favourite;
+pub use bookmark::Bookmark;
 pub use builder::{Meta, MusicSpecsBuilder};
 pub use playlist::{ItemSource, Playlist, PlaylistItem};
 pub use post::{MusicContent, MusicPost, Visibility};

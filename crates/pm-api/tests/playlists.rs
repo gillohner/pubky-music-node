@@ -287,7 +287,7 @@ async fn playlist_lifecycle() {
     let (_, list) = call(&app, "GET", "/v1/playlists", None).await;
     assert!(list.as_array().unwrap().is_empty());
 
-    // Favourites: a tagged track hearts by id; an untagged one and an album
+    // Bookmarks: a tagged track is bookmarked by id; an untagged one and an album
     // without a release id are kept on this node; the list joins back.
     let (st, tracks) = call(&app, "GET", "/v1/library/tracks?limit=50", None).await;
     assert_eq!(st, StatusCode::OK);
@@ -301,11 +301,13 @@ async fn playlist_lifecycle() {
     let (st, f) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(serde_json::json!({"track_id": tagged_id})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["bookmarked"], true);
+    // The deprecated name, for clients of /v1/favourites
     assert_eq!(f["favourite"], true);
     let uri = f["uri"].as_str().unwrap().to_string();
     assert!(uri.starts_with("https://musicbrainz.org/"), "{uri}");
@@ -384,14 +386,14 @@ async fn playlist_lifecycle() {
         let (st, e) = call(
             &app,
             "PUT",
-            "/v1/favourites",
+            "/v1/bookmarks",
             Some(serde_json::json!({"track_id": u["id"]})),
         )
         .await;
-        // Kept as a favourite on this node only, never synced
+        // Kept as a bookmark on this node only, never synced
         assert_eq!(st, StatusCode::OK, "{e}");
         assert_eq!(e["uri"], format!("track:{}", u["id"]));
-        let (_, all) = call(&app, "GET", "/v1/favourites", None).await;
+        let (_, all) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert!(
             all["uris"].as_array().unwrap().iter().any(|x| *x == e["uri"]),
             "{all}"
@@ -399,7 +401,7 @@ async fn playlist_lifecycle() {
         let (st, _) = call(
             &app,
             "DELETE",
-            &format!("/v1/favourites?track_id={}", u["id"]),
+            &format!("/v1/bookmarks?track_id={}", u["id"]),
             None,
         )
         .await;
@@ -409,13 +411,13 @@ async fn playlist_lifecycle() {
     let (st, b) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(serde_json::json!({"album_id": bare_album_id})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{b}");
     assert_eq!(b["uri"], format!("album:{bare_album_id}"));
-    let (_, all) = call(&app, "GET", "/v1/favourites", None).await;
+    let (_, all) = call(&app, "GET", "/v1/bookmarks", None).await;
     assert!(
         all["albums"]
             .as_array()
@@ -427,7 +429,7 @@ async fn playlist_lifecycle() {
     let (st, _) = call(
         &app,
         "DELETE",
-        &format!("/v1/favourites?album_id={bare_album_id}"),
+        &format!("/v1/bookmarks?album_id={bare_album_id}"),
         None,
     )
     .await;
@@ -435,7 +437,7 @@ async fn playlist_lifecycle() {
     let (st, f) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(serde_json::json!({"album_id": album_id})),
     )
     .await;
@@ -444,18 +446,18 @@ async fn playlist_lifecycle() {
     let (st, _) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(serde_json::json!({"track_id": 999_999})),
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    let (st, _) = call(&app, "PUT", "/v1/favourites", Some(serde_json::json!({}))).await;
+    let (st, _) = call(&app, "PUT", "/v1/bookmarks", Some(serde_json::json!({}))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     // By canonical URL too, idempotent; an unknown URL lands in `other`.
     let (st, _) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(serde_json::json!({"uri": uri})),
     )
     .await;
@@ -463,14 +465,14 @@ async fn playlist_lifecycle() {
     let (st, _) = call(
         &app,
         "PUT",
-        "/v1/favourites",
+        "/v1/bookmarks",
         Some(
             serde_json::json!({"uri": "https://musicbrainz.org/artist/833f00e1-781f-4edd-90e4-e52712618862"}),
         ),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let (st, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    let (st, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(favs["tracks"].as_array().unwrap().len(), 1, "{favs}");
     assert_eq!(favs["tracks"][0]["id"], tagged_id);
@@ -479,7 +481,12 @@ async fn playlist_lifecycle() {
     assert_eq!(favs["uris"].as_array().unwrap().len(), 3);
     let (st, home) = call(&app, "GET", "/v1/library/home", None).await;
     assert_eq!(st, StatusCode::OK);
-    assert!(home["favourite_albums"].is_array());
+    assert_eq!(home["bookmarked_albums"].as_array().unwrap().len(), 1, "{home}");
+    assert_eq!(home["favourite_albums"], home["bookmarked_albums"]);
+    // The deprecated path answers the same
+    let (st, old) = call(&app, "GET", "/v1/favourites", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(old, favs);
     // A Subsonic scrobble is a play in the history, under the client's name; the
     // recent/frequent album lists and now-playing answer from the same data.
     let (st, _) = call(
@@ -553,13 +560,13 @@ async fn playlist_lifecycle() {
     let (st, f) = call(
         &app,
         "DELETE",
-        &format!("/v1/favourites?track_id={tagged_id}"),
+        &format!("/v1/bookmarks?track_id={tagged_id}"),
         None,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{f}");
-    assert_eq!(f["favourite"], false);
-    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    assert_eq!(f["bookmarked"], false);
+    let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
     assert!(favs["tracks"].as_array().unwrap().is_empty());
     // Subsonic sees the same hearts.
     let (st, _) = call(
@@ -1593,7 +1600,8 @@ async fn roon_exports_move_over_with_a_report() {
         r["not_identified"], 1,
         "the untagged favourite needs an identity first: {r}"
     );
-    assert_eq!(r["favourites"], 1);
+    assert_eq!(r["bookmarks"], 1);
+    assert_eq!(r["favourites"], 1, "the deprecated name too");
     assert_eq!(r["dry_run"], true);
     assert_eq!(r["tags_found"][0], serde_json::json!(["late night", 2]));
     let reasons: Vec<&str> = r["misses"]
@@ -1607,7 +1615,7 @@ async fn roon_exports_move_over_with_a_report() {
         "{reasons:?}"
     );
     assert!(reasons.iter().any(|x| x.contains("identify it")), "{reasons:?}");
-    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
     assert!(!favs.to_string().contains(MB), "nothing written by a dry run");
 
     // Then for real, with the tags made public on purpose
@@ -1619,11 +1627,11 @@ async fn roon_exports_move_over_with_a_report() {
     .await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(
-        (r["favourites"].as_u64(), r["tags_added"].as_u64()),
+        (r["bookmarks"].as_u64(), r["tags_added"].as_u64()),
         (Some(1), Some(2)),
         "{r}"
     );
-    let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+    let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
     assert!(favs.to_string().contains(MB), "{favs}");
     let (_, tags) = call(&app, "GET", "/v1/tags", None).await;
     assert!(

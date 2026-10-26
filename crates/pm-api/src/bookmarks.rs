@@ -1,9 +1,11 @@
-//! Favourites ("hearts"): v1 `PubkyAppBookmark`s of canonical music URLs
-//! (ADR 0010), kept locally in the library and pushed to the user's private
-//! homeserver folder by the sync. A track, album or artist without a
-//! canonical identity is kept as a favourite **on this node only** (never synced; constraint 4)
-//! and becomes an ordinary favourite once it is identified. Albums and artists without an id
-//! answer 422 with the reason.
+//! Bookmarks (called favourites or hearts before 2026-10-26): social v1 bookmarks of canonical
+//! music URLs (ADR 0010, 0014), kept locally in the library and pushed to the user's private
+//! homeserver folder (`/priv/social/v1/bookmarks/`) by the sync. A track, album or artist without
+//! a canonical identity is bookmarked **on this node only** (never synced; constraint 4) and
+//! becomes an ordinary bookmark once it is identified. Albums and artists without an id answer
+//! 422 with the reason.
+//!
+//! `/v1/bookmarks` is the API; `/v1/favourites` answers the same for one release (deprecated).
 
 use crate::state::NodeState;
 use crate::types::*;
@@ -11,13 +13,13 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use pm_library::{FavouriteRow, Library};
+use pm_library::{BookmarkRow, Library};
 use pm_model::{MusicUri, TrackId};
-use pm_pubky::Favourite;
+use pm_pubky::Bookmark;
 use std::sync::Arc;
 
-/// The canonical URL a favourite reference points at.
-pub(crate) fn canonical_for(lib: &Library, r: &FavouriteRef) -> Result<MusicUri, ApiError> {
+/// The canonical URL an item reference points at (a bookmark, a tag or a review target).
+pub(crate) fn canonical_for(lib: &Library, r: &ItemRef) -> Result<MusicUri, ApiError> {
     if let Some(uri) = r.uri.as_deref().filter(|u| !u.trim().is_empty()) {
         return MusicUri::parse(uri).map_err(|e| ApiError::bad_request(format!("{uri}: {e}")));
     }
@@ -65,13 +67,14 @@ pub(crate) fn canonical_for(lib: &Library, r: &FavouriteRef) -> Result<MusicUri,
     ))
 }
 
-/// Library songs without a MusicBrainz id or ISRC, favourited on this node only (mn-infra:
+/// Library songs without a MusicBrainz id or ISRC, bookmarked on this node only (mn-infra:
 /// Music Assistant's `star` failed on every other song of an untagged library). Albums and
-/// artists MusicBrainz doesn't know yet are kept the same way (second review: hearting such an
-/// album failed with "no MusicBrainz release id").
-const LOCAL_KEY: &str = "favourites.local";
-const LOCAL_ALBUMS: &str = "favourites.local.albums";
-const LOCAL_ARTISTS: &str = "favourites.local.artists";
+/// artists MusicBrainz doesn't know yet are kept the same way (second review: bookmarking such an
+/// album failed with "no MusicBrainz release id"). Library migration 15 renamed the keys from
+/// `favourites.local*`.
+const LOCAL_KEY: &str = "bookmarks.local";
+const LOCAL_ALBUMS: &str = "bookmarks.local.albums";
+const LOCAL_ARTISTS: &str = "bookmarks.local.artists";
 
 fn local_of(lib: &Library, key: &str) -> Vec<i64> {
     lib.get_setting(key)
@@ -99,10 +102,7 @@ fn store_local(lib: &Library, ids: &[i64]) -> Result<(), ApiError> {
 }
 
 /// What a reference names when it has no identity yet: `(setting key, page key prefix, id)`.
-fn unidentified(
-    lib: &Library,
-    r: &FavouriteRef,
-) -> Result<Option<(&'static str, &'static str, i64)>, ApiError> {
+fn unidentified(lib: &Library, r: &ItemRef) -> Result<Option<(&'static str, &'static str, i64)>, ApiError> {
     if r.uri.as_deref().is_some_and(|u| !u.trim().is_empty()) {
         return Ok(None);
     }
@@ -127,10 +127,10 @@ fn unidentified(
     Ok(None)
 }
 
-/// Heart or unheart: a published favourite, or (a song, album or artist not identified yet) one
-/// kept on this node. Returns the key the page checks (`uri`, or `track:<id>`, `album:<id>`,
+/// Bookmark or unbookmark: a published bookmark, or (a song, album or artist not identified yet)
+/// one kept on this node. Returns the key the page checks (`uri`, or `track:<id>`, `album:<id>`,
 /// `artist:<id>` for a node-only one).
-pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, ApiError> {
+pub(crate) fn set(lib: &Library, r: &ItemRef, on: bool) -> Result<String, ApiError> {
     if let Some((key, kind, id)) = unidentified(lib, r)? {
         let mut ids = local_of(lib, key);
         ids.retain(|x| *x != id);
@@ -144,8 +144,8 @@ pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, A
     if on {
         add(lib, uri.clone())?;
     } else {
-        lib.remove_favourite(&uri.to_url())?;
-        // It may have been a node-only favourite before it was identified
+        lib.remove_bookmark(&uri.to_url())?;
+        // It may have been a node-only bookmark before it was identified
         for (key, id) in [
             (LOCAL_KEY, r.track_id),
             (LOCAL_ALBUMS, r.album_id),
@@ -163,13 +163,14 @@ pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, A
     Ok(uri.to_url())
 }
 
-/// [`set`] for a change a device made at `at` (Unix seconds) and sends later (an offline heart).
-/// For a published favourite, a clear older than the heart the node has is skipped (the song was
-/// hearted again since), and a new heart keeps the time it was made. Node-only favourites have
-/// no time: the last change to arrive wins. Returns the key and whether it is a favourite now.
+/// [`set`] for a change a device made at `at` (Unix seconds) and sends later (an offline
+/// bookmark). For a published bookmark, a clear older than the bookmark the node has is skipped
+/// (the song was bookmarked again since), and a new bookmark keeps the time it was made.
+/// Node-only bookmarks have no time: the last change to arrive wins. Returns the key and
+/// whether it is bookmarked now.
 pub(crate) fn set_at(
     lib: &Library,
-    r: &FavouriteRef,
+    r: &ItemRef,
     on: bool,
     at: Option<i64>,
 ) -> Result<(String, bool), ApiError> {
@@ -177,18 +178,18 @@ pub(crate) fn set_at(
         if unidentified(lib, r)?.is_none() {
             let uri = canonical_for(lib, r)?;
             let url = uri.to_url();
-            let live = lib.favourite_by_uri(&url)?.filter(|f| !f.deleted);
+            let live = lib.bookmark_by_uri(&url)?.filter(|f| !f.deleted);
             match (on, live) {
-                // Hearted after the second the clear was made in (within it, the clear wins)
+                // Bookmarked after the second the clear was made in (within it, the clear wins)
                 (false, Some(f)) if f.created_at >= at.saturating_add(1).saturating_mul(1_000_000) => {
                     return Ok((url, true))
                 }
                 (true, None) => {
-                    let f = Favourite {
+                    let f = Bookmark {
                         created_at: at.clamp(0, pm_library::db::now_unix()) * 1_000_000,
-                        ..Favourite::new(uri)
+                        ..Bookmark::new(uri)
                     };
-                    lib.add_favourite(&f.id, &url, f.created_at)?;
+                    lib.add_bookmark(&f.id, &url, f.created_at)?;
                     return Ok((url, true));
                 }
                 _ => {}
@@ -198,7 +199,7 @@ pub(crate) fn set_at(
     Ok((set(lib, r, on)?, on))
 }
 
-/// Node-only favourites identified since become ordinary ones (synced with the next sync).
+/// Node-only bookmarks identified since become ordinary ones (synced with the next sync).
 fn promote_local(lib: &Library) -> Result<(), ApiError> {
     let ids = local_ids(lib);
     if ids.is_empty() {
@@ -209,7 +210,7 @@ fn promote_local(lib: &Library) -> Result<(), ApiError> {
         if let Some(t) = lib.get_track(TrackId(*id))? {
             match t.publishable_uri() {
                 Some(u) => {
-                    if lib.favourite_by_uri(&u.to_url())?.is_none() {
+                    if lib.bookmark_by_uri(&u.to_url())?.is_none() {
                         add(lib, u.clone())?;
                     }
                 }
@@ -240,7 +241,7 @@ fn promote_local(lib: &Library) -> Result<(), ApiError> {
             };
             match uri {
                 Some(u) => {
-                    if lib.favourite_by_uri(&u.to_url())?.is_none() {
+                    if lib.bookmark_by_uri(&u.to_url())?.is_none() {
                         add(lib, u)?;
                     }
                 }
@@ -254,15 +255,15 @@ fn promote_local(lib: &Library) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(crate) fn add(lib: &Library, uri: MusicUri) -> Result<FavouriteRow, pm_library::LibraryError> {
-    let f = Favourite::new(uri);
-    lib.add_favourite(&f.id, &f.uri.to_url(), f.created_at)
+pub(crate) fn add(lib: &Library, uri: MusicUri) -> Result<BookmarkRow, pm_library::LibraryError> {
+    let f = Bookmark::new(uri);
+    lib.add_bookmark(&f.id, &f.uri.to_url(), f.created_at)
 }
 
-/// Every favourite, joined to the library where it is present.
-pub(crate) fn collect(lib: &Library) -> Result<Favourites, ApiError> {
+/// Every bookmark, joined to the library where it is present.
+pub(crate) fn collect(lib: &Library) -> Result<Bookmarks, ApiError> {
     promote_local(lib)?;
-    let mut out = Favourites::default();
+    let mut out = Bookmarks::default();
     for id in local_ids(lib) {
         if let Some(t) = lib.get_track(TrackId(id))? {
             out.uris.push(format!("track:{id}"));
@@ -281,7 +282,7 @@ pub(crate) fn collect(lib: &Library) -> Result<Favourites, ApiError> {
             out.artists.push(a);
         }
     }
-    for row in lib.list_favourites()? {
+    for row in lib.list_bookmarks()? {
         out.uris.push(row.uri.clone());
         let Ok(uri) = MusicUri::parse(&row.uri) else {
             out.other.push(row.uri);
@@ -308,25 +309,28 @@ pub(crate) fn collect(lib: &Library) -> Result<Favourites, ApiError> {
     Ok(out)
 }
 
-pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Favourites> {
+/// `GET /v1/bookmarks` (and the deprecated `/v1/favourites`).
+pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Bookmarks> {
     let lib = s.library.lock().expect("library poisoned");
     Ok(Json(collect(&lib)?))
 }
 
+/// `PUT /v1/bookmarks {uri | track_id | album_id | artist_id}`.
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
-    Json(r): Json<FavouriteRef>,
-) -> ApiResult<FavouriteChanged> {
-    let (uri, favourite) = set_at(&s.library.lock().expect("library poisoned"), &r, true, r.at)?;
+    Json(r): Json<ItemRef>,
+) -> ApiResult<BookmarkChanged> {
+    let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), &r, true, r.at)?;
     s.notify_library();
-    Ok(Json(FavouriteChanged { uri, favourite }))
+    Ok(Json(BookmarkChanged::new(uri, on)))
 }
 
+/// `DELETE /v1/bookmarks?uri=|track_id=|album_id=|artist_id=`.
 pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
-    Query(r): Query<FavouriteRef>,
-) -> ApiResult<FavouriteChanged> {
-    let (uri, favourite) = set_at(&s.library.lock().expect("library poisoned"), &r, false, r.at)?;
+    Query(r): Query<ItemRef>,
+) -> ApiResult<BookmarkChanged> {
+    let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), &r, false, r.at)?;
     s.notify_library();
-    Ok(Json(FavouriteChanged { uri, favourite }))
+    Ok(Json(BookmarkChanged::new(uri, on)))
 }

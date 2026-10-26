@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 pub const KEY_PREFIX: &str = "smart.";
 
-/// One rule. `field`: `genre`, `artist`, `year`, `favourite`, `plays`, `last_played`, `tag`.
+/// One rule. `field`: `genre`, `artist`, `year`, `bookmark`, `plays`, `last_played`, `tag`.
+/// `favourite` is the older name of `bookmark` (rules saved before 2026-10-26 keep it).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Rule {
     pub field: String,
@@ -116,7 +117,7 @@ pub struct SmartResult {
 
 /// What each rule looks at, gathered once per evaluation.
 struct Facts {
-    favourites: HashSet<i64>,
+    bookmarks: HashSet<i64>,
     plays: HashMap<i64, (u64, i64)>,
     tags: HashMap<String, HashSet<String>>,
     now: i64,
@@ -155,9 +156,9 @@ fn matches(rule: &Rule, t: &Track, f: &Facts) -> bool {
             let (lo, hi) = (num(&rule.value), rule.to.as_ref().and_then(num));
             y.is_some_and(|y| lo.is_none_or(|lo| y >= lo) && hi.is_none_or(|hi| y <= hi))
         }
-        "favourite" => {
+        "bookmark" | "favourite" => {
             let on = rule.value.as_bool().unwrap_or(true);
-            f.favourites.contains(&id) == on
+            f.bookmarks.contains(&id) == on
         }
         "plays" => {
             let n = f.plays.get(&id).map(|p| p.0).unwrap_or(0) as i64;
@@ -200,7 +201,7 @@ fn check(r: &Rules) -> Result<(), ApiError> {
     for rule in &r.rules {
         if !matches!(
             rule.field.as_str(),
-            "genre" | "artist" | "year" | "favourite" | "plays" | "last_played" | "tag"
+            "genre" | "artist" | "year" | "bookmark" | "favourite" | "plays" | "last_played" | "tag"
         ) {
             return Err(ApiError::bad_request(format!(
                 "No rule about \u{201c}{}\u{201d}",
@@ -214,9 +215,9 @@ fn check(r: &Rules) -> Result<(), ApiError> {
 /// The songs these rules pick right now.
 pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
-    let favs = crate::favourites::collect(&lib)?;
+    let marked = crate::bookmarks::collect(&lib)?;
     let facts = Facts {
-        favourites: favs.tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect(),
+        bookmarks: marked.tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect(),
         plays: lib.play_stats()?,
         tags: {
             let mut m: HashMap<String, HashSet<String>> = HashMap::new();

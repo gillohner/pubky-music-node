@@ -140,7 +140,10 @@ fn listen_is_private_or_public() {
 #[test]
 fn a_public_listen_never_points_at_a_private_object() {
     // The person's own private file is fine in a private history
-    let mine = MusicSource::new("library", format!("pubky://{OWNER}/priv/social/v1/files/0033SCZXVEPNG"));
+    let mine = MusicSource::new(
+        "library",
+        format!("pubky://{OWNER}/priv/social/v1/files/0033SCZXVEPNG"),
+    );
     let post = listen(PLAYED, None, Some(mine), SONG.into());
     written(&post, Root::Priv).unwrap();
     // and refused under /pub/, where everyone reads it

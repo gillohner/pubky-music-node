@@ -1,6 +1,6 @@
 //! The node's objects as pubky-social-specs v1 objects (ADR 0014).
 //!
-//! The node keeps its working copy in its own shape ([`MusicContent`], [`Favourite`](crate::Favourite)); this module
+//! The node keeps its working copy in its own shape ([`MusicContent`], [`Bookmark`](crate::Bookmark)); this module
 //! converts at the homeserver boundary, both ways:
 //!
 //! | Node object | v1 object | Path |
@@ -9,7 +9,7 @@
 //! | [`Review`] with a rating | music `review` (rating 1–10) | `/{root}/music/v1/posts/…` |
 //! | [`Review`] without a rating | social `note` embedding the music URL | `/{root}/social/v1/posts/…` |
 //! | [`Activity`] | music `listen` | `/priv/music/v1/posts/…` |
-//! | [`Favourite`](crate::Favourite) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
+//! | [`Bookmark`](crate::Bookmark) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
 //!
 //! The local id (a timestamp id of the creation time) is the v1 post id, so a migrated object
 //! keeps its identity. Creation writes `editId == id`; every later write is a new version above
@@ -431,22 +431,22 @@ pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
     }))
 }
 
-/// The bookmark of a favourite: the object and its path. `created_at` is kept.
-pub fn favourite_bookmark(uri: &MusicUri, created_at: i64) -> Result<(PubkySocialBookmark, String), String> {
+/// The social v1 bookmark of a music URL: the object and its path. `created_at` is kept.
+pub fn bookmark_of(uri: &MusicUri, created_at: i64) -> Result<(PubkySocialBookmark, String), String> {
     let mut created = create_bookmark(&uri.to_url())?;
     created.bookmark.created_at = created_at;
     Ok((created.bookmark, created.path))
 }
 
-/// The path a favourite's bookmark lives at.
-pub fn favourite_bookmark_path(uri: &MusicUri) -> Result<String, String> {
+/// The path the bookmark of a music URL lives at.
+pub fn bookmark_path(uri: &MusicUri) -> Result<String, String> {
     let filename = pubky_social_specs::bookmark_filename(&uri.to_url())?;
     Ok(PubkySocialBookmark::create_path(&filename))
 }
 
 /// The music URL a stored bookmark names, `None` for a bookmark of something else or an invalid
 /// one. `path` is the bookmark's path; `body` its JSON.
-pub fn favourite_from_bookmark(path: &str, body: &[u8]) -> Option<(MusicUri, i64)> {
+pub fn music_bookmark(path: &str, body: &[u8]) -> Option<(MusicUri, i64)> {
     let filename = path.rsplit('/').next()?.strip_suffix(".json")?;
     let content: PubkySocialBookmark = serde_json::from_slice(body).ok()?;
     let target = bookmark_target(filename, &content).ok()?;
@@ -705,24 +705,18 @@ mod tests {
     }
 
     #[test]
-    fn favourites_are_v1_bookmarks() {
+    fn bookmarks_are_v1_bookmarks() {
         let uri = MusicUri::parse(SONG).unwrap();
-        let (b, path) = favourite_bookmark(&uri, 1_792_540_800_000_000).unwrap();
+        let (b, path) = bookmark_of(&uri, 1_792_540_800_000_000).unwrap();
         assert!(path.starts_with("/priv/social/v1/bookmarks/"), "{path}");
-        assert_eq!(favourite_bookmark_path(&uri).unwrap(), path);
+        assert_eq!(bookmark_path(&uri).unwrap(), path);
         let body = serde_json::to_vec(&b).unwrap();
-        assert_eq!(
-            favourite_from_bookmark(&path, &body),
-            Some((uri, 1_792_540_800_000_000))
-        );
+        assert_eq!(music_bookmark(&path, &body), Some((uri, 1_792_540_800_000_000)));
         // A bookmark of something that is not music
         let (other, opath) = {
             let c = create_bookmark("https://example.com/").unwrap();
             (c.bookmark, c.path)
         };
-        assert_eq!(
-            favourite_from_bookmark(&opath, &serde_json::to_vec(&other).unwrap()),
-            None
-        );
+        assert_eq!(music_bookmark(&opath, &serde_json::to_vec(&other).unwrap()), None);
     }
 }

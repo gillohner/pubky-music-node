@@ -1915,7 +1915,7 @@ pub(crate) async fn collection(
 }
 
 /// `POST /v1/sources/tidal/collection/import`: the collection as node
-/// favourites (ISRC where TIDAL has one, else the TIDAL link; ADR 0010).
+/// bookmarks (ISRC where TIDAL has one, else the TIDAL link; ADR 0010).
 pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiResult<ImportReport> {
     signed_in_user(&s)?;
     let track_ids = relationship_ids(
@@ -1938,7 +1938,7 @@ pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiRes
     for t in &docs {
         match canonical_track(t) {
             Some(uri) => {
-                crate::favourites::add(&lib, uri)?;
+                crate::bookmarks::add(&lib, uri)?;
                 report.imported += 1;
             }
             None => report.skipped += 1,
@@ -1947,7 +1947,7 @@ pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiRes
     for id in &album_ids {
         match pm_model::MusicUri::parse(&tidal_url("album", id)) {
             Ok(uri) => {
-                crate::favourites::add(&lib, uri)?;
+                crate::bookmarks::add(&lib, uri)?;
                 report.imported += 1;
             }
             Err(_) => report.skipped += 1,
