@@ -4,6 +4,17 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Now playing on one screen** (build step 2 of docs/ux/responsive.md):
+  - The cover, the title with the heart, the quality label, the scrubber and the transport fit a phone screen with nothing below the fold.
+  - Queue, Lyrics, Details, Sources and Tags are sheets.
+    - Phones: a row under the transport opens a sheet over the player, with a strip that keeps play/pause in reach. Drag the sheet down to close it.
+    - Tablets and desktops: the sheet is a panel beside the player (Queue by default).
+  - **Queue sheet:** tap a song to play it now. Reordering and clearing stay on the Queue page, a tap away.
+  - **Sources sheet:** where else the song plays, in the same order as the song page.
+  - **Quality label:** opens Details (the signal path).
+  - **Top bar:** the zone is a chip that opens the zone picker. Dashboard, the sleep timer, DSP and the song page sit behind ⋯.
+  - The open sheet stays open while songs change.
+
 - **One app shell for phone, tablet and desktop** (STEWARD-UX-RESPONSIVE.md; build step 1 of docs/ux/responsive.md):
   - Phones (under 600 px) get tabs: Home, Search, Library, Zones. The mini player sits above them as a card with the cover, the title, the zone and play/pause.
   - Swipe up on the mini player opens Now playing; swipe down from its top closes it.
