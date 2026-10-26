@@ -31,6 +31,7 @@ pub mod nexus;
 pub mod pinakes;
 pub mod schemas;
 pub mod v1;
+pub mod vault;
 
 pub use config::{Network, PmPubkyConfig};
 pub use discovery::{DiscoveredItem, Discovery};
