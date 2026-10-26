@@ -224,6 +224,10 @@ only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for
 
 ## Umbrel
 
+**Install:** in umbrelOS, App Store › ⋯ › Community App Stores, add
+`https://github.com/gillohner/pubky-music-umbrel`, open the "Pubky Music" store and install Pubky Music
+Node. That repository mirrors `deploy/umbrel/` (the `umbrel-mirror` workflow; docs/RELEASING.md).
+
 `deploy/umbrel/` is an Umbrel community app store (`umbrel-app-store.yml`, store id `pubky-music`)
 with one app, `pubky-music-node`: the node with its own Pubky homeserver inside, as in the compose
 bundle (PostgreSQL, pubky-homeserver v0.16.2 with Pubky's config wrapper, cloudflared). Umbrel's

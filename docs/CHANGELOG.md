@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-26
+
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
+
 ## 2026-10-25
 
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
