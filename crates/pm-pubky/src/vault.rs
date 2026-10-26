@@ -129,7 +129,7 @@ fn read_local_revoked(path: &Path) -> std::io::Result<Vec<Revoked>> {
 }
 
 /// Add `revoked` to the file of signed-out clients at `path`, and return everything in either.
-/// The file only grows (up to [`MAX_LOCAL_REVOKED`]).
+/// The file only grows (up to 4096 records).
 pub fn remember_revoked(path: &Path, revoked: &[Revoked]) -> std::io::Result<Vec<Revoked>> {
     let mut local = Index {
         revoked: read_local_revoked(path)?,
