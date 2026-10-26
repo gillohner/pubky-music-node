@@ -1117,7 +1117,8 @@
     const w = state.npWant; if (!w || w.gen !== npGen || Date.now() - w.at > 3000) return;
     const body = $('.np-sheet-body', overlay); if (body && w.scroll != null && body.scrollHeight - body.clientHeight >= w.scroll) { body.scrollTop = w.scroll; w.scroll = null; }
     const lines = $('.lyric-lines', overlay); if (lines && w.lyric != null) { lines.scrollTop = w.lyric; w.lyric = null; }
-    if (w.focus) { const f = $(w.focus, overlay); if (f) { f.focus({ preventScroll: true }); if (f.id === 'nptagadd') f.setSelectionRange(f.value.length, f.value.length); w.focus = null; } }
+    const free = !document.activeElement || document.activeElement === document.body || !overlay.contains(document.activeElement); // never take focus someone has moved since
+    if (w.focus && free) { const f = $(w.focus, overlay); if (f) { f.focus({ preventScroll: true }); if (f.id === 'nptagadd') f.setSelectionRange(f.value.length, f.value.length); w.focus = null; } }
   };
   // A change of arrangement (rotating a phone, resizing a window) redraws an open Now playing
   window.addEventListener('resize', () => { if (!overlay.hidden && overlay.dataset.layout && overlay.dataset.layout !== `${shellMode()}-${npCompact()}`) renderNowPlaying(); });
