@@ -154,6 +154,9 @@ pub struct NodeState {
     pub events: crate::events::EventBus,
     /// Homeserver sync, when the node has a Pubky session.
     pub sync: Mutex<Option<Arc<crate::sync::PubkySync>>>,
+    /// Held across one sync of the node's sign-ins with the vault (`vault_cache`), and across
+    /// "Sign out everywhere", so two never interleave.
+    pub vault_pass: tokio::sync::Mutex<()>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// Sleep timers: the zone pauses when its deadline passes.
@@ -387,6 +390,7 @@ impl NodeState {
             events,
             sources_off,
             sync: Mutex::new(None),
+            vault_pass: tokio::sync::Mutex::new(()),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
             discover: Mutex::new(None),

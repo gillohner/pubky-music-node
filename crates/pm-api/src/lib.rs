@@ -98,6 +98,7 @@ pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
 pub mod vault;
+pub mod vault_cache;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -631,6 +632,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/vault", get(vault::get))
         .route("/vault/register", post(vault::register))
+        .route("/vault/sync", post(vault::sync_now))
         .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
         .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
         .route("/vault/new-key", post(vault::new_key))

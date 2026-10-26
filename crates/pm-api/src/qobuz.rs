@@ -164,6 +164,16 @@ pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
     save(&lib, &st);
 }
 
+/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark are
+/// written under one library guard, so no vault pass sees one without the other.
+pub(crate) fn update_signed_in(s: &NodeState, service: &str, f: impl FnOnce(&mut ModeState)) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut st = load(&lib);
+    f(&mut st);
+    save(&lib, &st);
+    crate::vault_cache::new_sign_in(&lib, service);
+}
+
 fn config_app() -> &'static std::sync::OnceLock<App> {
     static C: std::sync::OnceLock<App> = std::sync::OnceLock::new();
     &C
@@ -179,6 +189,11 @@ pub fn set_config_app(id: &str, secret: &str) {
             from: "config".into(),
         });
     }
+}
+
+/// The app id the node's Qobuz sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    app_of(&s.library.lock().expect("library poisoned")).map(|a| a.id)
 }
 
 /// The app the owner set: in Settings, else node.toml, else `PM_QOBUZ_APP_ID` / `_SECRET`.
@@ -736,7 +751,7 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         country: user["country_code"].as_str().map(str::to_string),
         hires: params["hires_streaming"].as_bool().unwrap_or(false),
     };
-    update(&s, |st| {
+    update_signed_in(&s, "qobuz", |st| {
         st.session = Some(sess);
         st.health = None;
     });
