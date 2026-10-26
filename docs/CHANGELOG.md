@@ -5,6 +5,7 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-26
 
 - **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
 - **Faster reconnects after a short outage** (mn-infra's note on #114's review):
   - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
   - A held change re-checks every second, so it is never refused while the node is already back.
