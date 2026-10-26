@@ -943,4 +943,72 @@ mod tests {
         let (t, _, p) = music_tag(&post, "nice", 1).unwrap();
         assert!(music_tag_from(&p, &serde_json::to_vec(&t).unwrap()).is_none());
     }
+
+    /// pubky-social-migrator (npm) copies a person's `/pub/pubky.app/` tree to v1 with these
+    /// transforms and never deletes. Where it and the node's own move touch the same object, they
+    /// write the same path, so the two converge instead of making duplicates: a tag on a music
+    /// URL keeps its id, a bookmark is keyed by its target, a follow by the followee.
+    #[test]
+    fn the_spec_migrator_writes_where_the_node_does() {
+        use pubky_app_specs::traits::HashId as _;
+        use pubky_social_specs::migrate::MigrationCtx;
+        let mut ctx = MigrationCtx::new(owner());
+        let migrated = |ctx: &mut MigrationCtx, path: &str, body: Vec<u8>| {
+            let m = ctx.migrate(path, &body).unwrap();
+            assert_eq!(m.writes.len(), 1, "{path}");
+            format!("/{}", m.writes[0].0)
+        };
+        // A tag the node wrote under pubky.app/tags/ before 2026-10-21
+        let old = pubky_app_specs::PubkyAppTag {
+            uri: SONG.into(),
+            label: "calm".into(),
+            created_at: 1_792_540_800_000_000,
+        };
+        let (_, _, node_path) = music_tag(SONG, "calm", old.created_at).unwrap();
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/tags/{}", old.create_id()),
+            serde_json::to_vec(&old).unwrap(),
+        );
+        assert_eq!(path, node_path);
+        // A bookmark of a music URL made in pubky.app
+        let b = pubky_app_specs::PubkyAppBookmark {
+            uri: SONG.into(),
+            created_at: 1_792_540_800_000_000,
+        };
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/bookmarks/{}", b.create_id()),
+            serde_json::to_vec(&b).unwrap(),
+        );
+        assert_eq!(path, bookmark_path(SONG).unwrap());
+        // A follow the node wrote in the older form
+        let followee = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/follows/{followee}"),
+            br#"{"created_at":1792540800000000}"#.to_vec(),
+        );
+        assert_eq!(path, pubky_social_specs::PubkySocialFollow::create_path(followee));
+        // The node's older music objects were private: the migrator never reads /priv
+        assert!(ctx
+            .migrate(&format!("priv/pubky.app/posts/{}", id_of(t0())), b"{}")
+            .is_err());
+        // A post both could move keeps its id: v0 posts/{id} becomes v1 posts/{id}/{id}.json,
+        // the path the node's first version of the same id takes
+        let id = id_of(t0());
+        let note = pubky_app_specs::PubkyAppPost::new(
+            "hello".into(),
+            pubky_app_specs::PubkyAppPostKind::Short,
+            None,
+            None,
+            None,
+        );
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/posts/{id}"),
+            serde_json::to_vec(&note).unwrap(),
+        );
+        assert_eq!(path, PubkySocialPost::create_path_in(Root::Pub, &id, &id, None));
+    }
 }

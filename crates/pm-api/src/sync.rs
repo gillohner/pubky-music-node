@@ -845,7 +845,14 @@ impl PubkySync {
         let cleared_before = crate::listens::cleared_before(&library.lock().expect("library poisoned"));
         let mut reads = 0;
         for ns in [v1::SOCIAL_NAMESPACE, pubky_music_specs::MUSIC_NAMESPACE] {
-            let found = heads.newest_in(ns);
+            let mut found = heads.newest_in(ns);
+            // A public social post is read only as the published copy of one with a private
+            // draft (every collection the node publishes has one). The rest of /pub/social/v1/
+            // is the person's other posts (pubky-social-migrator copies all of pubky.app there):
+            // not fetched on every sync, and never imported as music.
+            if ns == v1::SOCIAL_NAMESPACE {
+                found.retain(|id, _| heads.has_in(v1::Root::Priv, ns, id));
+            }
             // What is new or newer than the node's copy, then fetched 8 at a time
             let wanted: Vec<(String, v1::Head, bool)> = {
                 let lib = library.lock().expect("library poisoned");
@@ -1041,6 +1048,13 @@ impl Heads {
             .get(&(is_pub(root), ns))?
             .get(id)
             .map(|h| h.edit_id.clone())
+    }
+
+    /// Whether `id` has a version in `root` and `ns`.
+    fn has_in(&self, root: v1::Root, ns: &'static str, id: &str) -> bool {
+        self.0
+            .get(&(is_pub(root), ns))
+            .is_some_and(|m| m.contains_key(id))
     }
 
     /// The newest edit id of `id` in `ns` under either root.

@@ -53,6 +53,8 @@ Newest first. Dates are when the change landed on `main`.
   - Listeners can't read the owner's history.
 - **Tags are social v1 tags** (Part A.4): the node writes `/pub/social/v1/tags/<id>.json` (same id as before), which Nexus indexes as resource tags. The sync moves the older `/pub/pubky.app/tags/` and `/pub/pubky.music/tags/` tags once and reads them until then. Other apps' v1 tags are read once and not fetched again.
 - **Follows and profiles on social v1** (Part A.6): following writes `/pub/social/v1/follows/<key>.json` as well as the pubky.app follow (until Nexus indexes v1 follows); a profile from a homeserver is read from `/pub/social/v1/profile.json` first.
+- **pubky-social-specs from crates.io:** `=1.0.0-rc.1` replaces the git pin `acde362` (the same data model).
+- **The node and pubky-social-migrator don't duplicate each other:** where both move an object from `/pub/pubky.app/`, they write the same v1 path (a tag on a music URL keeps its id; bookmarks are keyed by target; follows by followee). The node no longer fetches the person's other public social posts on each sync, and never imports them as reviews. It reads a public social post only as the published copy of a collection it has a draft of. Checked with the spec's own transforms in a unit test and on a testnet.
 - **`pubky-music-specs`** (Part A.3 and A3):
   - a `listen` may be public;
   - times (`*_at`) are microseconds, and readers take older millisecond values (anything below 3000-01-01 in ms); the node writes its public collections again once;

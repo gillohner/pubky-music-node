@@ -2005,3 +2005,154 @@ async fn profiles_and_follows_are_social_v1() {
         .unwrap()
         .is_empty());
 }
+
+/// What pubky-social-migrator does with a person's `/pub/pubky.app/` objects: each to v1 with the
+/// spec's transforms, nothing deleted, nothing that exists rewritten.
+async fn run_migrator(
+    homeserver: &NodeHomeserver,
+    session: &pubky::PubkySession,
+    z32: &str,
+    raw: &str,
+    legacy: &[(String, serde_json::Value)],
+) {
+    let mut ctx = pubky_social_specs::migrate::MigrationCtx::new(v1::PubkyId::try_from(raw).unwrap());
+    for (path, body) in legacy {
+        let m = ctx
+            .migrate(path.trim_start_matches('/'), &serde_json::to_vec(body).unwrap())
+            .unwrap();
+        for (to, bytes) in m.writes {
+            let to = format!("/{to}");
+            let dir = &to[..to.rfind('/').unwrap() + 1];
+            let exists = if to.starts_with("/pub/") {
+                homeserver
+                    .public_paths(z32, dir)
+                    .await
+                    .unwrap_or_default()
+                    .contains(&to)
+            } else {
+                homeserver
+                    .stat_private(session, &to)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            };
+            if !exists {
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                homeserver.write_object(session, &to, &v).await.unwrap();
+            }
+        }
+    }
+}
+
+/// pubky-social-migrator (npm) copies a person's `/pub/pubky.app/` tree to social v1 on their
+/// first pubky.app visit and never deletes. Run here with the spec's own transforms against the
+/// same homeserver as the node: a tag, a bookmark and a follow both write converge on one v1
+/// file each, and the person's migrated pubky.app posts (one embeds a song) are neither fetched
+/// as music nor imported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_spec_migrator_and_the_node_converge() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pubky_app_specs::traits::HashId;
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, raw) = identity(&pubky, "pm-api-migrator").await;
+    let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+    let followee = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+    // The pubky.app tree: a tag the node wrote before 2026-10-21, a bookmark and a post made in
+    // pubky.app (the post embeds the song), a follow
+    let tag = pubky_app_specs::PubkyAppTag::new(song.into(), "calm".into());
+    let mark = pubky_app_specs::PubkyAppBookmark::new(song.into());
+    let post = pubky_app_specs::PubkyAppPost::new(
+        "listen to this".into(),
+        pubky_app_specs::PubkyAppPostKind::Short,
+        None,
+        Some(pubky_app_specs::PubkyAppPostEmbed {
+            kind: pubky_app_specs::PubkyAppPostKind::Link,
+            uri: song.into(),
+        }),
+        None,
+    );
+    let post_id = v1::id_of(pm_pubky::ids::now_micros() - 1_000_000);
+    let legacy: Vec<(String, serde_json::Value)> = vec![
+        (
+            format!("/pub/pubky.app/tags/{}", tag.create_id()),
+            serde_json::to_value(&tag).unwrap(),
+        ),
+        (
+            format!("/pub/pubky.app/bookmarks/{}", mark.create_id()),
+            serde_json::to_value(&mark).unwrap(),
+        ),
+        (
+            format!("/pub/pubky.app/posts/{post_id}"),
+            serde_json::to_value(&post).unwrap(),
+        ),
+        (
+            format!("/pub/pubky.app/follows/{followee}"),
+            serde_json::json!({"created_at": 1_792_540_800_000_000_i64}),
+        ),
+    ];
+    for (path, body) in &legacy {
+        homeserver.write_object(&session, path, body).await.unwrap();
+    }
+    // The migrator first, then the node, then the migrator again (a second pubky.app visit)
+    run_migrator(&homeserver, &session, &z32, &raw, &legacy).await;
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "n");
+    let app = router(n.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session.clone()));
+    n.set_sync(Some(sync.clone()));
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": song})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(&app, "PUT", &format!("/v1/profiles/{followee}/follow"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    run_migrator(&homeserver, &session, &z32, &raw, &legacy).await;
+    let r = sync.sync(&n.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+
+    // One of each
+    let tags = homeserver
+        .public_paths(&z32, "/pub/social/v1/tags/")
+        .await
+        .unwrap();
+    assert_eq!(tags, [format!("/pub/social/v1/tags/{}.json", tag.create_id())]);
+    let marks = homeserver.read_v1_bookmarks(&session).await.unwrap();
+    assert_eq!(marks.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(), [song]);
+    let follows = homeserver
+        .public_paths(&z32, "/pub/social/v1/follows/")
+        .await
+        .unwrap();
+    assert_eq!(follows, [format!("/pub/social/v1/follows/{followee}.json")]);
+    let (_, mine) = call(&app, "GET", "/v1/tags", None).await;
+    assert_eq!(mine["tags"].as_array().unwrap().len(), 1, "{mine}");
+    let (_, b) = call(&app, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(b["uris"], serde_json::json!([song]));
+    // The migrated pubky.app post is there, and it is not the node's: no review, no collection
+    let public = homeserver
+        .v1_heads(&z32, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+        .await
+        .unwrap();
+    assert!(public.contains_key(&post_id), "the migrator wrote it");
+    let (_, reviews) = call(&app, "GET", "/v1/reviews", None).await;
+    assert!(reviews["reviews"].as_array().unwrap().is_empty(), "{reviews}");
+    let (_, colls) = call(&app, "GET", "/v1/collections", None).await;
+    assert!(colls.as_array().unwrap().is_empty(), "{colls}");
+    assert!(n
+        .library
+        .lock()
+        .unwrap()
+        .get_music_post(&post_id)
+        .unwrap()
+        .is_none());
+}

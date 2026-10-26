@@ -64,6 +64,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+# The spec's v0-to-v1 transforms (what pubky-social-migrator runs), for the testnet check that it
+# and the node's own move converge. Tests only.
+pubky-social-specs = { workspace = true, features = ["migrator"] }
 tempfile = "3"
 pm-endpoint = { workspace = true }
 id3 = { workspace = true }
