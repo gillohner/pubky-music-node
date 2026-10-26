@@ -87,8 +87,8 @@ uuid = { version = "1.28", features = ["v4", "serde"] }
 walkdir = "2.5"
 pubky = { version = "0.16.2", features = ["json"] }
 pubky-app-specs = "0.8.1"
-# v1 social objects (branch v1, 1.0.0-alpha.5), pinned until a release is published
-pubky-social-specs = { git = "https://github.com/pubky/pubky-social-specs", rev = "acde362939dabb79a3b08de250bcbc70da4e827d" }
+# v1 social objects: the 1.0.0-rc.1 release (tag v1.0.0-rc.1, the same data model as the acde362 pin before it)
+pubky-social-specs = "=1.0.0-rc.1"
 pubky-music-specs = { path = "crates/pubky-music-specs" }
 pm-appdata = { path = "crates/pm-appdata" }
 

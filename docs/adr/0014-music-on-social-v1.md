@@ -29,7 +29,8 @@ Music uses the shared social objects and only adds what is musical.
   `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
   `ext.music` hints. It depends only on `pubky-social-specs` and serde, never on node code, so it can
   move to its own repository like `mapky-app-specs` and `eventky-app-specs`. `pubky-social-specs` is a git
-  dependency pinned to `acde362` until a release is published.
+  dependency pinned to `acde362` until a release is published. (Since 2026-10-26 it is the crates.io
+  release `=1.0.0-rc.1`, tag `v1.0.0-rc.1`: the same data model.)
 - **Ratings are 1 to 10**, the same shape as Mapky's review. The UI shows five stars with halves; the
   node's existing 1–5 ratings double on migration.
 - **`ext.music` is hostile input** (RFC Part C2, rules 10 and 11): the readers return only a
