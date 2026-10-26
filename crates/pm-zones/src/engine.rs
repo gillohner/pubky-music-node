@@ -922,6 +922,8 @@ fn service_of(uri: &str) -> &str {
     }
     match uri.split_once(':') {
         Some(("http" | "https", _)) => "stream",
+        // Spotify Connect plays through librespot
+        Some(("librespot", _)) => "spotify",
         Some((scheme, _)) if !scheme.is_empty() => scheme,
         _ => "library",
     }
@@ -935,5 +937,6 @@ mod service_tests {
         assert_eq!(super::service_of("/music/a.flac"), "library");
         assert_eq!(super::service_of("tidal:track:1"), "tidal");
         assert_eq!(super::service_of("https://x/y.mp3"), "stream");
+        assert_eq!(super::service_of("librespot:connect"), "spotify");
     }
 }

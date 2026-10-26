@@ -368,6 +368,18 @@ impl pm_zones::FrameSource for LiveSource {
         FORMAT
     }
 
+    /// librespot always runs at `--bitrate 320` (Ogg Vorbis from Spotify).
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(pm_zones::StreamInfo {
+            codec: "Vorbis".into(),
+            bitrate_kbps: Some(320),
+            lossless: false,
+            service: "spotify".into(),
+            tier: None,
+            preview: false,
+        })
+    }
+
     fn duration_ms(&self) -> Option<u64> {
         None
     }

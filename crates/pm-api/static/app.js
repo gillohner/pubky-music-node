@@ -851,7 +851,7 @@
       : `${f.codec}${f.bitrate_kbps ? ` ${f.bitrate_kbps} kbps` : ''}`;
     const tier = f.tier ? ` ${f.tier.charAt(0).toUpperCase()}${f.tier.slice(1)}` : '';
     const from = f.preview ? 'preview' : f.service === 'library' ? 'local file' : f.service === 'stream' ? 'stream' : f.service === 'download' ? 'downloaded' : `${SERVICE_NAMES[f.service] || srcName(f.service)}${tier}`;
-    const conv = sf && of && sf.kind !== 'dsd' && of.kind !== 'dsd' ? (of.rate_hz !== sf.rate_hz ? ` → ${kHz(of.rate_hz)} kHz` : of.bits < sf.bits ? ` → ${of.bits} bit` : '') : '';
+    const conv = sf && of && sf.kind !== 'dsd' && of.kind !== 'dsd' ? (of.rate_hz !== sf.rate_hz ? ` → ${kHz(of.rate_hz)} kHz` : f.lossless && of.bits < sf.bits ? ` → ${of.bits} bit` : '') : '';
     return `${what}${conv} · ${from}`;
   };
   // Why the node converts, from the signal path's own notes (resample, requantize, DSD to PCM)
@@ -935,7 +935,9 @@
   };
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
-  $('#quality').onclick = () => { const z = currentZone(); if (z && z.now_playing) qualitySheet(); else toggleNowPlaying(true); };
+  // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
+  // an older node) the label opens Now playing, where the signal path is
+  $('#quality').onclick = () => { const z = currentZone(); if (z && z.now_playing && z.now_playing.format) qualitySheet(); else toggleNowPlaying(true); };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   const fillNpPubky = async (it) => {
@@ -1019,9 +1021,12 @@
   // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
   // Play from order and the zone's output settings.
   // On a source's tab, bring its quality setting into view (it may load a moment after the page)
-  const focusQualityControl = (tries = 20) => {
-    const el = $$('[aria-label]', main).find((e) => /quality/i.test(e.getAttribute('aria-label')) && e.offsetParent !== null);
-    if (!el) { if (tries > 0) setTimeout(() => focusQualityControl(tries - 1), 200); return; }
+  const focusQualityControl = (svc, tries = 20) => {
+    if (state.view !== 'sources') return; // they went elsewhere
+    // that service's own control ("Qobuz quality", "TIDAL full track quality"), not another's
+    const name = String(SERVICE_NAMES[svc] || srcName(svc) || '').toLowerCase();
+    const el = name && $$('[aria-label]', main).find((e) => { const l = e.getAttribute('aria-label').toLowerCase(); return l.startsWith(name) && l.includes('quality') && e.offsetParent !== null; });
+    if (!el) { if (tries > 0) setTimeout(() => focusQualityControl(svc, tries - 1), 200); return; }
     el.scrollIntoView({ block: 'center' }); el.focus({ preventScroll: true });
     const row = el.closest('.set-row') || el; row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1600);
   };
@@ -1030,6 +1035,7 @@
     const f = np.format || {};
     const svc = f.service || '';
     const d = document.createElement('dialog'); d.className = 'dialog qsheet';
+    const svcRow = svc ? '' : ' hidden';
     const conv = conversionWhy(np);
     const arriving = streamLabel(np, true) || (np.signal_path ? fmtFormat(np.source_format) : 'Played by this browser');
     const zonePlays = np.output_format ? `Plays it as ${np.output_format.kind === 'dsd' ? fmtFormat(np.output_format) : `${kHz(np.output_format.rate_hz)} kHz / ${np.output_format.bits} bit`}` : '';
@@ -1037,7 +1043,7 @@
       <div class="set-rows">
         <div class="set-row"><div class="set-label"><div class="set-name">Arriving</div><p class="set-help">${esc(arriving)}</p></div></div>
         ${zonePlays ? `<div class="set-row"><div class="set-label"><div class="set-name">On ${esc(z.name)}</div><p class="set-help">${esc(zonePlays)}${conv.length ? `. Changed on the way: ${esc(conv.join('; '))}` : ', as it arrives'}.</p></div></div>` : ''}
-        <div class="set-row" id="qsvc"><div class="set-label"><div class="set-name">${esc(svc === 'library' ? 'Your files' : SERVICE_NAMES[svc] || srcName(svc) || 'Source')}</div><p class="set-help muted">${svc === 'library' ? 'Your files play as they are.' : '<span class="spin"></span> Asking for its quality choices…'}</p></div></div>
+        <div class="set-row" id="qsvc"${svcRow}><div class="set-label"><div class="set-name">${esc(svc === 'library' ? 'Your files' : SERVICE_NAMES[svc] || srcName(svc) || 'Source')}</div><p class="set-help muted">${svc === 'library' ? 'Your files play as they are.' : '<span class="spin"></span> Asking for its quality choices…'}</p></div></div>
       </div>
       <div class="dialog-actions">${isOwner() ? '<button class="btn ghost" data-qplay>Play from order</button><button class="btn ghost" data-qout>Output and DSP</button>' : ''}<button class="btn" data-qclose>Close</button></div>`;
     document.body.appendChild(d);
@@ -1065,7 +1071,7 @@
     } else {
       box.innerHTML = f.preview ? `Previews only (30 s). Full songs need another service.${isOwner() ? ' ' + goSource : ''}` : qs && qs.note ? esc(qs.note) : svc === 'stream' || !isOwner() ? 'As the stream sends it.' : `Its quality is set in ${goSource}.`;
     }
-    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('sources', { source: svc }); focusQualityControl(); };
+    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = async () => { done(); if (!overlay.hidden) toggleNowPlaying(); await setView('sources', { source: svc }); focusQualityControl(svc); };
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
