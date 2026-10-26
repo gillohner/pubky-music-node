@@ -92,6 +92,7 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 | Android and Google TV | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-android-arm64.apk) |
 | Node and endpoint | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz` (armv7: 32-bit Raspberry Pi OS), Windows and macOS too | same names under edge |
 | Node image | `ghcr.io/gillohner/pubky-music-node:latest` (amd64, arm64) | `…:edge` |
+| Umbrel | the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel) (App Store › Community App Stores) | |
 
 The app (`pm-desktop`) is the node's web UI in a window; on desktops it also plays through the
 computer's DACs, bit-perfect through ALSA on Linux. The macOS and Windows builds are not signed

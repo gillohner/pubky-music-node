@@ -226,6 +226,8 @@ jobs:
           cd /tmp/abs-src && npm ci --no-audit --no-fund && npm run build:server
       - run: cargo build -p pm-node
       - run: python3 -I tools/abs-source.py target/debug/pm-node /tmp/abs-src "$(command -v ffmpeg)" /tmp/abs
+      # Downloads with the real ffmpeg (the other download tests use a stand-in)
+      - run: PM_REAL_FFMPEG=1 cargo test -p pm-api --test downloads real_ffmpeg
       - if: failure()
         run: tail -50 /tmp/abs/node.log /tmp/abs/abs.log
   bundle:
@@ -244,6 +246,8 @@ jobs:
         run: |
           cp target/debug/pm-node deploy/docker/entrypoint.sh deploy/bundle/ci/
           docker build -q -t pubky-music-node:ci deploy/bundle/ci
+          # The image carries ffmpeg with the encoders downloads use
+          docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
       - name: docker compose up
         working-directory: deploy/bundle
         run: |
@@ -260,6 +264,9 @@ jobs:
           export PM_BUNDLED_HS_FILES=$PWD/deploy/bundle/hsdata/data/files
           PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
           cargo test -p pm-api --test bundled_homeserver
+          # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
+          cargo test -p pm-pubky --test vault_homeserver
+          cargo test -p pm-api --test vault_api
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)
