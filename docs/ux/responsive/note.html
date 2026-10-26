@@ -1,0 +1,340 @@
+<title>Pubky Music Layouts</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column for the note; figures widen to show wireframes at true proportions */
+:root {
+  --bg: #f4f4f7; --surface: #ffffff; --fg: #17171c; --muted: #5f5f6b; --line: #d9d9e2;
+  --accent: #5b45d6; --accent-soft: #ebe8fb;
+  --wf-bg: #fbfbfd; --wf-box: #e3e3ea; --wf-box2: #cfcfda; --wf-ink: #3a3a46; --wf-accent: #5b45d6;
+  /* Source accents, contrast-checked: text on the background >= 4.5:1, the button's ink on the accent >= 4.5:1 */
+  --spotify: #13803B; --spotify-ink: #ffffff; --tidal: #007C89; --tidal-ink: #ffffff; --qobuz: #1F5BD6; --qobuz-ink: #ffffff;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111116; --surface: #1a1a21; --fg: #ececf2; --muted: #a2a2b0; --line: #2e2e39;
+  --accent: #a596ff; --accent-soft: #2a2545;
+  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff;
+  --spotify: #1ED760; --spotify-ink: #111116; --tidal: #33E8E0; --tidal-ink: #111116; --qobuz: #6E9BFF; --qobuz-ink: #111116;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #111116; --surface: #1a1a21; --fg: #ececf2; --muted: #a2a2b0; --line: #2e2e39;
+  --accent: #a596ff; --accent-soft: #2a2545;
+  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff;
+  --spotify: #1ED760; --spotify-ink: #111116; --tidal: #33E8E0; --tidal-ink: #111116; --qobuz: #6E9BFF; --qobuz-ink: #111116;
+  color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 64px; }
+.col { max-width: 72ch; margin-inline: auto; }
+.wide { max-width: 1240px; margin-inline: auto; }
+header { padding-block: 40px 24px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 8px 0 12px; text-wrap: balance; font-weight: 700; }
+h2 { font-size: 24px; line-height: 1.25; margin: 40px 0 12px; text-wrap: balance; }
+h3 { font-size: 17px; margin: 24px 0 8px; }
+p, li { max-width: 72ch; }
+.lede { font-size: 19px; color: var(--muted); margin: 0; }
+code { font-family: var(--mono); font-size: .88em; background: var(--accent-soft); padding: .05em .3em; border-radius: 4px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); margin: 12px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 640px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+tr:last-child td { border-bottom: none; }
+.ask { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+.ask ol { margin: 8px 0 0; padding-left: 20px; }
+
+/* Figures: one row per width; each wireframe keeps its real pixel size and is scaled to fit */
+.figrow { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; margin: 16px 0 8px; }
+figure { margin: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+figcaption { font-size: 13px; color: var(--muted); max-width: 46ch; }
+figcaption b { color: var(--fg); font-weight: 600; }
+.wf { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--wf-bg); box-shadow: 0 1px 2px rgba(0,0,0,.06); max-width: 100%; }
+.screen { box-sizing: border-box; position: absolute; left: 0; top: 0; transform-origin: top left; color: var(--wf-ink); font-family: var(--sans); font-size: 14px; line-height: 1.3; background: var(--wf-bg); }
+.screen * { box-sizing: border-box; }
+.b { background: var(--wf-box); border-radius: 8px; }
+.b2 { background: var(--wf-box2); border-radius: 8px; }
+.ln { height: 10px; border-radius: 5px; background: var(--wf-box2); }
+.lnt { height: 8px; border-radius: 4px; background: var(--wf-box); }
+.lab { font-size: 12px; color: var(--wf-ink); opacity: .85; }
+.acc { background: var(--wf-accent); color: #fff; }
+.pill { border: 1.5px solid var(--wf-box2); border-radius: 999px; padding: 4px 10px; font-size: 12px; white-space: nowrap; }
+.pill.on { border-color: var(--wf-accent); color: var(--wf-accent); font-weight: 600; }
+.circ { border-radius: 999px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.col2 { display: flex; flex-direction: column; gap: 8px; }
+.note { position: absolute; font-family: var(--mono); font-size: 11px; background: var(--wf-accent); color: #fff; padding: 2px 6px; border-radius: 4px; }
+/* Source-aware colour on the player: one accent per source, a soft gradient from the cover */
+.src-spotify { --src: var(--spotify); --src-ink: var(--spotify-ink); }
+.src-tidal { --src: var(--tidal); --src-ink: var(--tidal-ink); }
+.src-qobuz { --src: var(--qobuz); --src-ink: var(--qobuz-ink); }
+.np-src { background: linear-gradient(180deg, color-mix(in srgb, var(--art) 38%, var(--wf-bg)) 0%, var(--wf-bg) 72%); }
+.np-src .qlabel { border: 1.5px solid var(--src); color: var(--src); font-weight: 600; }
+.np-src .play { background: var(--src); color: var(--src-ink); display: flex; align-items: center; justify-content: center; font-size: 26px; }
+.np-src .fill { background: var(--src); }
+.np-src .mark { width: 10px; height: 10px; border-radius: 3px; background: var(--src); display: inline-block; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+<header class="col">
+  <div class="eyebrow">Design note · STEWARD-UX-RESPONSIVE.md step 1 · mn-app · 2026-10-26 · for the owner's look</div>
+  <h1>Pubky Music on a phone, a tablet and a desktop</h1>
+  <p class="lede">One set of parts, arranged three ways. Now playing fits one phone screen; queue, lyrics, details, sources and tags open as sheets. Nothing gets built until you've looked at this.</p>
+</header>
+
+<section class="col">
+  <h2>What the other apps do</h2>
+  <p>Apple Music, Spotify, TIDAL, Qobuz, Plexamp, Symfonium and HiBy Music, on a phone and bigger screens. The full table is in <code>docs/ux/mobile-study.md</code>.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Pattern</th><th>Who does it</th><th>We</th></tr></thead>
+    <tbody>
+      <tr><td>Now playing on one screen: art, title, scrubber, transport, one row of secondary actions</td><td>Apple Music, TIDAL, Qobuz, Plexamp, Symfonium, HiBy. Spotify scrolls into cards below.</td><td>Take it</td></tr>
+      <tr><td>Queue and lyrics replace the art or slide up over it</td><td>Apple Music (in place), Plexamp and Symfonium (swipe up), TIDAL (tabs)</td><td>Take it: sheets on phones, panels on bigger screens</td></tr>
+      <tr><td>A mini player above a bottom tab bar; tap or swipe up expands, swipe down collapses</td><td>All seven</td><td>Take it</td></tr>
+      <tr><td>The quality is a label you tap</td><td>TIDAL, Qobuz, HiBy, Apple's Lossless badge</td><td>Have it (PR #94); it opens the quality sheet</td></tr>
+      <tr><td>The output is part of the player</td><td>Spotify's device picker, HiBy's USB mode</td><td>The zone pill on the mini player and Now playing; the DAC by name</td></tr>
+      <tr><td>Bigger screens: sidebar or rail, queue docked right, player bar at the bottom</td><td>Apple Music, Spotify, TIDAL, Qobuz</td><td>Take it, with a Layout option (Symfonium shows people want one)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Rules the whole app follows</h2>
+  <ul>
+    <li><b>Screens don't scroll; lists do.</b> Now playing, the quality sheet and the zone picker fit the screen. Library, album, artist, playlist and search scroll, and their headers fold into a compact bar.</li>
+    <li><b>Secondary things are sheets.</b> Queue, Lyrics, Details (signal path, file, credits), Sources (also on) and Tags open over Now playing: a bottom sheet on a phone, a side panel on a tablet, a docked panel on a desktop.</li>
+    <li><b>Thumbs first.</b> 44 px targets; the transport and the secondary row in the bottom half; swipe a row for Play next, long-press for its menu.</li>
+    <li><b>Same parts at every width.</b> A track row, an album tile, the player and a sheet are the same components; only the arrangement and the density change.</li>
+    <li>Safe areas, light and dark, reduced motion, and Android font scale 1.3 without clipping.</li>
+  </ul>
+</section>
+
+<section class="wide">
+  <h2>Phone, under 600 px</h2>
+  <div class="figrow">
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".62"><div class="screen" style="width:390px;height:844px">
+        <div style="padding:20px 16px 0;display:flex;flex-direction:column;gap:14px">
+          <div class="row" style="justify-content:space-between"><b style="font-size:26px">Library</b><div class="b circ" style="width:34px;height:34px"></div></div>
+          <div class="row" style="gap:8px"><span class="pill on">My library</span><span class="pill">Anna's library</span><span class="pill">Downloads</span></div>
+          <div class="row" style="gap:8px"><span class="pill">Albums</span><span class="pill">Artists</span><span class="pill">Songs</span><span class="pill">Playlists</span></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="col2"><div class="b" style="aspect-ratio:1"></div><div class="ln" style="width:80%"></div><div class="lnt" style="width:55%"></div></div>
+            <div class="col2"><div class="b" style="aspect-ratio:1"></div><div class="ln" style="width:70%"></div><div class="lnt" style="width:45%"></div></div>
+            <div class="col2"><div class="b" style="aspect-ratio:1"></div><div class="ln" style="width:75%"></div><div class="lnt" style="width:50%"></div></div>
+            <div class="col2"><div class="b" style="aspect-ratio:1"></div><div class="ln" style="width:60%"></div><div class="lnt" style="width:40%"></div></div>
+          </div>
+        </div>
+        <div style="position:absolute;left:8px;right:8px;bottom:76px;height:64px;border-radius:14px;background:var(--wf-box2);display:flex;align-items:center;gap:10px;padding:8px">
+          <div class="b" style="width:48px;height:48px;background:var(--wf-box)"></div>
+          <div class="col2" style="flex:1;gap:5px"><b style="font-size:13px">Song title</b><span class="lab">Artist · FLAC 96/24</span></div>
+          <span class="pill" style="background:var(--wf-bg)">Kitchen</span>
+          <div class="circ acc" style="width:40px;height:40px"></div>
+        </div>
+        <div style="position:absolute;left:0;right:0;bottom:0;height:68px;border-top:1px solid var(--wf-box2);display:grid;grid-template-columns:repeat(4,1fr);text-align:center;padding-top:10px;font-size:12px">
+          <div>◻<br>Home</div><div>◻<br>Search</div><div style="color:var(--wf-accent);font-weight:600">◼<br>Library</div><div>◻<br>Zones</div>
+        </div>
+      </div></div>
+      <figcaption><b>Library with the mini player and tab bar.</b> Your library first; libraries shared with you and Downloads as their own sections, never mixed in. The mini player carries the quality and the zone.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".62"><div class="screen" style="width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div class="b" style="width:342px;height:342px;margin-inline:auto"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <span class="pill on" style="align-self:flex-start">FLAC 96/24 · TIDAL Max</span>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px"></div><div class="row lab" style="justify-content:space-between"><span>1:12</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ acc" style="width:72px;height:72px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>Now playing, one screen at 390 × 844.</b> Art, title with the heart, the quality label (tap: quality sheet), scrubber, transport. One bottom row opens the five sheets. The zone pill sits at the top; swipe down collapses to the mini player.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".62"><div class="screen" style="width:390px;height:844px">
+        <div style="padding:16px 24px;display:flex;gap:12px;align-items:center;opacity:.55">
+          <div class="b" style="width:56px;height:56px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:60%"></div><div class="lnt" style="width:40%"></div></div><div class="circ acc" style="width:40px;height:40px"></div>
+        </div>
+        <div style="position:absolute;left:0;right:0;top:96px;bottom:0;background:var(--wf-bg);border-top-left-radius:22px;border-top-right-radius:22px;box-shadow:0 -6px 24px rgba(0,0,0,.18);padding:10px 16px;display:flex;flex-direction:column;gap:12px;border:1px solid var(--wf-box2)">
+          <div class="b2" style="width:44px;height:5px;margin-inline:auto"></div>
+          <div class="row" style="gap:8px"><span class="pill on">Queue</span><span class="pill">Lyrics</span><span class="pill">Details</span><span class="pill">Sources</span><span class="pill">Tags</span></div>
+          <span class="lab">Playing next · 12 songs · Shuffle · Repeat</span>
+          <div class="col2" style="gap:10px">
+            <div class="row"><div class="b" style="width:44px;height:44px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:70%"></div><div class="lnt" style="width:45%"></div></div><span class="lab">≡</span></div>
+            <div class="row"><div class="b" style="width:44px;height:44px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:55%"></div><div class="lnt" style="width:35%"></div></div><span class="lab">≡</span></div>
+            <div class="row"><div class="b" style="width:44px;height:44px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:65%"></div><div class="lnt" style="width:50%"></div></div><span class="lab">≡</span></div>
+            <div class="row"><div class="b" style="width:44px;height:44px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:50%"></div><div class="lnt" style="width:30%"></div></div><span class="lab">≡</span></div>
+            <div class="row"><div class="b" style="width:44px;height:44px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:72%"></div><div class="lnt" style="width:42%"></div></div><span class="lab">≡</span></div>
+          </div>
+          <span class="lab" style="margin-top:auto">Drag ≡ to reorder · swipe left to remove · Clear · Save as playlist</span>
+        </div>
+      </div></div>
+      <figcaption><b>A sheet over Now playing.</b> The player shrinks to a strip on top, so play/pause stays in reach. Tabs switch between the five sheets; drag down closes. The other four use the same frame.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".62"><div class="screen" style="width:390px;height:844px;padding:18px 16px;display:flex;flex-direction:column;gap:6px;overflow:hidden">
+        <b style="font-size:24px">Settings</b><div class="b" style="padding:10px 12px;display:flex;gap:12px;align-items:center;background:var(--wf-box)"><div class="b2 circ" style="width:40px;height:40px"></div><div class="col2" style="gap:4px"><b>Anna Brunner</b><span class="lab">pubky.example · 2.1 GB used</span></div></div><div class="col2" style="gap:2px;margin-top:4px"><span class="lab" style="font-weight:600">YOU</span><span class="lab" style="font-size:11px">Saved on your homeserver: follows you to every node and device</span></div><div class="b" style="background:var(--wf-box);padding:0 12px"><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>My accounts</span><span class="lab">TIDAL, Last.fm ›</span></div><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>My library and sharing</span><span class="lab">›</span></div><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>Home, layout, appearance</span><span class="lab">Automatic ›</span></div><div class="row" style="height:44px;justify-content:space-between"><span>Playback quality</span><span class="lab">Your choice ›</span></div></div><div class="col2" style="gap:2px;margin-top:4px"><span class="lab" style="font-weight:600">THIS PHONE</span><span class="lab" style="font-size:11px">Only on this phone</span></div><div class="b" style="background:var(--wf-box);padding:0 12px"><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>FiiO KA17</span><span class="lab">Bit-perfect ›</span></div><div class="row" style="height:44px;justify-content:space-between"><span>Downloads and cache</span><span class="lab">1.4 GB · Wi-Fi only ›</span></div></div><div class="col2" style="gap:2px;margin-top:4px"><span class="lab" style="font-weight:600">THIS NODE · ADMIN</span><span class="lab" style="font-size:11px">For everyone on this node</span></div><div class="b" style="background:var(--wf-box);padding:0 12px"><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>Service apps</span><span class="lab">Spotify, Qobuz ›</span></div><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>People</span><span class="lab">3 ›</span></div><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>Library folders, zones, outputs</span><span class="lab">›</span></div><div class="row" style="height:44px;justify-content:space-between"><span>Remote access, updates</span><span class="lab">Working ›</span></div></div><div class="col2" style="gap:2px;margin-top:4px"><span class="lab" style="font-weight:600">THIS HOMESERVER · ADMIN</span><span class="lab" style="font-size:11px">The homeserver this node runs</span></div><div class="b" style="background:var(--wf-box);padding:0 12px"><div class="row" style="height:44px;justify-content:space-between;border-bottom:1px solid var(--wf-box2)"><span>Sign-ups, users, quotas</span><span class="lab">2 invites ›</span></div><div class="row" style="height:44px;justify-content:space-between"><span>Storage, domain</span><span class="lab">41% ›</span></div></div></div></div>
+      <figcaption><b>Settings in four groups, by where each setting is saved.</b> <i>You</i> (on your homeserver, so it follows you), <i>This phone</i> (only this device), <i>This node</i> and <i>This homeserver</i> (admin only; the last appears only when the node runs its own homeserver). Every setting sits in exactly one group; where a node default and your own choice both exist (playback quality), the node holds the default and <i>You</i> the override, and each row says which applies. The list scrolls on a phone; on tablets and desktops the four groups are the left pane.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wide">
+  <h2>Tablet, 600 to 1024 px</h2>
+  <div class="figrow">
+    <figure>
+      <div class="wf" data-w="820" data-h="1180" data-s=".5"><div class="screen" style="width:820px;height:1180px;display:flex">
+        <div style="width:76px;border-right:1px solid var(--wf-box2);display:flex;flex-direction:column;align-items:center;gap:22px;padding-top:24px;font-size:11px;text-align:center">
+          <div>◻<br>Home</div><div>◻<br>Search</div><div style="color:var(--wf-accent);font-weight:600">◼<br>Library</div><div>◻<br>Zones</div><div style="margin-top:auto;margin-bottom:24px">⚙<br>Settings</div>
+        </div>
+        <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:32px;padding:32px">
+          <div class="col2" style="gap:18px">
+            <div class="row" style="justify-content:space-between"><span class="lab">⌄</span><span class="pill">Kitchen ▾</span></div>
+            <div class="b" style="aspect-ratio:1"></div>
+            <b style="font-size:24px">Song title</b><span class="lab" style="font-size:16px">Artist · Album</span>
+            <span class="pill on" style="align-self:flex-start">FLAC 96/24 · TIDAL Max</span>
+            <div class="ln" style="height:6px"></div>
+            <div class="row" style="justify-content:space-between;padding:0 10px"><div class="b circ" style="width:34px;height:34px"></div><div class="b circ" style="width:48px;height:48px"></div><div class="circ acc" style="width:76px;height:76px"></div><div class="b circ" style="width:48px;height:48px"></div><div class="b circ" style="width:34px;height:34px"></div></div>
+          </div>
+          <div class="col2" style="gap:14px;border-left:1px solid var(--wf-box2);padding-left:24px">
+            <div class="row" style="gap:8px;flex-wrap:wrap"><span class="pill on">Queue</span><span class="pill">Lyrics</span><span class="pill">Details</span><span class="pill">Sources</span><span class="pill">Tags</span></div>
+            <div class="row"><div class="b" style="width:48px;height:48px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:70%"></div><div class="lnt" style="width:40%"></div></div></div>
+            <div class="row"><div class="b" style="width:48px;height:48px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:60%"></div><div class="lnt" style="width:45%"></div></div></div>
+            <div class="row"><div class="b" style="width:48px;height:48px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:75%"></div><div class="lnt" style="width:35%"></div></div></div>
+            <div class="row"><div class="b" style="width:48px;height:48px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:55%"></div><div class="lnt" style="width:50%"></div></div></div>
+            <div class="row"><div class="b" style="width:48px;height:48px"></div><div class="col2" style="flex:1;gap:6px"><div class="ln" style="width:68%"></div><div class="lnt" style="width:42%"></div></div></div>
+          </div>
+        </div>
+      </div></div>
+      <figcaption><b>Tablet: a rail and a two-column Now playing.</b> The player stays left; the sheet that a phone slides up is a side panel on the right, with the same five tabs. Lists become two-column grids; the mini player sits at the bottom of the content area.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wide">
+  <h2>Desktop, over 1024 px</h2>
+  <div class="figrow">
+    <figure>
+      <div class="wf" data-w="1440" data-h="900" data-s=".8"><div class="screen" style="width:1440px;height:900px;display:grid;grid-template-columns:240px 1fr 340px;grid-template-rows:1fr 88px">
+        <div style="grid-row:1;border-right:1px solid var(--wf-box2);padding:24px 16px;display:flex;flex-direction:column;gap:12px">
+          <b style="font-size:18px">Pubky Music</b>
+          <span class="lab" style="margin-top:8px">LIBRARY</span><span>Home</span><span style="color:var(--wf-accent);font-weight:600">Albums</span><span>Artists</span><span>Songs</span><span>Playlists</span>
+          <span class="lab" style="margin-top:8px">SHARED WITH YOU</span><span>Anna's library</span><span>Office NAS</span>
+          <span class="lab" style="margin-top:8px">PLAYING</span><span>Zones</span><span style="margin-top:auto">Settings</span>
+        </div>
+        <div style="grid-row:1;padding:24px 28px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
+          <div class="row" style="gap:16px"><div class="b" style="width:180px;height:180px"></div><div class="col2" style="gap:10px"><span class="lab">ALBUM · MY LIBRARY</span><b style="font-size:32px">Album title</b><span class="lab" style="font-size:15px">Artist · 2015 · 12 songs · FLAC 96/24</span><div class="row"><div class="acc b" style="width:96px;height:36px"></div><div class="b" style="width:96px;height:36px"></div></div></div></div>
+          <div class="row lab" style="border-bottom:1px solid var(--wf-box2);padding:8px 0;font-family:var(--mono);font-size:11px"><span style="width:40px">#</span><span style="flex:3">TITLE</span><span style="flex:2">ARTIST</span><span style="width:110px">QUALITY</span><span style="width:60px">TIME</span></div>
+          <div class="row" style="padding:6px 0"><span style="width:40px" class="lab">1</span><span style="flex:3"><div class="ln" style="width:60%"></div></span><span style="flex:2"><div class="lnt" style="width:50%"></div></span><span style="width:110px" class="lab">96/24</span><span style="width:60px" class="lab">4:12</span></div>
+          <div class="row" style="padding:6px 0"><span style="width:40px" class="lab">2</span><span style="flex:3"><div class="ln" style="width:50%"></div></span><span style="flex:2"><div class="lnt" style="width:40%"></div></span><span style="width:110px" class="lab">96/24</span><span style="width:60px" class="lab">4:36</span></div>
+          <div class="row" style="padding:6px 0"><span style="width:40px" class="lab">3</span><span style="flex:3"><div class="ln" style="width:70%"></div></span><span style="flex:2"><div class="lnt" style="width:45%"></div></span><span style="width:110px" class="lab">96/24</span><span style="width:60px" class="lab">5:08</span></div>
+          <div class="row" style="padding:6px 0"><span style="width:40px" class="lab">4</span><span style="flex:3"><div class="ln" style="width:55%"></div></span><span style="flex:2"><div class="lnt" style="width:35%"></div></span><span style="width:110px" class="lab">96/24</span><span style="width:60px" class="lab">4:25</span></div>
+        </div>
+        <div style="grid-row:1;border-left:1px solid var(--wf-box2);padding:20px;display:flex;flex-direction:column;gap:12px">
+          <div class="row" style="gap:8px;flex-wrap:wrap"><span class="pill on">Queue</span><span class="pill">Lyrics</span><span class="pill">Details</span><span class="pill">Sources</span><span class="pill">Tags</span></div>
+          <div class="row"><div class="b" style="width:40px;height:40px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:70%"></div><div class="lnt" style="width:40%"></div></div></div>
+          <div class="row"><div class="b" style="width:40px;height:40px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:60%"></div><div class="lnt" style="width:45%"></div></div></div>
+          <div class="row"><div class="b" style="width:40px;height:40px"></div><div class="col2" style="flex:1;gap:5px"><div class="ln" style="width:75%"></div><div class="lnt" style="width:35%"></div></div></div>
+          <span class="lab" style="margin-top:auto">Close the panel for a wider list</span>
+        </div>
+        <div style="grid-column:1/-1;grid-row:2;border-top:1px solid var(--wf-box2);display:grid;grid-template-columns:1fr 1.4fr 1fr;align-items:center;padding:0 20px;gap:20px">
+          <div class="row"><div class="b" style="width:56px;height:56px"></div><div class="col2" style="gap:5px"><b style="font-size:13px">Song title</b><span class="lab">Artist</span></div></div>
+          <div class="col2" style="gap:8px;align-items:center"><div class="row" style="gap:18px"><div class="b circ" style="width:28px;height:28px"></div><div class="b circ" style="width:32px;height:32px"></div><div class="circ acc" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:28px;height:28px"></div></div><div class="ln" style="width:100%;height:5px"></div></div>
+          <div class="row" style="justify-content:flex-end;gap:10px"><span class="pill on">FLAC 96/24 · TIDAL</span><span class="pill">Kitchen ▾</span><div class="ln" style="width:90px"></div></div>
+        </div>
+      </div></div>
+      <figcaption><b>Desktop: sidebar, a dense list with columns, the queue docked right, the player bar along the bottom.</b> Shared libraries get their own sidebar section. The docked panel is the same five tabs; closing it widens the list. Now playing opens as a full view with the panel beside the art.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wide">
+  <h2>Colour from where it plays</h2>
+  <p style="max-width:72ch">While a song plays, the player takes an accent from where it streams: the quality label, the scrubber, the source chip and the play button. Now playing also gets a soft gradient from the cover. Local files and your homeserver keep our own accent. A tint only: no logos beyond the small source mark, no copied layouts or fonts. Lists and the rest of the app keep their own theme, so nothing else changes colour from song to song.</p>
+  <div class="figrow">
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-spotify" style="--art:#c8663b;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#c8663b"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">OGG 320 kbps</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>Spotify</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>Spotify.</b> The Spotify accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-tidal" style="--art:#2b4a8a;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#2b4a8a"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">FLAC 96/24 · Max</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>TIDAL</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>TIDAL.</b> The TIDAL accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-qobuz" style="--art:#2f6f5e;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#2f6f5e"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">FLAC 192/24</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>Qobuz</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>Qobuz.</b> The Qobuz accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+  </div>
+  <p style="max-width:72ch" class="lab">Each accent is checked in both themes and nudged where it fails: text on the background at least 4.5:1, and the play button's ink on the accent at least 4.5:1. On dark, bright accents (Spotify's green, TIDAL's cyan) take dark ink; white on them would fail. Switch the theme to see both. Settings › Appearance: <b>Colour from source</b> (on), <b>Colour from album art</b> (on), or neither. With reduced motion the colour changes without a fade.</p>
+</section>
+
+<section class="col">
+  <h2>Layout, per person</h2>
+  <p><b>Settings › Home and layout:</b> Layout <i>Automatic</i> (by width, as above), <i>Compact</i> (phone arrangement at any width), or <i>Comfortable</i> (tablet arrangement on a desktop); <i>Dense lists</i> on tablets and desktops; Home rows to show and their order. With per-person libraries (STEWARD-MULTI-USER.md) these are saved on each person's homeserver, so they follow you to every device.</p>
+
+  <h2>Multi-user screens, inside this shell</h2>
+  <ul>
+    <li><b>Library:</b> "My library" first; each library shared with you as its own section (a chip on phones, a sidebar group on desktops), never merged into yours. A shared song's menu says whose library it is from.</li>
+    <li><b>Settings › My accounts:</b> your TIDAL, Spotify, Qobuz, Last.fm, Plex… from your sources vault; nobody else on the node can use them.</li>
+    <li><b>Settings › Service apps (admin):</b> the node's app keys (Spotify app, Qobuz app, YouTube key, Last.fm app…) in one screen, each with where to get it and a Test button. People never see it.</li>
+    <li><b>Settings › My library and sharing:</b> where your files are (and the remote homeserver's quota warning), and who may listen or download.</li>
+  </ul>
+
+  <h2>Build order once you agree</h2>
+  <ol>
+    <li>Navigation shell: tab bar, rail, sidebar; the mini player; expand and collapse.</li>
+    <li>Now playing on one screen; the five sheets and panels.</li>
+    <li>Library, album, artist, playlist, search: folding headers, grids on tablets, columns on desktops.</li>
+    <li>Settings as a grouped list on phones, two panes on bigger screens (with the multi-user screens as the ADR lands).</li>
+  </ol>
+  <p>Each step: screenshots at 390, 820 and 1440 px in light and dark, before and after; the overlap, accessibility and click-every-button checks at all three widths.</p>
+
+  <div class="ask">
+    <b>Three things to decide</b>
+    <ol>
+      <li><b>The fourth tab:</b> Zones (where it plays, as drawn), or Queue (then Zones moves into the player's zone pill only)?</li>
+      <li><b>Swipe gestures on rows:</b> swipe right for Play next and left for Add to playlist, as drawn, or long-press only?</li>
+      <li><b>Lyrics:</b> in place of the art (Apple Music) or in the sheet with the others (as drawn)?</li>
+    </ol>
+  </div>
+</section>
+</main>
+
+<script>
+// Scale each wireframe to fit its row, never above the scale it asks for
+const fit = () => {
+  for (const wf of document.querySelectorAll('.wf')) {
+    const w = +wf.dataset.w, h = +wf.dataset.h, want = +wf.dataset.s;
+    const room = Math.min(wf.closest('section').clientWidth - 2, window.innerWidth - 34);
+    const s = Math.min(want, room / w);
+    wf.style.width = Math.round(w * s) + 'px'; wf.style.height = Math.round(h * s) + 'px';
+    wf.querySelector('.screen').style.transform = `scale(${s})`;
+  }
+};
+fit(); addEventListener('resize', fit);
+</script>
