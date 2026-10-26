@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Settings in four groups, by where each setting is saved** (STEWARD-SETTINGS-GROUPS.md; build step 4 of docs/ux/responsive.md):
+  - **You** (saved on your homeserver, so it follows you): My accounts, Home, and Playback quality. Each choice says whether yours or the node's default applies.
+  - **This device:** Display (theme, layout, Dense lists, colour), kept in this browser.
+  - **This node** (admin): Service apps (every app the admin sets once, with where to get one), People, Library folders, Zones and outputs, Discover, Backup, Import, and About and updates.
+  - **This homeserver** (admin, only when the node runs its own): its address, status, accounts, invites and storage, and the domain and tunnel.
+  - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
+  - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
+
 - **The API says when the homeserver is full** (the owner's upload request; the screens are mn-app's): a homeserver's 507 becomes "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota" on the upload (`full: true`), in a failed save, and as a 507 for a single copy; folder copies stop at the first such file instead of sending the rest only to be refused. `GET /v1/storage` keeps when it happened (`full_at`, for that account) until an upload goes through or files are deleted. On another homeserver, whose quota nobody can read, it reports the music files that homeserver lists (`used_from: your music files there`); the bundled one still reports the exact quota and use.
 - **Service apps in one list** (ADR 0016 step 2, the admin side): `GET /v1/node/apps` names every app the node uses for everyone (Spotify, TIDAL, Qobuz, SoundCloud, YouTube, Last.fm, Jamendo, AcoustID, the drives, the artist-image services), whether each is set and from where, where to get one, and the route that sets it; never a secret. Settings › This node can show them on one screen.
 - **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):

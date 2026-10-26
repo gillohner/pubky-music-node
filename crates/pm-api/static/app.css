@@ -1263,3 +1263,9 @@ html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-bt
 html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
 /* and a soft gradient from the cover behind Now playing */
 html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }
+
+/* Settings in four groups (STEWARD-SETTINGS-GROUPS.md): a header per group saying where it is saved */
+.set-group-h { display: flex; flex-direction: column; gap: 2px; padding: 14px 10px 6px; }
+.set-group-h:first-child { padding-top: 2px; }
+.set-group-t { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
+.set-group-s { font-size: 12px; color: var(--muted); line-height: 1.35; }

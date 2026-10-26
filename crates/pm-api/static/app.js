@@ -1276,14 +1276,16 @@
   // `<prefix>-<key>`. The view's address is `/<view>/<key>` (add the view to the router).
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
-  const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
+  const sideTabs = ({ view, title, tabs: entries, prefix = view, ids = {}, remembered }) => {
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width
+    // Entries are tabs ([id, label, icon, extra]) and group headers ({group, title, saved}) between them
+    const tabs = entries.filter(Array.isArray);
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
     const name = (k) => (tabs.find(([x]) => x === k) || [k, k])[1];
     const pid = (k) => ids[k] || `${prefix}-${k}`;
-    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${tabs.map(([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`).join('')}</nav>`;
+    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${entries.map((e) => (!Array.isArray(e) ? `<div class="set-group-h" role="presentation"><span class="set-group-t">${esc(e.title)}</span>${e.saved ? `<span class="set-group-s">${esc(e.saved)}</span>` : ''}</div>` : (([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`)(e))).join('')}</nav>`;
     const panel = (k, html) => `<section class="set-panel" id="${pid(k)}" data-panel="${k}" role="tabpanel" aria-labelledby="${prefix}tab-${k}" ${active === k ? '' : 'hidden'}>${phone ? `<button class="btn ghost set-back" data-tabs-back>${icon('back')} ${esc(title)}</button>` : ''}<h2 class="set-title">${esc(name(k))}</h2>${html}</section>`;
     const page = (panels) => (phone && active ? '' : pageHead(title)) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav()}<div class="set-body-wrap">${panels}</div></div>`;
     // On a computer a tab switches in place (the address follows); on a phone it is its own page
@@ -1303,7 +1305,21 @@
     };
     return { phone, active, name, nav, panel, page, wire };
   };
-  const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['people', 'People', 'artist'], ['remote', 'Remote access', 'external'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
+  // Settings in four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md, docs/ux/responsive.md):
+  // You (your homeserver), This device, This node (admin), This homeserver (admin, with a bundled one)
+  const SETTINGS_GROUPS = { you: 'Saved on your homeserver: follows you to every node and device', device: 'Only on this device', node: 'For everyone on this node', homeserver: 'The homeserver this node runs' };
+  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false }) => [
+    { group: 'you', title: 'You', saved: saved.you || SETTINGS_GROUPS.you },
+    ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'],
+    { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
+    ['appearance', 'Display', 'sun'],
+    { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
+    ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['library', 'Library folders', 'disc'], ['playback', 'Zones and outputs', 'zone'],
+    ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
+    ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['about', 'About and updates', 'info'],
+    ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
+  ];
+  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
   const VIEW_LABELS = { downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
@@ -2568,7 +2584,8 @@
           await pubkyUser();
           // Rows the owner can hide and reorder (UX review #10); the layout is kept on the node
           const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
-          if (!state.homeLayout) state.homeLayout = await api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] }));
+          // Your Home (Settings › You): your own layout where you set one, else the node's default
+          if (!state.homeLayout) state.homeLayout = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
           const lay = state.homeLayout; const known = HOME_ROWS.map(([k]) => k);
           const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
           const showRow = (k) => !(lay.hidden || []).includes(k);
@@ -2578,7 +2595,7 @@
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
-          const saveLayout = async (next) => { state.homeLayout = next; render(); try { state.homeLayout = await api('PUT', '/home/layout', next); } catch (e) { toast(e.message, 'error'); } };
+          const saveLayout = async (next) => { state.homeLayout = next; render(); try { const p = await api('PUT', '/me/prefs', { home_layout: next }); state.homeLayout = (p.home_layout && p.home_layout.value) || next; } catch (e) { toast(e.message, 'error'); } };
           $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
           const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
           $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
@@ -3936,10 +3953,14 @@
           const hsHere = !!(bundled && bundled.configured && bundled.reachable);
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           const stor = await api('GET', '/storage').catch(() => null);
+          const nodeMap = await api('GET', '/node').catch(() => null);
+          const prefs = await api('GET', '/me/prefs').catch(() => null);
+          const apps = await api('GET', '/node/apps').catch(() => null);
           if (state.view !== 'settings') return;
+          const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS.filter(([k]) => k !== 'remote' || (tunnel && tunnel.available)), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available) }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -4011,9 +4032,30 @@
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
-          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          // You › Home: whose layout applies; edit it on Home itself
+          const applies = (a) => (a === 'yours' ? 'Yours' : 'The node’s default');
+          const homeL = prefs && prefs.home_layout;
+          const homeTab = group('Your Home', row('Rows on Home', `${homeL ? `${applies(homeL.applies)}. ` : ''}Which rows show and in what order; change them with Edit Home on Home.`, `<button class="btn ghost" id="sethomeedit">${icon('settings')} Edit Home</button>${homeL && homeL.applies === 'yours' ? ' <button class="btn ghost" id="sethomereset">Use the node’s default</button>' : ''}`)
+            + row('Saved on', prefs ? (prefs.saved_on === 'homeserver' ? 'Your homeserver, so it follows you to every node and device.' : 'This node for now; it goes to your homeserver once it can be reached.') : '', ''));
+          // You › Playback quality: your choice per service over the node's
+          const qEntries = Object.entries((prefs && prefs.quality) || {});
+          const qualityTab = group('Per service', qEntries.length
+            ? qEntries.map(([src, q]) => row(esc(SERVICE_NAMES[src] || srcName(src)), applies(q.applies), `<span class="pill">${esc(String(q.value == null ? '—' : q.value))}</span>${q.applies === 'yours' ? ` <button class="btn ghost sm" data-qreset="${esc(src)}">Use the node’s</button>` : ''}`)).join('')
+            : block('', 'Each service plays at the quality set on its page in Sources. Your own choice per service, over the node’s, comes here with the services’ quality choices.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
+          // This node › Service apps: the apps the admin sets once for everyone
+          const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map((a) => row(esc(a.name), [a.note ? esc(a.note) : '', a.from ? `Set in ${esc(a.from === 'config' ? 'node.toml' : a.from === 'builtin' ? 'this build' : 'Settings')}` : ''].filter(Boolean).join(' · '), `${a.configured ? '<span class="pill ok">Set</span>' : '<span class="pill">Not set</span>'}${a.get_one ? ` <a class="btn ghost sm" href="${esc(a.get_one)}" target="_blank" rel="noopener">${icon('external')} Get one</a>` : ''}`)).join('') : block('', 'No list from this node.', ''));
+          // This homeserver: the bundled one
+          const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
+            + row('Status', '', bundled.reachable ? `<span class="pill ok">Running${bundled.version ? ` · ${esc(bundled.version)}` : ''}</span>` : `<span class="pill bad">Not reachable</span>${bundled.error ? ` <span class="muted small">${esc(bundled.error)}</span>` : ''}`)
+            + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
+            + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
+            + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
+          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
+          const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
+          const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
+          $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
           // Fix my files' tags: the list first, then the write
           const loadFixes = async () => {
             const out = $('#fixout'); if (!out) return;
