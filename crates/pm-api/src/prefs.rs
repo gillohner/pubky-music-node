@@ -187,17 +187,6 @@ pub fn load(s: &NodeState, c: &Caller) -> Prefs {
         .unwrap_or_default()
 }
 
-/// The owner's preferences on this node, for the parts of the node that apply them.
-pub fn owner(s: &NodeState) -> Prefs {
-    load(
-        s,
-        &Caller {
-            role: Role::Owner,
-            key: None,
-        },
-    )
-}
-
 fn node_layout(s: &NodeState) -> HomeLayout {
     s.library
         .lock()
@@ -239,23 +228,57 @@ fn store_local(s: &NodeState, c: &Caller, p: &Prefs) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn pending(s: &NodeState) -> bool {
+/// The owner's changes made on this node that aren't on their homeserver yet, as one `PUT` body
+/// (later changes merged over earlier ones). Kept so they can be put on top of a newer copy
+/// another node wrote meanwhile, rather than one copy replacing the other whole.
+fn pending(s: &NodeState) -> Option<Value> {
     s.library
         .lock()
         .expect("library poisoned")
         .get_setting(OWNER_PENDING_KEY)
         .ok()
         .flatten()
-        .is_some()
+        .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+        .filter(Value::is_object)
 }
 
-fn set_pending(s: &NodeState, on: bool) {
-    let lib = s.library.lock().expect("library poisoned");
-    let _ = if on {
-        lib.set_setting(OWNER_PENDING_KEY, "1")
-    } else {
-        lib.delete_setting(OWNER_PENDING_KEY).map(|_| ())
-    };
+/// Merge `more` over `into`: objects member by member, anything else replaces (a `null` stays a
+/// `null`: it means "drop the override").
+fn merge(into: &mut Value, more: &Value) {
+    match (into, more) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (k, v) in b {
+                match a.get_mut(k) {
+                    Some(x) if x.is_object() && v.is_object() => merge(x, v),
+                    _ => {
+                        a.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (a, b) => *a = b.clone(),
+    }
+}
+
+fn add_pending(s: &NodeState, change: &Value) -> Result<(), ApiError> {
+    let mut all = pending(s).unwrap_or_else(|| Value::Object(Map::new()));
+    merge(&mut all, change);
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(OWNER_PENDING_KEY, &all.to_string())?;
+    Ok(())
+}
+
+fn clear_pending(s: &NodeState) {
+    if let Err(e) = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .delete_setting(OWNER_PENDING_KEY)
+    {
+        tracing::warn!("preferences: the note of unsaved changes stays: {e}");
+    }
 }
 
 /// The owner's copy on their homeserver: `Ok(None)` when there is none, `Err` when it couldn't be
@@ -289,35 +312,59 @@ fn owner_lock() -> &'static tokio::sync::Mutex<()> {
     L.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// The owner's preferences, settled between the node and the homeserver: the newer copy wins,
-/// and one not saved there yet goes there now. Returns them and where they are saved.
+/// The owner's preferences, settled between the node and the homeserver:
+/// - changes not saved there yet go on top of the homeserver's copy when that one is newer (or the
+///   same age and different), and the result goes there;
+/// - otherwise the newer copy wins (the homeserver's on a tie), and the node's goes there when it
+///   is newer or the homeserver has none.
+///
+/// Returns them and where they are saved.
 async fn settle_owner(s: &NodeState, c: &Caller) -> Result<(Prefs, &'static str), ApiError> {
     let local = load(s, c);
     let Some(sync) = s.sync_handle() else {
         return Ok((local, "node"));
     };
     let unsaved = pending(s);
-    match remote(&sync).await {
-        Ok(Some(r)) if r.updated_at > local.updated_at && !unsaved => {
-            store_local(s, c, &r)?;
-            Ok((r, "homeserver"))
-        }
-        Ok(r) => {
-            // The node's is newer, or the homeserver has none, or the node's wasn't saved there
-            let behind = unsaved || r.as_ref() != Some(&local);
-            if behind && local.updated_at > 0 {
-                if push(&sync, &local).await {
-                    set_pending(s, false);
-                    return Ok((local, "homeserver"));
-                }
-                return Ok((local, "node"));
-            }
-            Ok((local, "homeserver"))
-        }
+    let r = match remote(&sync).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!("preferences: answering from the node's copy: {e}");
-            Ok((local, "node"))
+            return Ok((local, "node"));
         }
+    };
+    let theirs_newer = r
+        .as_ref()
+        .is_some_and(|r| r != &local && r.updated_at >= local.updated_at);
+    let settled = match (r, unsaved) {
+        // Changed elsewhere meanwhile, and changed here unsaved: ours on top of theirs
+        (Some(r), Some(patch)) if theirs_newer => {
+            let mut p = r.clone();
+            let change: PrefsUpdate = serde_json::from_value(patch)
+                .map_err(|e| ApiError::bad_request(format!("unsaved preferences: {e}")))?;
+            apply(&mut p, change)?;
+            p.updated_at = now_ms().max(r.updated_at + 1);
+            store_local(s, c, &p)?;
+            p
+        }
+        // Changed elsewhere, nothing unsaved here: theirs
+        (Some(r), None) if theirs_newer => {
+            store_local(s, c, &r)?;
+            return Ok((r, "homeserver"));
+        }
+        // Ours is newer, the homeserver has none, or ours wasn't saved there
+        (r, unsaved) => {
+            let behind = unsaved.is_some() || r.as_ref() != Some(&local);
+            if !behind || (local.updated_at == 0 && unsaved.is_none()) {
+                return Ok((local, "homeserver"));
+            }
+            local
+        }
+    };
+    if push(&sync, &settled).await {
+        clear_pending(s);
+        Ok((settled, "homeserver"))
+    } else {
+        Ok((settled, "node"))
     }
 }
 
@@ -328,7 +375,15 @@ pub(crate) async fn get(
 ) -> ApiResult<PrefsView> {
     storage_key(&c)?;
     if c.role == Role::Owner {
-        let _one = owner_lock().lock().await;
+        // A change is being saved: answer from the node's copy rather than wait for it
+        let Ok(_one) = owner_lock().try_lock() else {
+            let saved_on = if s.sync_handle().is_some() && pending(&s).is_none() {
+                "homeserver"
+            } else {
+                "node"
+            };
+            return Ok(Json(view(&s, &load(&s, &c), saved_on)));
+        };
         let (p, saved_on) = settle_owner(&s, &c).await?;
         return Ok(Json(view(&s, &p, saved_on)));
     }
@@ -392,9 +447,13 @@ fn now_ms() -> u64 {
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
     axum::Extension(c): axum::Extension<Caller>,
-    Json(u): Json<PrefsUpdate>,
+    Json(raw): Json<Value>,
 ) -> ApiResult<PrefsView> {
     storage_key(&c)?;
+    let parse = |v: Value| -> Result<PrefsUpdate, ApiError> {
+        serde_json::from_value(v).map_err(|e| ApiError::bad_request(format!("preferences: {e}")))
+    };
+    let u = parse(raw.clone())?;
     if c.role != Role::Owner {
         let mut p = load(&s, &c);
         apply(&mut p, u)?;
@@ -403,18 +462,19 @@ pub(crate) async fn put(
         return Ok(Json(view(&s, &p, "node")));
     }
     let _one = owner_lock().lock().await;
-    // The change goes on top of the newer of the node's copy and the homeserver's, so a change
-    // made on another node meanwhile isn't written over
+    // The change goes on top of the settled copy, so a change made on another node meanwhile isn't
+    // written over; it is noted as unsaved until the homeserver has it (also before the node is
+    // signed in with Pubky, so a newer copy found then doesn't replace it whole)
     let (mut p, _) = settle_owner(&s, &c).await?;
     apply(&mut p, u)?;
     p.updated_at = now_ms().max(p.updated_at + 1);
     store_local(&s, &c, &p)?;
+    add_pending(&s, &raw)?;
     let Some(sync) = s.sync_handle() else {
         return Ok(Json(view(&s, &p, "node")));
     };
-    set_pending(&s, true);
     let saved_on = if push(&sync, &p).await {
-        set_pending(&s, false);
+        clear_pending(&s);
         "homeserver"
     } else {
         "node"
@@ -425,6 +485,33 @@ pub(crate) async fn put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsaved_changes_merge_into_one_change_and_go_on_top_of_a_newer_copy() {
+        let mut all = serde_json::json!({});
+        merge(&mut all, &serde_json::json!({"quality": {"tidal": "max"}}));
+        merge(
+            &mut all,
+            &serde_json::json!({"quality": {"qobuz": "cd", "tidal": null}, "appearance": {"colour_from": "art"}}),
+        );
+        assert_eq!(
+            all,
+            serde_json::json!({"quality": {"tidal": null, "qobuz": "cd"}, "appearance": {"colour_from": "art"}})
+        );
+        // Another node's newer copy changed the layout; ours changed the quality: both stay
+        let mut theirs = Prefs::default();
+        theirs.home_layout = Some(HomeLayout {
+            order: vec!["radio".into()],
+            hidden: vec![],
+        });
+        theirs.quality.insert("tidal".into(), "high".into());
+        let change: PrefsUpdate = serde_json::from_value(all).unwrap();
+        apply(&mut theirs, change).unwrap();
+        assert_eq!(theirs.home_layout.unwrap().order, ["radio"]);
+        assert_eq!(theirs.quality.get("qobuz").map(String::as_str), Some("cd"));
+        assert!(!theirs.quality.contains_key("tidal"));
+        assert_eq!(theirs.appearance.colour_from.as_deref(), Some("art"));
+    }
 
     #[test]
     fn a_full_quality_list_can_still_be_trimmed_and_changed() {

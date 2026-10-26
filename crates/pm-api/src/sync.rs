@@ -1027,7 +1027,11 @@ impl PubkySync {
         else {
             return Ok(None);
         };
-        Ok(serde_json::from_value(v).ok())
+        // A copy this build can't read (a newer build's) is an error, not "none": nothing writes
+        // over it
+        serde_json::from_value(v)
+            .map(Some)
+            .map_err(|e| SyncError::Store(format!("prefs.json: {e}")))
     }
 
     /// Save the person's own preferences on their homeserver.
