@@ -611,7 +611,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route(
             "/devices/{id}/downloads",
-            get(devices::get_downloads).put(devices::put_downloads),
+            get(devices::get_downloads).put(devices::put_downloads).layer(
+                axum::extract::DefaultBodyLimit::max(devices::DOWNLOADS_BODY_LIMIT),
+            ),
         )
         .route("/vault", get(vault::get))
         .route("/vault/register", post(vault::register))

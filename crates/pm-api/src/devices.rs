@@ -28,7 +28,11 @@ const MAX_DEVICES: usize = 32;
 const MAX_KEEP_TRACKS: usize = 20_000;
 const MAX_KEEP_ALBUMS: usize = 2_000;
 const MAX_KEEP_PLAYLISTS: usize = 200;
-const MAX_HAVE: usize = 50_000;
+/// Files a device reports: more than a kept library can expand to (favourites, albums and
+/// playlists aren't capped by track), and within the downloads route's body limit.
+pub(crate) const MAX_HAVE: usize = 200_000;
+/// The downloads route's body limit: `MAX_HAVE` entries of about 60 bytes each.
+pub(crate) const DOWNLOADS_BODY_LIMIT: usize = 16 << 20;
 /// A file a device reports is at most this big (1 TiB): anything else is a bug or a lie.
 const MAX_FILE_BYTES: u64 = 1 << 40;
 /// The formats a device may say it keeps a song in.
@@ -139,9 +143,14 @@ fn store(s: &NodeState, d: &Device) -> Result<(), ApiError> {
 }
 
 fn all(s: &NodeState) -> Result<Vec<Device>, ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    Ok(lib
-        .settings_with_prefix(PREFIX)?
+    // Only the raw records are copied under the library lock; parsing (a device's `have` can be
+    // large) happens after it is let go
+    let raw = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .settings_with_prefix(PREFIX)?;
+    Ok(raw
         .into_iter()
         .filter_map(|(_, v)| serde_json::from_str::<Device>(&v).ok())
         .collect())
@@ -327,8 +336,14 @@ fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiEr
         }
     }
     for p in keep.playlists.iter().collect::<BTreeSet<_>>() {
-        // A playlist that was deleted keeps nothing
-        if let Ok(ids) = crate::playlists::library_track_ids(&lib, p) {
+        // A playlist that was deleted keeps nothing; any other failure is an error, or its songs
+        // would be listed as unkept (and the device might delete them)
+        let ids = match crate::playlists::library_track_ids(&lib, p) {
+            Ok(ids) => Some(ids),
+            Err(e) if e.status == axum::http::StatusCode::NOT_FOUND => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(ids) = ids {
             for id in ids {
                 if seen.contains(&id) {
                     continue;
