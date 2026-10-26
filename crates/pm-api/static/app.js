@@ -793,7 +793,7 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); if (search.value.trim()) runSearch(); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
   $('#me').onclick = () => setView('settings');
   $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
