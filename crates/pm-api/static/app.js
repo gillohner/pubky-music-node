@@ -281,6 +281,12 @@
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
+  // One design at three sizes (docs/ux/responsive.md): phone under 600 px (bottom tabs and a mini
+  // player), tablet to 1024 px (a rail), desktop above (the sidebar). Settings › Appearance › Layout
+  // can force Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop).
+  const layoutPref = () => { try { return localStorage.getItem('pm.layout') || 'auto'; } catch { return 'auto'; } };
+  const shellFor = (w, pref) => (pref === 'compact' || w < 600 ? 'phone' : pref === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop');
+  const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
   // A button that needs text in a field: disabled (with the reason) until there is some.
   const needsText = (input, btn) => { if (!input || !btn) return; const sync = () => { const empty = !input.value.trim(); btn.disabled = empty; btn.title = empty ? `Type in “${input.placeholder || 'the field'}” first` : ''; }; input.addEventListener('input', sync); sync(); };
@@ -787,56 +793,52 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { search.focus(); if (search.value.trim()) runSearch(); return; } setView(k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
+  $('#me').onclick = () => setView('settings');
+  $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); closeJobPop(); if ($('#sidebar').classList.contains('open')) closeSheet(); };
-  // The menu button: phones open the sidebar as a sheet (closes on back, outside tap, Esc or a pick);
-  // wider screens collapse it to icons (or expand it on tablets), remembered per browser.
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); };
+  // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
+  // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
+  const applyShell = () => {
+    const now = shellFor(window.innerWidth, layoutPref());
+    document.documentElement.dataset.shell = now;
+    const up = $('#upstreams');
+    if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
+  };
+  window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
+  applyShell();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
-  const phone = () => mq('(max-width: 720px)');
   const tablet = () => mq('(max-width: 1100px)');
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
   applySide();
   // Icon-only nav items keep their names as tooltips and accessible labels.
   $$('.nav-item').forEach((b) => { const t = (b.querySelector('span') || {}).textContent; if (t) { b.title = t; b.setAttribute('aria-label', t); } });
-  const sheetOpen = () => $('#sidebar').classList.contains('open');
-  let sheetBack = false;
-  const closeSheet = (fromBack) => { if (!sheetOpen()) return; sheetBack = !!fromBack; $('#sidebar').classList.remove('open'); $('#scrim').hidden = true; $('#menu').setAttribute('aria-expanded', 'false'); if (!fromBack && history.state && history.state.sheet) history.back(); };
   $('#menu').setAttribute('aria-expanded', 'false');
   $('#menu').onclick = () => {
-    if (phone()) {
-      if (sheetOpen()) { closeSheet(); return; }
-      $('#sidebar').classList.add('open'); $('#scrim').hidden = false; $('#menu').setAttribute('aria-expanded', 'true');
-      // A transient history entry, so back closes the sheet instead of leaving the page.
-      try { history.pushState({ ...(history.state || {}), sheet: true }, '', location.pathname + location.search); } catch { /* sandboxed */ }
-      return;
-    }
     const collapsedNow = shell.classList.contains('collapsed') || (tablet() && !shell.classList.contains('expanded'));
     const next = collapsedNow ? (tablet() ? 'names' : 'auto') : 'icons';
     try { localStorage.setItem('pm.sidebar', next); } catch { /* no storage */ }
     applySide();
     $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(tablet() && next === 'auto')));
   };
-  window.addEventListener('popstate', () => { if (sheetOpen()) closeSheet(true); });
   // Menus, popovers and dialogs close on back and the page stays (STEWARD-UX-BRIEF-2 navigation).
   // Opening one adds a transient history entry; back pops it and closes them. Closing one any
   // other way pops it too, and opening a page from inside one replaces it (setView).
   const transients = []; // { open: () => bool, close: (fromBack) => void }
   let popHandled = false; let selfPop = false; let popPending = null; let popResolve = null;
-  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true, sheet: false }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
+  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
   // Popping is asynchronous: a page opened right after waits for it (setView), or the pop would undo it.
   const popTransient = () => { if (transients.some((t) => t.open())) return; if (history.state && history.state.transient && !selfPop) { selfPop = true; popPending = new Promise((r) => { popResolve = r; setTimeout(() => { popPending = null; popResolve = null; r(); }, 600); }); history.back(); } };
   window.addEventListener('popstate', () => {
     if (selfPop) { selfPop = false; popHandled = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
-    if (sheetOpen() || sheetBack) return;
     const open = transients.filter((t) => t.open()); if (!open.length) return;
     open.forEach((t) => t.close(true)); popHandled = true;
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOpen()) closeSheet(); });
 
   // ---- player bar ----------------------------------------------------------
   const ORDER = { bit_perfect: 0, enhanced: 1, lossless: 2, lossy: 3 };
@@ -941,17 +943,32 @@
   };
   // ---- Now Playing overlay -------------------------------------------------
   const overlay = $('#nowplaying');
-  const toggleNowPlaying = (force) => {
-    const open = force === true ? true : overlay.hidden;
+  // Back closes it like a menu; opening a page from it takes its history entry (setView)
+  const npTr = { open: () => !overlay.hidden, close: (fromBack) => toggleNowPlaying(false, fromBack) };
+  const toggleNowPlaying = (force, fromBack) => {
+    const open = force === true ? true : force === false ? false : overlay.hidden;
+    const was = !overlay.hidden;
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
-    if (open) renderNowPlaying();
+    if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
+    const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
+    if (was && fromBack !== true) popTransient();
   };
+  // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it
+  {
+    let y0 = null; let d0 = null;
+    const player = $('.player');
+    player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
+    player.addEventListener('touchend', (e) => { if (y0 != null && y0 - e.changedTouches[0].clientY > 40 && overlay.hidden) toggleNowPlaying(true); y0 = null; });
+    overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
+    overlay.addEventListener('touchend', (e) => { if (d0 != null && e.changedTouches[0].clientY - d0 > 80 && !overlay.hidden) toggleNowPlaying(); d0 = null; });
+  }
   const renderNowPlaying = () => {
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
-      overlay.innerHTML = `<div class="np-page"><div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
+      overlay.innerHTML = `<div class="np-page"><div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
+      $('#npq').onclick = () => setView('queue');
       return;
     }
     const it = np.item;
@@ -1062,7 +1079,7 @@
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
   const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
@@ -1203,22 +1220,23 @@
       // Changing a query or tab inside the same page replaces; opening another page pushes.
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
-      const replace = how === 'replace' || !!cur.sheet || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { sheet: false, transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const replace = how === 'replace' || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
+      const entry = { transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    // The phone's bottom bar: Home, Search, Library (every library view and item page), Queue
-    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'radio', 'person'];
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'albums' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Zones, Settings
+    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
+    if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    if ($('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false'); } $('#scrim').hidden = true; closePop();
+    $('#scrim').hidden = true; closePop();
+    if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
     return render();
   };
   window.addEventListener('popstate', async (e) => {
-    if (sheetBack) { sheetBack = false; return; } // back only closed the sidebar sheet
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
@@ -1579,7 +1597,7 @@
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
     menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
     // Phones: a sheet from the bottom, not a dropdown that runs off the screen (UX review #3)
-    menuEl.classList.toggle('sheet', !!(window.matchMedia && matchMedia('(max-width: 720px)').matches));
+    menuEl.classList.toggle('sheet', shellMode() === 'phone');
     if (menuEl.classList.contains('sheet')) { menuEl.style.left = '0px'; menuEl.style.right = '0px'; menuEl.style.top = 'auto'; menuEl.style.bottom = '0px'; menuEl.style.width = 'auto'; }
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
@@ -2084,7 +2102,22 @@
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => window.open(it.uri, '_blank', 'noopener') }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
-  const pageHead = (title, count, actions = '') => `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
+  const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
+  const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`));
+  const bindLayoutPick = () => $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
+    try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
+    $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
+    applyShell();
+  });
+  // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
+  const LIB_TOP = [['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
+  const libNav = () => {
+    if (!LIB_TOP.some(([k]) => k === state.view)) return '';
+    const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
+    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
+    return `<nav class="libnav chips" aria-label="Library">${items.map(([k, l]) => `<button class="chip ${k === state.view ? 'on' : ''}" data-libnav="${k}" ${k === state.view ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
+  };
+  const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
@@ -2793,7 +2826,7 @@
           try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
           const srcs = state.sources;
-          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
@@ -3571,8 +3604,8 @@
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), '<button class="btn" id="lsignout">Sign out of this device</button>')
                 + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
-              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
-            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row);
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             $('#lsignout').onclick = async () => { try { await api('DELETE', '/me/token'); } catch { /* signed out either way */ } state.token = ''; try { localStorage.removeItem('pm.token'); } catch { /* no storage */ } location.reload(); };
             break;
           }
@@ -3658,7 +3691,7 @@
             + group('Every day or week, to a folder', block('', '', '<div id="bksched"><div class="skeleton" style="height:60px"></div></div>'))
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
-          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
+          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
@@ -3746,7 +3779,7 @@
           const ca = $('#pkcopyall'); if (ca) ca.onclick = () => startUpload({ all: true });
           const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; await bringFiles(); mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+          $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
           // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
           const roonRun = async (dry) => {
             const files = [...($('#roonfiles').files || [])]; const out = $('#roonout');

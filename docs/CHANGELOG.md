@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **One app shell for phone, tablet and desktop** (STEWARD-UX-RESPONSIVE.md; build step 1 of docs/ux/responsive.md):
+  - Phones (under 600 px) get tabs: Home, Search, Library, Zones. The mini player sits above them as a card with the cover, the title, the zone and play/pause.
+  - Swipe up on the mini player opens Now playing; swipe down from its top closes it.
+  - Tablets (600–1024 px) get a rail with the same four, plus Settings at the foot, and the full player bar. Desktops keep the sidebar.
+  - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
+  - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
+  - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
 - **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
 - **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
 - **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
