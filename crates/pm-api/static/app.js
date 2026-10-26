@@ -1018,6 +1018,13 @@
   // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
   // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
   // Play from order and the zone's output settings.
+  // On a source's tab, bring its quality setting into view (it may load a moment after the page)
+  const focusQualityControl = (tries = 20) => {
+    const el = $$('[aria-label]', main).find((e) => /quality/i.test(e.getAttribute('aria-label')) && e.offsetParent !== null);
+    if (!el) { if (tries > 0) setTimeout(() => focusQualityControl(tries - 1), 200); return; }
+    el.scrollIntoView({ block: 'center' }); el.focus({ preventScroll: true });
+    const row = el.closest('.set-row') || el; row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1600);
+  };
   const qualitySheet = async () => {
     const z = currentZone(); const np = z && z.now_playing; if (!np) return;
     const f = np.format || {};
@@ -1045,18 +1052,20 @@
     if (svc === 'library') return;
     const box = $('#qsvc .set-help', d);
     const goSource = `<button class="lnk" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} settings</button>`;
+    // Straight to the service's own quality setting (its Sources tab), for owners
+    const goQuality = isOwner() && svc && svc !== 'stream' && svc !== 'library' ? `<button class="lnk qjump" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} quality settings ›</button>` : '';
     let qs = null;
     if (isOwner() && svc && svc !== 'stream') { try { qs = await api('GET', `/sources/${encodeURIComponent(svc)}/quality`); } catch { qs = null; } }
     if (!d.isConnected) return;
     if (qs && (qs.options || []).length) {
       const when = qs.applies === 'now' ? 'Applies now.' : 'Applies from the next song.';
       box.classList.remove('muted');
-      box.innerHTML = `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>${qs.note ? `<span class="muted small qnote">${esc(qs.note)}</span>` : ''}`;
+      box.innerHTML = goQuality + `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>${qs.note ? `<span class="muted small qnote">${esc(qs.note)}</span>` : ''}`;
       $$('[data-qopt]', box).forEach((b) => b.onclick = async () => { try { await api('PUT', `/sources/${encodeURIComponent(svc)}/quality`, { id: b.dataset.qopt }); $$('[data-qopt]', box).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); toast(`${SERVICE_NAMES[svc] || srcName(svc)}: ${b.textContent}. ${when}`); } catch (e) { toast(e.message, 'error'); } });
     } else {
       box.innerHTML = f.preview ? `Previews only (30 s). Full songs need another service.${isOwner() ? ' ' + goSource : ''}` : qs && qs.note ? esc(qs.note) : svc === 'stream' || !isOwner() ? 'As the stream sends it.' : `Its quality is set in ${goSource}.`;
     }
-    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('sources', { source: svc }); };
+    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('sources', { source: svc }); focusQualityControl(); };
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };

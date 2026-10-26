@@ -1141,3 +1141,5 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .npqual .qtext-long { font-weight: 550; }
 .qsheet .qnote { display: block; margin-top: 6px; }
+.qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
+.set-row.flash, .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; transition: outline-color 1.2s ease; }
