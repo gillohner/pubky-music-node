@@ -1722,10 +1722,13 @@
   // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
   // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
   {
-    let sw = null; let lastCtx = 0; let lastLong = 0;
+    let sw = null; let lastCtx = 0; let lastLong = 0; let longEnd = 0;
     document.addEventListener('contextmenu', (e) => { lastCtx = Date.now(); if (Date.now() - lastLong < 2000 && e.target.closest && e.target.closest('.srow, .track, [data-srow]')) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
     // the click a long press leaves on release (iOS) must not play the row
-    document.addEventListener('click', (e) => { if (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]')) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; } }, true);
+    document.addEventListener('click', (e) => {
+      // the click iOS sends on releasing a long press: whatever is under the finger then (a row, the menu sheet)
+      if (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]'))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
+    }, true);
     const ROWS = '.srow, .track, [data-srow]';
     const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
     const reset = (row) => { row.style.transform = ''; row.classList.remove('swiping', 'swipe-ready'); delete row.dataset.swipeLabel; };
@@ -1749,6 +1752,7 @@
     }, { passive: true });
     const end = () => {
       if (!sw) return; clearTimeout(sw.timer); const s2 = sw; sw = null;
+      if (s2.long) longEnd = Date.now();
       if (!s2.on) return;
       reset(s2.row);
       if (Math.abs(s2.dx) >= 80) { const more = moreOf(s2.row); menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now(), anchor: more }; more.click(); }
