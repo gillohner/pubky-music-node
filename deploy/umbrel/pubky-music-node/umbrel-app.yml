@@ -2,7 +2,7 @@ manifestVersion: 1
 id: pubky-music-node
 category: media
 name: Pubky Music Node
-version: "a432705"
+version: "0.1.0"
 tagline: Bit-perfect music server and zones, built on Pubky
 icon: https://raw.githubusercontent.com/gillohner/pubky-music-node/main/deploy/umbrel/pubky-music-node/icon.svg
 description: >-
@@ -33,13 +33,13 @@ defaultPassword: ""
 # APP_PASSWORD (shown by umbrelOS): the token for the web UI, the apps and Subsonic clients.
 deterministicPassword: true
 releaseNotes: >-
-  Zones overview, queue tools (shuffle, save as playlist, transfer between
-  zones, library radio, sleep timer), lyrics with follow-along, Focus by file
-  quality with format badges, new releases from your artists, backups from
-  Settings, homeserver private files, Subsonic jukebox control and lyrics,
-  an installable web UI for phones, and multi-arch images (amd64, arm64).
-  Earlier: Home, Favourites, Genres, Radio, Now Playing with the signal path;
-  group zones and a DSP editor; playlist import from M3U, CSV and Roon
-  exports; tags, reviews and favourites synced to the homeserver.
+  v0.1.0, the first versioned release. New since the last build: a bundled
+  Pubky homeserver on the box with a Cloudflare tunnel from Settings › Remote
+  access; people on the node, each signing in with their own Pubky Ring key;
+  party mode with a guest link; crossfade per zone; Library › Add music
+  (uploads and copies to your homeserver); downloads and transcodes for phones;
+  more ways to sign in to TIDAL, including imports from other apps on the box;
+  and better song matches. Earlier: zones, queue tools, lyrics, backups,
+  Subsonic jukebox control and an installable web UI.
 submitter: Pubky Music
 submission: https://github.com/gillohner/pubky-music-node

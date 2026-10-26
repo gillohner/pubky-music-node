@@ -254,10 +254,10 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
 - **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
   published as its own repository (asked of the owner); add that repository's URL in Umbrel's
   App Store › Community App Stores.
-- **The image:** until the first release tag, the app pins an `edge` build by digest
-  (multi-arch, amd64 and arm64); its version is that build's commit. Images are published to
-  `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
-  `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
+- **The image:** the app pins a release image by digest (now `0.1.0`), multi-arch (amd64 and
+  arm64). Images are published to `ghcr.io/gillohner/pubky-music-node` by
+  `.github/workflows/release.yml`: every `v*` tag gives `<version>`, `<major.minor>` and `latest`,
+  and every push to main `edge`. A new release updates the pin (docs/RELEASING.md).
 
 ## Reaching the node from outside the house
 
