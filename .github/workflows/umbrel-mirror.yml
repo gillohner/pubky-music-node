@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   mirror:
-    if: github.repository == 'gillohner/pubky-music-node'
+    # Only main is published (a manual run from another branch would push that branch's files)
+    if: github.repository == 'gillohner/pubky-music-node' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -32,7 +33,7 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/mirror && chmod 600 ~/.ssh/mirror
           # GitHub's published SSH host key (docs.github.com, "GitHub's SSH key fingerprints")
           echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null"
           git clone -q git@github.com:gillohner/pubky-music-umbrel.git "$RUNNER_TEMP/store"
           rsync -a --delete --exclude .git deploy/umbrel/ "$RUNNER_TEMP/store/"
           cd "$RUNNER_TEMP/store"
@@ -41,7 +42,7 @@ jobs:
             echo "the store is already up to date"
             exit 0
           fi
-          git -c user.name="pubky-music-node mirror" -c user.email="mirror@users.noreply.github.com" \
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -q -m "Sync from gillohner/pubky-music-node@${GITHUB_SHA::7} (deploy/umbrel)"
           git push -q origin HEAD:main
           echo "synced ${GITHUB_SHA::7}"

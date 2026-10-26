@@ -9,6 +9,6 @@ app. The password Umbrel shows for the app is the node's token: the web UI, the 
 clients ask for it.
 
 This repository is a mirror of [`deploy/umbrel/`](https://github.com/gillohner/pubky-music-node/tree/main/deploy/umbrel)
-in [gillohner/pubky-music-node](https://github.com/gillohner/pubky-music-node), synced on every change
-there. Report problems and send changes there, not here. How it's set up and checked:
+in [gillohner/pubky-music-node](https://github.com/gillohner/pubky-music-node), synced from there at each
+release (on every change, once its mirror key is set up). Report problems and send changes there, not here. How it's set up and checked:
 [docs/deploy.md › Umbrel](https://github.com/gillohner/pubky-music-node/blob/main/docs/deploy.md#umbrel).
