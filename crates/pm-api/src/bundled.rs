@@ -137,9 +137,10 @@ pub(crate) fn status_from_info(v: &Value) -> BundledStatus {
 }
 
 /// `GET /v1/homeserver/bundled`: whether the node has a bundled homeserver and how it is doing.
+/// 404 without one, so Settings can hide "This homeserver" with one cheap call.
 pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<BundledStatus> {
     if s.bundled_homeserver().is_none() {
-        return Ok(Json(BundledStatus::default()));
+        return Err(ApiError::not_found("this node has no bundled homeserver"));
     }
     Ok(Json(match admin(&s, reqwest::Method::GET, "/info", None).await {
         Ok(v) => status_from_info(&v),

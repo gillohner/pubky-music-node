@@ -3879,6 +3879,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-offline"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "getrandom 0.3.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "pm-out-airplay"
 version = "0.1.0"
 dependencies = [
@@ -4075,6 +4091,7 @@ dependencies = [
  "hound",
  "pm-model",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

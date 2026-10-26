@@ -149,3 +149,31 @@ pub trait SourceFactory: Send + Sync {
         output: &crate::sink::OutputId,
     ) -> Result<Box<dyn Processor>, SourceError>;
 }
+
+#[cfg(test)]
+mod stream_info_tests {
+    use super::StreamInfo;
+
+    /// Older nodes and sources leave members out: they read as empty, and what is unknown is
+    /// left out of the JSON again.
+    #[test]
+    fn stream_info_defaults() {
+        let f: StreamInfo = serde_json::from_str(r#"{"codec":"FLAC","lossless":true}"#).unwrap();
+        assert_eq!(
+            f,
+            StreamInfo {
+                codec: "FLAC".into(),
+                bitrate_kbps: None,
+                lossless: true,
+                service: String::new(),
+                tier: None,
+                preview: false,
+            }
+        );
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"codec": "FLAC", "lossless": true, "service": "", "preview": false})
+        );
+    }
+}

@@ -27,6 +27,13 @@ pub enum SyncError {
     Store(String),
 }
 
+impl SyncError {
+    /// The homeserver refused a write because the person's storage is full (507).
+    pub fn is_full(&self) -> bool {
+        matches!(self, SyncError::Homeserver(e) if pm_pubky::homeserver::is_full(e))
+    }
+}
+
 pub struct PubkySync {
     homeserver: NodeHomeserver,
     session: PubkySession,
@@ -1017,6 +1024,32 @@ pub struct SettingsBackup {
 }
 
 impl PubkySync {
+    /// The person's own preferences on their homeserver (`prefs.json`), when there are any.
+    pub async fn read_prefs(&self) -> Result<Option<crate::prefs::Prefs>, SyncError> {
+        let Some(v) = self
+            .homeserver
+            .read_prefs(&self.session)
+            .await
+            .map_err(|e| SyncError::Store(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        // A copy this build can't read (a newer build's) is an error, not "none": nothing writes
+        // over it
+        serde_json::from_value(v)
+            .map(Some)
+            .map_err(|e| SyncError::Store(format!("prefs.json: {e}")))
+    }
+
+    /// Save the person's own preferences on their homeserver.
+    pub async fn write_prefs(&self, p: &crate::prefs::Prefs) -> Result<(), SyncError> {
+        let v = serde_json::to_value(p).map_err(|e| SyncError::Store(e.to_string()))?;
+        self.homeserver
+            .write_prefs(&self.session, &v)
+            .await
+            .map_err(SyncError::from)
+    }
+
     /// Snapshot the owner's settings into the private folder (after every
     /// sync and every change the API makes). Best effort; errors are logged.
     pub async fn backup_settings(&self, s: &crate::state::NodeState) {

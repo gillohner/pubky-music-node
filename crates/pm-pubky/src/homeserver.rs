@@ -27,6 +27,15 @@ pub(crate) fn is_not_found(e: &pubky::Error) -> bool {
     )
 }
 
+/// The homeserver answers 507 when the person's storage is full (their quota is used up).
+pub fn is_full(e: &HomeserverError) -> bool {
+    matches!(
+        e,
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if *status == reqwest::StatusCode::INSUFFICIENT_STORAGE
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -701,6 +710,8 @@ pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
 /// The node's settings (contact, folders, streaming sessions, renderers, DSP)
 /// so a reinstalled or replaced node restores them after one Ring sign-in.
 pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
+/// The person's own preferences ("You" in Settings), read and written by every node they use.
+pub const PREFS_PATH: &str = "/priv/pubky.music/prefs.json";
 
 /// How the user's own devices find their node (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -735,6 +746,26 @@ impl NodeHomeserver {
         settings: &serde_json::Value,
     ) -> Result<(), HomeserverError> {
         self.write_object(session, NODE_SETTINGS_PATH, settings).await
+    }
+
+    pub async fn write_prefs(
+        &self,
+        session: &PubkySession,
+        prefs: &serde_json::Value,
+    ) -> Result<(), HomeserverError> {
+        self.write_object(session, PREFS_PATH, prefs).await
+    }
+
+    pub async fn read_prefs(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Option<serde_json::Value>, HomeserverError> {
+        // One request: a 404 means there are none yet
+        match session.storage().get_json(PREFS_PATH).await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn read_node_settings(
@@ -787,7 +818,13 @@ pub struct LoginFlow {
 /// public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
 /// external links today), and the v1 social and music namespaces it moves to
 /// (`social/v1`, `music/v1`; STEWARD-PLAN step 3), so one approval covers both.
-pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+///
+/// The app's private folder is asked for by its parts (the node record, the settings backup, the
+/// person's preferences, their files, the sources vault), never as `/priv/pubky.music/` itself:
+/// pubky's canonical form drops a capability that a broader one covers, so a signer or a
+/// homeserver that normalises would lose the vault capability, and the vault counts only when it
+/// is named itself. A session from before, with the whole folder, still covers every part.
+pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/node.json:rw,/priv/pubky.music/settings.json:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
@@ -946,6 +983,18 @@ mod capability_tests {
             missing.contains(&"/priv/pubky.music/vault/:rw".to_string()),
             "a session from before the vault asks again"
         );
+        // A session approved with the set from before the parts still covers today's set
+        let before: Vec<&str> = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw"
+            .split(',')
+            .collect();
+        assert_eq!(
+            missing_capabilities(&before, LOGIN_CAPABILITIES),
+            Vec::<String>::new()
+        );
+        // Normalising the set changes nothing (no entry covers another), so a signer or a
+        // homeserver that normalises can't drop the vault or anything else
+        let caps: pubky::Capabilities = LOGIN_CAPABILITIES.parse().unwrap();
+        assert_eq!(caps.normalize().to_string(), LOGIN_CAPABILITIES);
         assert_eq!(
             missing_capabilities(&["/pub/social/v1/:r"], "/pub/social/v1/:rw"),
             vec!["/pub/social/v1/:rw".to_string()],
@@ -955,5 +1004,24 @@ mod capability_tests {
             "Server responded with an error: 403 Forbidden - Session does not have read access to path"
         ));
         assert!(!is_capability_error("connection reset"));
+    }
+}
+
+#[cfg(test)]
+mod full_tests {
+    use super::*;
+
+    #[test]
+    fn a_507_is_a_full_homeserver_and_nothing_else_is() {
+        let server = |status: u16| {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+            }))
+        };
+        assert!(is_full(&server(507)));
+        assert!(!is_full(&server(404)));
+        assert!(!is_full(&server(413)));
+        assert!(!is_full(&HomeserverError::Transport("reset".into())));
     }
 }

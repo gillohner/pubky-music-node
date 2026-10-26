@@ -308,8 +308,11 @@ Open Sources › TIDAL › Connect TIDAL.
 - **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
   secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
   here are scrobbled; artist pages show similar artists.
-- **Your own apps:** `[tidal]`, `[jamendo]`, `[spotify]` and `[acoustid]` in `node.toml` (or the `PM_*` variables)
-  always win over the built-in ones. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
+  (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
+  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
+  in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
+  rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
   `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).

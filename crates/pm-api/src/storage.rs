@@ -138,11 +138,11 @@ async fn save_now(s: &Arc<NodeState>) -> Result<(), String> {
             sync.carry_on(s, &report);
             let mut st = s.storage_save.lock().expect("save");
             st.last_saved_at = Some(now());
-            st.error = report.errors.first().cloned();
+            st.error = report.errors.first().cloned().map(|e| plain_error(s, e));
             Ok(())
         }
         Err(e) => {
-            let msg = e.to_string();
+            let msg = plain_error(s, e.to_string());
             s.storage_save.lock().expect("save").error = Some(msg.clone());
             Err(msg)
         }
@@ -197,8 +197,42 @@ pub struct HomeserverStorage {
     pub user: Option<String>,
     /// The owner's storage quota on the bundled homeserver: MB, `"unlimited"`, or null.
     pub quota_mb: Option<serde_json::Value>,
-    /// The owner's files on the bundled homeserver, in bytes.
+    /// The owner's files on the homeserver, in bytes: all of them on the bundled one; on
+    /// another homeserver, the music files it lists for them (it tells nobody its quota).
     pub used_bytes: Option<u64>,
+    /// What `used_bytes` counts: `homeserver files` (bundled) or `your music files there` (another
+    /// homeserver, whose quota is unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_from: Option<String>,
+    /// When the homeserver last answered that it is full (Unix seconds); cleared by the next
+    /// upload that goes through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_at: Option<i64>,
+}
+
+/// Where the time of the homeserver's last "full" answer is kept.
+const FULL_KEY: &str = "storage.full_at";
+
+/// Note that the homeserver answered "full" (507), or that an upload went through or space
+/// was freed again. Kept with the account it was for: another sign-in doesn't inherit it.
+pub(crate) fn note_full(s: &NodeState, full: bool) {
+    let user = s.sync_handle().map(|h| h.z32().to_string());
+    let lib = s.library.lock().expect("library poisoned");
+    let _ = match (full, user) {
+        (true, Some(u)) => lib.set_setting(FULL_KEY, &format!("{u}:{}", pm_library::db::now_unix())),
+        (true, None) => Ok(()),
+        (false, _) => lib.delete_setting(FULL_KEY).map(|_| ()),
+    };
+}
+
+/// A homeserver error as people read it: a full homeserver (507) in plain words, and noted.
+pub(crate) fn plain_error(s: &NodeState, msg: String) -> String {
+    if msg.contains("507 Insufficient Storage") {
+        note_full(s, true);
+        crate::add_music::FULL.to_string()
+    } else {
+        msg
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -289,6 +323,32 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Storage
         Some(h) => h.await.ok(),
         None => None,
     };
+    // Another homeserver: the music files it lists for the person (its quota can't be read)
+    let (used_bytes, used_from) = match (used_bytes, bundled, &sync) {
+        (Some(b), _, _) => (Some(b), Some("homeserver files".to_string())),
+        (None, false, Some(h)) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), h.list_private_files()).await {
+                Ok(Ok(files)) => (
+                    Some(files.iter().filter_map(|f| f.size).sum()),
+                    Some("your music files there".to_string()),
+                ),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+    // Only for the account it was noted for
+    let full_at = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(FULL_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| {
+            let (u, at) = v.rsplit_once(':')?;
+            (user.as_deref() == Some(u)).then(|| at.parse().ok()).flatten()
+        });
     let n = pending(&s);
     let save = s.storage_save.lock().expect("save").clone();
     let running = s.sync_activity.lock().expect("sync activity").running;
@@ -342,6 +402,8 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Storage
             user,
             quota_mb,
             used_bytes,
+            used_from,
+            full_at,
         },
         saving: Saving {
             state: state.into(),

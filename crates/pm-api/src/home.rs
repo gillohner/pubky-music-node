@@ -105,7 +105,8 @@ pub struct HomeLayout {
     pub hidden: Vec<String>,
 }
 
-/// `GET /v1/home/layout`.
+/// `GET /v1/home/layout`: the node's layout, the default for everyone ("This node"). The layout
+/// that applies to a person, theirs where they set one, is `home_layout` in `GET /v1/me/prefs`.
 pub(crate) async fn get_layout(State(s): State<Arc<NodeState>>) -> ApiResult<HomeLayout> {
     Ok(Json(
         s.library
@@ -119,11 +120,8 @@ pub(crate) async fn get_layout(State(s): State<Arc<NodeState>>) -> ApiResult<Hom
     ))
 }
 
-/// `PUT /v1/home/layout {order, hidden}`.
-pub(crate) async fn set_layout(
-    State(s): State<Arc<NodeState>>,
-    Json(l): Json<HomeLayout>,
-) -> ApiResult<HomeLayout> {
+/// A Home layout is at most 40 row ids, each up to 40 of `a-z` and `-`.
+pub(crate) fn check_layout(l: &HomeLayout) -> Result<(), ApiError> {
     let ok = |v: &Vec<String>| {
         v.len() <= 40
             && v.iter()
@@ -132,6 +130,16 @@ pub(crate) async fn set_layout(
     if !ok(&l.order) || !ok(&l.hidden) {
         return Err(ApiError::bad_request("a Home layout is a list of row ids"));
     }
+    Ok(())
+}
+
+/// `PUT /v1/home/layout {order, hidden}`: the node's layout ("This node": the default for everyone
+/// who hasn't set their own in `/v1/me/prefs`).
+pub(crate) async fn set_layout(
+    State(s): State<Arc<NodeState>>,
+    Json(l): Json<HomeLayout>,
+) -> ApiResult<HomeLayout> {
+    check_layout(&l)?;
     s.library
         .lock()
         .expect("library poisoned")

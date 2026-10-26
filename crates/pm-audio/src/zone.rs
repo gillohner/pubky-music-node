@@ -186,6 +186,26 @@ impl SourceFactory for LocalFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library file reports its codec from the decoder, is lossless with no bitrate, and
+    /// says it comes from the library.
+    #[test]
+    fn a_file_says_what_it_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        write_wav(&wav, 44_100, 4410, 1);
+        let f = FileSource::open(&wav).unwrap();
+        let info = FrameSource::stream_info(&f).unwrap();
+        assert_eq!(info.codec, "WAV");
+        assert!(info.lossless);
+        assert_eq!(info.bitrate_kbps, None, "no bitrate for a lossless file");
+        assert_eq!(info.service, "library");
+        assert!(!info.preview);
+
+        let flac = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/14_wasted_bits.flac");
+        let info = FrameSource::stream_info(&FileSource::open(&flac).unwrap()).unwrap();
+        assert_eq!((info.codec.as_str(), info.lossless), ("FLAC", true));
+    }
     use pm_zones::outputs::{read_wav, WavFileOutput};
     use pm_zones::{Insert, Zone, ZoneEvent, ZoneId};
     use std::sync::Arc;
