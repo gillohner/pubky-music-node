@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-26
+
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
+
 ## 2026-10-25
 
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
