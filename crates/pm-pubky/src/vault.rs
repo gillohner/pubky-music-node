@@ -957,8 +957,8 @@ impl Vault<'_> {
                 }
                 Err(e) => return Err(e),
             };
-            // A sign-out everywhere marks the list before it takes any blob's lock, so the list
-            // read under this lock shows it
+            // A sign-out everywhere marks the list before it takes any blob's lock, so for a
+            // blob that exists the list read under this lock shows it
             let ix = self.index().await?;
             if marker.is_some_and(|m| Self::signed_out_everywhere_at(&ix) != m) {
                 return Ok(None);
@@ -967,9 +967,24 @@ impl Vault<'_> {
                 return Ok(None);
             }
             let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
-            self.write_held(&held, service, &path, sign_in, &others, false)
-                .await
-                .map(Some)
+            let revision = self
+                .write_held(&held, service, &path, sign_in, &others, false)
+                .await?;
+            // A blob that didn't exist before can be missed by a sign-out everywhere listing the
+            // folder meanwhile: read the mark once more, still holding the lock, and take the new
+            // blob back if it moved. Either the listing saw the blob, or the mark came first.
+            if let (Some(m), None) = (marker, &current) {
+                let now = self.index().await.map(|ix| Self::signed_out_everywhere_at(&ix));
+                if now.as_ref().map_or(true, |at| *at != m) {
+                    let storage = self.session.storage();
+                    let _ = match &held.lock {
+                        Some(l) => storage.delete_locked(l).await.map(|_| ()),
+                        None => storage.delete(path.as_str()).await.map(|_| ()),
+                    };
+                    return Ok(None);
+                }
+            }
+            Ok(Some(revision))
         }
         .await;
         if leased {

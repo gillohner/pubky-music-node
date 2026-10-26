@@ -24,6 +24,12 @@
 //! aside, and other nodes move aside any copy made before it (the sign-in ids carry their time;
 //! the device list carries `signed_out_everywhere_at`), conflicts included.
 //!
+//! Clocks: a sign-in id carries the time it was made on its node, and the sign-out mark the time
+//! on the device that signed out; a tie counts as older (aside). A node whose clock is far behind
+//! moves aside a sign-in made just after a sign-out everywhere (the person signs in again); one far
+//! ahead could keep one made just before it. A sign-in from before ids existed (time 0) counts as
+//! older than any sign-out everywhere.
+//!
 //! Known limits: a sign-in lost to a change of the node's app is forgotten, not signed out, even
 //! when the person signed out by hand after the app changed. Two nodes that each had the same
 //! account end up on one refresh chain; with a service that rotates refresh tokens, the node that
@@ -212,11 +218,6 @@ pub fn lineage_at(lineage: &str) -> u64 {
         .split_once('-')
         .and_then(|(t, _)| t.parse().ok())
         .unwrap_or(0)
-}
-
-/// [`new_sign_in`] for a source that doesn't hold the library.
-pub fn new_sign_in_of(s: &NodeState, service: &str) {
-    new_sign_in(&s.library.lock().expect("library poisoned"), service);
 }
 
 /// The id of the node's sign-in for a service, made the first time it is asked for (time 0: the
@@ -648,13 +649,17 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
     // A copy here that predates the last sign-out everywhere, and isn't the sign-in this node
     // synced since, never goes back in: it gives way to the vault's, or goes aside
     if let Some(m) = mine {
-        let confirmed = seen.is_some_and(|s| !s.conflict && same_sign_in(m, s));
+        // The sign-in this node synced since the last sign-out everywhere (a record from before it
+        // vouches for nothing)
+        let confirmed = seen.is_some_and(|s| !s.conflict && !wipe.since_seen && same_sign_in(m, s));
         // This very copy was judged after the last sign-out everywhere already (a conflict
         // recorded since): it survived that, whatever its age
         let judged = seen.is_some_and(|s| !wipe.since_seen && s.hash == m.hash);
         if !confirmed && !judged && wipe.predates(m) {
             return match theirs {
-                Some(t) if pull(t) == Do::Pull => Do::Pull,
+                // The vault's copy of the same account replaces it; one for another account
+                // doesn't overwrite it (this one goes aside first, and the next pass takes that)
+                Some(t) if pull(t) == Do::Pull && t.side.account == m.account => Do::Pull,
                 _ => Do::MoveAside,
             };
         }
@@ -670,8 +675,8 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
         // Signed out everywhere on this node just now: nothing here goes back in
         (Some(_), None) if wipe.now => Do::MoveAside,
         (Some(m), None) => match seen {
-            // Never synced: it moves in, unless it is older than the last sign-out everywhere
-            None if wipe.predates(m) => Do::MoveAside,
+            // Never synced: it moves in (one older than the last sign-out everywhere went aside
+            // above)
             None => Do::Push,
             // Never in the vault (a conflict): gone from it means signed out everywhere, or only
             // the other sign-in went, and then this one moves in
@@ -684,9 +689,9 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
             }
             // Unchanged here and gone from the vault: signed out elsewhere
             Some(s) if m.hash == s.hash => Do::MoveAside,
-            // A new sign-in here goes out, if made after the last sign-out everywhere; a refresh
-            // of the old one doesn't bring back what was signed out
-            Some(s) if !same_sign_in(m, s) && !wipe.predates(m) => Do::Push,
+            // A new sign-in here goes out (one older than the last sign-out everywhere went aside
+            // above); a refresh of the old one doesn't bring back what was signed out
+            Some(s) if !same_sign_in(m, s) => Do::Push,
             Some(_) => Do::MoveAside,
         },
         (None, Some(t)) => match seen {
@@ -928,6 +933,10 @@ pub(crate) async fn sync_held(
             Do::InStep => {
                 if let (Some(m), Some(o)) = (&mine, &theirs) {
                     let lib = s.library.lock().expect("library poisoned");
+                    // A source that changed its sign-in since this pass read it wins: next pass
+                    if carried(&lib, b).ok().flatten().map(|x| hash(&x)) != Some(hash(m)) {
+                        continue;
+                    }
                     // Both sides are one sign-in now: the node takes the vault's id for it
                     let their_lineage = node_lineage(&o.sign_in);
                     if let Some(l) = &their_lineage {
@@ -1368,12 +1377,12 @@ mod tests {
             Do::Push
         );
         // A conflict whose vault side was filled again after a sign-out everywhere: this side,
-        // from before it, gives way to the new sign-in
+        // from before it, goes aside (another account; the next pass takes the vault's)
         let mut c = seen("a", "9");
         c.conflict = true;
         assert_eq!(
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(true)),
-            Do::Pull
+            Do::MoveAside
         );
         assert_eq!(
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(false)),
@@ -1407,7 +1416,28 @@ mod tests {
                 Some(&other),
                 &w(true)
             ),
+            Do::MoveAside
+        );
+        let other8 = vlin(vside("c", "8"), "160-L3");
+        assert_eq!(
+            decide(
+                Some(&s),
+                Some(&lin(side("h2", "8"), "50-L2")),
+                Some(&other8),
+                &w(true)
+            ),
             Do::Pull
+        );
+        // The sign-in this node synced before the wipe, meeting a phone's copy written after it:
+        // the record vouches for nothing, so it goes aside
+        assert_eq!(
+            decide(
+                Some(&seen("h1", "7")),
+                Some(&side("h1", "7")),
+                Some(&phone),
+                &w(true)
+            ),
+            Do::MoveAside
         );
         // A node in a conflict that signs in again after the wipe: a new sign-in, not moved aside
         let mut cf = seen("a", "9");
