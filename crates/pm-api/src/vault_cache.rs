@@ -639,6 +639,26 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
             pull(t)
         }
     };
+    // A conflict record from before a sign-out everywhere says nothing about a sign-in made after
+    // it: that one is new here
+    let seen = match (seen, mine) {
+        (Some(s), Some(m)) if s.conflict && wipe.since_seen && m.lineage != s.lineage => None,
+        _ => seen,
+    };
+    // A copy here that predates the last sign-out everywhere, and isn't the sign-in this node
+    // synced since, never goes back in: it gives way to the vault's, or goes aside
+    if let Some(m) = mine {
+        let confirmed = seen.is_some_and(|s| !s.conflict && same_sign_in(m, s));
+        // This very copy was judged after the last sign-out everywhere already (a conflict
+        // recorded since): it survived that, whatever its age
+        let judged = seen.is_some_and(|s| !wipe.since_seen && s.hash == m.hash);
+        if !confirmed && !judged && wipe.predates(m) {
+            return match theirs {
+                Some(t) if pull(t) == Do::Pull => Do::Pull,
+                _ => Do::MoveAside,
+            };
+        }
+    }
     match (mine, theirs) {
         (None, None) => {
             if seen.is_some() {
@@ -931,7 +951,10 @@ pub(crate) async fn sync_held(
                 let m = mine.as_ref().expect("push has a node copy");
                 let lin = lineage.clone().unwrap_or_default();
                 let si = sign_in_for(b, m, theirs.as_ref().map(|o| &o.sign_in), app.clone(), &lin);
-                match vault.write_shared_if(b.service, &si, &unchanged).await {
+                match vault
+                    .write_shared_if(b.service, &si, Some(marker), &unchanged)
+                    .await
+                {
                     Ok(Some(revision)) => {
                         record(
                             &s.library.lock().expect("library poisoned"),
@@ -1344,12 +1367,13 @@ mod tests {
             decide(Some(&s), Some(&lin(side("h2", "7"), "150-L2")), None, &w(true)),
             Do::Push
         );
-        // A conflict whose vault side was filled again after a sign-out everywhere: this side goes
+        // A conflict whose vault side was filled again after a sign-out everywhere: this side,
+        // from before it, gives way to the new sign-in
         let mut c = seen("a", "9");
         c.conflict = true;
         assert_eq!(
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(true)),
-            Do::MoveAside
+            Do::Pull
         );
         assert_eq!(
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(false)),
@@ -1361,6 +1385,46 @@ mod tests {
         assert_eq!(
             decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
             Do::Pull
+        );
+        // A sign-in made here before the wipe and not synced, meeting a copy written after it: a
+        // phone's (not usable here) puts it aside, another node's is taken; never pushed
+        let mut phone = vside("p", "8");
+        phone.from_a_node = false;
+        assert_eq!(
+            decide(
+                Some(&s),
+                Some(&lin(side("h2", "8"), "50-L2")),
+                Some(&phone),
+                &w(true)
+            ),
+            Do::MoveAside
+        );
+        let other = vlin(vside("c", "9"), "160-L3");
+        assert_eq!(
+            decide(
+                Some(&s),
+                Some(&lin(side("h2", "8"), "50-L2")),
+                Some(&other),
+                &w(true)
+            ),
+            Do::Pull
+        );
+        // A node in a conflict that signs in again after the wipe: a new sign-in, not moved aside
+        let mut cf = seen("a", "9");
+        cf.conflict = true;
+        cf.lineage = Some("1-L0".into());
+        assert_eq!(
+            decide(Some(&cf), Some(&lin(side("n", "9"), "150-L5")), None, &w(true)),
+            Do::Push
+        );
+        assert_eq!(
+            decide(
+                Some(&cf),
+                Some(&lin(side("n", "9"), "150-L5")),
+                Some(&vlin(vside("c", "7"), "160-L3")),
+                &w(true)
+            ),
+            Do::Conflict
         );
         assert_eq!(lineage_at("150-abc"), 150);
         assert_eq!(lineage_at("abc"), 0);

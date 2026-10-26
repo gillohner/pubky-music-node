@@ -1203,10 +1203,15 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             }
         }
     }
-    // One sign-in, stored and marked new together: no vault pass sees one without the other
-    let _pass = s.vault_pass.lock().await;
-    store_user(s, Some(&session))?;
-    crate::vault_cache::new_sign_in_of(s, "tidal");
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(
+            USER_KEY,
+            &serde_json::to_string(&session).expect("session serializes"),
+        )?;
+        crate::vault_cache::new_sign_in(&lib, "tidal");
+    }
     tracing::info!(user = ?session.user_id, "TIDAL sign-in stored");
     Ok(())
 }
@@ -1471,16 +1476,13 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
 /// A sign-in from another app's file or a paste becomes the device-way session: full tracks,
 /// kept like the node's own (`tidal.unofficial`, sealed in backups), renewed by the node where
 /// the refresh token came from the client this build carries.
-pub(crate) async fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Session) {
-    // One sign-in, stored and marked new together: no vault pass sees one without the other
-    let _pass = s.vault_pass.lock().await;
-    crate::tidal_unofficial::update(s, |st| {
+pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Session) {
+    crate::tidal_unofficial::update_signed_in(s, "tidal-full", |st| {
         st.session = Some(session);
         st.login = None;
         st.enabled = true;
         st.health = None;
     });
-    crate::vault_cache::new_sign_in_of(s, "tidal-full");
 }
 
 /// A way was picked. The device way is what the Full tracks switch used to turn on; the app way

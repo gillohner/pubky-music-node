@@ -622,10 +622,12 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             .or(v["results"][0]["name"].as_str())
             .map(str::to_string);
     }
-    // One sign-in, stored and marked new together: no vault pass sees one without the other
-    let _pass = s.vault_pass.lock().await;
-    store_user(s, Some(&session))?;
-    crate::vault_cache::new_sign_in_of(s, "jamendo");
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(USER_KEY, &serde_json::to_string(&session).expect("serializes"))?;
+        crate::vault_cache::new_sign_in(&lib, "jamendo");
+    }
     tracing::info!("Jamendo sign-in stored");
     Ok(())
 }

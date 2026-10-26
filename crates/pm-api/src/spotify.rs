@@ -856,9 +856,13 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         product: None,
         scope: v["scope"].as_str().unwrap_or("").to_string(),
     };
-    // One sign-in, stored and marked new together: no vault pass sees one without the other
-    let _pass = s.vault_pass.lock().await;
-    store_user(s, Some(&session))?;
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other (the
+        // account details below are a later change of the same sign-in)
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(USER_KEY, &serde_json::to_string(&session).expect("serializes"))?;
+        crate::vault_cache::new_sign_in(&lib, "spotify");
+    }
     if let Ok(me) = get_json(s, "/me", &[]).await {
         session.user_id = me["id"].as_str().map(str::to_string);
         session.display_name = me["display_name"].as_str().map(str::to_string);
@@ -866,7 +870,6 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         session.product = me["product"].as_str().map(str::to_string);
         store_user(s, Some(&session))?;
     }
-    crate::vault_cache::new_sign_in_of(s, "spotify");
     tracing::info!(user = ?session.user_id, "Spotify sign-in stored");
     Ok(())
 }

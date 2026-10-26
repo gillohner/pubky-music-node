@@ -143,6 +143,16 @@ pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) -> ModeState
     st
 }
 
+/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark are
+/// written under one library guard, so no vault pass sees one without the other.
+pub(crate) fn update_signed_in(s: &NodeState, service: &str, f: impl FnOnce(&mut ModeState)) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut st = load(&lib);
+    f(&mut st);
+    save(&lib, &st);
+    crate::vault_cache::new_sign_in(&lib, service);
+}
+
 fn config_client() -> &'static std::sync::OnceLock<Client> {
     static C: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
     &C
@@ -448,9 +458,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
         if ok {
             if let Some(sess) = session_from(&v, None) {
                 let sess = fill_session(s, sess).await;
-                // Stored and marked new together: no vault pass sees one without the other
-                let pass = s.vault_pass.lock().await;
-                update(s, |st| {
+                update_signed_in(s, "tidal-full", |st| {
                     st.session = Some(sess);
                     st.login = None;
                     st.enabled = true;
@@ -460,8 +468,6 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
                         at: now(),
                     });
                 });
-                crate::vault_cache::new_sign_in_of(s, "tidal-full");
-                drop(pass);
                 tracing::info!("TIDAL full tracks (unofficial): signed in");
             }
             return;

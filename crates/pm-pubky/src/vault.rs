@@ -924,18 +924,21 @@ impl Vault<'_> {
     /// Who is trusted is read under the blob's lock: a device signed out meanwhile is in the
     /// index before its sign-out takes any blob lock, so it is never wrapped to again.
     pub async fn write_shared(&self, service: &str, sign_in: &SignIn) -> Result<u64> {
-        self.write_shared_if(service, sign_in, &|_| true)
+        self.write_shared_if(service, sign_in, None, &|_| true)
             .await?
             .ok_or_else(|| VaultError::Format("not written").into())
     }
 
-    /// [`Vault::write_shared`] only while `ok` accepts what is there (`None`: nothing), checked
-    /// under the lock: a decision made from an earlier read isn't written over a change made
-    /// meanwhile. `None` when it wasn't written.
+    /// [`Vault::write_shared`] only while `ok` accepts what is there (`None`: nothing), and,
+    /// with `marker`, while the device list's `signed_out_everywhere_at` is still that one, both
+    /// checked under the lock: a decision made from an earlier read isn't written over a change
+    /// made meanwhile, or into a vault the person has just signed out of. `None` when it wasn't
+    /// written.
     pub async fn write_shared_if(
         &self,
         service: &str,
         sign_in: &SignIn,
+        marker: Option<Option<u64>>,
         ok: &(dyn Fn(Option<&SignIn>) -> bool + Sync),
     ) -> Result<Option<u64>> {
         let path = Self::blob_path(service)?;
@@ -954,10 +957,15 @@ impl Vault<'_> {
                 }
                 Err(e) => return Err(e),
             };
+            // A sign-out everywhere marks the list before it takes any blob's lock, so the list
+            // read under this lock shows it
+            let ix = self.index().await?;
+            if marker.is_some_and(|m| Self::signed_out_everywhere_at(&ix) != m) {
+                return Ok(None);
+            }
             if !ok(current.as_ref().map(|o| &o.sign_in)) {
                 return Ok(None);
             }
-            let ix = self.index().await?;
             let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
             self.write_held(&held, service, &path, sign_in, &others, false)
                 .await
