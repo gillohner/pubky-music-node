@@ -159,6 +159,8 @@
   const api = async (method, path, body) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
+    // Switching a service on or off, signing in or out, or a new play order changes the ranking
+    if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) state.svcRank = null;
     let r;
     try {
       r = await fetch('/v1' + path, {
@@ -1914,17 +1916,26 @@
   const srcHealthy = (x) => !!x && x.enabled !== false && (typeof x.healthy === 'boolean' ? x.healthy : HEALTHY_STATUS.test(String(x.status || '')));
   const loadSvcRank = async () => {
     if (!isOwner()) return null;
-    if (state.svcRank && Date.now() - state.svcRank.at < 60000) return state.svcRank;
-    try {
-      const [srcs, po] = await Promise.all([api('GET', '/sources'), api('GET', '/play-order').catch(() => ({ order: [] }))]);
-      state.sources = srcs;
-      state.svcRank = { at: Date.now(), healthy: new Set(['library', ...srcs.filter(srcHealthy).map((x) => x.id)]), off: new Set(srcs.filter((x) => x.enabled === false).map((x) => x.id)), order: po.order || [] };
-    } catch { state.svcRank = null; }
-    return state.svcRank;
+    if (state.svcRank && Date.now() - state.svcRank.at < 60000) return state.svcRank.failed ? null : state.svcRank;
+    if (state.svcRankLoading) return state.svcRankLoading;
+    state.svcRankLoading = (async () => {
+      try {
+        const [srcs, po] = await Promise.all([api('GET', '/sources'), api('GET', '/play-order').catch(() => ({ order: [], services: [] }))]);
+        state.sources = srcs;
+        // The play order knows who can play right now; fall back to each service's status
+        const connected = new Map((po.services || []).map((x) => [x.id, x.connected]));
+        const ok = (x) => srcHealthy(x) && connected.get(x.id) !== false;
+        state.svcRank = { at: Date.now(), healthy: new Set(['library', ...srcs.filter(ok).map((x) => x.id)]), off: new Set(srcs.filter((x) => x.enabled === false).map((x) => x.id)), order: po.order || [] };
+        return state.svcRank;
+      } catch { state.svcRank = { at: Date.now(), failed: true }; return null; } finally { state.svcRankLoading = null; }
+    })();
+    return state.svcRankLoading;
   };
+  // A source row's service id: Pinakes names sites by slug or host ("youtube-music", "www.youtube.com")
+  const srcSvc = (src) => (src === 'library' ? 'library' : serviceKey(String(src || '').toLowerCase().replace(/^(www|music|open|m)\./, '').replace(/\.[a-z]+$/, '')));
   // Sort anything that names a service (`svc(x)` gives its id): healthy first, then by play order
   const rankSvc = (list, svc = (x) => x, r = state.svcRank) => {
-    if (!r) return list;
+    if (!r || r.failed) return list;
     const pos = (id) => { const i = r.order.indexOf(id); return i < 0 ? 999 : i; };
     return list.map((x, k) => [x, k]).sort(([a, i], [b, j]) => (r.healthy.has(svc(a)) ? 0 : 1) - (r.healthy.has(svc(b)) ? 0 : 1) || pos(svc(a)) - pos(svc(b)) || i - j).map(([x]) => x);
   };
@@ -2745,7 +2756,7 @@
           const pin = async (k, body, msg) => { try { await api('PUT', `/playlists/${d.summary.id}/items/${k}/source`, body); state.plPf = null; toast(msg); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-psrc]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); const k = Number(b.dataset.psrc); const t = songs[k]; const pinnedNow = t.pinned || t.pinLost;
-            const opts = rankSvc(t.sources || [], (x) => x.service).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
+            const opts = rankSvc(t.sources || [], (x) => x.service).sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0)).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
             showMenu(b, [{ title: t.unavailable ? t.unavailable : 'Play this song from' }, { label: 'Auto (follow the playlist)', icon: 'shuffle', on: !pinnedNow, note: t.plays && !pinnedNow ? `now: ${srcName(t.plays.service)}` : null, run: () => pin(k, { service: null }, 'Follows the playlist again') }, ...opts,
               ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
@@ -3288,14 +3299,14 @@
           // The source line (STEWARD-UX-PLAYER-SOURCES §1): a quiet line under the title. This page's
           // own source first; then the same recording on services that are on and working, in the
           // owner's play order; the rest behind "more". Services switched off are left out.
-          const rk = state.svcRank;
-          const alsoSvc = (v) => (v.source === 'library' ? 'library' : v.source);
+          const rk = state.svcRank && !state.svcRank.failed ? state.svcRank : null;
+          const alsoSvc = (v) => srcSvc(v.source);
           const alsoAll = rankSvc(pg.also_on.map((v, k) => ({ v, k })).filter(({ v }) => !(rk && rk.off.has(alsoSvc(v)))), ({ v }) => alsoSvc(v));
           const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
           const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
-          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<a class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</a>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${v.url ? `<a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
           const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${pg.link ? `<a class="chiplink" href="${esc(pg.link)}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
-          const alsoLine = (isGlobal && !alsoAll.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && alsoFirst.length ? '<span class="muted">· also</span>' : ''}${alsoFirst.map(alsoItem).join('')}${alsoMore.length ? `<button class="lnk srcmore" data-srcmore aria-expanded="false">${alsoFirst.length || !isGlobal ? `${alsoMore.length} more` : `${alsoMore.length} services`}</button><span class="srcrest" hidden>${alsoMore.map(alsoItem).join('')}</span>` : ''}</div>`
+          const alsoLine = (isGlobal && !alsoAll.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && alsoFirst.length ? '<span class="muted">· also</span>' : ''}${alsoFirst.map(alsoItem).join('')}${alsoMore.length ? `${!isGlobal && !alsoFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${alsoMore.length} more source${alsoMore.length === 1 ? '' : 's'}">${alsoFirst.length || !isGlobal ? `${alsoMore.length} more` : `${alsoMore.length} services`}</button><span class="srcrest" hidden>${alsoMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${v.url ? ` <a class="chiplink" href="${esc(v.url)}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
@@ -3366,7 +3377,7 @@
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
-          const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a, button', rest); if (first) first.focus(); };
+          const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
