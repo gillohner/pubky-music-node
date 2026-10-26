@@ -974,13 +974,37 @@ impl Vault<'_> {
             // folder meanwhile: read the mark once more, still holding the lock, and take the new
             // blob back if it moved. Either the listing saw the blob, or the mark came first.
             if let (Some(m), None) = (marker, &current) {
-                let now = self.index().await.map(|ix| Self::signed_out_everywhere_at(&ix));
+                // Read once more on a failure before taking the blob back (a hiccup would
+                // otherwise cost every other node a round of moving it aside and back)
+                let mut now = self.index().await;
+                if now.is_err() {
+                    now = self.index().await;
+                }
+                let now = now.map(|ix| Self::signed_out_everywhere_at(&ix));
                 if now.as_ref().map_or(true, |at| *at != m) {
                     let storage = self.session.storage();
-                    let _ = match &held.lock {
-                        Some(l) => storage.delete_locked(l).await.map(|_| ()),
-                        None => storage.delete(path.as_str()).await.map(|_| ()),
-                    };
+                    let mut gone = false;
+                    for _ in 0..2 {
+                        let r = match &held.lock {
+                            Some(l) => storage.delete_locked(l).await.map(|_| ()),
+                            None => storage.delete(path.as_str()).await.map(|_| ()),
+                        };
+                        match r {
+                            Ok(()) => gone = true,
+                            Err(e) if is_not_found(&e) => gone = true,
+                            Err(e) => tracing::warn!(service, "vault: taking back a sign-in written as the person signed out everywhere: {e}"),
+                        }
+                        if gone {
+                            break;
+                        }
+                    }
+                    if !gone {
+                        // Said loudly: the sign-in is in the vault after a sign-out everywhere
+                        return Err(VaultError::Format(
+                            "a sign-in written as the person signed out everywhere couldn't be taken back",
+                        )
+                        .into());
+                    }
                     return Ok(None);
                 }
             }
