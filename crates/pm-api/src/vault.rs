@@ -85,6 +85,9 @@ pub struct VaultView {
     /// Listed and trusted in the device list.
     pub registered: bool,
     pub devices: Vec<Device>,
+    /// Why the device list couldn't be read (junk, or too large); the sign-ins are still listed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub devices_problem: Option<String>,
     pub sign_ins: Vec<VaultSignIn>,
     /// The node's last sync with the vault: `{at, report: {migrated, pushed, pulled, signed_out,
     /// not_readable}}`.
@@ -93,7 +96,11 @@ pub struct VaultView {
 }
 
 async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
-    let devices = vault.devices().await?;
+    let (devices, devices_problem) = match vault.devices().await {
+        Ok(d) => (d, None),
+        Err(e @ (VaultStoreError::Vault(_) | VaultStoreError::Local(_))) => (Vec::new(), Some(e.to_string())),
+        Err(e) => return Err(e),
+    };
     let me = vault.client_key().to_hex();
     let registered = devices.iter().any(|d| d.this_node && d.trusted);
     let mut sign_ins = Vec::new();
@@ -137,6 +144,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
         this_device: me,
         registered,
         devices,
+        devices_problem,
         sign_ins,
         last_sync: None,
     })
@@ -278,4 +286,37 @@ pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate
     Ok(Json(
         crate::vault_cache::pass(&s, &vault).await.map_err(vault_error)?,
     ))
+}
+
+/// `POST /v1/vault/new-key {"confirm": true}`: give the node a new vault key, for a node that was
+/// signed out of the vault (its old key is never trusted again). The old key file is kept beside
+/// it (`client.key.replaced-<unix s>`); the node registers with the new one, and another device
+/// gives it the sign-ins. A node signed out by its grant also needs approving again in Ring.
+pub(crate) async fn new_key(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<VaultView> {
+    if body.get("confirm") != Some(&serde_json::Value::Bool(true)) {
+        return Err(ApiError::bad_request(
+            "send {\"confirm\": true}: the node can't read its sign-ins until another device shares them with the new key",
+        ));
+    }
+    let sync = signed_in(&s)?;
+    let path = s.data_dir().join("vault").join("client.key");
+    if path.exists() {
+        let aside = path.with_file_name(format!("client.key.replaced-{}", pm_library::db::now_unix()));
+        std::fs::rename(&path, &aside).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the node's vault key: {e}"),
+            )
+        })?;
+    }
+    let secret = client_secret(&s)?;
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
+    vault.register(&s.name).await.map_err(vault_error)?;
+    Ok(Json(view(&vault).await.map_err(vault_error)?))
 }

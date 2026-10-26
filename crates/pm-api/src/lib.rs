@@ -609,6 +609,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/vault/sync", post(vault::sync_now))
         .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
         .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
+        .route("/vault/new-key", post(vault::new_key))
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",

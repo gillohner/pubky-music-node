@@ -92,6 +92,24 @@ async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value
     (st, serde_json::from_slice(&b).unwrap_or(Value::Null))
 }
 
+async fn post_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let st = resp.status();
+    let b = resp.into_body().collect().await.unwrap().to_bytes();
+    (st, serde_json::from_slice(&b).unwrap_or(Value::Null))
+}
+
 #[tokio::test]
 async fn the_device_list_and_signing_out_through_the_api() {
     let Some(a) = admin() else {
@@ -180,6 +198,8 @@ async fn the_device_list_and_signing_out_through_the_api() {
         StatusCode::BAD_REQUEST
     );
 
+    // The list as it was before the sign-out, with the phone's valid entry
+    let before_sign_out = phone.index().await.unwrap();
     // Sign the phone out: TIDAL rotates past it
     let (st, r) = call(
         &app,
@@ -199,27 +219,24 @@ async fn the_device_list_and_signing_out_through_the_api() {
     // The node remembers the sign-out: the phone writes the list back without it, and the node
     // still doesn't trust it
     assert!(dir.path().join("vault/revoked.json").exists());
-    let mut ix = phone.index().await.unwrap();
-    let before_sign_out = ix.revoked.clone();
-    ix.revoked.clear();
+    assert!(before_sign_out.revoked.is_empty());
     phone_session
         .storage()
         .put(
             pubky_music_specs::vault::INDEX_PATH,
-            serde_json::to_vec(&ix).unwrap(),
+            serde_json::to_vec(&before_sign_out).unwrap(),
         )
         .await
         .unwrap();
-    assert!(!before_sign_out.is_empty());
     let (_, v) = call(&app, "GET", "/v1/vault").await;
-    assert!(
-        v["devices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|d| d["this_node"] == true || d["trusted"] == false),
-        "{v}"
-    );
+    let listed = v["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["client_key"] == phone.client_key().to_hex())
+        .cloned()
+        .unwrap_or_else(|| panic!("the phone's entry is back in the list: {v}"));
+    assert_eq!(listed["trusted"], false, "{v}");
     // A blob no client wrote doesn't take the device list down
     phone_session
         .storage()
@@ -233,6 +250,22 @@ async fn the_device_list_and_signing_out_through_the_api() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert!(v["sign_ins"][0]["problem"].is_string(), "{v}");
     assert_eq!(v["sign_ins"][1]["readable"], true, "{v}");
+
+    // A new vault key: only when confirmed; the old file is kept aside and the node registers
+    // with the new key
+    assert_eq!(
+        post_json(&app, "/v1/vault/new-key", json!({})).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (st, v) = post_json(&app, "/v1/vault/new-key", json!({"confirm": true})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_ne!(v["this_device"], json!(node_key));
+    assert_eq!(v["registered"], true, "{v}");
+    assert!(std::fs::read_dir(dir.path().join("vault")).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("client.key.replaced-")));
 
     // Sign out everywhere
     let (st, r) = call(&app, "POST", "/v1/vault/sign-out-everywhere").await;

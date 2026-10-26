@@ -590,9 +590,10 @@ async fn a_device_added_during_a_refresh_keeps_its_key() {
     let vb = Vault::new(&sessions[1], &keys[1]);
     let vc = Vault::new(&sessions[2], &keys[2]);
     va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
-    let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(3));
+    // B writes at 3.5 s: after A's lease (2 s to settle) and its read, while the service answers
+    let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(5));
     let (ra, wb) = tokio::join!(va.refresh("tidal", false, |s| svc.refresh(s)), async {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
         let cur = vb.read("tidal").await.unwrap().unwrap().sign_in;
         vb.write("tidal", &cur, &[va.client_key(), vc.client_key()]).await
     });
