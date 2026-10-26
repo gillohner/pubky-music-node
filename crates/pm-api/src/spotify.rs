@@ -864,6 +864,7 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         session.product = me["product"].as_str().map(str::to_string);
         store_user(s, Some(&session))?;
     }
+    crate::vault_cache::new_sign_in_of(s, "spotify");
     tracing::info!(user = ?session.user_id, "Spotify sign-in stored");
     Ok(())
 }

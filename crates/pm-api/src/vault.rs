@@ -248,7 +248,7 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
         .map_err(vault_error)?;
     // The node's own copies go aside now, not at the next sync. The vault is already wiped
     // here, so a sync that fails is reported, not an error
-    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault).await {
+    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault, None).await {
         Ok(c) => (c.signed_out, None),
         Err(e) => (Vec::new(), Some(e.to_string())),
     };
@@ -276,7 +276,25 @@ pub struct Everywhere {
 
 /// `POST /v1/vault/sync`: register, share, and sync the node's sign-ins with the vault now (it
 /// also runs after every sign-in and every 15 minutes). Answers what moved, by service.
-pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate::vault_cache::CacheReport> {
+pub(crate) async fn sync_now(
+    State(s): State<Arc<NodeState>>,
+    body: axum::body::Bytes,
+) -> ApiResult<crate::vault_cache::CacheReport> {
+    /// `{service, take: "node"|"vault"}`: settle that service's conflict, or take a copy that
+    /// isn't usable as it is, that way.
+    #[derive(serde::Deserialize)]
+    struct Settle {
+        service: String,
+        take: crate::vault_cache::Take,
+    }
+    let settle: Option<Settle> = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Some(
+            serde_json::from_slice(&body)
+                .map_err(|e| ApiError::bad_request(format!("{{service, take}}: {e}")))?,
+        )
+    };
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
@@ -284,7 +302,9 @@ pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate
         .device("node")
         .remember_revocations(&revoked);
     Ok(Json(
-        crate::vault_cache::pass(&s, &vault).await.map_err(vault_error)?,
+        crate::vault_cache::pass(&s, &vault, settle.as_ref().map(|x| (x.service.as_str(), x.take)))
+            .await
+            .map_err(vault_error)?,
     ))
 }
 

@@ -750,6 +750,7 @@ async fn finish_login(s: &NodeState, token: &str) -> Result<String, String> {
             problem: None,
         }),
     );
+    crate::vault_cache::new_sign_in(&lib, "lastfm");
     Ok(user)
 }
 

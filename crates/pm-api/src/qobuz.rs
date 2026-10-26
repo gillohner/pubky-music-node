@@ -746,6 +746,7 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         st.health = None;
     });
     crate::search::forget_answers();
+    crate::vault_cache::new_sign_in_of(&s, "qobuz");
     tracing::info!("Qobuz sign-in stored");
     Ok(Json(view(&s)))
 }

@@ -924,13 +924,38 @@ impl Vault<'_> {
     /// Who is trusted is read under the blob's lock: a device signed out meanwhile is in the
     /// index before its sign-out takes any blob lock, so it is never wrapped to again.
     pub async fn write_shared(&self, service: &str, sign_in: &SignIn) -> Result<u64> {
+        self.write_shared_if(service, sign_in, &|_| true)
+            .await?
+            .ok_or_else(|| VaultError::Format("not written").into())
+    }
+
+    /// [`Vault::write_shared`] only while `ok` accepts what is there (`None`: nothing), checked
+    /// under the lock: a decision made from an earlier read isn't written over a change made
+    /// meanwhile. `None` when it wasn't written.
+    pub async fn write_shared_if(
+        &self,
+        service: &str,
+        sign_in: &SignIn,
+        ok: &(dyn Fn(Option<&SignIn>) -> bool + Sync),
+    ) -> Result<Option<u64>> {
         let path = Self::blob_path(service)?;
         let held = self.lock(&path).await?;
         let r = async {
+            let current = match self.read(service).await {
+                Ok(o) => o,
+                Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
+                    return Err(VaultStoreError::NotOurs(service.to_string()))
+                }
+                Err(e) => return Err(e),
+            };
+            if !ok(current.as_ref().map(|o| &o.sign_in)) {
+                return Ok(None);
+            }
             let ix = self.index().await?;
             let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
             self.write_held(&held, service, &path, sign_in, &others, false)
                 .await
+                .map(Some)
         }
         .await;
         self.unlock(held).await;
@@ -1004,6 +1029,9 @@ const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
 /// The longest a service is given to answer a refresh; then the lock is let go.
 const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// The device list's member saying when the person last signed out everywhere (Unix seconds).
+pub const SIGNED_OUT_EVERYWHERE: &str = "signed_out_everywhere_at";
+
 /// The longest the service-side part of a sign-out may hold a sign-in.
 const BEFORE_FOR: Duration = Duration::from_secs(20);
 /// The longest one renewal of the lock or the lease may take.
@@ -1548,10 +1576,13 @@ impl Vault<'_> {
         F: Fn(String, SignIn) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        // Said in the device list first, so a node whose own copy was never in the vault (a
+        // conflict) knows the person signed out everywhere, not of one sign-in
+        self.mark_signed_out_everywhere().await?;
         let mut report = EverywhereReport::default();
         for service in self.services().await? {
-            match self.delete_one(&service, &before).await {
-                Ok(()) => report.removed.push(service),
+            match self.delete_one(&service, &before, &|_| true).await {
+                Ok(_) => report.removed.push(service),
                 Err(e) => report.left.push(NotDone {
                     service,
                     why: e.to_string(),
@@ -1564,10 +1595,52 @@ impl Vault<'_> {
     /// Remove one sign-in from the vault, under its lock (signed out of that service on this
     /// device, for every device). Nothing to do when it isn't there.
     pub async fn remove(&self, service: &str) -> Result<()> {
-        self.delete_one(service, &|_: String, _: SignIn| async {}).await
+        self.delete_one(service, &|_: String, _: SignIn| async {}, &|_| true)
+            .await
+            .map(|_| ())
     }
 
-    async fn delete_one<F, Fut>(&self, service: &str, before: &F) -> Result<()>
+    /// [`Vault::remove`] only while `ok` accepts what is there, checked under the lock. Returns
+    /// whether it was removed.
+    pub async fn remove_if(
+        &self,
+        service: &str,
+        ok: &(dyn Fn(Option<&SignIn>) -> bool + Sync),
+    ) -> Result<bool> {
+        self.delete_one(service, &|_: String, _: SignIn| async {}, ok)
+            .await
+    }
+
+    /// When the person last signed out everywhere, as the device list says (Unix seconds).
+    pub fn signed_out_everywhere_at(ix: &Index) -> Option<u64> {
+        ix.extra
+            .get(SIGNED_OUT_EVERYWHERE)
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    /// Note in the device list that the person signed out everywhere now.
+    async fn mark_signed_out_everywhere(&self) -> Result<()> {
+        let held = self.lock(spec::INDEX_PATH).await?;
+        let r = async {
+            let mut ix = self.index().await?;
+            ix.extra
+                .insert(SIGNED_OUT_EVERYWHERE.into(), serde_json::json!(now()));
+            let body = index_body(&mut ix)?;
+            self.put_locked(&held, spec::INDEX_PATH, body).await
+        }
+        .await;
+        self.unlock(held).await;
+        r
+    }
+
+    /// Delete one sign-in under its lock (or the lease), when `ok` accepts what is there then.
+    /// Returns whether it was deleted.
+    async fn delete_one<F, Fut>(
+        &self,
+        service: &str,
+        before: &F,
+        ok: &(dyn Fn(Option<&SignIn>) -> bool + Sync),
+    ) -> Result<bool>
     where
         F: Fn(String, SignIn) -> Fut,
         Fut: std::future::Future<Output = ()>,
@@ -1576,11 +1649,21 @@ impl Vault<'_> {
         let held = self.lock(&path).await?;
         // Where locks are refused, the lease: a client refreshing now keeps it, and the sign-in
         // is left for the next try
-        if held.lock.is_none() && !self.take_lease(service).await? {
+        let leased = held.lock.is_none();
+        if leased && !self.take_lease(service).await? {
             return Err(VaultStoreError::Busy(path));
         }
+        let current = self.read(service).await.ok().flatten();
+        if !ok(current.as_ref().map(|o| &o.sign_in)) {
+            if leased {
+                self.drop_lease(service).await;
+            } else {
+                self.unlock(held).await;
+            }
+            return Ok(false);
+        }
         // `before` runs while the sign-in is held, so it must not write the vault itself
-        if let Some(o) = self.read(service).await.ok().flatten() {
+        if let Some(o) = current {
             if tokio::time::timeout(BEFORE_FOR, before(service.to_string(), o.sign_in))
                 .await
                 .is_err()
@@ -1602,7 +1685,7 @@ impl Vault<'_> {
         if let Some(lp) = spec::lease_path(service) {
             let _ = storage.delete(lp.as_str()).await;
         }
-        Ok(())
+        Ok(true)
     }
 }
 

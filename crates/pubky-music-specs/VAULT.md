@@ -159,7 +159,10 @@ wrapped to.
     holds that grant (an old key of a device that has a new one keeps the device in): the last key on a grant
     takes the grant with it, so a thief can't register again under it. A client never signs itself out
     through its own grant id.
-- **Sign out everywhere:** delete the blobs, each under its lock, and revoke each token at its service.
+- **Sign out everywhere:** first set `signed_out_everywhere_at` (Unix seconds) in `index.json`, under its lock,
+  then delete the blobs, each under its lock, and revoke each token at its service. A client whose own copy
+  of a sign-in was never in the vault reads that member to tell "signed out everywhere" from "that other
+  sign-in was removed".
 
 Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer
 blob, and they treat an older one as stale and read it again (a homeserver can serve an old copy).

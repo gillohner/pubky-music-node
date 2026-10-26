@@ -328,6 +328,9 @@ pub(crate) async fn connect(
         .lock()
         .expect("library poisoned")
         .set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
+    if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+        crate::vault_cache::new_sign_in_of(&s, "listenbrainz");
+    }
     if acct.submit && !pending(&s).is_empty() {
         send_listens(&s, &acct.token, Vec::new()).await;
     }

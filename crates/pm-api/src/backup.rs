@@ -260,8 +260,10 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             for key in NODE_OWN {
                 copy.delete_setting(key)?;
             }
-            // Sign-ins moved aside after "Sign out everywhere" are still tokens: never in a backup
-            for (key, _) in copy.settings_with_prefix(crate::vault_cache::SIGNED_OUT_PREFIX)? {
+            // The vault cache's state belongs to this machine (its records name its vault key,
+            // and sign-ins moved aside after "Sign out everywhere" are still tokens): never in a
+            // backup
+            for (key, _) in copy.settings_with_prefix("vault.")? {
                 copy.delete_setting(&key)?;
             }
             copy.vacuum_into_place()?;

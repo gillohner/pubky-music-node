@@ -309,14 +309,15 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         )));
     }
     let (a1, a2) = (router(n1.clone()), router(n2.clone()));
-    let tidal_v1 = r#"{"access_token":"at-1","refresh_token":"rt-1","user_id":"7","country":"CH"}"#;
+    let tidal_v1 =
+        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
     let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
     set(&n1, "tidal.user", tidal_v1);
     set(
         &n1,
         "jamendo.user",
-        r#"{"access_token":"jam-1","refresh_token":"jam-r","user_id":"42"}"#,
+        r#"{"access_token":"jam-1","refresh_token":"jam-r","expires_at":5000,"name":"Gil"}"#,
     );
 
     // Node 1: its two sign-ins move into the vault
@@ -335,11 +336,12 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     assert_eq!(get(&n2, "tidal.user").as_deref(), Some(tidal_v1));
     assert_eq!(
         get(&n2, "jamendo.user").as_deref(),
-        Some(r#"{"access_token":"jam-1","refresh_token":"jam-r","user_id":"42"}"#)
+        Some(r#"{"access_token":"jam-1","refresh_token":"jam-r","expires_at":5000,"name":"Gil"}"#)
     );
 
     // Node 2's source refreshes TIDAL locally: it reaches node 1
-    let tidal_v2 = r#"{"access_token":"at-2","refresh_token":"rt-2","user_id":"7","country":"CH"}"#;
+    let tidal_v2 =
+        r#"{"access_token":"at-2","refresh_token":"rt-2","expires_at":2000,"user_id":"7","country":"CH"}"#;
     set(&n2, "tidal.user", tidal_v2);
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pushed"], json!(["tidal"]), "{r}");
@@ -348,12 +350,15 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal_v2));
     // Node 2 refreshes the old account while node 1 signs in to another one: node 1's wins (the
     // person just acted there), and reaches node 2
-    let tidal_v3 = r#"{"access_token":"at-3","refresh_token":"rt-3","user_id":"7","country":"CH"}"#;
+    let tidal_v3 =
+        r#"{"access_token":"at-3","refresh_token":"rt-3","expires_at":3000,"user_id":"7","country":"CH"}"#;
     set(&n2, "tidal.user", tidal_v3);
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pushed"], json!(["tidal"]), "{r}");
-    let other = r#"{"access_token":"other-1","refresh_token":"other-r","user_id":"9","country":"DE"}"#;
+    let other = r#"{"access_token":"other-1","refresh_token":"other-r","expires_at":2500,"user_id":"9","country":"DE"}"#;
     set(&n1, "tidal.user", other);
+    // (a new sign-in, as the source's own sign-in flow marks it)
+    pm_api::vault_cache::new_sign_in(&n1.library.lock().unwrap(), "tidal");
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(
         r["pushed"],
@@ -372,8 +377,35 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     // Nothing changed: nothing moves
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     let quiet = json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "removed": [],
-        "conflicts": [], "not_usable": [], "not_readable": [], "failed": []});
+        "conflicts": [], "not_usable": [], "not_readable": [], "failed": [], "forgotten": []});
     assert_eq!(r, quiet);
+
+    // A node restored from a backup made without a passphrase would have the sync records and
+    // not the sign-ins. Its records are another machine's (another vault key), so it takes the
+    // vault's copies instead of signing the person out everywhere
+    let d3 = tempfile::tempdir().unwrap();
+    let n3 = node(d3.path());
+    {
+        let flow = homeserver.start_login("restored.pubky.music").unwrap();
+        signer.approve_auth(flow.url()).await.unwrap();
+        let session = flow.await_approval().await.unwrap();
+        *n3.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap(),
+            session,
+        )));
+    }
+    let a3 = router(n3.clone());
+    for k in ["vault.synced.tidal", "vault.synced.jamendo"] {
+        let v = get(&n1, k).expect("node 1 has a record");
+        set(&n3, k, &v);
+    }
+    call(&a3, "POST", "/v1/vault/register").await;
+    call(&a1, "POST", "/v1/vault/register").await;
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal", "jamendo"]), "{r}");
+    assert_eq!(r["removed"], json!([]), "{r}");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r, quiet, "node 1 keeps its sign-ins");
 
     // Signing out of Jamendo on node 2 removes it from the vault, and node 1 follows; it doesn't
     // come back on node 2's next pass

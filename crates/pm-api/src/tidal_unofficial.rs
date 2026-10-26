@@ -160,14 +160,14 @@ pub fn set_config_client(id: &str, secret: &str) {
     }
 }
 
-/// The device client the owner set: in Settings, else from node.toml, else the
-/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment, else the one built into this build
-/// (`from: builtin`, python-tidal's, STEWARD-TIDAL-DEFAULT.md).
 /// The device client id the full-tracks sign-in is made with (`vault_cache`).
 pub(crate) fn app_id(s: &NodeState) -> Option<String> {
     client_of(&s.library.lock().expect("library poisoned")).map(|c| c.id)
 }
 
+/// The device client the owner set: in Settings, else from node.toml, else the
+/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment, else the one built into this build
+/// (`from: builtin`, python-tidal's, STEWARD-TIDAL-DEFAULT.md).
 pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     let kept: Option<Client> = lib
         .get_setting(CLIENT_KEY)
@@ -458,6 +458,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
                         at: now(),
                     });
                 });
+                crate::vault_cache::new_sign_in_of(s, "tidal-full");
                 tracing::info!("TIDAL full tracks (unofficial): signed in");
             }
             return;

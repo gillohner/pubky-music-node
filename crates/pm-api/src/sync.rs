@@ -988,12 +988,12 @@ impl std::fmt::Debug for PubkySync {
     }
 }
 
-/// Settings keys that belong to the owner, not to a machine: streaming
-/// sessions, renderers added by hand, the Subsonic jukebox zone, DSP per
-/// output. Caches (`tidal.collection`, `tidal.version.*`, `artist.info.*`,
-/// `mb.rg.*`, `pinakes.version.*`) are not backed up.
-const BACKED_UP_SETTING_PREFIXES: [&str; 9] = [
-    "tidal.user",
+/// Settings keys that belong to the owner, not to a machine: renderers added
+/// by hand, the Subsonic jukebox zone, DSP per output. Caches
+/// (`tidal.collection`, `tidal.version.*`, `artist.info.*`, `mb.rg.*`,
+/// `pinakes.version.*`) are not backed up. Sign-ins aren't either: they travel
+/// encrypted in the vault (`vault_cache`), and this file is plain JSON.
+const BACKED_UP_SETTING_PREFIXES: [&str; 8] = [
     "tidal.playback_limit",
     "outputs.upnp_addresses",
     "outputs.endpoint_addresses",
@@ -1104,6 +1104,11 @@ impl PubkySync {
                 }
             }
             for (k, val) in &backup.settings {
+                // Only what is still backed up: an older file can hold a sign-in in plain text,
+                // and putting it back would bring back what was signed out
+                if !BACKED_UP_SETTING_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                    continue;
+                }
                 let keep = lib
                     .get_setting(k)
                     .ok()

@@ -1204,6 +1204,7 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         }
     }
     store_user(s, Some(&session))?;
+    crate::vault_cache::new_sign_in_of(s, "tidal");
     tracing::info!(user = ?session.user_id, "TIDAL sign-in stored");
     Ok(())
 }
@@ -1475,6 +1476,7 @@ pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Se
         st.enabled = true;
         st.health = None;
     });
+    crate::vault_cache::new_sign_in_of(s, "tidal-full");
 }
 
 /// A way was picked. The device way is what the Full tracks switch used to turn on; the app way

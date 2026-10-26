@@ -623,6 +623,7 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             .map(str::to_string);
     }
     store_user(s, Some(&session))?;
+    crate::vault_cache::new_sign_in_of(s, "jamendo");
     tracing::info!("Jamendo sign-in stored");
     Ok(())
 }

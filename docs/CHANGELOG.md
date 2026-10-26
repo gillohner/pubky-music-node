@@ -8,7 +8,10 @@ Newest first. Dates are when the change landed on `main`.
   - After every sign-in, at startup and every 15 minutes, the node's sign-ins for TIDAL, TIDAL full tracks, Spotify, Qobuz, Bandcamp, Last.fm, ListenBrainz and Jamendo are kept in step with the person's vault, one pass at a time. These are the person's own sign-ins only, not the node's apps or keys, which the admin sets once (ADR 0016).
   - The two sides are compared by content. A sign-in only on the node moves in once; one only in the vault fills the node. After that, whichever side changed since the last sync wins.
   - Signing out of a source on the node removes it from the vault. "Sign out everywhere" moves each node's copy aside (`vault.signed_out.*`, never in a backup).
-  - Two different copies meeting for the first time (two nodes that each had their own) are reported as a conflict, and both stay. A sign-in made with another app than the node's isn't taken.
+  - Each source marks its interactive sign-ins, so a new sign-in wins over a refresh of the old one, and a refresh never brings back what was signed out.
+  - Two copies for different accounts meeting for the first time (two nodes that each had their own) are reported as a conflict, and both stay until `POST /v1/vault/sync {service, take}` settles it. Copies of one account are one sign-in. A sign-in made with another app than the node's isn't taken, and a phone's copy isn't overwritten by a refresh.
+  - Every write or removal is checked again under the blob's lock, so a pass on another node meanwhile isn't undone. A sign-in lost to a change of the node's app isn't a sign-out.
+  - The sync records belong to the machine and stay out of backups, so a node restored from a backup takes the vault's copies. TIDAL's sign-in is no longer mirrored in plain text to `/priv/pubky.music/settings.json` (the next pass rewrites the file), and an older file's copy isn't restored.
   - Only the sign-in itself travels: the mode switch, health and download format stay on each node. Each blob keeps what other clients put in it.
   - Media servers (usually a server in that house), drives, gPodder (per-node cursors) and SoundCloud (its token sits in the admin's client setting) stay on the node for now. So do librespot's, Soloist's and yt-dlp's machine state.
   - `POST /v1/vault/sync` runs it now.

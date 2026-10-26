@@ -1172,6 +1172,7 @@ pub(crate) async fn put(
                 .expect("library poisoned")
                 .set_setting(COOKIE_KEY, c)?;
             update(&s, |st| st.fan = Some(fan));
+            crate::vault_cache::new_sign_in_of(&s, "bandcamp");
         }
     }
     update(&s, |st| {
