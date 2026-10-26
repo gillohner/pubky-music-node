@@ -7,6 +7,8 @@ Newest first. Dates are when the change landed on `main`.
 - **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Only a grant that names the vault itself (`/priv/pubky.music/vault/:rw`) counts: an app approved for all storage is not trusted with the sign-ins. The node asks Ring for that capability, and an older sign-in is asked to sign in again. Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
   - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
   - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Each client remembers every sign-out it has seen in a local file, because the device list is writable by the devices it lists. A signed-out device that writes the list back without its record stays signed out, and the next registration writes the record back. Who gets a key is read under each blob's lock.
+  - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
   - Vault files are written under the homeserver's WebDAV lock.
   - Tested on a real homeserver with forged, borrowed and garbage entries.
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).

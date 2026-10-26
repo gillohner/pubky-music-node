@@ -33,7 +33,7 @@ secret on the device. It is authorised by the person's identity, without ever ho
    "device": "node"}`. `device` is optional: `node`, `desktop`, `android`, `ios` or `browser` (for the icon;
    readers that don't know a value show a generic one).
    The result, `{grant, pop}`, is the root-signed grant JWS (it names the client key in `cnf`) and the proof JWS.
-3. It adds itself to `index.json`.
+3. It adds itself to `index.json`, under that file's lock (see "Editing `index.json`").
 
 A reader trusts an entry only if all of these hold:
 - `verify_custom_grant_pop` accepts the proof (both signatures, the grant bound to the proof, the grant
@@ -61,6 +61,26 @@ app must hold the root secret. A grant proof gives the same identity binding wit
 ```
 Times are Unix seconds. `last_used_at` is written at most once a day per client. A client listed in
 `revoked` (by key or grant id) never gets keys again, even if it re-adds itself.
+
+**Editing `index.json`.** Every change to the list (adding a client, `last_used_at`, signing one out)
+is a read-modify-write under that file's lock: `LOCK` on `index.json`, read it again, change it, `PUT`
+with the lock, unlock. Where `LOCK` answers `405`, use the lease (`index.lease.json`, as for blobs
+below). An edit made without the lock can drop a registration or a sign-out made at the same time.
+
+**Revocation is remembered by each client.** The `revoked` list is not tamper-proof. Every client
+listed in `index.json` can write it, a signed-out one too (its homeserver grant still allows that),
+and the homeserver can serve an older copy. So:
+- each client keeps its own append-only record of every `revoked` entry it has seen;
+- it trusts nobody in the union of that record and the list as served;
+- when it writes `index.json`, it writes the union back, so a dropped record returns.
+
+A list that drops a record therefore re-trusts nobody for a client that has seen the record. The same
+holds for epochs: clients remember the highest epoch they have seen.
+
+**Who gets a key is decided under the blob's lock.** A client that wraps a data key to the trusted
+clients (writing a blob, or adding a device) reads `index.json` again after it takes that blob's lock.
+A sign-out changes the index before it takes any blob lock, so a client signed out meanwhile is never
+wrapped to.
 
 ## The envelope
 
@@ -119,7 +139,8 @@ Times are Unix seconds. `last_used_at` is written at most once a day per client.
 - **Adding a device:** a client that sees a trusted entry with no recipient in a blob unwraps the data key and
   appends a recipient for it, keeping the epoch, under that blob's lock.
 - **Sign out this device:**
-  1. The entry moves to `revoked`.
+  1. The entry moves to `revoked` (under the index lock). Where Ring offers it, the person also revokes
+     the device's grant, so it loses write access to the vault folder.
   2. Every blob gets a new data key at `epoch` + 1, is encrypted again, and is wrapped only to the remaining
      trusted clients.
   3. The token is revoked at the service where its API allows that.
@@ -156,3 +177,7 @@ client's token write and could undo a rotated refresh token.
 ## Limits
 
 Blob ≤ 64 KiB, index ≤ 256 KiB, ≤ 64 clients. Larger answers are refused unread.
+
+A reader still reads an `index.json` that lists more than 64 entries, within the byte limit, so entries
+that don't verify can't make the list unreadable. A client adding itself to a full list first drops the
+entries that aren't trusted. Their sign-outs stay in `revoked`.

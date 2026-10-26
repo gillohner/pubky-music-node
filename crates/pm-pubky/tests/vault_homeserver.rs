@@ -424,3 +424,72 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
     assert_eq!(vn.share_with_trusted().await.unwrap(), 0);
     assert!(vb.read("tidal").await.is_err());
 }
+
+/// The Claude review of #91: `index.json` is writable by the devices it lists, the signed-out ones
+/// too. A signed-out phone that writes the list back without its record, and its entry back in,
+/// stays signed out for a node that remembers revocations; the node's next registration puts the
+/// record back in the list.
+#[tokio::test]
+async fn a_signed_out_device_that_rewrites_the_list_stays_signed_out() {
+    use pubky_music_specs::vault::{Index, Revoked, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let (kn, kd) = (ClientSecret::generate(), ClientSecret::generate());
+    let file = std::env::temp_dir().join(format!("pm-revoked-{}.json", &kn.public().to_hex()[..12]));
+    let node = Vault::new(&sessions[0], &kn).remember_revocations(&file);
+    let phone = Vault::new(&sessions[1], &kd);
+    node.register("Node").await.unwrap();
+    phone.register("Phone").await.unwrap();
+    node.write_shared("tidal", &sign_in("before")).await.unwrap();
+    assert!(phone.read("tidal").await.is_ok());
+    let full: Index = phone.index().await.unwrap();
+
+    // The node signs the phone out (the index first, as #93's sign-out does)
+    let jti = node
+        .trusted(&full)
+        .into_iter()
+        .find(|t| t.client_key == phone.client_key())
+        .unwrap()
+        .grant_id;
+    let mut ix = node.index().await.unwrap();
+    ix.revoked.push(Revoked {
+        client_key: Some(phone.client_key()),
+        grant_id: Some(jti),
+        at: 1,
+    });
+    sessions[0]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let seen = node.index().await.unwrap();
+    assert!(!node
+        .trusted(&seen)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+
+    // The phone writes the list back as it was before, with its valid entry and no record
+    sessions[1]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&full).unwrap())
+        .await
+        .unwrap();
+    assert!(phone.index().await.unwrap().revoked.is_empty());
+    // The node still doesn't trust it, and gives it no key to what is written next
+    let ix = node.index().await.unwrap();
+    assert!(!node
+        .trusted(&ix)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+    node.write_shared("tidal", &sign_in("after")).await.unwrap();
+    assert!(phone.read("tidal").await.is_err());
+    assert_eq!(node.share_with_trusted().await.unwrap(), 0);
+    assert!(phone.read("tidal").await.is_err());
+    // The node's next registration writes the record back
+    node.register("Node").await.unwrap();
+    assert!(phone.index().await.unwrap().is_revoked(&phone.client_key(), None));
+    let _ = std::fs::remove_file(&file);
+}
