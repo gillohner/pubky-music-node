@@ -37,6 +37,30 @@ pub enum VaultStoreError {
     NeedsVaultGrant,
     #[error("the node's record of signed-out devices: {0}")]
     Local(#[from] std::io::Error),
+    /// The service refreshed the tokens but they couldn't be written to the vault. `sign_in`
+    /// holds them: after a rotation they are the only ones that still work, so the caller uses
+    /// them and writes them again later.
+    #[error("the new {service} tokens couldn't be saved to the vault yet: {reason}")]
+    Unsaved {
+        service: String,
+        sign_in: Box<SignIn>,
+        reason: String,
+    },
+}
+
+impl VaultStoreError {
+    /// The homeserver's HTTP status, where the error is one.
+    fn http_status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::Homeserver(HomeserverError::Pubky(e)) => status(e),
+            _ => None,
+        }
+    }
+
+    /// Worth trying again shortly: the homeserver or the network, not the data.
+    fn transient(&self) -> bool {
+        matches!(self, Self::Busy(_) | Self::Homeserver(_))
+    }
 }
 
 impl From<pubky::Error> for VaultStoreError {
@@ -798,6 +822,10 @@ const LEASE_SETTLE: Duration = Duration::from_secs(2);
 const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 /// How long a client waits for another one's refresh before giving up.
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
+/// The longest a service is given to answer a refresh; then the lock is let go.
+const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// Tries at writing refreshed tokens before handing them back unsaved.
+const SAVE_TRIES: u32 = 6;
 
 /// What [`Vault::refresh`] did.
 #[derive(Debug)]
@@ -818,6 +846,14 @@ impl Refreshed {
     }
 }
 
+/// How refreshed tokens were saved.
+enum Saved {
+    /// Written, as returned.
+    Ours(SignIn),
+    /// Another client's fresh copy was there: used instead.
+    Theirs(SignIn),
+}
+
 /// The service refused the refresh (`String`: its words, never a token).
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -829,6 +865,10 @@ impl Vault<'_> {
     /// tokens and `expires_at`; it's called only when the tokens are due (or `force`, after the
     /// service refused them) and nobody refreshed them meanwhile. It never sees a token that wasn't
     /// read under the lock (or the lease).
+    ///
+    /// Once the service has answered, its new tokens are written back, retried if the write
+    /// fails, or returned in [`VaultStoreError::Unsaved`]: they may be the only ones that still
+    /// work. Dropping this future after the service answered loses them, so callers let it run.
     pub async fn refresh<F, Fut>(&self, service: &str, force: bool, refresh: F) -> Result<Refreshed>
     where
         F: FnOnce(SignIn) -> Fut,
@@ -922,63 +962,159 @@ impl Vault<'_> {
             release(held).await;
             return Ok(Refreshed::ByAnother(cur.sign_in));
         }
-        let recipients = cur.recipients.clone();
-        // The service call, with the lock renewed while it runs
-        let call = refresh(cur.sign_in.clone());
+        // The service call, with the lock (or the lease) renewed while it runs, and a limit
+        let call = tokio::time::timeout(CALL_FOR, refresh(cur.sign_in.clone()));
         tokio::pin!(call);
         let mut renew = tokio::time::interval(RENEW_EVERY);
         renew.tick().await;
-        let mut lost = false;
         let outcome = loop {
             tokio::select! {
                 out = &mut call => break out,
-                _ = renew.tick() => {
-                    if let Some(l) = held.lock.as_mut() {
-                        if self.session.storage().refresh_lock(l, LOCK_FOR).await.is_err() {
-                            lost = true;
-                        }
-                    }
-                }
+                _ = renew.tick() => self.renew(&mut held, service).await,
             }
         };
         let mut fresh = match outcome {
-            Ok(s) => s,
-            Err(e) => {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 release(held).await;
                 return Err(VaultStoreError::Refresh(e.0));
+            }
+            Err(_) => {
+                release(held).await;
+                return Err(VaultStoreError::Refresh(format!(
+                    "the service didn't answer in {} s",
+                    CALL_FOR.as_secs()
+                )));
             }
         };
         fresh.last_refresh = Some(spec::LastRefresh {
             client: self.client_key(),
             at: now(),
         });
-        if lost {
-            // The lock lapsed while the service answered: take it again and write only if nobody
-            // wrote meanwhile; otherwise theirs stands and ours is dropped.
-            release(held).await;
-            held = self.lock(path).await?;
-            match self.read(service).await {
-                Ok(Some(o)) if o.sign_in.revision == cur.sign_in.revision => {}
-                Ok(Some(o)) => {
-                    self.unlock(held).await;
-                    return Ok(Refreshed::ByAnother(o.sign_in));
+        fresh.service = service.to_string();
+        // From here `fresh` may hold the only refresh token that still works: it is written, or
+        // handed back
+        let saved = self.save_refreshed(&mut held, service, path, &cur, &fresh).await;
+        release(held).await;
+        match saved {
+            Ok(Saved::Ours(s)) => Ok(Refreshed::ByUs(s)),
+            Ok(Saved::Theirs(s)) => Ok(Refreshed::ByAnother(s)),
+            // Removed meanwhile (signed out everywhere), or rotated without this node (it was
+            // signed out): not ours to keep
+            Err(e @ (VaultStoreError::NotOurs(_) | VaultStoreError::Vault(VaultError::NotARecipient)))
+            | Err(e @ VaultStoreError::Vault(VaultError::Format("the sign-in was removed meanwhile"))) => {
+                Err(e)
+            }
+            Err(e) => Err(VaultStoreError::Unsaved {
+                service: service.to_string(),
+                sign_in: Box::new(fresh),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    /// Write tokens the service just gave, trying again while the homeserver fails (and taking
+    /// the lock again when it lapsed: ours are the live tokens, so waiting is worth it).
+    async fn save_refreshed(
+        &self,
+        held: &mut Locked,
+        service: &str,
+        path: &str,
+        cur: &Opened,
+        fresh: &SignIn,
+    ) -> Result<Saved> {
+        let deadline = tokio::time::Instant::now() + WAIT_FOR_OTHERS;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let e = match self.save_once(held, service, path, cur, fresh).await {
+                Ok(s) => return Ok(s),
+                Err(e) => e,
+            };
+            if !e.transient() || attempt >= SAVE_TRIES || tokio::time::Instant::now() >= deadline {
+                return Err(e);
+            }
+            tracing::warn!(
+                service,
+                attempt,
+                "vault: the refreshed sign-in isn't saved yet: {e}"
+            );
+            let lapsed = matches!(
+                e.http_status(),
+                Some(reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::LOCKED)
+            );
+            if lapsed && held.lock.is_some() {
+                let old = std::mem::replace(held, Locked { lock: None });
+                self.unlock(old).await;
+                *held = loop {
+                    match self.lock(path).await {
+                        Ok(h) => break h,
+                        Err(VaultStoreError::Busy(_)) if tokio::time::Instant::now() < deadline => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
+            } else {
+                tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+            }
+        }
+    }
+
+    /// One try at writing refreshed tokens. The blob is read again first:
+    /// - another client's fresh copy (newer, other tokens, not due) stands, and ours are dropped;
+    /// - a copy written meanwhile without new tokens (a new device, a sign-out rotation, a
+    ///   setting) is kept, with our tokens in it and wrapped to its recipients.
+    async fn save_once(
+        &self,
+        held: &Locked,
+        service: &str,
+        path: &str,
+        cur: &Opened,
+        fresh: &SignIn,
+    ) -> Result<Saved> {
+        let Some(now_o) = self.read(service).await? else {
+            return Err(VaultError::Format("the sign-in was removed meanwhile").into());
+        };
+        let theirs = &now_o.sign_in;
+        if theirs.revision > cur.sign_in.revision
+            && theirs.tokens != cur.sign_in.tokens
+            && !theirs.needs_refresh(now())
+        {
+            return Ok(Saved::Theirs(now_o.sign_in));
+        }
+        let mut s = if theirs.revision == cur.sign_in.revision {
+            fresh.clone()
+        } else {
+            let mut s = theirs.clone();
+            s.tokens = fresh.tokens.clone();
+            s.expires_at = fresh.expires_at;
+            s.scopes = fresh.scopes.clone();
+            s.last_refresh = fresh.last_refresh;
+            if fresh.user.is_some() {
+                s.user = fresh.user.clone();
+            }
+            s
+        };
+        let me = self.client_key();
+        let others: Vec<ClientKey> = now_o.recipients.iter().copied().filter(|k| *k != me).collect();
+        s.revision = self.write_held(held, service, path, &s, &others).await?;
+        Ok(Saved::Ours(s))
+    }
+
+    /// Renew what keeps other clients out while the service answers: the lock, or our lease.
+    async fn renew(&self, held: &mut Locked, service: &str) {
+        match held.lock.as_mut() {
+            Some(l) => {
+                if let Err(e) = self.session.storage().refresh_lock(l, LOCK_FOR).await {
+                    // It still has up to 20 s; the write takes it again if it lapsed
+                    tracing::warn!(service, "vault: the lock wasn't renewed: {e}");
                 }
-                Ok(None) | Err(_) => {
-                    self.unlock(held).await;
-                    return Err(VaultStoreError::Busy(path.to_string()));
+            }
+            None => {
+                if let Err(e) = self.renew_lease(service).await {
+                    tracing::warn!(service, "vault: the lease wasn't renewed: {e}");
                 }
             }
         }
-        let others: Vec<ClientKey> = recipients
-            .into_iter()
-            .filter(|k| *k != self.client_key())
-            .collect();
-        let r = self.write_held(&held, service, path, &fresh, &others).await;
-        release(held).await;
-        let revision = r?;
-        fresh.revision = revision;
-        fresh.service = service.to_string();
-        Ok(Refreshed::ByUs(fresh))
     }
 
     /// Take the refresh lease (VAULT.md): `false` while another client's lease is live or ours
@@ -1009,13 +1145,38 @@ impl Vault<'_> {
         Ok(read().await?.is_some_and(|l| l.client == me))
     }
 
-    /// Give the lease back (only ours).
+    /// Push our lease's `until` on while the service answers (only while it is still ours).
+    async fn renew_lease(&self, service: &str) -> Result<()> {
+        let path =
+            spec::lease_path(service).ok_or_else(|| VaultStoreError::BadService(service.to_string()))?;
+        let me = self.client_key();
+        let ours = self
+            .read_bytes(&path, 1024)
+            .await?
+            .and_then(|b| serde_json::from_slice::<spec::Lease>(&b).ok())
+            .is_some_and(|l| l.client == me);
+        if !ours {
+            return Ok(());
+        }
+        let lease = spec::Lease {
+            client: me,
+            until: now() + spec::LOCK_SECONDS,
+        };
+        let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
+        self.session.storage().put(path.as_str(), body).await?;
+        Ok(())
+    }
+
+    /// Give the lease back: only ours, and only while it is live. Once it has run out another
+    /// client may be taking it, and deleting could remove theirs.
     async fn drop_lease(&self, service: &str) {
         let Some(path) = spec::lease_path(service) else {
             return;
         };
         if let Ok(Some(b)) = self.read_bytes(&path, 1024).await {
-            if serde_json::from_slice::<spec::Lease>(&b).is_ok_and(|l| l.client == self.client_key()) {
+            if serde_json::from_slice::<spec::Lease>(&b)
+                .is_ok_and(|l| l.client == self.client_key() && l.until > now() + 1)
+            {
                 let _ = self.session.storage().delete(path.as_str()).await;
             }
         }

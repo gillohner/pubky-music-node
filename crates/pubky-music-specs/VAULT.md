@@ -159,10 +159,17 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    every 10 s. This is the pubky SDK's `SessionStorage::lock` on homeservers from 0.16.2.
 2. Under the lock it reads the blob again. If another client has already refreshed it (higher `revision`, not
    expired), it uses that and unlocks.
-3. Otherwise it refreshes with the refresh token it just read. It writes the new tokens with `revision` + 1 and
-   `last_refresh` (`PUT` with the lock's `If` header), then unlocks.
-4. A client that finds the blob locked (`423`) waits 1–2 s and reads it again. It never refreshes a token it
-   didn't just read under the lock.
+3. Otherwise it refreshes with the refresh token it just read, giving the service at most 60 s (then it unlocks
+   and gives up). It writes the new tokens with `revision` + 1 and `last_refresh` (`PUT` with the lock's `If`
+   header), then unlocks.
+   - It reads the blob again just before writing. If another client's fresh copy is there (newer, other tokens,
+     not due), that one stands. If the blob was changed meanwhile without new tokens (a device added, a
+     sign-out rotation, a setting), it puts its tokens into that copy, wrapped to that copy's recipients.
+   - The new tokens may be the only ones that still work (the service has used up the old refresh token), so
+     they are never dropped: a failed write is tried again, taking the lock again if it lapsed. If it still
+     fails, the client keeps using them and writes them later.
+4. A client that finds the blob locked (`423`) retries the lock for about 2 s, then waits 1–2 s and reads the
+   blob again. It never refreshes a token it didn't just read under the lock.
 5. If renewing the lock fails while the service answers, the client locks again and writes only if nobody
    wrote meanwhile. At a service that rotates refresh tokens this can cost one refresh: the other client's
    call fails at the service, and its next read picks up the winner.
@@ -172,7 +179,12 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    wait and read the blob again.
 2. Otherwise write your own lease (`until` = now + 30), wait 2 s, and read the lease again. Go on only if it is
    still yours.
-3. Refresh, write the blob, then delete the lease.
+3. Refresh, renewing the lease (`until` = now + 30) every 10 s while the service answers, write the blob, then
+   delete the lease. Delete it only while it is yours and still live: once it has run out another client may
+   be taking it.
+
+Leases compare `until` with the local clock, so a client whose clock is more than 30 s off can take a live
+lease. That costs a failed refresh at the service. Locks don't depend on clocks.
 
 The lease is its own file, not a member of the blob: writing a lease into the blob would race with another
 client's token write and could undo a rotated refresh token.
