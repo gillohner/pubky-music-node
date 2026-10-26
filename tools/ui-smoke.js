@@ -49,10 +49,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('bar:', w.document.querySelector('#np').textContent.replace(/\s+/g, ' ').trim(), '| quality:', w.document.querySelector('#quality .qtext').textContent, '| zone:', w.document.querySelector('#zonename').textContent);
   w.document.querySelector('#np').click(); await sleep(400);
   console.log('overlay hidden?', w.document.querySelector('#nowplaying').hidden, '| overlay h1:', w.document.querySelector('#nowplaying h1')?.textContent);
-  // Now Playing carries the sleep timer menu and the (hidden until loaded) lyrics panel.
-  if (!w.document.querySelector('#npsleep')) errors.push('no sleep timer button on Now Playing');
-  if (!w.document.querySelector('#nplyrics')) errors.push('no lyrics panel on Now Playing');
-  const sleepBtn = w.document.querySelector('#npsleep'); if (sleepBtn) { sleepBtn.click(); await sleep(200); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('sleep menu:', items.join(' | ')); if (!items.includes('Off')) errors.push('sleep menu incomplete'); w.document.body.click(); await sleep(100); }
+  // Now Playing: the sleep timer behind ⋯, and the Lyrics sheet (its panel hidden until loaded)
+  const npMore = w.document.querySelector('#npmore');
+  if (!npMore) errors.push('no ⋯ menu on Now Playing');
+  else {
+    npMore.click(); await sleep(200);
+    const top = [...w.document.querySelectorAll('.popover.menu .pop-item')].find((e) => /Sleep/.test(e.textContent));
+    if (!top) errors.push('no sleep timer in the ⋯ menu'); else { top.click(); await sleep(300); }
+    const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent);
+    console.log('sleep menu:', items.join(' | ')); if (!items.includes('Off')) errors.push('sleep menu incomplete');
+    w.document.body.click(); await sleep(100);
+  }
+  const lyr = w.document.querySelector('#nowplaying [data-npsheet="lyrics"]'); if (lyr) { lyr.click(); await sleep(300); }
+  if (!w.document.querySelector('#nplyrics')) errors.push('no lyrics sheet on Now Playing');
   w.document.querySelector('#npclose').click();
   // Albums: Focus chips filter the grid; "All" shows everything again.
   w.document.querySelector('.nav-item[data-view="albums"]').click(); await sleep(900);

@@ -11,8 +11,8 @@ const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1
     const p = await ctx.newPage();
     await p.goto(BASE + '/tracks'); await p.waitForTimeout(2000);
     await p.click('#shuffle'); await p.waitForTimeout(800); // Play all
-    // Desktop: the sidebar; phones: Now playing › Queue
-    if (name === 'phone') { await p.focus('#np'); await p.keyboard.press('Enter'); await p.waitForTimeout(500); await p.click('#npq'); } else await p.click('.nav-item[data-view="queue"]');
+    // Desktop: the sidebar; phones: Now playing › Queue sheet › Reorder
+    if (name === 'phone') { await p.focus('#np'); await p.keyboard.press('Enter'); await p.waitForTimeout(500); await p.click('.np-tabs [data-npsheet="queue"]'); await p.waitForTimeout(300); await p.click('#npqfull'); } else await p.click('.nav-item[data-view="queue"]');
     await p.waitForTimeout(1500);
     const names = async () => p.$$eval('.list.queue .list-row .name', (els) => els.map((e) => e.textContent));
     const before = await names();
