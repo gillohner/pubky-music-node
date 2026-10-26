@@ -6,7 +6,7 @@
 
 use crate::queue::{Queue, QueueItem};
 use crate::sink::{AudioSink, Output};
-use crate::source::{FrameSource, Processor, SourceError, SourceFactory};
+use crate::source::{FrameSource, Processor, SourceError, SourceFactory, StreamInfo};
 use crate::zone::{NowPlaying, Transport, ZoneEvent, ZoneId, ZoneState};
 use pm_model::{AudioBlock, AudioFormat, PathStage, Quality, SampleKind, Samples};
 use std::collections::VecDeque;
@@ -48,6 +48,19 @@ struct Current {
     stream_title: Option<String>,
     /// Fading out into the next track: the signal path shows a `crossfade` stage.
     fading: bool,
+    /// What is streaming (codec, bitrate, service), worked out once when the track starts.
+    format: Option<StreamInfo>,
+}
+
+/// What a source is streaming, with the service taken from the item's uri when the source
+/// leaves it empty. Once per track, never on the audio thread's publish.
+fn stream_info_of(source: &dyn FrameSource, item: &QueueItem) -> Option<StreamInfo> {
+    source.stream_info().map(|mut f| {
+        if f.service.is_empty() {
+            f.service = service_of(&item.uri).to_string();
+        }
+        f
+    })
 }
 
 /// The next track while it fades in over the end of the current one (crossfade).
@@ -485,6 +498,7 @@ impl Engine {
             signal_path: proc.signal_path().clone(),
             gapless,
         });
+        let format = stream_info_of(source.as_ref(), &item);
         self.current = Some(Current {
             index,
             item,
@@ -495,6 +509,7 @@ impl Engine {
             paused_at_ms: None,
             stream_title: None,
             fading: false,
+            format,
         });
         self.prefetch = None;
         self.error = None;
@@ -798,6 +813,7 @@ impl Engine {
             signal_path: inc.proc.signal_path().clone(),
             gapless: false,
         });
+        let format = stream_info_of(inc.source.as_ref(), &inc.item);
         self.current = Some(Current {
             index,
             item: inc.item,
@@ -808,6 +824,7 @@ impl Engine {
             paused_at_ms: None,
             stream_title: None,
             fading: false,
+            format,
         });
         self.prefetch = None;
         self.error = None;
@@ -868,12 +885,7 @@ impl Engine {
             },
             members: self.sink.as_ref().map(|s| s.members()).unwrap_or_default(),
             stream_title: c.stream_title.clone(),
-            format: c.source.stream_info().map(|mut f| {
-                if f.service.is_empty() {
-                    f.service = service_of(&c.item.uri).to_string();
-                }
-                f
-            }),
+            format: c.format.clone(),
         });
         self.state.send_modify(|s| {
             s.transport = self.transport;
