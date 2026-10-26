@@ -4033,6 +4033,7 @@
     clearInterval(link.tick);
     const paint = () => {
       if (link.up) { clearInterval(link.tick); return; }
+      if (link.waiters.length) linkHint(); // a change is held: never let it wait out a long retry
       const secs = Math.max(0, Math.ceil((link.retryAt - Date.now()) / 1000));
       if (!navigator.onLine) setConn('bad', 'Offline: no network');
       else if (link.ever && Date.now() - link.downSince < 20000) setConn('wait', 'Reconnecting…');
@@ -4042,9 +4043,13 @@
   };
   const scheduleRetry = () => {
     clearTimeout(link.retry);
-    const d = Math.min(30000, 500 * 2 ** Math.min(link.attempt, 10));
+    // Short retries while it matters: someone waits on a held change, or the node has only just gone
+    // (a restart is back within seconds); the long backoff after that spares a node that is really off
+    const urgent = link.waiters.length > 0 || (link.downSince && Date.now() - link.downSince < 20000);
+    const d = Math.min(urgent ? 1500 : 30000, 500 * 2 ** Math.min(link.attempt, 10));
     const wait = Math.round(d / 2 + Math.random() * d / 2);
     link.attempt++; link.retryAt = Date.now() + wait;
+    const conn = $('#conn'); if (conn) conn.dataset.retryAt = String(link.retryAt); // CI checks resync against this
     link.retry = setTimeout(() => { link.retry = null; reconnect(); }, wait);
   };
   const goneDown = () => {
