@@ -120,6 +120,7 @@ Today a node is reached outside the LAN over HTTPS (the address it publishes on 
   | :-- | :-- |
   | both controllers notice a killed node | 2 ms (the socket closes; a vanished host takes ≤ 20 s, two missed pings) |
   | both resync after the node is back (3.3 s outage) | 0.3–0.6 s for the controller with a held change (it retries at once), 1.5–1.7 s for the other (backoff) |
+  | the same in CI (2026-10-26, about 5 s outages) | up to 2.4 s with a held change; up to 8 s for the other by design (the retry that finds the node back can be a 4–8 s backoff step), so the check allows 9 s |
   | a pause pressed during the outage | goes through when the node is back, and both controllers show it |
   | a change on one controller shows on the other | 0.11 s |
   | after 20 s down | offline, "retrying in N s" |
