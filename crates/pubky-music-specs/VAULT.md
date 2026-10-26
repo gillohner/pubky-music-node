@@ -60,7 +60,8 @@ app must hold the root secret. A grant proof gives the same identity binding wit
   "revoked": [ { "client_key": "<hex>", "grant_id": "<jti>", "at": 1761500000 } ] }
 ```
 Times are Unix seconds. `last_used_at` is written at most once a day per client. A client listed in
-`revoked` (by key or grant id) never gets keys again, even if it re-adds itself.
+`revoked` (by key or grant id) never gets keys again, even if it re-adds itself. Records carry `client_key`
+(see Revocation); one with only a grant id keeps out the listed entries under that grant.
 
 **Editing `index.json`.** Every change to the list (adding a client, `last_used_at`, signing one out)
 is a read-modify-write under that file's lock: `LOCK` on `index.json`, read it again, change it, `PUT`
@@ -154,8 +155,10 @@ wrapped to.
   - One sign-in that can't be rotated now (locked by another client's refresh, unreadable) doesn't stop the
     others: it is reported, and its next write leaves the device out anyway (writers read the index under the
     blob's lock and never wrap to a signed-out client).
-  - A client never signs itself out through its own grant id: when the entry being signed out shares the
-    signer's grant (an old key of the same client), only its key goes into `revoked`.
+  - Every record names the device's `client_key`. It also names the grant id only when no other listed entry
+    holds that grant (an old key of a device that has a new one keeps the device in): the last key on a grant
+    takes the grant with it, so a thief can't register again under it. A client never signs itself out
+    through its own grant id.
 - **Sign out everywhere:** delete the blobs, each under its lock, and revoke each token at its service.
 
 Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer

@@ -463,12 +463,15 @@ impl<'a> Vault<'a> {
     pub async fn write(&self, service: &str, sign_in: &SignIn, others: &[ClientKey]) -> Result<u64> {
         let path = Self::blob_path(service)?;
         let held = self.lock(&path).await?;
-        let r = self.write_held(&held, service, &path, sign_in, others).await;
+        let r = self
+            .write_held(&held, service, &path, sign_in, others, false)
+            .await;
         self.unlock(held).await;
         r
     }
 
-    /// [`Vault::write`] under a lock already held on `path`.
+    /// [`Vault::write`] under a lock already held on `path`. With `must_exist`, a sign-in that
+    /// is gone (removed meanwhile) isn't made again.
     async fn write_held(
         &self,
         held: &Locked,
@@ -476,12 +479,26 @@ impl<'a> Vault<'a> {
         path: &str,
         sign_in: &SignIn,
         others: &[ClientKey],
+        must_exist: bool,
     ) -> Result<u64> {
         let me = self.client_key();
         let mut recipients = vec![me];
         // Read under the blob's lock: a device signed out meanwhile is in the index already, so
-        // it is dropped here (and the key rotates past it) whatever list the caller had
-        let out = revoked_keys(&self.index().await?);
+        // it is dropped here (and the key rotates past it) whatever list the caller had. A list
+        // that can't be read doesn't stop the write: this node's own record still applies
+        let mut out: Vec<ClientKey> = self
+            .remember(&[])
+            .await?
+            .iter()
+            .filter_map(|r| r.client_key)
+            .collect();
+        match self.index().await {
+            Ok(ix) => out.extend(revoked_keys(&ix)),
+            Err(e) => tracing::warn!(
+                service,
+                "vault: the device list can't be read, writing by this node's record: {e}"
+            ),
+        }
         for k in others {
             if !recipients.contains(k) && !out.contains(k) {
                 recipients.push(*k);
@@ -494,6 +511,9 @@ impl<'a> Vault<'a> {
             }
             Err(e) => return Err(e),
         };
+        if must_exist && existing.is_none() {
+            return Err(VaultError::Format("the sign-in was removed meanwhile").into());
+        }
         let (data_key, epoch, revision) = match &existing {
             None => (DataKey::generate(), 1, 1),
             Some(o) => {
@@ -909,7 +929,8 @@ impl Vault<'_> {
         let r = async {
             let ix = self.index().await?;
             let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
-            self.write_held(&held, service, &path, sign_in, &others).await
+            self.write_held(&held, service, &path, sign_in, &others, false)
+                .await
         }
         .await;
         self.unlock(held).await;
@@ -983,6 +1004,8 @@ const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
 /// The longest a service is given to answer a refresh; then the lock is let go.
 const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// The longest the service-side part of a sign-out may hold a sign-in.
+const BEFORE_FOR: Duration = Duration::from_secs(20);
 /// The longest one renewal of the lock or the lease may take.
 const RENEW_FOR: Duration = Duration::from_secs(5);
 /// Tries at writing refreshed tokens before handing them back unsaved.
@@ -1276,7 +1299,7 @@ impl Vault<'_> {
         };
         let me = self.client_key();
         let others: Vec<ClientKey> = now_o.recipients.iter().copied().filter(|k| *k != me).collect();
-        s.revision = self.write_held(held, service, path, &s, &others).await?;
+        s.revision = self.write_held(held, service, path, &s, &others, true).await?;
         Ok(Saved::Ours(s))
     }
 
@@ -1438,15 +1461,23 @@ impl Vault<'_> {
                 // key): sign out the key only, or the node would sign itself out
                 .filter(|j| my_grant.as_deref() != Some(j.as_str()));
             ix.clients.retain(|e| e.client_key != *device);
+            // The grant too, unless another listed key holds it (two keys of one device: signing
+            // out the old one keeps the other); the last key on a grant takes the grant with it
+            let shared = |j: &str| {
+                ix.clients
+                    .iter()
+                    .any(|e| pubky::GrantClaims::decode(&e.proof.grant).is_ok_and(|c| c.jti.to_string() == j))
+            };
+            let jti = jti.filter(|j| !shared(j));
             let rec = spec::Revoked {
                 client_key: Some(*device),
                 grant_id: jti,
                 at: now(),
             };
-            // Remembered here first: the list itself can be written back without it
-            self.remember(std::slice::from_ref(&rec))?;
+            // Remembered here first, for good: the list itself can be written back without it
+            self.remember_made(&rec)?;
             ix.add_revoked([&rec]);
-            let body = serde_json::to_vec(&ix).map_err(|_| VaultError::Format("index"))?;
+            let body = index_body(&mut ix)?;
             self.put_locked(&held, spec::INDEX_PATH, body).await?;
             Ok::<Index, VaultStoreError>(ix)
         }
@@ -1499,7 +1530,8 @@ impl Vault<'_> {
                 .copied()
                 .filter(|k| k != device && *k != self.client_key())
                 .collect();
-            self.write_held(&held, service, &path, &sign_in, &others).await?;
+            self.write_held(&held, service, &path, &sign_in, &others, true)
+                .await?;
             Ok::<Rotation, VaultStoreError>(Rotation::Rotated)
         }
         .await;
@@ -1536,8 +1568,19 @@ impl Vault<'_> {
     {
         let path = Self::blob_path(service)?;
         let held = self.lock(&path).await?;
+        // Where locks are refused, the lease: a client refreshing now keeps it, and the sign-in
+        // is left for the next try
+        if held.lock.is_none() && !self.take_lease(service).await? {
+            return Err(VaultStoreError::Busy(path));
+        }
+        // `before` runs while the sign-in is held, so it must not write the vault itself
         if let Some(o) = self.read(service).await.ok().flatten() {
-            before(service.to_string(), o.sign_in).await;
+            if tokio::time::timeout(BEFORE_FOR, before(service.to_string(), o.sign_in))
+                .await
+                .is_err()
+            {
+                tracing::warn!(service, "vault: the service-side sign-out took too long");
+            }
         }
         let storage = self.session.storage();
         let r = match &held.lock {
