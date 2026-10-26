@@ -160,6 +160,7 @@
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
+    if (method !== 'GET' && path.startsWith('/me/prefs')) state.prefsCache = null;
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r;
     try {
@@ -1285,7 +1286,7 @@
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
     const name = (k) => (tabs.find(([x]) => x === k) || [k, k])[1];
     const pid = (k) => ids[k] || `${prefix}-${k}`;
-    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${entries.map((e) => (!Array.isArray(e) ? `<div class="set-group-h" role="presentation"><span class="set-group-t">${esc(e.title)}</span>${e.saved ? `<span class="set-group-s">${esc(e.saved)}</span>` : ''}</div>` : (([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`)(e))).join('')}</nav>`;
+    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${(() => { let grp = null; return entries.map((e) => (!Array.isArray(e) ? (grp = `${prefix}grp-${e.group}`, `<div class="set-group-h" role="presentation" id="${grp}"><span class="set-group-t">${esc(e.title)}</span>${e.saved ? `<span class="set-group-s">${esc(e.saved)}</span>` : ''}</div>`) : (([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}"${grp ? ` aria-describedby="${grp}"` : ''}>${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`)(e))).join(''); })()}</nav>`;
     const panel = (k, html) => `<section class="set-panel" id="${pid(k)}" data-panel="${k}" role="tabpanel" aria-labelledby="${prefix}tab-${k}" ${active === k ? '' : 'hidden'}>${phone ? `<button class="btn ghost set-back" data-tabs-back>${icon('back')} ${esc(title)}</button>` : ''}<h2 class="set-title">${esc(name(k))}</h2>${html}</section>`;
     const page = (panels) => (phone && active ? '' : pageHead(title)) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav()}<div class="set-body-wrap">${panels}</div></div>`;
     // On a computer a tab switches in place (the address follows); on a phone it is its own page
@@ -1686,7 +1687,7 @@
     const line = $('[data-taggers]', box.closest('section') || box);
     if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
-  // Settings › Library › Cloud drives › Add a folder: browse the drive's folders, pick one.
+  // Settings › Library folders › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
     d.innerHTML = `<h2>A folder on ${esc(name)}</h2><p class="muted">Its songs join the library and play from the drive; nothing is copied.</p><div id="dfpath" class="muted small"></div><div id="dfbox" class="list"></div><p class="muted small" id="dfmsg"></p><div class="toolbar"><button class="btn primary" id="dfadd" disabled>Add this folder</button><button class="btn ghost" data-dfclose>Cancel</button></div>`;
@@ -1716,7 +1717,7 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
-  // Settings › Library › Add a WebDAV share: the folder's address, user and password; the node
+  // Settings › Library folders › Add a WebDAV share: the folder's address, user and password; the node
   // checks it, keeps it and scans it (POST /library/webdav).
   const webdavDialog = () => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -2582,10 +2583,14 @@
           const win = state.homeWindow || '7d';
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
-          // Rows the owner can hide and reorder (UX review #10); the layout is kept on the node
+          // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
           const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
           // Your Home (Settings › You): your own layout where you set one, else the node's default
-          if (!state.homeLayout) state.homeLayout = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
+          if (!state.homeLayout) {
+            const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
+            if (state.view !== 'home') break; // they went elsewhere while the homeserver answered
+            state.homeLayout = lay;
+          }
           const lay = state.homeLayout; const known = HOME_ROWS.map(([k]) => k);
           const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
           const showRow = (k) => !(lay.hidden || []).includes(k);
@@ -2595,7 +2600,27 @@
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
-          const saveLayout = async (next) => { state.homeLayout = next; render(); try { const p = await api('PUT', '/me/prefs', { home_layout: next }); state.homeLayout = (p.home_layout && p.home_layout.value) || next; } catch (e) { toast(e.message, 'error'); } };
+          // Saves go one at a time and the newest layout is the one that ends up saved: while one is
+          // on its way, a later change waits and is sent when it lands (each save takes seconds)
+          const saveLayout = (next) => {
+            if (!state.homeSaved) state.homeSaved = state.homeLayout;
+            state.homeLayout = next; render();
+            state.homePending = next;
+            if (state.homeSaving) return;
+            state.homeSaving = (async () => {
+              while (state.homePending) {
+                const send = state.homePending; state.homePending = null;
+                try {
+                  const p = await api('PUT', '/me/prefs', { home_layout: send });
+                  state.homeSaved = (p.home_layout && p.home_layout.value) || send;
+                } catch (e) {
+                  toast(e.message, 'error');
+                  if (!state.homePending) { state.homeLayout = state.homeSaved; if (state.view === 'home') render(); }
+                }
+              }
+              state.homeSaving = null;
+            })();
+          };
           $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
           const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
           $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
@@ -3090,7 +3115,7 @@
             const who = await pubkyUser();
             const go = await choiceDialog({ title: `Share “${d.summary.name}”?`, text: who
               ? 'A public copy goes to your homeserver with the next sync (in a few minutes): the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
-              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › Accounts); the playlist stays on this node until then.',
+              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the playlist stays on this node until then.',
               choices: who ? [{ label: 'Share', value: 'share', primary: true }] : [{ label: 'Open Accounts', value: 'accounts', primary: true }] });
             if (go === 'share') setVis(true); else if (go === 'accounts') setView('settings', 'accounts');
           };
@@ -3159,8 +3184,8 @@
           const account = active === 'youtube' ? ytAccount : active === 'spotify' ? spotAccount : active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
           const body = !cur ? '' : cur.id === 'library'
-            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library</button>')
-              + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Playback</button>'))
+            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library folders</button>')
+              + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })()
                 + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
@@ -3847,7 +3872,7 @@
             + `<section class="section card addm" aria-labelledby="addfolder"><div class="section-head"><h3 id="addfolder">${icon('disc')} Use a folder in place</h3></div>`
             + `<p class="muted small">Play files where they are: a folder on the node’s machine, a mounted NAS share. Nothing is copied; the folder is watched for new music.</p>`
             + (flist.length ? `<ul class="uplist">${flist.map((p) => `<li><code class="path">${esc(p)}</code></li>`).join('')}</ul>` : '')
-            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library</button>.</p></section>`;
+            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library folders</button>.</p></section>`;
           $('[data-back]', main).onclick = () => goBack('albums');
           $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
           $$('[data-goto-library]', main).forEach((b) => b.onclick = () => setView('settings', 'library'));
@@ -3953,9 +3978,12 @@
           const hsHere = !!(bundled && bundled.configured && bundled.reachable);
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           const stor = await api('GET', '/storage').catch(() => null);
-          const nodeMap = await api('GET', '/node').catch(() => null);
-          const prefs = await api('GET', '/me/prefs').catch(() => null);
-          const apps = await api('GET', '/node/apps').catch(() => null);
+          const fresh = (c) => c && Date.now() - c.at < 30000;
+          const [nodeMap, prefs, apps] = await Promise.all([
+            api('GET', '/node').catch(() => null),
+            fresh(state.prefsCache) ? state.prefsCache.v : api('GET', '/me/prefs').then((v) => { state.prefsCache = { at: Date.now(), v }; return v; }).catch(() => null),
+            api('GET', '/node/apps').catch(() => null),
+          ]);
           if (state.view !== 'settings') return;
           const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
