@@ -1,6 +1,6 @@
 # One design for phone, tablet and desktop (design note, step 1)
 
-STEWARD-UX-RESPONSIVE.md step 1. **Waiting for the owner's look before anything is built.** The same note as a page, with the wireframes scaled side by side: `responsive/note.html` (published for the owner; link in ~/QUESTIONS.md). The study behind it: `mobile-study.md`.
+STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn.** The same note as a page, with the wireframes scaled side by side: `responsive/note.html` (published for the owner; link in ~/QUESTIONS.md). The study behind it: `mobile-study.md`.
 
 ## Rules
 - **Screens don't scroll; lists do.** Now playing, the quality sheet and the zone picker fit the screen. Library, album, artist, playlist and search scroll; their headers fold into a compact bar.
@@ -62,10 +62,10 @@ Settings › Home and layout:
 
 Per person, saved on their homeserver (STEWARD-MULTI-USER.md).
 
-## Decisions for the owner
-1. **The fourth tab:** Zones (drawn), or Queue?
-2. **Swipe gestures on rows,** or long-press only?
-3. **Lyrics:** in place of the art, or in the sheet (drawn)?
+## The owner's decisions (2026-10-26)
+1. **The fourth tab:** Zones.
+2. **Swipes on rows:** right = Play next, left = Add to playlist; long-press opens the row's menu.
+3. **Lyrics:** in the sheet with the others.
 
 ## Build order after the look
 Each step is one PR:
