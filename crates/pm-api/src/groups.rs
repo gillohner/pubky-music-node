@@ -1,5 +1,5 @@
-//! Settings in four groups (STEWARD-SETTINGS-GROUPS.md), the same in the UI, the API and
-//! docs/APP-DATA.md. Each setting lives in exactly one group:
+//! Settings in four groups (the owner's settings-groups request), the same in the UI, the API and
+//! the app-data docs. Each setting lives in exactly one group:
 //!
 //! - **You** (`/v1/me/prefs`, `/v1/vault`): saved on the person's homeserver, follows them.
 //! - **This device**: kept by the app on the device, never on the node (no API).
@@ -36,7 +36,7 @@ pub(crate) async fn index(State(s): State<Arc<NodeState>>) -> ApiResult<Value> {
             "saved": "Only on this device",
             "sections": [
                 {"id": "dac", "title": "USB DAC and bit-perfect", "routes": []},
-                {"id": "downloads", "title": "Downloads and offline", "routes": ["/v1/devices"]},
+                {"id": "downloads", "title": "Downloads and offline", "routes": ["/v1/library/tracks/{id}/download"]},
                 {"id": "cache", "title": "Cache", "routes": []},
             ],
         }),

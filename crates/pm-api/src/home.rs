@@ -105,12 +105,9 @@ pub struct HomeLayout {
     pub hidden: Vec<String>,
 }
 
-/// `GET /v1/home/layout`: the owner's own layout ("You", `/v1/me/prefs`) where they set one,
-/// else the node's.
+/// `GET /v1/home/layout`: the node's layout, the default for everyone ("This node"). The layout
+/// that applies to a person, theirs where they set one, is `home_layout` in `GET /v1/me/prefs`.
 pub(crate) async fn get_layout(State(s): State<Arc<NodeState>>) -> ApiResult<HomeLayout> {
-    if let Some(l) = crate::prefs::owner(&s).home_layout {
-        return Ok(Json(l));
-    }
     Ok(Json(
         s.library
             .lock()

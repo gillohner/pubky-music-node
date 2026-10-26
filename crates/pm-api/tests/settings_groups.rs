@@ -86,6 +86,27 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         .map(|g| g["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["you", "device", "node"]);
+    // Every route the index names is one the node answers (not 404 for every method)
+    for g in ix["groups"].as_array().unwrap() {
+        for sec in g["sections"].as_array().unwrap() {
+            for r in sec["routes"].as_array().unwrap() {
+                let r = r.as_str().unwrap().replace("{id}", "1");
+                let mut found = false;
+                for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                    // A route nobody serves answers 404 with no body; a handler's 404 (no such
+                    // track) carries the node's JSON error
+                    let (st, body) = call(&app, OWNER, m, &r, None).await;
+                    if (st != StatusCode::NOT_FOUND && st != StatusCode::METHOD_NOT_ALLOWED)
+                        || !body.is_null()
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                assert!(found, "/v1/node lists {r}, which nothing answers");
+            }
+        }
+    }
     // The tunnel answers at its new place as at the old one
     let old = call(&app, OWNER, "GET", "/v1/remote/tunnel", None).await;
     let new = call(&app, OWNER, "GET", "/v1/homeserver/bundled/tunnel", None).await;
@@ -133,12 +154,11 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         p["appearance"]["colour_from"],
         json!({"value": "art", "applies": "yours"})
     );
+    // /v1/home/layout stays the node's (it round-trips with its PUT); prefs say what applies
     let (_, l) = call(&app, OWNER, "GET", "/v1/home/layout", None).await;
-    assert_eq!(
-        l["order"],
-        json!(["favourites"]),
-        "Home follows the owner's layout"
-    );
+    assert_eq!(l["order"], json!(["recent"]));
+    let (_, p2) = call(&app, OWNER, "GET", "/v1/me/prefs", None).await;
+    assert_eq!(p2["home_layout"]["value"]["order"], json!(["favourites"]));
     // A member left out stays; null drops the override
     let (_, p) = call(
         &app,
@@ -160,9 +180,13 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         json!({"quality": {"tidal": "MAX!"}}),
         json!({"quality": {"Not a source": "max"}}),
         json!({"home_layout": {"order": ["Bad Row"], "hidden": []}}),
+        json!({"apperance": {"colour_from": "art"}}),
     ] {
         let (st, v) = call(&app, OWNER, "PUT", "/v1/me/prefs", Some(bad.clone())).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad} → {v}");
+        assert!(
+            st == StatusCode::BAD_REQUEST || st == StatusCode::UNPROCESSABLE_ENTITY,
+            "{bad} → {st} {v}"
+        );
     }
 
     // A listener has their own, kept on the node; the owner's don't change

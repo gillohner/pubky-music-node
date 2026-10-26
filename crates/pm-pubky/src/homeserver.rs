@@ -751,11 +751,12 @@ impl NodeHomeserver {
         &self,
         session: &PubkySession,
     ) -> Result<Option<serde_json::Value>, HomeserverError> {
-        let storage = session.storage();
-        if !storage.exists(PREFS_PATH).await? {
-            return Ok(None);
+        // One request: a 404 means there are none yet
+        match session.storage().get_json(PREFS_PATH).await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        Ok(Some(storage.get_json(PREFS_PATH).await?))
     }
 
     pub async fn read_node_settings(
