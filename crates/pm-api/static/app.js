@@ -939,8 +939,11 @@
       const h = $('#npheart', overlay); if (!h || !live()) return;
       if (!ref()) { h.innerHTML = ''; return; }
       const word = fav ? 'In favourites' : 'Add to favourites';
+      const had = document.activeElement && document.activeElement.id === 'npfav';
       h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
       $('#npfav', overlay).onclick = async () => { try { await setFavourite(ref(), !fav); fav = !fav; drawHeart(); } catch (e) { toast(e.message, 'error'); } };
+      if (had) $('#npfav', overlay).focus({ preventScroll: true });
+      npRestore();
     };
     drawHeart();
     if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } if (!live()) return; if (t) { fav = isFav(t); drawHeart(); } }
@@ -960,8 +963,8 @@
     if (ta) {
       // A half-typed tag survives re-renders while the song stays the same
       if (state.npTagDraft && state.npTagDraft.id === it.id) ta.value = state.npTagDraft.value;
-      if (state.npRefocusTag) { state.npRefocusTag = false; ta.focus({ preventScroll: true }); ta.setSelectionRange(ta.value.length, ta.value.length); }
       ta.oninput = () => { state.npTagDraft = { id: it.id, value: ta.value }; };
+      npRestore();
       ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); state.npTagDraft = null; fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
     }
   };
@@ -1006,7 +1009,8 @@
       if (a.id) focus = '#' + a.id;
       else for (const k of ['npsheet', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
     }
-    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, focus };
+    const lines = $('.lyric-lines', overlay);
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus };
   };
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
@@ -1079,7 +1083,7 @@
     $('.np-sheet-tabs', overlay).onkeydown = (e) => {
       const ks = npSheets().map(([k]) => k); const i = ks.indexOf(sheet); if (i < 0) return;
       const j = e.key === 'ArrowRight' ? (i + 1) % ks.length : e.key === 'ArrowLeft' ? (i - 1 + ks.length) % ks.length : e.key === 'Home' ? 0 : e.key === 'End' ? ks.length - 1 : -1;
-      if (j >= 0) { e.preventDefault(); openSheet(ks[j]); }
+      if (j >= 0) { e.preventDefault(); e.stopPropagation(); openSheet(ks[j]); }
     };
     $('#npsheetclose').onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
     $('#npquality').onclick = () => openSheet('details');
@@ -1099,12 +1103,21 @@
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
-    if (sheet && keep.sheet === sheet) { const body = $('.np-sheet-body', overlay); if (body) body.scrollTop = keep.scroll; }
-    if (keep.focus) { const f = $(keep.focus, overlay); if (f) f.focus({ preventScroll: true }); else if (keep.focus === '#nptagadd') state.npRefocusTag = true; }
+    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
+    npRestore();
     if (sheet === 'sources' && songPage) fillNpSources(songPage, gen);
     fillNpPubky(it, gen);
     loadLyrics(it);
+    npRestore();
     refreshSleep();
+  };
+  // Put back what the last render had (scroll, focus) once the content it needs is there; for that
+  // render only, and only in its first seconds so a late answer never yanks the view
+  const npRestore = () => {
+    const w = state.npWant; if (!w || w.gen !== npGen || Date.now() - w.at > 3000) return;
+    const body = $('.np-sheet-body', overlay); if (body && w.scroll != null && body.scrollHeight - body.clientHeight >= w.scroll) { body.scrollTop = w.scroll; w.scroll = null; }
+    const lines = $('.lyric-lines', overlay); if (lines && w.lyric != null) { lines.scrollTop = w.lyric; w.lyric = null; }
+    if (w.focus) { const f = $(w.focus, overlay); if (f) { f.focus({ preventScroll: true }); if (f.id === 'nptagadd') f.setSelectionRange(f.value.length, f.value.length); w.focus = null; } }
   };
   // A change of arrangement (rotating a phone, resizing a window) redraws an open Now playing
   window.addEventListener('resize', () => { if (!overlay.hidden && overlay.dataset.layout && overlay.dataset.layout !== `${shellMode()}-${npCompact()}`) renderNowPlaying(); });
@@ -1116,13 +1129,14 @@
       let req = npSrcPending.get(songPage);
       if (!req) { req = api('GET', `/item/song/${encodeURIComponent(songPage)}`).catch(() => null).finally(() => npSrcPending.delete(songPage)); npSrcPending.set(songPage, req); }
       pg = await req;
-      if (pg) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
+      if (pg && !pg.reading && !pg.pending) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
     }
     const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
     const also = (pg && pg.also_on) || [];
     box.innerHTML = (also.length ? `<div class="list">${rankSvc(also, (v) => srcSvc(v.source)).map((v) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${v.url ? `<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
+    npRestore();
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -1144,6 +1158,7 @@
     const box = $('#nplyrics'); if (!box) return;
     const none = $('#nplyricsnone'); if (none) none.hidden = !!l;
     const ld = $('#nplyricsload'); if (ld) ld.hidden = true;
+    setTimeout(npRestore, 0);
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
