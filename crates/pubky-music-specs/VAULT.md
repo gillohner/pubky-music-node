@@ -176,9 +176,11 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
      fails, the client keeps using them and writes them later.
 4. A client that finds the blob locked (`423`) retries the lock for about 2 s, then waits 1–2 s and reads the
    blob again. It never refreshes a token it didn't just read under the lock.
-5. If renewing the lock fails while the service answers, the client locks again and writes only if nobody
-   wrote meanwhile. At a service that rotates refresh tokens this can cost one refresh: the other client's
-   call fails at the service, and its next read picks up the winner.
+5. A renewal that fails while the service answers is tried again at the next tick (the lock still has up to
+   20 s). If the lock has lapsed by the time of the write (`412`), the client locks again and writes by the
+   rules of step 3. At a service that rotates refresh tokens a lapsed lock can cost one refresh: another
+   client that took the lock meanwhile fails at the service, and its next read picks up these tokens.
+   Each renewal and each write try is time-limited, so a stalled connection never holds the new tokens.
 
 **Where `LOCK` is refused** (`405`, an older homeserver), the lease file takes its place:
 1. Read `<service>.lease.json` (`{"client": "<hex>", "until": <unix s>}`). If another client's lease is live,

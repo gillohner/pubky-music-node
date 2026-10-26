@@ -965,6 +965,8 @@ const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
 /// The longest a service is given to answer a refresh; then the lock is let go.
 const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// The longest one renewal of the lock or the lease may take.
+const RENEW_FOR: Duration = Duration::from_secs(5);
 /// Tries at writing refreshed tokens before handing them back unsaved.
 const SAVE_TRIES: u32 = 6;
 
@@ -1111,7 +1113,13 @@ impl Vault<'_> {
         let outcome = loop {
             tokio::select! {
                 out = &mut call => break out,
-                _ = renew.tick() => self.renew(&mut held, service).await,
+                // Time-limited: the homeserver client has no timeouts of its own, and the
+                // service's answer waits while this runs
+                _ = renew.tick() => {
+                    if tokio::time::timeout(RENEW_FOR, self.renew(&mut held, service)).await.is_err() {
+                        tracing::warn!(service, "vault: renewing took too long; it is tried again in 10 s");
+                    }
+                }
             }
         };
         let mut fresh = match outcome {
@@ -1144,6 +1152,12 @@ impl Vault<'_> {
             // signed out): not ours to keep
             Err(e @ (VaultStoreError::NotOurs(_) | VaultStoreError::Vault(VaultError::NotARecipient)))
             | Err(e @ VaultStoreError::Vault(VaultError::Format("the sign-in was removed meanwhile"))) => {
+                // The service has used up the old refresh token, so the devices that still hold
+                // this sign-in may need to sign in again
+                tracing::warn!(
+                    service,
+                    "vault: refreshed tokens dropped, the sign-in changed hands meanwhile: {e}"
+                );
                 Err(e)
             }
             Err(e) => Err(VaultStoreError::Unsaved {
@@ -1168,9 +1182,15 @@ impl Vault<'_> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let e = match self.save_once(held, service, path, cur, fresh).await {
-                Ok(s) => return Ok(s),
-                Err(e) => e,
+            // Each try is held to what is left of the deadline: a write stalled on a dead
+            // connection mustn't keep the tokens from being handed back
+            let left = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(Duration::from_secs(1));
+            let e = match tokio::time::timeout(left, self.save_once(held, service, path, cur, fresh)).await {
+                Ok(Ok(s)) => return Ok(s),
+                Ok(Err(e)) => e,
+                Err(_) => VaultStoreError::Busy(path.to_string()),
             };
             if !e.transient() || attempt >= SAVE_TRIES || tokio::time::Instant::now() >= deadline {
                 return Err(e);
@@ -1182,7 +1202,8 @@ impl Vault<'_> {
             );
             let lapsed = matches!(
                 e.http_status(),
-                Some(reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::LOCKED)
+                // The homeserver answers 412 to a write under a lock it no longer has
+                Some(reqwest::StatusCode::PRECONDITION_FAILED)
             );
             if lapsed && held.lock.is_some() {
                 let old = std::mem::replace(held, Locked { lock: None });
