@@ -170,6 +170,8 @@
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch { linkHint(); throw new Error("Can't reach the node."); }
+    // and again once the change has landed: a read that started meanwhile isn't kept either
+    if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (r.status === 401) { login(); throw new Error('The node wants an API token.'); }
     const text = await r.text();
     let json = null;
