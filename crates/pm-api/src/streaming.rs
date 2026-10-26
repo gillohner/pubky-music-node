@@ -35,7 +35,31 @@ pub trait StreamingService: Send + Sync {
     fn stage(&self) -> &'static str {
         "stable"
     }
+    /// Whether a phone or laptop may keep offline copies of its tracks (see [`DOWNLOADABLE`]).
+    fn downloadable(&self) -> bool {
+        DOWNLOADABLE.contains(&self.id())
+    }
 }
+
+/// The sources whose tracks may be kept offline on a person's devices (STEWARD-DOWNLOADS.md; the
+/// owner can override): the Internet Archive (its files are there to be copied), podcasts, and the
+/// person's own media servers (Plex, Jellyfin, OpenSubsonic, Audiobookshelf: their own files, like
+/// a mount).
+///
+/// Not downloadable: the subscription services (TIDAL, Qobuz, Deezer, Spotify, YouTube),
+/// official or unofficial mode, since their terms allow offline copies only in their own apps. A
+/// stream that isn't encrypted is still not ours to keep. Also not: radio (live); Jamendo, SoundCloud
+/// and Audius, where downloads are allowed per track (Jamendo's `audiodownload_allowed`), until
+/// their hits carry that flag; and Bandcamp streams. Bandcamp purchases become
+/// library files, and the library is always downloadable (`/v1/library/tracks/{id}/download`).
+pub const DOWNLOADABLE: &[&str] = &[
+    "archive",
+    "podcasts",
+    "plex",
+    "jellyfin",
+    "subsonic",
+    "audiobookshelf",
+];
 
 /// Every feature a source may declare:
 /// - `search`: its own search (the scoped search and the Sources tab);
@@ -109,6 +133,9 @@ pub struct SourceRow {
     pub features: Vec<&'static str>,
     /// One of [`STAGES`].
     pub stage: &'static str,
+    /// Its tracks may be kept offline on a device ([`DOWNLOADABLE`]); the app shows the control
+    /// only where this is true.
+    pub downloadable: bool,
     /// Which sign-in way is in use, in one line, for sources that sign people in
     /// (`crate::signin`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +149,7 @@ impl SourceRow {
             enabled,
             features: svc.features().to_vec(),
             stage: svc.stage(),
+            downloadable: svc.downloadable(),
             sign_in: crate::signin::line(s, svc.id()),
         }
     }
@@ -282,4 +310,50 @@ pub(crate) async fn item(
 ) -> ApiResult<SourceItem> {
     let svc = find(&source)?;
     Ok(Json(svc.item(&s, &id).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_downloadable_policy() {
+        let ids: Vec<&str> = services().iter().map(|s| s.id()).collect();
+        for id in DOWNLOADABLE {
+            assert!(ids.contains(id), "{id} isn't a source");
+        }
+        let downloadable = |id: &str| {
+            services()
+                .into_iter()
+                .find(|s| s.id() == id)
+                .unwrap()
+                .downloadable()
+        };
+        // Subscription services, official or unofficial mode, and live radio: never
+        for id in [
+            "tidal",
+            "qobuz",
+            "deezer",
+            "spotify",
+            "youtube",
+            "radio",
+            "jamendo",
+            "soundcloud",
+            "audius",
+            "bandcamp",
+        ] {
+            assert!(!downloadable(id), "{id} must not be downloadable");
+        }
+        // The Internet Archive, podcasts, the person's own servers
+        for id in [
+            "archive",
+            "podcasts",
+            "plex",
+            "jellyfin",
+            "subsonic",
+            "audiobookshelf",
+        ] {
+            assert!(downloadable(id), "{id} should be downloadable");
+        }
+    }
 }

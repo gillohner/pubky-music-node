@@ -7,7 +7,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# The sources vault (VAULT.md): its types, and the reference encryption with the primitives
+# pubky-noise uses (X25519 from curve25519-dalek, HKDF-SHA-256, XChaCha20-Poly1305).
+vault = ["dep:base64", "dep:curve25519-dalek", "dep:chacha20poly1305", "dep:hkdf", "dep:sha2", "dep:getrandom", "dep:zeroize"]
+
 [dependencies]
 pubky-social-specs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { version = "0.23", optional = true }
+curve25519-dalek = { version = "5", optional = true }
+chacha20poly1305 = { version = "0.11", optional = true }
+hkdf = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+getrandom = { version = "0.3", optional = true }
+zeroize = { version = "1", optional = true }
+
+[dev-dependencies]
+base64 = "0.23"
+# The client-proof test checks a proof with the SDK's own verifier.
+pubky = { workspace = true }

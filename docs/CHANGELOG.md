@@ -2,7 +2,7 @@
 
 Newest first. Dates are when the change landed on `main`.
 
-## 2026-10-25
+## 2026-10-26
 
 - **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):
   - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
@@ -10,6 +10,63 @@ Newest first. Dates are when the change landed on `main`.
   - **The desktop and Android app:** it syncs every 15 minutes while connected, and opens Downloads when the node can't be reached and music is kept.
   - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once.
   - What to keep is chosen from the Downloads screen and the Download buttons in the next PR. Until then, `cargo run -p pm-offline --example offline` keeps albums by hand.
+
+- **Faster reconnects after a short outage** (mn-infra's note on #114's review):
+  - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
+  - A held change re-checks every second, so it is never refused while the node is already back.
+  - The next retry time is on `#conn` as `data-retry-at`, for tests.
+
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
+- **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
+
+## 2026-10-25
+
+- **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.
+  - CI checks the image's encoders and transcodes a real file to each format.
+- **Each device's downloads** (STEWARD-DOWNLOADS.md): `/v1/devices` registers a person's phones and laptops, and `/v1/devices/{id}/downloads` is what each keeps offline (songs, albums, playlists, favourites) and has.
+  - The node answers with what the device still wants: a kept playlist's or album's new songs, new favourites. It also shows each device's storage.
+  - Listeners have their own devices and keep songs and albums. The screens are mn-app's.
+- **Which sources may be kept offline** (STEWARD-DOWNLOADS.md): every source says `downloadable` in `GET /v1/sources`, and the app shows "keep offline" only there.
+  - Yes: the Internet Archive, podcasts, and the person's own Plex, Jellyfin, OpenSubsonic and Audiobookshelf.
+  - No: TIDAL, Qobuz, Deezer, Spotify and YouTube in either mode (their terms allow offline copies only in their own apps), radio, and Bandcamp streams. Not yet: Jamendo, SoundCloud and Audius, which allow it per track.
+  - The library, Bandcamp purchases included, is always downloadable. The policy is one list (`streaming::DOWNLOADABLE`); the owner can change it.
+- **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
+  - Signing a device out records it as revoked, in the device list and in the node's own `<data>/vault/revoked.json`, so the node never trusts it again even if the device writes the list back. Its Pubky session stays valid until it is revoked in Pubky Ring, and the answer says so.
+  - Every sign-in the node can read gets a new data key the device doesn't have. The answer lists those the node can't read, for another device to rotate, and those it couldn't rotate now (busy or unreadable), which don't stop the others. Every later write leaves a signed-out device out.
+  - A sign-out names the grant only when no other listed key holds it, so signing out an old key of a device (from any client) keeps its new one. `POST /v1/vault/new-key` gives a signed-out node a new key. Writes still go through when the device list is unreadable (the node's own record applies), and `GET /v1/vault` shows the problem. On homeservers without locks, sign out everywhere takes the lease and a refresh can't bring a deleted sign-in back.
+  - An old key of the node under the same grant signs out only that key, not the node. Sign out everywhere deletes each sign-in under its lock and lists any left. One unreadable sign-in no longer takes `GET /v1/vault` down, and "sign in again" answers 409.
+  - Revoking tokens at the services comes with each source's vault integration, and the answer says so.
+  - The screens are mn-app's.
+- **Vault refreshes don't race** (STEWARD-VAULT.md item 4). `Vault::refresh` takes the homeserver's WebDAV lock on the sign-in (30 s, renewed every 10 s while the service answers) and reads it again. If another client already refreshed it, it uses that; otherwise it refreshes the token it just read and writes it back with `last_refresh`.
+  - Where locks are refused it uses the lease file instead.
+  - A refused refresh is never written over the vault.
+  - New tokens are never dropped: a failed write is tried again, taking the lock again if it lapsed, and otherwise handed back to the caller. A write made meanwhile that changes no tokens (a new device) is kept. The lease is renewed like the lock, and the service gets at most 60 s.
+  - Tested on a real homeserver against a fake service that rotates refresh tokens: two clients refresh at once, under the lock and with the lease file, and the service is asked once. A 33-second refresh keeps its lock and its lease (another client at 31 s still waits). A refresh that can't be saved hands its tokens back.
+- **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Only a grant that names the vault itself (`/priv/pubky.music/vault/:rw`) counts: an app approved for all storage is not trusted with the sign-ins. The node asks Ring for that capability, and an older sign-in is asked to sign in again. Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
+  - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
+  - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Each client remembers every sign-out it has seen in a local file, because the device list is writable by the devices it lists. A signed-out device that writes the list back without its record stays signed out, and the next registration writes the record back. The node's own sign-outs are never dropped from that file, records from the list are bounded and checked, and records about the node itself aren't kept, so a flooded or hostile list can't make it trust a signed-out device or grow the list past its limit. Who gets a key is read under each blob's lock.
+  - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
+  - Vault files are written under the homeserver's WebDAV lock.
+  - Tested on a real homeserver with forged, borrowed and garbage entries.
+- **Quieter source switching, working services first** (STEWARD-UX-PLAYER-SOURCES.md §1):
+  - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
+  - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
+  - Sources and a playlist song's "Play this song from" menu use the same order.
+- **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
+  - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
+  - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
+  - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
+  - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
+- **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
+  - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
+  - Listeners may download what they may play. The homeserver's files come through the node.
+  - Transcodes use ffmpeg where the node has it (501 otherwise; the original always works).
+- **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:
+  - a random data key per blob, wrapped to each client's X25519 key (pubky-noise's primitives: X25519, HKDF-SHA-256, XChaCha20-Poly1305);
+  - a device list in `index.json`, whose entries prove themselves with the pubky SDK's grant proofs (Ring's grant plus a custom proof over the client key; no app holds the identity secret);
+  - the homeserver's WebDAV lock for refreshes, with a lease file where locks are refused, and rotation when a device signs out.
+  - The `vault` feature of `pubky-music-specs` has the types and the reference encryption. `tests/vectors/vault-v1.json` holds the vectors, reproduced independently by `check_vault_v1.py`; a client proof is checked with the SDK's own verifier. CI runs the feature's tests.
 - **TIDAL signs in with what another app on this machine already has** (mn-sources, STEWARD-CREDENTIALS-REUSE.md step 2): two more ways in Sources › TIDAL › Sign in. *A sign-in from another app on this machine* looks, read-only, in tidal-dl-ng's and beets' python-tidal session file, tidal-dl's token file and streamrip's config, shows what it found by user and expiry (never a token), and uses it on one click; a file picker takes the file from elsewhere. *Paste a token* takes a token file's contents or a bare access token. Imports are kept like the node's own sign-in (sealed in backups, gone with Sign out), renewed by the node where the token came from the client this build carries, and refused in plain words when expired or unreadable. Music Assistant's encrypted settings are listed, never read. `POST /v1/sources/{source}/signin/import {id|text}`; `/signin` answers carry `imports` and `places`.
 - **One Sign in for TIDAL, the ways side by side** (mn-sources, STEWARD-CREDENTIALS-REUSE.md step 1): Sources › TIDAL shows one Sign in group: a short list of ways labelled by where they come from (Pubky Music's app · tidal-dl-ng's client, the device sign-in tidal-dl-ng and python-tidal use · Your own app), the recommended one preselected, one button; once signed in, one status line with Change way and Sign out. Picking tidal-dl-ng's client is what the Full tracks switch used to do; quality and health stay under it. The Sources list says per source which way is in use. `GET/PUT/DELETE /v1/sources/{source}/signin`; `/v1/sources` rows carry `sign_in`. Sign-ins imported from other apps on the machine and a pasted token follow as further ways.
 

@@ -976,11 +976,6 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .fixlist .set-item .sub { white-space: normal; }
 .set-warn { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; color: var(--warn); }
 /* Item pages: one instance per page, the same recording elsewhere one click away */
-.alsoon { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 10px; min-width: 0; }
-.alsoon .also { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; min-width: 0; }
-.alsoon .also .chiplink { display: inline-flex; align-items: center; padding: 2px; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 6px; }
-.alsoon .also .chiplink:hover { color: var(--accent-strong); background: var(--surface-2); }
-.alsoon .also .ic { width: 14px; height: 14px; }
 .opened-as { margin: 6px 0 0; }
 .chip.tag.tag-link { border-style: dashed; padding-left: 6px; }
 .chip.tag .chipx .ic { width: 12px; height: 12px; vertical-align: -1px; }
@@ -996,8 +991,6 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .cand .evidence { color: var(--ok, var(--accent-strong)); }
 .cand .evidence .ic { width: 12px; height: 12px; vertical-align: -1px; }
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
-.alsoon .also.here { background: var(--accent-soft); color: var(--accent-strong); border-radius: 999px; padding: 3px 10px 3px 4px; gap: 6px; }
-.alsoon .also.here .muted { color: inherit; opacity: 0.75; }
 .tag-wait { padding: 0 6px 0 2px; font-style: italic; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .genre-pub { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); }
@@ -1146,3 +1139,16 @@ body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.o
 .dl-note { margin-top: 4px; }
 body.offline [data-bnav="home"] { display: none; }
 body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
+/* The source line on item pages (STEWARD-UX-PLAYER-SOURCES §1): small, one line, no pills */
+.srcline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
+.srcline .src, .srcline .srcrest { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.srcline .srcrest { flex-wrap: wrap; gap: 2px 10px; }
+.srcline .src .lnk, .srcline .src > span { color: var(--fg-2, var(--fg)); }
+.srcline .src.own > span { color: var(--fg); font-weight: 550; }
+.srcline .src-badge.ico { width: 16px; height: 16px; margin: 0; background: transparent; color: var(--muted); box-shadow: none; }
+.srcline .src-badge.ico svg { width: 13px; height: 13px; }
+.srcline .src.own .src-badge.ico { color: var(--fg); }
+.srcline .chiplink { display: inline-flex; align-items: center; padding: 2px; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 6px; opacity: 0.7; }
+.srcline .chiplink:hover, .srcline .chiplink:focus-visible { color: var(--accent-strong); background: var(--surface-2); opacity: 1; }
+.srcline .chiplink .ic { width: 13px; height: 13px; }
+.srcline .srcmore { font-size: 13px; color: var(--muted); }

@@ -124,11 +124,23 @@ fn allow_navigation(
         u.scheme(),
         "http" | "https" | "mailto" | "pubkyauth" | "pubkyring"
     ) {
-        if let Err(e) = app.opener().open_url(u.as_str(), None::<&str>) {
-            tracing::warn!(url = %u, "cannot open externally: {e}");
-        }
+        open_external(app, u.as_str());
     }
     false
+}
+
+/// Open a link in the system browser or the app that handles it (Pubky Ring for `pubkyauth://`).
+/// The opener is a mobile plugin on Android: its call runs on the main thread and waits there for
+/// the answer, so it is never called from a main-thread callback (navigation, new-window, sync
+/// commands) but from a blocking worker, and the caller returns at once.
+fn open_external(app: &AppHandle, url: &str) {
+    let app = app.clone();
+    let url = url.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+            tracing::warn!(%url, "cannot open externally: {e}");
+        }
+    });
 }
 
 fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
@@ -405,13 +417,16 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
+/// Async so that it never blocks the IPC thread (the UI thread on desktop) while the opener waits
+/// for Android's main thread (see [`open_external`]).
 #[tauri::command]
-fn open_ring(app: AppHandle, url: String) -> Result<(), String> {
+async fn open_ring(app: AppHandle, url: String) -> Result<(), String> {
     if !url.starts_with("pubkyauth://") {
         return Err("not a Pubky Ring link".into());
     }
-    app.opener()
-        .open_url(url, None::<&str>)
+    tauri::async_runtime::spawn_blocking(move || app.opener().open_url(url, None::<&str>))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
 }
 
@@ -521,9 +536,7 @@ pub fn run() {
                 builder = builder.on_new_window(move |u, _features| {
                     tracing::debug!(url = %u, "new window requested");
                     if matches!(u.scheme(), "http" | "https" | "mailto") {
-                        if let Err(e) = handle.opener().open_url(u.as_str(), None::<&str>) {
-                            tracing::warn!(url = %u, "cannot open externally: {e}");
-                        }
+                        open_external(&handle, u.as_str());
                     }
                     tauri::webview::NewWindowResponse::Deny
                 });

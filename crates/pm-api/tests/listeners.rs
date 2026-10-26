@@ -144,6 +144,7 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
         "/v1/sources/tidal/collection",
         "/v1/podcasts/subscriptions",
         "/v1/people",
+        "/v1/vault",
         "/v1/library/tracks/1/candidates",
     ] {
         let (st, body) = call(&app, &listener, "GET", owners, None).await;
