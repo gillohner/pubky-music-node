@@ -9,14 +9,19 @@ STEWARD-UX-RESPONSIVE.md step 1. **Waiting for the owner's look before anything 
 - **Same parts at every width;** only the arrangement and density change. Safe areas, both themes, reduced motion, font scale 1.3.
 
 ## Phone (under 600 px)
-| Library, mini player, tab bar | Now playing, one screen | A sheet over Now playing | Settings, one grouped list |
+| Library, mini player, tab bar | Now playing, one screen | A sheet over Now playing | Settings, four groups |
 | :-: | :-: | :-: | :-: |
 | ![](responsive/phone-library.png) | ![](responsive/phone-now-playing.png) | ![](responsive/phone-queue-sheet.png) | ![](responsive/phone-settings.png) |
 
 - **Tabs:** Home, Search, Library, Zones. The mini player above them carries the quality and the zone.
 - **Library:** my library first; shared libraries and Downloads as their own sections.
 - **Now playing:** art; title with the heart; the quality label (opens the quality sheet); scrubber; transport. One row opens the five sheets; swipe down collapses it.
-- **Settings:** yours first, then this phone, then the node's admin screens.
+- **Settings:** four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md). Each group header says where in one line:
+  - **You:** saved on your homeserver, so it follows you to every node and device. My accounts, My library and sharing, Home, layout and appearance, playback quality.
+  - **This phone:** only on this device. The USB DAC and bit-perfect, Downloads and cache.
+  - **This node (admin):** for everyone on this node. Service apps, People, Library folders, zones and outputs, Remote access and updates.
+  - **This homeserver (admin, only when the node runs its own):** sign-ups and invites, users, quotas, storage, domain.
+  - Every setting sits in exactly one group. Where a node default and your own choice both exist (playback quality), the node group holds the default and You holds the override; each row says which applies. On tablets and desktops the groups are the left pane.
 
 ## Tablet (600–1024 px)
 ![](responsive/tablet-now-playing.png)
