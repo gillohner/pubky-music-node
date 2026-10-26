@@ -274,13 +274,22 @@ async fn playlist_lifecycle() {
     // Listing, status, delete.
     let (_, list) = call(&app, "GET", "/v1/playlists", None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
+    // The song that played is a listen (listen history is private by default). The zone's event
+    // task writes it, which `wait_stopped` does not wait for: wait for the listen itself
+    let mut h = serde_json::Value::Null;
+    for _ in 0..500 {
+        h = call(&app, "GET", "/v1/me/listens", None).await.1;
+        if h["listens"][0]["id"].is_string() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(h["listens"][0]["visibility"], "private", "{h}");
     let (st, status) = call(&app, "GET", "/v1/pubky", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(status["user"].is_null());
-    // The playlist, and the listen of the song that played (listen history is private by default)
+    // The playlist and the listen
     assert_eq!(status["unsynced"], 2);
-    let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
-    assert_eq!(h["listens"][0]["visibility"], "private", "{h}");
     let (st, _) = call(&app, "POST", "/v1/pubky/sync", None).await;
     assert_eq!(st, StatusCode::PRECONDITION_FAILED);
     let (st, _) = call(&app, "DELETE", &format!("/v1/playlists/{id}"), None).await;
