@@ -622,6 +622,8 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             .or(v["results"][0]["name"].as_str())
             .map(str::to_string);
     }
+    // One sign-in, stored and marked new together: no vault pass sees one without the other
+    let _pass = s.vault_pass.lock().await;
     store_user(s, Some(&session))?;
     crate::vault_cache::new_sign_in_of(s, "jamendo");
     tracing::info!("Jamendo sign-in stored");

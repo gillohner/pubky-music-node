@@ -940,6 +940,12 @@ impl Vault<'_> {
     ) -> Result<Option<u64>> {
         let path = Self::blob_path(service)?;
         let held = self.lock(&path).await?;
+        // Where locks are refused, the lease keeps the check and the write together against a
+        // client refreshing now
+        let leased = held.lock.is_none();
+        if leased && !self.take_lease(service).await? {
+            return Err(VaultStoreError::Busy(path));
+        }
         let r = async {
             let current = match self.read(service).await {
                 Ok(o) => o,
@@ -958,6 +964,9 @@ impl Vault<'_> {
                 .map(Some)
         }
         .await;
+        if leased {
+            self.drop_lease(service).await;
+        }
         self.unlock(held).await;
         r
     }

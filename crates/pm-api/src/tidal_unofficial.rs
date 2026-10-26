@@ -448,6 +448,8 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
         if ok {
             if let Some(sess) = session_from(&v, None) {
                 let sess = fill_session(s, sess).await;
+                // Stored and marked new together: no vault pass sees one without the other
+                let pass = s.vault_pass.lock().await;
                 update(s, |st| {
                     st.session = Some(sess);
                     st.login = None;
@@ -459,6 +461,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
                     });
                 });
                 crate::vault_cache::new_sign_in_of(s, "tidal-full");
+                drop(pass);
                 tracing::info!("TIDAL full tracks (unofficial): signed in");
             }
             return;

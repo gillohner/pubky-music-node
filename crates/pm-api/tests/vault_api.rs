@@ -433,11 +433,20 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
 
     // Sign out everywhere from node 1: aside on node 1 now, on node 2 at its next sync (its
     // conflicting copy too)
+    // A Spotify sign-in made on node 1 a moment before, not synced yet, goes aside too: it is
+    // never pushed back into the wiped vault
+    set(
+        &n1,
+        "spotify.user",
+        r#"{"access_token":"sp-1","refresh_token":"sp-r","expires_at":9000,"user_id":"gil"}"#,
+    );
+    pm_api::vault_cache::new_sign_in(&n1.library.lock().unwrap(), "spotify");
     let (st, r) = call(&a1, "POST", "/v1/vault/sign-out-everywhere").await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["removed"], json!(["listenbrainz", "tidal"]));
     assert_eq!(r["left"], json!([]));
-    assert_eq!(r["signed_out_here"], json!(["tidal", "listenbrainz"]));
+    assert_eq!(r["signed_out_here"], json!(["tidal", "spotify", "listenbrainz"]));
+    assert_eq!(get(&n1, "spotify.user"), None);
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
     assert_eq!(r["signed_out"], json!(["tidal", "listenbrainz"]), "{r}");
     for n in [&n1, &n2] {

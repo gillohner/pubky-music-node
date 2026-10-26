@@ -20,6 +20,15 @@
 //! node meanwhile isn't undone. The sync records belong to the machine (they name its vault key)
 //! and never go into a backup.
 //!
+//! "Sign out everywhere" is never undone: the pass right after it moves every copy on that node
+//! aside, and other nodes move aside any copy made before it (the sign-in ids carry their time;
+//! the device list carries `signed_out_everywhere_at`), conflicts included.
+//!
+//! Known limits: a sign-in lost to a change of the node's app is forgotten, not signed out, even
+//! when the person signed out by hand after the app changed. Two nodes that each had the same
+//! account end up on one refresh chain; with a service that rotates refresh tokens, the node that
+//! didn't refresh last fails until its next pass takes the new tokens.
+//!
 //! Only the sign-in travels: the members of each setting that hold the credential ([`Carry`]).
 //! What belongs to the machine stays: whether a mode is switched on, its health, a pending
 //! device login, the download format. A sign-in made with another app than the node's (Spotify,
@@ -58,6 +67,9 @@ pub struct Bridge {
     pub service: &'static str,
     pub carry: &'static [Carry],
     pub app: Option<fn(&NodeState) -> Option<String>>,
+    /// Members of the node's state about the sign-in it had (`setting`, `member`), dropped when
+    /// it takes another one from the vault: Last.fm's "this key was refused".
+    pub reset: &'static [(&'static str, &'static str)],
 }
 
 const fn whole(key: &'static str) -> Carry {
@@ -82,21 +94,25 @@ pub const BRIDGES: &[Bridge] = &[
         service: "tidal",
         carry: &[whole("tidal.user")],
         app: Some(crate::tidal::app_id),
+        reset: &[],
     },
     Bridge {
         service: "tidal-full",
         carry: &[members("tidal.unofficial", &["session"])],
         app: Some(crate::tidal_unofficial::app_id),
+        reset: &[],
     },
     Bridge {
         service: "spotify",
         carry: &[whole("spotify.user")],
         app: Some(crate::spotify::app_id),
+        reset: &[],
     },
     Bridge {
         service: "qobuz",
         carry: &[members("qobuz.unofficial", &["session"])],
         app: Some(crate::qobuz::app_id),
+        reset: &[],
     },
     Bridge {
         service: "bandcamp",
@@ -105,22 +121,26 @@ pub const BRIDGES: &[Bridge] = &[
             members("bandcamp.unofficial", &["fan"]),
         ],
         app: None,
+        reset: &[],
     },
     Bridge {
         service: "lastfm",
         // The key and who it is; whether to send what plays (`submit`) stays per node
         carry: &[members("lastfm.session", &["key", "user"])],
         app: Some(crate::lastfm::app_id),
+        reset: &[("lastfm.session", "problem")],
     },
     Bridge {
         service: "listenbrainz",
         carry: &[members("listenbrainz.account", &["token", "user"])],
         app: None,
+        reset: &[],
     },
     Bridge {
         service: "jamendo",
         carry: &[whole("jamendo.user")],
         app: Some(crate::jamendo::app_id),
+        reset: &[],
     },
 ];
 
@@ -158,6 +178,10 @@ pub struct Synced {
     /// When it was recorded (Unix seconds).
     #[serde(default)]
     pub at: u64,
+    /// The device list's `signed_out_everywhere_at` then: a different one now means the person
+    /// signed out everywhere since (compared as a value, not against this machine's clock).
+    #[serde(default)]
+    pub marker: Option<u64>,
 }
 
 fn synced_key(service: &str) -> String {
@@ -177,7 +201,17 @@ pub fn new_sign_in(lib: &Library, service: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let id = blake3::hash(format!("{t}.{n}.{}.{service}", std::process::id()).as_bytes()).to_hex();
-    let _ = lib.set_setting(&lineage_key(service), &id.as_str()[..16]);
+    let at = pm_library::db::now_unix().max(0);
+    let _ = lib.set_setting(&lineage_key(service), &format!("{at}-{}", &id.as_str()[..16]));
+}
+
+/// When a sign-in id was made (Unix seconds; 0 for an id made for a sign-in that was already
+/// there, or one from before ids had a time).
+pub fn lineage_at(lineage: &str) -> u64 {
+    lineage
+        .split_once('-')
+        .and_then(|(t, _)| t.parse().ok())
+        .unwrap_or(0)
 }
 
 /// [`new_sign_in`] for a source that doesn't hold the library.
@@ -185,16 +219,28 @@ pub fn new_sign_in_of(s: &NodeState, service: &str) {
     new_sign_in(&s.library.lock().expect("library poisoned"), service);
 }
 
-/// The id of the node's sign-in for a service, made the first time it is asked for.
-fn local_lineage(lib: &Library, service: &str) -> String {
-    if let Ok(Some(l)) = lib.get_setting(&lineage_key(service)) {
-        return l;
+/// The id of the node's sign-in for a service, made the first time it is asked for (time 0: the
+/// sign-in was already there, nobody knows since when).
+fn local_lineage(lib: &Library, service: &str) -> Result<String, String> {
+    if let Some(l) = lib
+        .get_setting(&lineage_key(service))
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(l);
     }
     new_sign_in(lib, service);
-    lib.get_setting(&lineage_key(service))
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    let made = lib
+        .get_setting(&lineage_key(service))
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let id = made
+        .split_once('-')
+        .map_or(made.as_str(), |(_, id)| id)
+        .to_string();
+    let l = format!("0-{id}");
+    lib.set_setting(&lineage_key(service), &l)
+        .map_err(|e| e.to_string())?;
+    Ok(l)
 }
 
 /// What one sync did, per service.
@@ -335,6 +381,20 @@ pub fn move_aside(lib: &Library, b: &Bridge) {
     apply(lib, b, &Map::new());
 }
 
+/// What the node noted about the sign-in it had ([`Bridge::reset`]) doesn't apply to one it
+/// just took from the vault.
+pub fn reset_after_pull(lib: &Library, b: &Bridge) {
+    for (key, member) in b.reset {
+        if let Ok(Some(raw)) = lib.get_setting(key) {
+            if let Some(mut obj) = object_of(&Value::String(raw)) {
+                if obj.remove(*member).is_some() {
+                    let _ = lib.set_setting(key, &Value::Object(obj).to_string());
+                }
+            }
+        }
+    }
+}
+
 pub fn hash(m: &Map<String, Value>) -> String {
     blake3::hash(serde_json::to_string(m).unwrap_or_default().as_bytes())
         .to_hex()
@@ -391,7 +451,7 @@ pub fn sign_in_for(
     s.service = b.service.to_string();
     s.extra
         .insert("node".into(), json!({ "settings": travels, "lineage": lineage }));
-    if app.is_some() {
+    if b.app.is_some() {
         s.client_id = app;
     }
     let sess = session_of(b, travels);
@@ -428,12 +488,31 @@ pub fn sign_in_for(
             extra: Map::new(),
         }
     });
+    // What the standard members were when the node wrote them: a client that writes its own
+    // sign-in and keeps `node` (as VAULT.md asks) changes them, so the copy stops counting as the
+    // node's
+    let std = std_hash(&s);
+    if let Some(Value::Object(n)) = s.extra.get_mut("node") {
+        n.insert("std".into(), json!(std));
+    }
     s
 }
 
-/// What a node wrote into a vault sign-in (`None`: written by a client that isn't a node).
+/// The standard members a reader without `node` uses: the tokens, their expiry, the account.
+fn std_hash(s: &SignIn) -> String {
+    let std =
+        json!({ "tokens": s.tokens, "expires_at": s.expires_at, "user": s.user.as_ref().map(|u| &u.id) });
+    blake3::hash(std.to_string().as_bytes()).to_hex().to_string()
+}
+
+/// What a node wrote into a vault sign-in (`None`: written by a client that isn't a node, or
+/// rewritten by one since: its standard members aren't the node's any more).
 pub fn node_settings(s: &SignIn) -> Option<Map<String, Value>> {
-    match s.extra.get("node")?.get("settings")? {
+    let node = s.extra.get("node")?;
+    if node.get("std").and_then(Value::as_str) != Some(std_hash(s).as_str()) {
+        return None;
+    }
+    match node.get("settings")? {
         Value::Object(o) => Some(o.clone()),
         _ => None,
     }
@@ -448,10 +527,7 @@ pub fn node_lineage(s: &SignIn) -> Option<String> {
 fn vault_hash(s: &SignIn) -> String {
     match node_settings(s) {
         Some(m) => hash(&m),
-        None => {
-            let std = json!({ "tokens": s.tokens, "expires_at": s.expires_at, "user": s.user.as_ref().map(|u| &u.id) });
-            format!("std:{}", blake3::hash(std.to_string().as_bytes()).to_hex())
-        }
+        None => format!("std:{}", std_hash(s)),
     }
 }
 
@@ -465,6 +541,31 @@ pub struct Side {
     /// Which sign-in it is ([`new_sign_in`]); `None` for a copy no node wrote.
     pub lineage: Option<String>,
     pub expires_at: Option<u64>,
+}
+
+impl Side {
+    /// When this sign-in was made, as far as anyone knows (0: unknown).
+    fn made_at(&self) -> u64 {
+        self.lineage.as_deref().map_or(0, lineage_at)
+    }
+}
+
+/// What [`decide`] knows about "Sign out everywhere".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wipe {
+    /// This pass runs right after this node signed out everywhere: every copy here goes aside.
+    pub now: bool,
+    /// The device list's `signed_out_everywhere_at` now.
+    pub at: Option<u64>,
+    /// It differs from the one the record was made with: a sign-out everywhere since then.
+    pub since_seen: bool,
+}
+
+impl Wipe {
+    /// A sign-in here made before the last sign-out everywhere (or not known to be newer).
+    fn predates(&self, m: &Side) -> bool {
+        self.at.is_some_and(|w| w >= m.made_at())
+    }
 }
 
 /// The vault's side, with what the node needs to take it.
@@ -514,8 +615,8 @@ fn same_sign_in(side: &Side, seen: &Synced) -> bool {
 }
 
 /// The sync rules for one service (module docs). `seen` is what both sides held at the last
-/// sync; `wiped` says the person signed out everywhere since then.
-pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultSide>, wiped: bool) -> Do {
+/// sync; `wipe` what is known about the person signing out everywhere.
+pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultSide>, wipe: &Wipe) -> Do {
     let pull = |t: &VaultSide| {
         if t.from_a_node && t.our_app {
             Do::Pull
@@ -546,12 +647,16 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
                 Do::Nothing
             }
         }
+        // Signed out everywhere on this node just now: nothing here goes back in
+        (Some(_), None) if wipe.now => Do::MoveAside,
         (Some(m), None) => match seen {
+            // Never synced: it moves in, unless it is older than the last sign-out everywhere
+            None if wipe.predates(m) => Do::MoveAside,
             None => Do::Push,
             // Never in the vault (a conflict): gone from it means signed out everywhere, or only
             // the other sign-in went, and then this one moves in
             Some(s) if s.conflict => {
-                if wiped {
+                if wipe.since_seen {
                     Do::MoveAside
                 } else {
                     Do::Push
@@ -559,9 +664,9 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
             }
             // Unchanged here and gone from the vault: signed out elsewhere
             Some(s) if m.hash == s.hash => Do::MoveAside,
-            // A new sign-in here goes out; a refresh of the old one doesn't bring back what was
-            // signed out
-            Some(s) if !same_sign_in(m, s) => Do::Push,
+            // A new sign-in here goes out, if made after the last sign-out everywhere; a refresh
+            // of the old one doesn't bring back what was signed out
+            Some(s) if !same_sign_in(m, s) && !wipe.predates(m) => Do::Push,
             Some(_) => Do::MoveAside,
         },
         (None, Some(t)) => match seen {
@@ -578,10 +683,19 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
             if m.hash == t.side.hash {
                 return Do::InStep;
             }
+            // A conflict when the person signed out everywhere since: this node's side goes too
+            // (the next pass takes whatever the vault has now)
+            if seen.is_some_and(|s| s.conflict) && wipe.since_seen {
+                return Do::MoveAside;
+            }
             let Some(s) = seen.filter(|s| !s.conflict) else {
                 // First contact with two different copies (or still that conflict): the same
                 // account is one sign-in refreshed on two sides; another account is a conflict
                 if m.account.is_some() && m.account == t.side.account {
+                    // A copy here from before the last sign-out everywhere doesn't win
+                    if wipe.predates(m) {
+                        return pull(t);
+                    }
                     return longer(m, t, false);
                 }
                 return Do::Conflict;
@@ -615,12 +729,14 @@ fn remember(lib: &Library, service: &str, synced: &Synced) {
 }
 
 /// The record for a service, if it was made with this vault (`owner`) by this machine (`client`).
-fn last_synced(lib: &Library, service: &str, owner: &str, client: &str) -> Option<Synced> {
-    lib.get_setting(&synced_key(service))
-        .ok()
-        .flatten()
+/// A record that can't be read is an error (taken as "never synced", a local sign-out would be
+/// undone); one that doesn't parse is from an older build and counts as none.
+fn last_synced(lib: &Library, service: &str, owner: &str, client: &str) -> Result<Option<Synced>, String> {
+    Ok(lib
+        .get_setting(&synced_key(service))
+        .map_err(|e| e.to_string())?
         .and_then(|v| serde_json::from_str::<Synced>(&v).ok())
-        .filter(|s| s.owner == owner && s.client == client)
+        .filter(|s| s.owner == owner && s.client == client))
 }
 
 fn side_of(b: &Bridge, travels: &Map<String, Value>, lineage: Option<String>) -> Side {
@@ -650,24 +766,29 @@ fn app_for(b: &Bridge, travels: Option<&Map<String, Value>>, node_app: Option<St
 /// One pass over every bridge, waiting for any other pass (or "Sign out everywhere") to end.
 pub async fn sync(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
     let _pass = s.vault_pass.lock().await;
-    sync_held(s, vault, None).await
+    sync_held(s, vault, None, false).await
 }
 
 /// [`sync`] with [`NodeState::vault_pass`] already held. `take` settles one service's conflict
-/// (or takes a copy that isn't usable as it is) the way it says.
+/// (or takes a copy that isn't usable as it is) the way it says. `wiping`: this node just signed
+/// out everywhere, so every copy here goes aside.
 pub(crate) async fn sync_held(
     s: &NodeState,
     vault: &Vault<'_>,
     take: Option<(&str, Take)>,
+    wiping: bool,
 ) -> Result<CacheReport, VaultStoreError> {
     let mut report = CacheReport::default();
     let owner = vault.owner().to_string();
     let client = vault.client_key().to_hex();
-    let wiped_at = match vault.index().await {
+    // Whether the person signed out everywhere decides too much to guess: without the device
+    // list, nothing is synced this time
+    let marker = match vault.index().await {
         Ok(ix) => Vault::signed_out_everywhere_at(&ix),
         Err(e) => {
-            tracing::warn!("vault: the device list can't be read: {e}");
-            None
+            tracing::warn!("vault: the device list can't be read, not synced this time: {e}");
+            report.failed = BRIDGES.iter().map(|b| b.service.to_string()).collect();
+            return Ok(report);
         }
     };
     for b in BRIDGES {
@@ -698,8 +819,26 @@ pub(crate) async fn sync_held(
                     continue;
                 }
             };
-            let lineage = mine.as_ref().map(|_| local_lineage(&lib, b.service));
-            (mine, last_synced(&lib, b.service, &owner, &client), lineage)
+            let lineage = match mine.as_ref().map(|_| local_lineage(&lib, b.service)).transpose() {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(
+                        service = b.service,
+                        "vault: the node's sign-in id can't be read: {e}"
+                    );
+                    report.failed.push(service);
+                    continue;
+                }
+            };
+            let seen = match last_synced(&lib, b.service, &owner, &client) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(service = b.service, "vault: the sync record can't be read: {e}");
+                    report.failed.push(service);
+                    continue;
+                }
+            };
+            (mine, seen, lineage)
         };
         let app = app_for(b, mine.as_ref(), node_app.clone());
         let my_side = mine.as_ref().map(|m| side_of(b, m, lineage.clone()));
@@ -719,11 +858,12 @@ pub(crate) async fn sync_held(
                 our_app: b.app.is_none() || o.sign_in.client_id.is_none() || o.sign_in.client_id == node_app,
             }
         });
-        let wiped = match (&seen, wiped_at) {
-            (Some(x), Some(at)) => at >= x.at,
-            _ => false,
+        let wipe = Wipe {
+            now: wiping,
+            at: marker,
+            since_seen: marker.is_some() && seen.as_ref().is_some_and(|x| x.marker != marker),
         };
-        let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), wiped);
+        let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), &wipe);
         // Lost here because the node's app changed, not signed out: the vault keeps it
         if what == Do::Remove && seen.as_ref().is_some_and(|x| x.app != node_app) {
             what = Do::Forget;
@@ -756,6 +896,7 @@ pub(crate) async fn sync_held(
                     client: client.clone(),
                     app: node_app.clone(),
                     at: pm_library::db::now_unix().max(0) as u64,
+                    marker,
                 },
             )
         };
@@ -780,6 +921,7 @@ pub(crate) async fn sync_held(
                             || x.hash != hash(m)
                             || x.revision != o.sign_in.revision
                             || x.lineage != lin
+                            || x.marker != marker
                     }) {
                         record(&lib, o.sign_in.revision, m, lin, false);
                     }
@@ -820,6 +962,7 @@ pub(crate) async fn sync_held(
                     continue;
                 }
                 apply(&lib, b, &travels);
+                reset_after_pull(&lib, b);
                 let lin = node_lineage(&o.sign_in);
                 match &lin {
                     Some(l) => {
@@ -864,7 +1007,10 @@ pub(crate) async fn sync_held(
             Do::Conflict => {
                 if let (Some(m), Some(o)) = (&mine, &theirs) {
                     let lib = s.library.lock().expect("library poisoned");
-                    if seen.as_ref().is_none_or(|x| !x.conflict || x.hash != hash(m)) {
+                    if seen
+                        .as_ref()
+                        .is_none_or(|x| !x.conflict || x.hash != hash(m) || x.marker != marker)
+                    {
                         record(&lib, o.sign_in.revision, m, lineage.clone(), true);
                     }
                 }
@@ -922,7 +1068,7 @@ pub async fn pass(
     let _pass = s.vault_pass.lock().await;
     vault.touch(&s.name).await?;
     vault.share_with_trusted().await?;
-    let r = sync_held(s, vault, take).await?;
+    let r = sync_held(s, vault, take, false).await?;
     let lib = s.library.lock().expect("library poisoned");
     let _ = lib.set_setting(
         LAST_SYNC_KEY,
@@ -982,7 +1128,9 @@ mod tests {
 
     #[test]
     fn the_sync_rules() {
-        let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| decide(seen, m, t, false);
+        let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| {
+            decide(seen, m, t, &Wipe::default())
+        };
         let s = seen("h1", "7");
         // First time: migrate, take; two copies of one account are one sign-in (the longer-lived
         // wins); two accounts are a conflict
@@ -1011,8 +1159,23 @@ mod tests {
         );
         // ...and when the vault's copy goes: signed out everywhere moves ours aside, the other
         // sign-in alone going lets ours in
-        assert_eq!(decide(Some(&c), Some(&side("a", "7")), None, true), Do::MoveAside);
-        assert_eq!(decide(Some(&c), Some(&side("a", "7")), None, false), Do::Push);
+        assert_eq!(
+            decide(
+                Some(&c),
+                Some(&side("a", "7")),
+                None,
+                &Wipe {
+                    now: false,
+                    at: Some(5),
+                    since_seen: true
+                }
+            ),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(Some(&c), Some(&side("a", "7")), None, &Wipe::default()),
+            Do::Push
+        );
         // Unchanged on both sides, even when the vault's revision moved (a sign-out rotation)
         assert_eq!(
             d(Some(&s), Some(&side("h1", "7")), Some(&vside("h1", "7"))),
@@ -1103,7 +1266,9 @@ mod tests {
 
     #[test]
     fn a_new_sign_in_is_told_from_a_refresh_by_its_id() {
-        let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| decide(seen, m, t, false);
+        let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| {
+            decide(seen, m, t, &Wipe::default())
+        };
         let mut s = seen("h1", "7");
         s.lineage = Some("L1".into());
         // Signed out everywhere elsewhere, then signed in again here to the same account: it
@@ -1130,6 +1295,113 @@ mod tests {
         let mut mine = lin(side("h2", ""), "L2");
         mine.account = None;
         assert_eq!(d(Some(&j), Some(&mine), None), Do::Push);
+    }
+
+    #[test]
+    fn signing_out_everywhere_is_never_undone() {
+        let none = Wipe::default();
+        let w = |since_seen| Wipe {
+            now: false,
+            at: Some(100),
+            since_seen,
+        };
+        // Right after this node signed out everywhere: everything here goes aside, a sign-in
+        // made a minute ago (not synced yet) too
+        let now = Wipe {
+            now: true,
+            at: Some(100),
+            since_seen: true,
+        };
+        assert_eq!(
+            decide(None, Some(&lin(side("a", "7"), "99-x")), None, &now),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(None, Some(&lin(side("a", "7"), "99-x")), None, &none),
+            Do::Push
+        );
+        // Elsewhere: a copy never synced, or a new sign-in, older than the sign-out goes aside;
+        // one made after it moves in
+        assert_eq!(
+            decide(None, Some(&lin(side("a", "7"), "50-x")), None, &w(false)),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(None, Some(&lin(side("a", "7"), "0-x")), None, &w(false)),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(None, Some(&lin(side("a", "7"), "150-x")), None, &w(false)),
+            Do::Push
+        );
+        let mut s = seen("h1", "7");
+        s.lineage = Some("10-L1".into());
+        assert_eq!(
+            decide(Some(&s), Some(&lin(side("h2", "7"), "50-L2")), None, &w(true)),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(Some(&s), Some(&lin(side("h2", "7"), "150-L2")), None, &w(true)),
+            Do::Push
+        );
+        // A conflict whose vault side was filled again after a sign-out everywhere: this side goes
+        let mut c = seen("a", "9");
+        c.conflict = true;
+        assert_eq!(
+            decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(true)),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(false)),
+            Do::Conflict
+        );
+        // First contact, same account, this copy from before the sign-out: the vault's wins
+        let mut lasting = lin(side("a", "7"), "50-x");
+        lasting.expires_at = Some(9_999);
+        assert_eq!(
+            decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
+            Do::Pull
+        );
+        assert_eq!(lineage_at("150-abc"), 150);
+        assert_eq!(lineage_at("abc"), 0);
+    }
+
+    #[test]
+    fn a_phone_that_keeps_the_node_member_is_not_taken_for_the_node() {
+        let l = lib();
+        let b = bridge("spotify");
+        l.set_setting(
+            "spotify.user",
+            r#"{"access_token":"at","refresh_token":"rt1","expires_at":100,"user_id":"gil"}"#,
+        )
+        .unwrap();
+        let m = carried(&l, b).unwrap().unwrap();
+        let ours = sign_in_for(b, &m, None, None, "1-L");
+        assert_eq!(node_settings(&ours).unwrap(), m);
+        assert!(!vault_hash(&ours).starts_with("std:"));
+        // The phone signs in again and rewrites the blob, keeping `node` as the spec asks
+        let mut phone = ours.clone();
+        phone.tokens.insert("refresh_token".into(), json!("phone-rt"));
+        assert!(node_settings(&phone).is_none(), "a copy the node didn't write");
+        assert!(vault_hash(&phone).starts_with("std:"));
+        assert_ne!(vault_hash(&phone), vault_hash(&ours));
+    }
+
+    #[test]
+    fn a_pulled_last_fm_session_drops_the_old_ones_problem() {
+        let l = lib();
+        let b = bridge("lastfm");
+        l.set_setting(
+            "lastfm.session",
+            r#"{"key":"old","user":"gil","submit":false,"problem":"error 9"}"#,
+        )
+        .unwrap();
+        let mut travels = Map::new();
+        travels.insert("lastfm.session".into(), json!({"key": "new", "user": "gil"}));
+        apply(&l, b, &travels);
+        reset_after_pull(&l, b);
+        let v: Value = serde_json::from_str(&l.get_setting("lastfm.session").unwrap().unwrap()).unwrap();
+        assert_eq!(v, json!({"key": "new", "user": "gil", "submit": false}));
     }
 
     #[test]

@@ -741,12 +741,15 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         country: user["country_code"].as_str().map(str::to_string),
         hires: params["hires_streaming"].as_bool().unwrap_or(false),
     };
+    // Stored and marked new together: no vault pass sees one without the other
+    let pass = s.vault_pass.lock().await;
     update(&s, |st| {
         st.session = Some(sess);
         st.health = None;
     });
-    crate::search::forget_answers();
     crate::vault_cache::new_sign_in_of(&s, "qobuz");
+    drop(pass);
+    crate::search::forget_answers();
     tracing::info!("Qobuz sign-in stored");
     Ok(Json(view(&s)))
 }

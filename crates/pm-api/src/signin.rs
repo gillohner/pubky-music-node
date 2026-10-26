@@ -204,7 +204,7 @@ pub(crate) async fn import(
             ))
         }
     };
-    crate::tidal::import_sign_in(&s, imp.session);
+    crate::tidal::import_sign_in(&s, imp.session).await;
     s.library
         .lock()
         .expect("library poisoned")

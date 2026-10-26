@@ -324,6 +324,8 @@ pub(crate) async fn connect(
     if let Some(on) = body.submit {
         acct.submit = on;
     }
+    // Stored and marked new together: no vault pass sees one without the other
+    let pass = s.vault_pass.lock().await;
     s.library
         .lock()
         .expect("library poisoned")
@@ -331,6 +333,7 @@ pub(crate) async fn connect(
     if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
         crate::vault_cache::new_sign_in_of(&s, "listenbrainz");
     }
+    drop(pass);
     if acct.submit && !pending(&s).is_empty() {
         send_listens(&s, &acct.token, Vec::new()).await;
     }

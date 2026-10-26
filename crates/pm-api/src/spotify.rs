@@ -856,6 +856,8 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         product: None,
         scope: v["scope"].as_str().unwrap_or("").to_string(),
     };
+    // One sign-in, stored and marked new together: no vault pass sees one without the other
+    let _pass = s.vault_pass.lock().await;
     store_user(s, Some(&session))?;
     if let Ok(me) = get_json(s, "/me", &[]).await {
         session.user_id = me["id"].as_str().map(str::to_string);

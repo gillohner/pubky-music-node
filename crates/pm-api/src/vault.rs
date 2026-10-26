@@ -248,7 +248,7 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
         .map_err(vault_error)?;
     // The node's own copies go aside now, not at the next sync. The vault is already wiped
     // here, so a sync that fails is reported, not an error
-    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault, None).await {
+    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault, None, true).await {
         Ok(c) => (c.signed_out, None),
         Err(e) => (Vec::new(), Some(e.to_string())),
     };
@@ -295,6 +295,14 @@ pub(crate) async fn sync_now(
                 .map_err(|e| ApiError::bad_request(format!("{{service, take}}: {e}")))?,
         )
     };
+    if let Some(x) = &settle {
+        if !crate::vault_cache::BRIDGES.iter().any(|b| b.service == x.service) {
+            return Err(ApiError::bad_request(format!(
+                "{} isn't one of the sign-ins the node keeps in the vault",
+                x.service
+            )));
+        }
+    }
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
