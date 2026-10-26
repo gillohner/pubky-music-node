@@ -28,6 +28,7 @@ if (!w.HTMLDialogElement.prototype.showModal) w.HTMLDialogElement.prototype.show
 w.addEventListener('error', (e) => errors.push('window.error: ' + e.message));
 w.addEventListener('unhandledrejection', (e) => errors.push('unhandled: ' + e.reason));
 process.on('unhandledRejection', (e) => errors.push('node unhandled: ' + (e && e.stack || e)));
+Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement (jsdom is 1024 wide: a tablet)
 w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {

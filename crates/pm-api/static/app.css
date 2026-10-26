@@ -264,7 +264,7 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .pop-item .state { margin-left: auto; font-size: 11px; color: var(--muted); }
 .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 25; }
 .overlay {
-  position: fixed; inset: 0 0 var(--player) 0; z-index: 20; overflow: auto;
+  position: fixed; inset: 0 0 var(--player) 0; z-index: 20; overflow: auto; overscroll-behavior-y: contain;
   background: radial-gradient(1200px 600px at 20% 0%, rgba(139, 124, 246, 0.16), transparent 60%), var(--bg);
   animation: rise 0.25s var(--ease);
 }
@@ -953,7 +953,7 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .ytpanel.small .embedhead .muted { display: none; }
 .ytpanel #ytmin .ic { transition: transform 0.15s; }
 .ytpanel.small #ytmin .ic { transform: rotate(180deg); }
-@media (max-width: 720px) { .ytpanel { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); } }
+html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); }
 
 /* Player bar: the cover opens Now playing; Now playing's Pubky row */
 .np-artbtn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 6px; }
@@ -1010,6 +1010,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
 .main > .libnav + * { margin-top: 14px; }
+html[data-shell="desktop"] .libnav { display: none; }
+html[data-shell="desktop"] .main > .libnav + * { margin-top: 0; }
 
 html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; grid-template-areas: "content" "player" "bnav"; }
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
@@ -1047,8 +1049,10 @@ html[data-shell="tablet"] .sidebar, html[data-shell="tablet"] .menu-btn, html[da
 html[data-shell="tablet"] .bottomnav { grid-area: bnav; display: flex; flex-direction: column; gap: 6px; padding: 14px 8px; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
 html[data-shell="tablet"] .bnav { min-height: 58px; }
 html[data-shell="tablet"] .bnav.rail-only { margin-top: auto; }
-html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0 0 0 auto; flex: none; }
+html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
 html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
+/* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
+@media (max-width: 700px) { html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; } }
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
 .picker { max-height: 50vh; overflow: auto; margin: 10px 0; }
@@ -1102,7 +1106,7 @@ body.kiosk .main { padding: 0; }
 .selbox input { width: 18px; height: 18px; accent-color: var(--accent); }
 .selbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player) + 14px); z-index: 40; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: calc(100vw - 24px); padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow); }
 .selcount { font-weight: 600; margin-right: 4px; }
-@media (max-width: 720px) { .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; } }
+html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
 @media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
 /* One way back: the breadcrumb on wide screens, the back link on phones (UX review) */

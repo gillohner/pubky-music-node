@@ -793,7 +793,7 @@
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { search.focus(); if (search.value.trim()) runSearch(); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); if (search.value.trim()) runSearch(); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
   $('#me').onclick = () => setView('settings');
   $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
@@ -805,11 +805,10 @@
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
   const applyShell = () => {
-    const was = shellMode(); const now = shellFor(window.innerWidth, layoutPref());
+    const now = shellFor(window.innerWidth, layoutPref());
     document.documentElement.dataset.shell = now;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
-    if (was !== now && state.view) setTimeout(() => render(), 0); // after start-up has defined render
   };
   window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
   applyShell();
@@ -832,7 +831,7 @@
   // other way pops it too, and opening a page from inside one replaces it (setView).
   const transients = []; // { open: () => bool, close: (fromBack) => void }
   let popHandled = false; let selfPop = false; let popPending = null; let popResolve = null;
-  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true, sheet: false }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
+  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
   // Popping is asynchronous: a page opened right after waits for it (setView), or the pop would undo it.
   const popTransient = () => { if (transients.some((t) => t.open())) return; if (history.state && history.state.transient && !selfPop) { selfPop = true; popPending = new Promise((r) => { popResolve = r; setTimeout(() => { popPending = null; popResolve = null; r(); }, 600); }); history.back(); } };
   window.addEventListener('popstate', () => {
@@ -944,17 +943,22 @@
   };
   // ---- Now Playing overlay -------------------------------------------------
   const overlay = $('#nowplaying');
-  const toggleNowPlaying = (force) => {
-    const open = force === true ? true : overlay.hidden;
+  // Back closes it like a menu; opening a page from it takes its history entry (setView)
+  const npTr = { open: () => !overlay.hidden, close: (fromBack) => toggleNowPlaying(false, fromBack) };
+  const toggleNowPlaying = (force, fromBack) => {
+    const open = force === true ? true : force === false ? false : overlay.hidden;
+    const was = !overlay.hidden;
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
-    if (open) renderNowPlaying();
+    if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
+    const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
+    if (was && fromBack !== true) popTransient();
   };
   // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it
   {
     let y0 = null; let d0 = null;
     const player = $('.player');
-    player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('button, input') ? e.touches[0].clientY : null; }, { passive: true });
+    player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
     player.addEventListener('touchend', (e) => { if (y0 != null && y0 - e.changedTouches[0].clientY > 40 && overlay.hidden) toggleNowPlaying(true); y0 = null; });
     overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
     overlay.addEventListener('touchend', (e) => { if (d0 != null && e.changedTouches[0].clientY - d0 > 80 && !overlay.hidden) toggleNowPlaying(); d0 = null; });
@@ -962,8 +966,9 @@
   const renderNowPlaying = () => {
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
-      overlay.innerHTML = `<div class="np-page"><div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
+      overlay.innerHTML = `<div class="np-page"><div class="np-top"><button class="btn ghost" id="npclose">${icon('back')} Back</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
+      $('#npq').onclick = () => setView('queue');
       return;
     }
     const it = np.item;
@@ -1074,7 +1079,7 @@
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
   const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+    const phone = shellMode() === 'phone';
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
@@ -1215,8 +1220,8 @@
       // Changing a query or tab inside the same page replaces; opening another page pushes.
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
-      const replace = how === 'replace' || !!cur.sheet || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { sheet: false, transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const replace = how === 'replace' || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
+      const entry = { transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
@@ -1227,6 +1232,7 @@
     $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
+    if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
     return render();
   };
@@ -1591,7 +1597,7 @@
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
     menuEl.style.bottom = 'auto'; menuEl.style.right = 'auto'; menuEl.style.width = mw + 'px';
     // Phones: a sheet from the bottom, not a dropdown that runs off the screen (UX review #3)
-    menuEl.classList.toggle('sheet', !!(window.matchMedia && matchMedia('(max-width: 720px)').matches));
+    menuEl.classList.toggle('sheet', shellMode() === 'phone');
     if (menuEl.classList.contains('sheet')) { menuEl.style.left = '0px'; menuEl.style.right = '0px'; menuEl.style.top = 'auto'; menuEl.style.bottom = '0px'; menuEl.style.width = 'auto'; }
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
@@ -2103,11 +2109,12 @@
     $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
     applyShell();
   });
-  // Phones and tablets: the library's sections as a row of chips above the page title (desktop has the sidebar)
+  // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
   const LIB_TOP = [['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
-    if (shellMode() === 'desktop' || !LIB_TOP.some(([k]) => k === state.view)) return '';
-    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)));
+    if (!LIB_TOP.some(([k]) => k === state.view)) return '';
+    const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
+    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
     return `<nav class="libnav chips" aria-label="Library">${items.map(([k, l]) => `<button class="chip ${k === state.view ? 'on' : ''}" data-libnav="${k}" ${k === state.view ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
   };
   const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
@@ -2819,7 +2826,7 @@
           try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
           const srcs = state.sources;
-          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches);
+          const phone = shellMode() === 'phone';
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
