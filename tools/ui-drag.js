@@ -11,7 +11,7 @@ const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1
     const p = await ctx.newPage();
     await p.goto(BASE + '/tracks'); await p.waitForTimeout(2000);
     await p.click('#shuffle'); await p.waitForTimeout(800); // Play all
-    if (name === 'phone') { await p.click('#menu'); await p.waitForTimeout(300); } await p.click('.nav-item[data-view="queue"]'); await p.waitForTimeout(1500);
+    await p.evaluate(() => document.querySelector('.nav-item[data-view="queue"]').click()); await p.waitForTimeout(1500); // phones reach it from Now playing
     const names = async () => p.$$eval('.list.queue .list-row .name', (els) => els.map((e) => e.textContent));
     const before = await names();
     const g0 = await p.$('.list.queue [data-qgrip="0"]'); const r2 = await p.$('.list.queue [data-qrow="2"]');

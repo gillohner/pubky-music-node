@@ -177,17 +177,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w2.HTMLMediaElement.prototype.pause = function () {};
   w2.matchMedia = (q) => ({ matches: /max-width: (720|1100)px/.test(q), media: q, addEventListener() {}, removeEventListener() {} });
   w2.eval(js); await sleep(6000);
-  // Phone: ☰ opens the sheet; back closes it and stays on the same page.
-  const path0 = w2.location.pathname;
-  w2.document.querySelector('#menu').click(); await sleep(100);
-  const opened = w2.document.querySelector('#sidebar').classList.contains('open');
-  w2.history.back(); await sleep(800);
-  const closed = !w2.document.querySelector('#sidebar').classList.contains('open');
-  console.log('phone sheet: opened', opened, '| closed on back', closed, '| same page', w2.location.pathname === path0);
-  if (!opened || !closed || w2.location.pathname !== path0) errors.push('the phone sidebar sheet does not open or close on back');
   const dh = w2.document.querySelector('#main h1');
   console.log('deep link /song/mb-…:', dh && dh.textContent, '|', (w2.document.querySelector('#main .notice') || {}).textContent || '');
   if (!dh) errors.push('deep link to a song page did not render');
+  // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
+  // with its sections as chips; the account button opens Settings; back returns.
+  w2.localStorage.setItem('pm.layout', 'compact'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
+  const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
+  w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
+  const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);
+  const chip = w2.document.querySelector('#main .libnav [data-libnav="artists"]'); if (chip) chip.click(); await sleep(1500);
+  const onArtists = w2.location.pathname === '/artists'; const libOn = w2.document.querySelector('[data-bnav="library"]').classList.contains('on');
+  w2.document.querySelector('#me').click(); await sleep(1500);
+  const onSettings = w2.location.pathname.startsWith('/settings');
+  w2.history.back(); await sleep(1500);
+  console.log('phone shell:', w2.document.documentElement.dataset.shell, '| tabs', tabs, '| chips', libChips.join(','), '| artists', onArtists, 'library tab on', libOn, '| settings', onSettings, '| back', w2.location.pathname);
+  if (w2.document.documentElement.dataset.shell !== 'phone') errors.push('Layout: Compact does not give the phone arrangement');
+  if (tabs !== 'home,search,library,zones') errors.push(`the phone tabs are ${tabs}`);
+  if (!libChips.includes("albums") || !onArtists || !libOn) errors.push('the Library tab and its section chips do not work');
+  if (!onSettings || w2.location.pathname !== '/artists') errors.push('the account button does not open Settings, or back does not return');
   // ☰ does something at every width: desktop collapses the sidebar to icons and back.
   const shellEl = w.document.querySelector('.shell'); const menuBtn = w.document.querySelector('#menu');
   const sideBefore = shellEl.classList.contains('collapsed');

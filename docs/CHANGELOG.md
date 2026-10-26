@@ -2,6 +2,16 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-26
+
+- **One app shell for phone, tablet and desktop** (STEWARD-UX-RESPONSIVE.md; build step 1 of docs/ux/responsive.md):
+  - Phones (under 600 px) get tabs: Home, Search, Library, Zones. The mini player sits above them as a card with the cover, the title, the zone and play/pause.
+  - Swipe up on the mini player opens Now playing; swipe down from its top closes it.
+  - Tablets (600–1024 px) get a rail with the same four, plus Settings at the foot, and the full player bar. Desktops keep the sidebar.
+  - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
+  - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
+  - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
+
 ## 2026-10-25
 
 - **Quieter source switching, working services first** (STEWARD-UX-PLAYER-SOURCES.md §1):
