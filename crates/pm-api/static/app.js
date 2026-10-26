@@ -896,9 +896,60 @@
       const ps = $('#dashpos'); if (ps) ps.textContent = fmt(pos); const ds = $('#dashdur'); if (ds) ds.textContent = dur ? fmt(dur) : '';
     }
   };
+  // Colour from where it plays (docs/ux/responsive.md §6). The player surfaces take the source's
+  // accent: [light, dark], each checked in its theme (as text on the page ≥ 4.5:1, and the play
+  // button's ink on it ≥ 4.5:1). Our own files and the homeserver keep ours. A tint only: no logos,
+  // layouts or fonts of theirs, and lists keep the app's theme.
+  const SRC_ACCENT = {
+    spotify: ['#13803B', '#1ED760'], tidal: ['#007C89', '#33E8E0'], qobuz: ['#1F5BD6', '#6E9BFF'],
+    deezer: ['#9B35F4', '#B35CFF'], youtube: ['#E00000', '#FF3232'], soundcloud: ['#C94300', '#FF5500'],
+    bandcamp: ['#167A94', '#1DA0C3'], plex: ['#936608', '#E5A00D'], jellyfin: ['#9852AF', '#B26BC8'],
+    jamendo: ['#CE364D', '#F24560'], audius: ['#C00ED3', '#D741E7'], archive: ['#3774A9', '#428BCA'], subsonic: ['#086ED5', '#0A84FF'],
+  };
+  const colourOn = (k) => { try { return localStorage.getItem(k) !== 'off'; } catch { return true; } };
+  const svcOfItem = (it) => {
+    const u = String((it && it.uri) || ''); const m = /^([a-z]+)[:-]/.exec(u);
+    if (m && SRC_ACCENT[m[1]]) return m[1];
+    if (/^https?:/.test(u)) { try { const k = srcSvc(new URL(u).hostname); return SRC_ACCENT[k] ? k : null; } catch { return null; } }
+    return null;
+  };
+  const setSourceColour = (np) => {
+    const root = document.documentElement;
+    const svc = np && colourOn('pm.srcColour') ? (np.format && np.format.service ? srcSvc(np.format.service) : svcOfItem(np.item)) : null;
+    const a = svc && SRC_ACCENT[svc];
+    if (a) { root.dataset.src = svc; root.style.setProperty('--src-l', a[0]); root.style.setProperty('--src-d', a[1]); }
+    else { delete root.dataset.src; root.style.removeProperty('--src-l'); root.style.removeProperty('--src-d'); }
+  };
+  // Now playing's background: a soft gradient from the cover (its average colour, read through a small
+  // canvas; a cover from another site that does not allow that gets none)
+  const artTints = new Map();
+  const setArtTint = () => {
+    const root = document.documentElement; const img = $('#nowplaying .np-big img');
+    const clear = () => { delete root.dataset.art; root.style.removeProperty('--np-tint'); };
+    if (!img || !colourOn('pm.artColour')) { clear(); return; }
+    const src = img.currentSrc || img.src;
+    const apply = (c) => { if (c) { root.dataset.art = '1'; root.style.setProperty('--np-tint', c); } else clear(); };
+    if (artTints.has(src)) { apply(artTints.get(src)); return; }
+    const probe = new Image(); probe.crossOrigin = 'anonymous';
+    probe.onload = () => {
+      let c = null;
+      try {
+        const cv = document.createElement('canvas'); cv.width = 12; cv.height = 12; const g = cv.getContext('2d');
+        g.drawImage(probe, 0, 0, 12, 12); const d = g.getImageData(0, 0, 12, 12).data;
+        let r = 0; let gr = 0; let b = 0; let n = 0;
+        for (let i = 0; i < d.length; i += 4) { const hi = Math.max(d[i], d[i + 1], d[i + 2]); const lo = Math.min(d[i], d[i + 1], d[i + 2]); if (hi < 24 || lo > 235) continue; r += d[i]; gr += d[i + 1]; b += d[i + 2]; n += 1; }
+        if (n) c = `rgb(${Math.round(r / n)} ${Math.round(gr / n)} ${Math.round(b / n)} / 0.34)`;
+      } catch { c = null; }
+      artTints.set(src, c);
+      const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) apply(c);
+    };
+    probe.onerror = () => { artTints.set(src, null); clear(); };
+    probe.src = src;
+  };
   const renderBar = () => {
     markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
+    setSourceColour(np);
     const playing = z && z.transport === 'playing';
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
     $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -1110,6 +1161,7 @@
     if (sheet === 'sources' && songPage) fillNpSources(songPage, gen);
     fillNpPubky(it, gen);
     loadLyrics(it);
+    setArtTint();
     npRestore();
     refreshSleep();
   };
@@ -2292,7 +2344,13 @@
   const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
+  const colourGroup = (group, row) => group('Colour', row('Colour from where it plays', 'The player takes a tint from the service: TIDAL, Qobuz, Spotify…; your own files keep ours.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.srcColour" ${colourOn('pm.srcColour') ? 'checked' : ''} aria-label="Colour from where it plays">`)
+    + row('Colour from the cover', 'Now playing takes a soft gradient from the album art.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.artColour" ${colourOn('pm.artColour') ? 'checked' : ''} aria-label="Colour from the cover">`));
   const bindLayoutPick = () => {
+    $$('[data-colour-pick]', main).forEach((c) => c.onchange = () => {
+      try { if (c.checked) localStorage.removeItem(c.dataset.colourPick); else localStorage.setItem(c.dataset.colourPick, 'off'); } catch { /* no storage */ }
+      const z = currentZone(); setSourceColour(z && z.now_playing); setArtTint();
+    });
     $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
       try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
       $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
@@ -3796,7 +3854,7 @@
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), '<button class="btn" id="lsignout">Sign out of this device</button>')
                 + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
-              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row);
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             $('#lsignout').onclick = async () => { try { await api('DELETE', '/me/token'); } catch { /* signed out either way */ } state.token = ''; try { localStorage.removeItem('pm.token'); } catch { /* no storage */ } location.reload(); };
             break;
@@ -3883,7 +3941,7 @@
             + group('Every day or week, to a folder', block('', '', '<div id="bksched"><div class="skeleton" style="height:60px"></div></div>'))
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
-          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row);
+          const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))

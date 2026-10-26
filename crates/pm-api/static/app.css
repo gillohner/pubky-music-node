@@ -37,6 +37,7 @@
 /* Light: follows the system unless Settings › Appearance picks one (data-theme on <html>) */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
+  --pl-accent: var(--src-l, var(--accent));
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -65,6 +66,7 @@
   }
 }
 :root[data-theme="light"] {
+  --pl-accent: var(--src-l, var(--accent));
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -1234,3 +1236,12 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 :where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
 :where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
+
+/* Colour from where it plays (docs/ux/responsive.md §6): the player bar and Now playing take the
+   source's accent (--src-l / --src-d, set on <html> with data-src); lists keep the app's theme */
+:root { --pl-accent: var(--src-d, var(--accent)); }
+html[data-src] .player, html[data-src] #nowplaying { --accent: var(--pl-accent); --accent-strong: var(--pl-accent); --accent-soft: color-mix(in srgb, var(--pl-accent) 16%, transparent); }
+html[data-src] .player .icon-btn.play, html[data-src] #nowplaying .icon-btn.play { background: var(--accent); color: var(--on-accent); }
+html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
+/* and a soft gradient from the cover behind Now playing */
+html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }
