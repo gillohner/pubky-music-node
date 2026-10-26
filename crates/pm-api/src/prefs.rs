@@ -499,12 +499,14 @@ mod tests {
             serde_json::json!({"quality": {"tidal": null, "qobuz": "cd"}, "appearance": {"colour_from": "art"}})
         );
         // Another node's newer copy changed the layout; ours changed the quality: both stay
-        let mut theirs = Prefs::default();
-        theirs.home_layout = Some(HomeLayout {
-            order: vec!["radio".into()],
-            hidden: vec![],
-        });
-        theirs.quality.insert("tidal".into(), "high".into());
+        let mut theirs = Prefs {
+            home_layout: Some(HomeLayout {
+                order: vec!["radio".into()],
+                hidden: vec![],
+            }),
+            quality: [("tidal".to_string(), "high".to_string())].into(),
+            ..Prefs::default()
+        };
         let change: PrefsUpdate = serde_json::from_value(all).unwrap();
         apply(&mut theirs, change).unwrap();
         assert_eq!(theirs.home_layout.unwrap().order, ["radio"]);
