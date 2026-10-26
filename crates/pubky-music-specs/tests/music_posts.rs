@@ -14,7 +14,8 @@ use serde_json::json;
 const OWNER: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
 const SONG: &str = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
 const PUB: ValidationCtx = ValidationCtx { root: Root::Pub };
-const PLAYED: i64 = 1_792_540_800_000;
+/// 2026-10-20 in Unix microseconds.
+const PLAYED: i64 = 1_792_540_800_000_000;
 
 fn owner() -> PubkyId {
     PubkyId::try_from(OWNER).unwrap()
@@ -153,9 +154,9 @@ fn a_public_listen_never_points_at_a_private_object() {
 
 #[test]
 fn listen_rules() {
-    // Seconds instead of milliseconds
+    // Seconds instead of microseconds
     let err = written(&listen(1_792_540_800, None, None, SONG.into()), Root::Priv).unwrap_err();
-    assert!(err.contains("milliseconds"), "{err}");
+    assert!(err.contains("microseconds"), "{err}");
     let err = written(&listen(PLAYED, Some(-1), None, SONG.into()), Root::Priv).unwrap_err();
     assert!(err.contains("duration_ms"), "{err}");
     let err = written(
@@ -288,4 +289,123 @@ fn item_added_at_round_trips_and_ignores_junk() {
         let it = item(SONG, json!({"ext": {"music": {"added_at": junk}}}));
         assert_eq!(item_added_at(&it), None);
     }
+    // An older writer's milliseconds read as microseconds
+    let it = item(SONG, json!({"ext": {"music": {"added_at": PLAYED / 1000}}}));
+    assert_eq!(item_added_at(&it), Some(PLAYED));
+}
+
+/// Times are microseconds; a time below 3000-01-01 in milliseconds is an older millisecond
+/// value; anything before 2000 (seconds, say) is refused.
+#[test]
+fn times_are_microseconds_and_older_milliseconds_still_read() {
+    use pubky_music_specs::{micros_of, MILLIS_BEFORE, TIME_MIN_MICROS};
+    assert_eq!(micros_of(PLAYED), Some(PLAYED));
+    assert_eq!(micros_of(PLAYED / 1000), Some(PLAYED));
+    assert_eq!(micros_of(MILLIS_BEFORE - 1), Some((MILLIS_BEFORE - 1) * 1000));
+    assert_eq!(micros_of(TIME_MIN_MICROS), Some(TIME_MIN_MICROS));
+    // The two ranges never meet
+    const { assert!(MILLIS_BEFORE < TIME_MIN_MICROS) };
+    for bad in [MILLIS_BEFORE, TIME_MIN_MICROS - 1, 1_792_540_800, -1] {
+        assert_eq!(micros_of(bad), None, "{bad}");
+    }
+    // A listen an older node wrote in milliseconds reads in microseconds
+    let old = listen(PLAYED / 1000, None, None, SONG.into());
+    let back = written(&old, Root::Priv).unwrap();
+    assert_eq!(read_listen(&back).unwrap().played_at, PLAYED);
+}
+
+#[test]
+fn listening_is_live_and_feed_only() {
+    use pubky_music_specs::{listening, read_listening, FEED_ONLY_KINDS};
+    let src = MusicSource::new("tidal", "https://tidal.com/track/50850120");
+    let post = listening(
+        PLAYED,
+        PLAYED + 213_000_000,
+        Some(213_000),
+        Some(src),
+        SONG.into(),
+    );
+    let back = written(&post, Root::Pub).unwrap();
+    assert_eq!(back.kind, MusicPostKind::Listening);
+    assert!(back.kind.is_feed_only());
+    assert!(!MusicPostKind::Listen.is_feed_only());
+    assert_eq!(FEED_ONLY_KINDS, ["listening"]);
+    let c = read_listening(&back).unwrap();
+    assert_eq!((c.started_at, c.expires_at), (PLAYED, PLAYED + 213_000_000));
+    assert_eq!(serde_json::to_value(&back).unwrap()["embed"], SONG);
+    // Expires after it starts, within a day; embed names the music
+    assert!(written(&listening(PLAYED, PLAYED, None, None, SONG.into()), Root::Pub).is_err());
+    let day = pubky_music_specs::LIVE_WINDOW_MAX_MICROS;
+    assert!(written(
+        &listening(PLAYED, PLAYED + day + 1, None, None, SONG.into()),
+        Root::Pub
+    )
+    .is_err());
+    let mut no_embed = listening(PLAYED, PLAYED + 1, None, None, SONG.into());
+    no_embed.embed = None;
+    assert!(written(&no_embed, Root::Pub).is_err());
+}
+
+#[test]
+fn a_session_has_a_pubky_host() {
+    use pubky_music_specs::{read_session, session};
+    let host = format!("pubky://{OWNER}");
+    let post = session(
+        PLAYED,
+        Some(PLAYED + 3_600_000_000),
+        host.clone(),
+        None,
+        SONG.into(),
+    );
+    let back = written(&post, Root::Pub).unwrap();
+    assert_eq!(read_session(&back).unwrap().host, host);
+    assert!(!back.kind.is_feed_only());
+    for bad in [
+        "https://example.com/me".to_string(),
+        format!("pubky://{OWNER}/pub/social/v1/profile.json"),
+        "pubky://not-a-key".to_string(),
+    ] {
+        let post = session(PLAYED, None, bad.clone(), None, SONG.into());
+        assert!(written(&post, Root::Pub).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn service_names_are_hyphenated() {
+    use pubky_music_specs::{service_name, SERVICE_NAMES};
+    assert_eq!(service_name("Apple_Music").as_deref(), Some("apple-music"));
+    assert_eq!(service_name(" youtube music ").as_deref(), Some("youtube-music"));
+    assert_eq!(service_name("TIDAL").as_deref(), Some("tidal"));
+    assert_eq!(service_name("tidal!"), None);
+    assert!(SERVICE_NAMES
+        .iter()
+        .all(|n| pubky_music_specs::is_service_name(n) && !n.contains('_')));
+    assert!(SERVICE_NAMES.contains(&"library") && SERVICE_NAMES.contains(&"roon"));
+}
+
+#[test]
+fn a_duplicate_names_its_original() {
+    use pubky_music_specs::ext::{original, set_original};
+    let mut c: PubkySocialCollectionContent =
+        serde_json::from_value(json!({"name": "Copy", "items": []})).unwrap();
+    assert_eq!(original(&c, &PUB), None);
+    let theirs = format!("pubky://{OWNER}/pub/social/v1/posts/0033SCZXVEPNG");
+    set_original(&mut c, Some(&theirs));
+    assert_eq!(original(&c, &PUB), Some(theirs.clone()));
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!(v["ext"]["music"]["original"], theirs);
+    // Only a versionless post reference reads; anything else is absent
+    for bad in [
+        "https://example.com/list".to_string(),
+        format!("pubky://{OWNER}/pub/social/v1/posts/0033SCZXVEPNG/0033SCZXVEPNG.json"),
+        format!("pubky://{OWNER}/pub/social/v1/profile.json"),
+    ] {
+        set_original(&mut c, Some(&bad));
+        assert_eq!(original(&c, &PUB), None, "{bad}");
+    }
+    set_original(&mut c, None);
+    assert!(
+        serde_json::to_value(&c).unwrap().get("ext").is_none(),
+        "tidied away"
+    );
 }

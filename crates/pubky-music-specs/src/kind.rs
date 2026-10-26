@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::content;
 
-/// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`); a spelling this
-/// version does not know reads as [`MusicPostKind::Unknown`] and fails validation.
+/// Kinds that are feed only: a live announcement an indexer shows in feeds and lets expire,
+/// never a graph node or a lasting record. The Nexus fork mirrors this list.
+pub const FEED_ONLY_KINDS: &[&str] = &["listening"];
+
+/// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`, `"listening"`,
+/// `"session"`); a spelling this version does not know reads as [`MusicPostKind::Unknown`] and
+/// fails validation.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(from = "String", into = "String")]
 #[non_exhaustive]
@@ -18,9 +23,13 @@ pub enum MusicPostKind {
     /// A rating of 1 to 10 with optional text; `embed` is the reviewed music URL.
     #[default]
     Review,
-    /// One play of the music at `embed`, under `/priv/` (a private history) or `/pub/` (a public
-    /// one); the person chooses.
+    /// One play of the music at `embed`. The path decides who sees it: `/priv/` for a private
+    /// history, `/pub/` for a public one.
     Listen,
+    /// Now playing the music at `embed`, until `expires_at`. Feed only ([`FEED_ONLY_KINDS`]).
+    Listening,
+    /// A listening session others can join, hosted by `host`, playing the music at `embed` now.
+    Session,
     /// A kind a newer writer used, kept with its spelling.
     Unknown(String),
 }
@@ -31,8 +40,15 @@ impl MusicPostKind {
         match self {
             MusicPostKind::Review => "review",
             MusicPostKind::Listen => "listen",
+            MusicPostKind::Listening => "listening",
+            MusicPostKind::Session => "session",
             MusicPostKind::Unknown(name) => name,
         }
+    }
+
+    /// Whether this kind is feed only ([`FEED_ONLY_KINDS`]).
+    pub fn is_feed_only(&self) -> bool {
+        FEED_ONLY_KINDS.contains(&self.wire_name())
     }
 }
 
@@ -41,6 +57,8 @@ impl From<String> for MusicPostKind {
         match s.as_str() {
             "review" => MusicPostKind::Review,
             "listen" => MusicPostKind::Listen,
+            "listening" => MusicPostKind::Listening,
+            "session" => MusicPostKind::Session,
             _ => MusicPostKind::Unknown(s),
         }
     }
@@ -64,8 +82,9 @@ impl PostKind for MusicPostKind {
     }
 
     fn validate_content(&self, post: &PostEnvelope<Self>, _ctx: &ValidationCtx) -> Result<(), String> {
-        // Both kinds are about one piece of music, named by `embed`. A reply to a review is a
-        // social post with `parent` set to the review, not another review.
+        // Every kind is about one piece of music, named by `embed` (for `listening` and `session`
+        // the music playing now; never a URI inside the content). A reply to a review is a social
+        // post with `parent` set to the review, not another review.
         if post.embed.is_none() {
             return Err(format!(
                 "Validation Error: a {self} must embed the music URL it is about"
@@ -76,34 +95,50 @@ impl PostKind for MusicPostKind {
         }
         match self {
             MusicPostKind::Review => content::parse_review(&post.content).map(|_| ()),
-            MusicPostKind::Listen => {
-                // Either root: the person picks a private or a public history. A public listen's
-                // source passes the reference gate under the public root, so it never points
-                // at a private object.
+            // Either root: the path decides who sees it. A public post's references pass the gate
+            // under the public root, so they never point at a private object.
+            MusicPostKind::Listen | MusicPostKind::Listening | MusicPostKind::Session => {
                 if !post.attachments.is_empty() || post.lock.is_some() {
-                    return Err("Validation Error: a listen has no attachments and no lock".into());
+                    return Err(format!(
+                        "Validation Error: a {self} has no attachments and no lock"
+                    ));
                 }
-                content::parse_listen(&post.content).map(|_| ())
+                match self {
+                    MusicPostKind::Listen => content::parse_listen(&post.content).map(|_| ()),
+                    MusicPostKind::Listening => content::parse_listening(&post.content).map(|_| ()),
+                    _ => content::parse_session(&post.content).map(|_| ()),
+                }
             }
             // The envelope refuses Unknown before it asks the kind
             MusicPostKind::Unknown(name) => Err(format!("Validation Error: unknown music kind {name}")),
         }
     }
 
-    /// A listen's `source.uri`: http(s) or pubky only, checked by the envelope's gate with the
-    /// author in scope.
+    /// A `source.uri` (listen, listening, session): http(s) or pubky only; a session's `host`:
+    /// pubky only. Checked by the envelope's gate with the author in scope.
     fn content_references(&self, post: &PostEnvelope<Self>) -> Vec<ContentReference> {
-        if *self != MusicPostKind::Listen {
-            return Vec::new();
+        let mut out = Vec::new();
+        if matches!(
+            self,
+            MusicPostKind::Listen | MusicPostKind::Listening | MusicPostKind::Session
+        ) {
+            out.extend(
+                content::listen_source_uri(&post.content).map(|uri| ContentReference {
+                    field: "content.source.uri".into(),
+                    uri,
+                    schemes: AllowedSchemes::PubkyHttpHttps,
+                    max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
+                }),
+            );
         }
-        content::listen_source_uri(&post.content)
-            .map(|uri| ContentReference {
-                field: "content.source.uri".into(),
+        if *self == MusicPostKind::Session {
+            out.extend(content::session_host(&post.content).map(|uri| ContentReference {
+                field: "content.host".into(),
                 uri,
-                schemes: AllowedSchemes::PubkyHttpHttps,
+                schemes: AllowedSchemes::PubkyOnly,
                 max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
-            })
-            .into_iter()
-            .collect()
+            }));
+        }
+        out
     }
 }

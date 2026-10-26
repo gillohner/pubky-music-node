@@ -1,6 +1,11 @@
-//! Playlists other people share on Pubky (`/pub/social/v1/posts/`, published by any v1 client):
-//! list someone's, open one with where each song plays from on this node, play it, or save a
-//! private copy. Their data is hostile input: [`pm_pubky::v1::read_public_playlist`] validates it.
+//! Collections other people share on Pubky (`/pub/social/v1/posts/`, published by any v1 client):
+//! list someone's, open one (its items joined to this library, or where each song plays from on
+//! this node), play it, or save a private copy. Their data is hostile input:
+//! [`pm_pubky::v1::read_public_playlist`] validates it.
+//!
+//! They are read from the person's homeserver directly, by their key.
+// TODO(nexus): list them from our Nexus fork once it indexes collections (a query instead of one
+// request per collection), and keep the homeserver read for opening one.
 
 use crate::state::NodeState;
 use crate::types::*;
@@ -30,6 +35,14 @@ pub fn parse_link(input: &str) -> Option<(String, Option<String>)> {
         .map(|p| p.split('/').next().unwrap_or("").to_string())
         .filter(|id| v1::micros_of(id).is_some());
     Some((key.to_ascii_lowercase(), id))
+}
+
+/// The author and id of a public post link an item holds (`pubky://<key>/pub/…/posts/<id>`).
+pub fn parse_post(uri: &str) -> Option<(String, String)> {
+    let rest = uri.strip_prefix("pubky://")?;
+    let (key, path) = rest.split_once('/')?;
+    let id = path.strip_prefix("pub/")?.rsplit_once("/posts/")?.1;
+    (key.len() == 52 && v1::micros_of(id).is_some()).then(|| (key.to_string(), id.to_string()))
 }
 
 fn homeserver(s: &NodeState) -> Result<NodeHomeserver, ApiError> {
@@ -103,7 +116,33 @@ fn summary(key: &str, id: &str, p: &Playlist) -> SharedPlaylistSummary {
         description: p.description.clone(),
         items: p.items.len(),
         updated_at: p.updated_at,
+        layout: p.layout.clone().unwrap_or_else(|| "list".into()),
+        tracks_only: p.is_tracks_only(),
     }
+}
+
+/// `GET /v1/shared/{user}/collections` (and `/playlists`, the same list): someone's public
+/// collections, newest edit first.
+pub(crate) async fn list_collections(
+    State(s): State<Arc<NodeState>>,
+    Path(user): Path<String>,
+) -> ApiResult<Vec<SharedPlaylistSummary>> {
+    list(State(s), Path(user)).await
+}
+
+/// `GET /v1/shared/{user}/collections/{id}`: one public collection, every item joined to this
+/// library.
+pub(crate) async fn get_collection(
+    State(s): State<Arc<NodeState>>,
+    Path((user, id)): Path<(String, String)>,
+) -> ApiResult<SharedCollection> {
+    let (key, owner) = user_of(&user)?;
+    let p = read_one(&s, &key, &owner, &id).await?;
+    let entries = crate::playlists::entries(&s.library.lock().expect("library poisoned"), &p);
+    Ok(Json(SharedCollection {
+        summary: summary(&key, &id, &p),
+        entries,
+    }))
 }
 
 /// `GET /v1/shared/resolve?link=`: who (and which playlist) a pasted link names.
@@ -164,6 +203,8 @@ pub(crate) async fn copy(
             uris: p.items.iter().map(|i| i.uri.clone()).collect(),
             track_ids: Vec::new(),
             sources: p.items.iter().map(|i| i.source.clone()).collect(),
+            layout: p.layout.clone(),
+            public: None,
         }),
     )
     .await?;
@@ -184,6 +225,23 @@ mod tests {
     use super::parse_link;
 
     const KEY: &str = "zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o";
+
+    #[test]
+    fn post_items_name_their_author() {
+        assert_eq!(
+            super::parse_post(&format!("pubky://{KEY}/pub/social/v1/posts/0035WKVKQDHSM")),
+            Some((KEY.into(), "0035WKVKQDHSM".into()))
+        );
+        assert_eq!(
+            super::parse_post(&format!("pubky://{KEY}/pub/music/v1/posts/0035WKVKQDHSM")),
+            Some((KEY.into(), "0035WKVKQDHSM".into()))
+        );
+        assert_eq!(
+            super::parse_post(&format!("pubky://{KEY}/priv/social/v1/posts/0035WKVKQDHSM")),
+            None
+        );
+        assert_eq!(super::parse_post("https://musicbrainz.org/release/x"), None);
+    }
 
     #[test]
     fn links_name_a_person_and_maybe_a_playlist() {

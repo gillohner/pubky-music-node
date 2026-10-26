@@ -359,9 +359,16 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Lis
 }
 
 /// `POST /v1/listenbrainz/import`: the user's listens since the last import (at most 1000 per
-/// run) into the node's history, by MusicBrainz recording.
+/// run) into the node's history, by MusicBrainz recording, private or public as the history
+/// setting says; 409 while it is off.
 pub(crate) async fn import_listens(State(s): State<Arc<NodeState>>) -> ApiResult<ListenImport> {
     let acct = need_account(&s)?;
+    if crate::listens::history(&s.library.lock().expect("library poisoned")) == ListenHistory::Off {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "Your listen history is off (Settings › You), so there is nowhere to bring listens",
+        ));
+    }
     let since: i64 = s
         .library
         .lock()
@@ -408,24 +415,23 @@ pub(crate) async fn import_listens(State(s): State<Arc<NodeState>>) -> ApiResult
                 continue;
             };
             let uri = pm_model::MusicUri::recording(mbid);
-            let mut a = pm_pubky::Activity::new(
+            let lib = s.library.lock().expect("library poisoned");
+            let id = pm_pubky::ids::timestamp_id(at * 1_000_000);
+            if lib.get_music_post(&id)?.is_some() {
+                continue;
+            }
+            // A listen where the history setting says (checked above: not off)
+            match crate::listens::record(
+                &lib,
                 &uri,
                 pm_pubky::ActivitySource::Service {
                     name: "ListenBrainz".into(),
                 },
                 meta["additional_info"]["duration_ms"].as_u64(),
-            );
-            a.played_at = at * 1_000_000;
-            let post = pm_pubky::MusicPost::new(pm_pubky::MusicContent::Activity(a));
-            let id = post.create_id();
-            if post.validate(Some(&id)).is_err() {
-                out.skipped += 1;
-                continue;
-            }
-            let lib = s.library.lock().expect("library poisoned");
-            if lib.get_music_post(&id)?.is_none() {
-                crate::playlists::store(&lib, &post, &id, pm_pubky::Visibility::Private)?;
-                out.imported += 1;
+                Some(at * 1_000_000),
+            ) {
+                Ok(Some(_)) => out.imported += 1,
+                _ => out.skipped += 1,
             }
         }
         if listens.len() < 100 {
@@ -594,6 +600,7 @@ pub(crate) async fn import_playlist(
             uris,
             track_ids: Vec::new(),
             sources: Vec::new(),
+            ..Default::default()
         }),
     )
     .await?;

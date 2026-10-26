@@ -1,8 +1,8 @@
-//! The user's music tags: v1 `PubkyAppTag`s on canonical music URLs
-//! (ADR 0011). Tags are public by nature in pubky.app, so the node writes
+//! The user's music tags: social v1 tags on canonical music URLs in
+//! `/pub/social/v1/tags/` (ADR 0011, 0014). Tags are public by nature, so the node writes
 //! one only on an explicit action, keeps the working copy in the library's
-//! `tags` table and pushes it with the sync. Pinakes indexes them, which is
-//! what Discover reads back.
+//! `tags` table and pushes it with the sync. Nexus indexes them as resource tags and Pinakes
+//! reads them, which is what Discover reads back.
 
 use crate::bookmarks::canonical_for;
 use crate::state::NodeState;
@@ -13,16 +13,14 @@ use axum::http::StatusCode;
 use axum::Json;
 use pm_library::{Library, TagRow};
 use pm_model::MusicUri;
-use pubky_app_specs::traits::{HashId, Validatable};
-use pubky_app_specs::PubkyAppTag;
+use pubky_social_specs::PubkySocialTag;
 use std::sync::Arc;
 
-/// Sanitize and validate a label the way pubky.app does; returns the tag
-/// object (with the normalized label) and its id.
-pub(crate) fn make_tag(uri: &MusicUri, label: &str) -> Result<(PubkyAppTag, String), ApiError> {
-    let tag = PubkyAppTag::new(uri.to_url(), label.to_string());
-    let id = tag.create_id();
-    tag.validate(Some(&id))
+/// Trim and lowercase a label, then validate it as a social v1 tag; returns the tag object
+/// (with the normalized label) and its id (the hash of `uri:label`).
+pub(crate) fn make_tag(uri: &MusicUri, label: &str) -> Result<(PubkySocialTag, String), ApiError> {
+    let label = label.trim().to_lowercase();
+    let (tag, id, _) = pm_pubky::v1::music_tag(&uri.to_url(), &label, pm_pubky::ids::now_micros())
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     Ok((tag, id))
 }
@@ -251,18 +249,13 @@ pub(crate) async fn put(State(s): State<Arc<NodeState>>, Json(r): Json<TagRef>) 
 }
 
 /// `POST /v1/tags/bulk {label, album_id?|artist_id?}`: tag every track in
-/// scope that has a publishable identity. One `PubkyAppTag` per canonical
+/// scope that has a publishable identity. One social v1 tag per canonical
 /// URL, pushed by the sync; Pinakes then joins each to its group across
 /// services (`also_on`). An explicit action, never automatic (ADR 0011).
 pub(crate) async fn bulk(State(s): State<Arc<NodeState>>, Json(r): Json<BulkTag>) -> ApiResult<BulkTagged> {
-    let probe = PubkyAppTag::new(
-        "https://musicbrainz.org/recording/00000000-0000-0000-0000-000000000000".into(),
-        r.label.clone(),
-    );
-    probe
-        .validate(Some(&probe.create_id()))
-        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    let label = probe.label.clone();
+    let probe = MusicUri::parse("https://musicbrainz.org/recording/00000000-0000-0000-0000-000000000000")
+        .expect("a MusicBrainz URL");
+    let label = make_tag(&probe, &r.label)?.0.label;
     let mut out = BulkTagged {
         label: label.clone(),
         ..Default::default()

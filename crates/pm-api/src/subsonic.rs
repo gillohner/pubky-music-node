@@ -1399,12 +1399,14 @@ async fn dispatch(
                         ..Default::default()
                     };
                     if resolve_described(&lib, &d)?.is_some() {
-                        let a = pm_pubky::Activity::new(uri, pm_pubky::ActivitySource::Local, t.duration_ms);
-                        let post = MusicPost::new(MusicContent::Activity(a));
-                        let pid = post.create_id();
-                        if post.validate(Some(&pid)).is_ok() {
-                            let _ = store(&lib, &post, &pid, Visibility::Private);
-                        }
+                        // A listen where the history setting says (none when it is off)
+                        let _ = crate::listens::record(
+                            &lib,
+                            uri,
+                            pm_pubky::ActivitySource::Local,
+                            t.duration_ms,
+                            None,
+                        );
                     }
                 }
             }

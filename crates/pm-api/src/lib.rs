@@ -56,6 +56,7 @@ pub mod jellyfin;
 pub mod lastfm;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod listens;
 pub mod loudness;
 pub mod lrclib;
 pub mod mbproxy;
@@ -282,6 +283,31 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
+        // Collections: the same resource as /playlists (playlists.rs)
+        .route("/collections", get(playlists::list).post(playlists::create))
+        .route(
+            "/collections/{id}",
+            get(playlists::get)
+                .put(playlists::update)
+                .delete(playlists::delete),
+        )
+        .route("/collections/{id}/items", post(playlists::add_items))
+        .route(
+            "/collections/{id}/items/{index}",
+            axum::routing::delete(playlists::remove_item),
+        )
+        .route(
+            "/collections/{id}/local/{index}",
+            axum::routing::delete(playlists::remove_local),
+        )
+        .route("/collections/{id}/play", post(playlists::play))
+        .route("/collections/{id}/play-from", get(play_from::playlist_play_from))
+        .route("/collections/{id}/order", put(playlists::set_order))
+        .route("/collections/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/collections/{id}/items/{index}/source",
+            put(playlists::pin_source),
+        )
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
@@ -330,6 +356,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/shared/{user}/playlists", get(shared::list))
         .route("/shared/{user}/playlists/{id}", get(shared::get))
         .route("/shared/{user}/playlists/{id}/copy", post(shared::copy))
+        .route("/shared/{user}/collections", get(shared::list_collections))
+        .route("/shared/{user}/collections/{id}", get(shared::get_collection))
+        .route("/shared/{user}/collections/{id}/copy", post(shared::copy))
         .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))
         .route("/discover/charts", get(discover::charts))
@@ -636,6 +665,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me", get(accounts::me))
         .route("/me/prefs", get(prefs::get).put(prefs::put))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route("/me/listens", get(listens::list).delete(listens::delete_all))
+        .route("/me/listens/stats", get(listens::get_stats))
+        .route(
+            "/me/listens/settings",
+            get(listens::get_settings).put(listens::put_settings),
+        )
+        .route("/me/listens/visibility", post(listens::move_all))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
         .route("/devices", get(devices::list))

@@ -1623,6 +1623,41 @@ impl Library {
             .collect()
     }
 
+    /// Plays before `before` (unix seconds; all when `None`), newest first, at most `limit`.
+    pub fn plays_before(&self, before: Option<i64>, limit: u32) -> Result<Vec<PlayEntry>> {
+        let conn = self.lock();
+        let sql = format!(
+            "{} JOIN plays p ON p.track_id = t.id WHERE p.played_at < ?1 ORDER BY p.played_at DESC, p.id DESC LIMIT ?2",
+            track_select_with("p.id, p.zone, p.played_at")
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows: Vec<(RawTrack, i64, Option<String>, i64)> = stmt
+            .query_map(params![before.unwrap_or(i64::MAX), limit as i64], |r| {
+                Ok((
+                    row_to_track_raw(r)?,
+                    r.get(TRACK_COLUMNS)?,
+                    r.get(TRACK_COLUMNS + 1)?,
+                    r.get(TRACK_COLUMNS + 2)?,
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        rows.into_iter()
+            .map(|(raw, id, zone, played_at)| {
+                Ok(PlayEntry {
+                    id,
+                    track: finish_track(&conn, raw)?,
+                    zone,
+                    played_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Forget every play (the node's own history; nothing of it is published). Returns how many.
+    pub fn clear_plays(&self) -> Result<usize> {
+        Ok(self.lock().execute("DELETE FROM plays", [])?)
+    }
+
     /// Tracks by play count, most played first.
     pub fn most_played_tracks(&self, limit: u32) -> Result<Vec<PlayedTrack>> {
         let conn = self.lock();

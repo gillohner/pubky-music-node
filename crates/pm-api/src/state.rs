@@ -491,6 +491,11 @@ impl NodeState {
                     Ok(event) => {
                         if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
                             record_play(&library, &id, &item.uri);
+                            crate::listens::record_zone_play(
+                                &library.lock().expect("library poisoned"),
+                                &item.uri,
+                                item.duration_ms,
+                            );
                             if let Some(n) = node.upgrade() {
                                 crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
                                 crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());

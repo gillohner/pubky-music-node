@@ -126,6 +126,8 @@ pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
 
 /// Routes a listener may never use (reads included): the owner's settings and data.
 const OWNER_ONLY: &[&str] = &[
+    // The owner's listen history (under /me, which a listener may otherwise use)
+    "/me/listens",
     "/people",
     "/vault",
     "/party",
