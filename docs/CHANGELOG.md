@@ -5,6 +5,15 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-26
 
 - **Service apps in one list** (ADR 0016 step 2, the admin side): `GET /v1/node/apps` names every app the node uses for everyone (Spotify, TIDAL, Qobuz, SoundCloud, YouTube, Last.fm, Jamendo, AcoustID, the drives, the artist-image services), whether each is set and from where, where to get one, and the route that sets it; never a secret. Settings › This node can show them on one screen.
+- **Colour from where it plays** (STEWARD-UX-RESPONSIVE.md §6):
+  - While a song streams from a service, the player bar and Now playing take its accent: the play button, the scrubber and the quality label.
+    - It covers TIDAL, Qobuz, Spotify, Deezer, YouTube, SoundCloud, Bandcamp, Plex, Jellyfin, Jamendo, Audius, the Internet Archive and Subsonic.
+    - Your own files keep ours.
+    - Each accent is checked in both themes: at least 4.5:1 as text on the page, and for the play button's ink on it.
+    - Lists keep the app's theme.
+  - Now playing's background takes a soft gradient from the cover.
+  - Settings › Appearance › Colour has both switches (on by default), kept on this device until settings live on your homeserver.
+
 - **Lists for thumbs** (build step 3 of docs/ux/responsive.md):
   - **Song rows on touch screens:** swipe right to play next, left to add to a playlist (the owner's choice). A long press opens the row's menu, now on iPhones too. The swipes run the row's own menu items, so every kind of song row behaves the same.
   - **Section chips:** on phones and tablets they stay at the top while a list scrolls under them.
