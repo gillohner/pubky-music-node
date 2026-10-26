@@ -629,6 +629,22 @@ async fn signing_a_device_out_and_signing_out_everywhere() {
         .await
         .unwrap();
     assert!(v[2].read("tidal").await.unwrap().is_some());
+    // Junk the laptop could write, and a sign-in another device is refreshing (locked): neither
+    // stops the sign-out
+    sessions[2]
+        .storage()
+        .put(blob_path("junk").unwrap().as_str(), b"not an envelope".to_vec())
+        .await
+        .unwrap();
+    v[0].write_shared("spotify", &sign_in("s")).await.unwrap();
+    let busy = sessions[1]
+        .storage()
+        .lock(
+            blob_path("spotify").unwrap().as_str(),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
 
     // The node can't sign itself out
     assert!(v[0]
@@ -647,6 +663,15 @@ async fn signing_a_device_out_and_signing_out_everywhere() {
         .unwrap();
     assert_eq!(report.rotated, ["qobuz", "tidal"]);
     assert_eq!(report.not_readable_here, ["deezer"]);
+    let failed: Vec<&str> = report.failed.iter().map(|f| f.service.as_str()).collect();
+    assert_eq!(failed, ["junk", "spotify"], "{report:?}");
+    // Once the other device is done, signing out again rotates what was left
+    sessions[1].storage().unlock(&busy).await.unwrap();
+    let again = v[0]
+        .sign_out_device(&v[2].client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    assert_eq!(again.rotated, ["spotify"], "{again:?}");
     assert_eq!(
         called
             .lock()
@@ -676,11 +701,60 @@ async fn signing_a_device_out_and_signing_out_everywhere() {
     assert!(r.rotated.contains(&"deezer".to_string()), "{r:?}");
     assert!(v[2].read("deezer").await.is_err());
 
-    // Sign out everywhere: every sign-in goes, the device list stays
-    let removed = v[0].sign_out_everywhere(|_, _| async {}).await.unwrap();
-    assert_eq!(removed, ["deezer", "qobuz", "tidal"]);
+    // Sign out everywhere: every sign-in goes, the device list stays; one being refreshed by
+    // another device is left and reported
+    let busy = sessions[1]
+        .storage()
+        .lock(
+            blob_path("tidal").unwrap().as_str(),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    let r = v[0].sign_out_everywhere(|_, _| async {}).await.unwrap();
+    assert_eq!(r.removed, ["deezer", "junk", "qobuz", "spotify"]);
+    assert_eq!(r.left.len(), 1);
+    assert_eq!(r.left[0].service, "tidal");
+    sessions[1].storage().unlock(&busy).await.unwrap();
+    let r = v[0].sign_out_everywhere(|_, _| async {}).await.unwrap();
+    assert_eq!(r.removed, ["tidal"]);
     assert!(v[0].services().await.unwrap().is_empty());
     assert_eq!(v[0].index().await.unwrap().clients.len(), 2);
+}
+
+/// The Claude review of #93: a restored node makes a new key under the same grant, and the
+/// owner signs out the stale entry. Only that key goes; the node's grant stays trusted.
+#[tokio::test]
+async fn signing_out_an_old_key_of_this_node_keeps_the_node() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 1).await;
+    let (old, new) = (ClientSecret::generate(), ClientSecret::generate());
+    Vault::new(&sessions[0], &old)
+        .register("Living room node")
+        .await
+        .unwrap();
+    let node = Vault::new(&sessions[0], &new);
+    node.register("Living room node").await.unwrap();
+    node.write_shared("tidal", &sign_in("t")).await.unwrap();
+    assert_eq!(node.index().await.unwrap().clients.len(), 2);
+    let report = node
+        .sign_out_device(&old.public(), |_, _| async {})
+        .await
+        .unwrap();
+    assert_eq!(report.rotated, ["tidal"]);
+    let ix = node.index().await.unwrap();
+    let trusted: Vec<_> = node.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+    assert_eq!(trusted, [new.public()]);
+    assert!(
+        ix.revoked.iter().all(|r| r.grant_id.is_none()),
+        "{:?}",
+        ix.revoked
+    );
+    node.register("Living room node").await.unwrap();
+    assert!(Vault::new(&sessions[0], &old).read("tidal").await.is_err());
 }
 
 /// mn-app's review of #91: an app the person approved for all their storage (`/:rw`) is not a

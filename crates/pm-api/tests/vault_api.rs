@@ -190,15 +190,55 @@ async fn the_device_list_and_signing_out_through_the_api() {
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["rotated"], json!(["tidal"]));
     assert_eq!(r["refreshed_at_service"], json!([]));
+    assert_eq!(r["failed"], json!([]));
+    assert_eq!(r["revoke_in_ring"], true);
     assert!(phone.read("tidal").await.is_err());
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["devices"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(v["sign_ins"][0]["epoch"], 2);
+    // The node remembers the sign-out: the phone writes the list back without it, and the node
+    // still doesn't trust it
+    assert!(dir.path().join("vault/revoked.json").exists());
+    let mut ix = phone.index().await.unwrap();
+    let before_sign_out = ix.revoked.clone();
+    ix.revoked.clear();
+    phone_session
+        .storage()
+        .put(
+            pubky_music_specs::vault::INDEX_PATH,
+            serde_json::to_vec(&ix).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!before_sign_out.is_empty());
+    let (_, v) = call(&app, "GET", "/v1/vault").await;
+    assert!(
+        v["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["this_node"] == true || d["trusted"] == false),
+        "{v}"
+    );
+    // A blob no client wrote doesn't take the device list down
+    phone_session
+        .storage()
+        .put(
+            pubky_music_specs::vault::blob_path("junk").unwrap().as_str(),
+            b"junk".to_vec(),
+        )
+        .await
+        .unwrap();
+    let (st, v) = call(&app, "GET", "/v1/vault").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["sign_ins"][0]["problem"].is_string(), "{v}");
+    assert_eq!(v["sign_ins"][1]["readable"], true, "{v}");
 
     // Sign out everywhere
     let (st, r) = call(&app, "POST", "/v1/vault/sign-out-everywhere").await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(r["removed"], json!(["tidal"]));
+    assert_eq!(r["removed"], json!(["junk", "tidal"]));
+    assert_eq!(r["left"], json!([]));
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["sign_ins"], json!([]));
 }

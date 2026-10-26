@@ -145,7 +145,12 @@ wrapped to.
      trusted clients.
   3. The token is revoked at the service where its API allows that.
   - A removed device can still read what it saw before, nothing after.
-- **Sign out everywhere:** delete the blobs, and revoke each token at its service.
+  - One sign-in that can't be rotated now (locked by another client's refresh, unreadable) doesn't stop the
+    others: it is reported, and its next write leaves the device out anyway (writers read the index under the
+    blob's lock and never wrap to a signed-out client).
+  - A client never signs itself out through its own grant id: when the entry being signed out shares the
+    signer's grant (an old key of the same client), only its key goes into `revoked`.
+- **Sign out everywhere:** delete the blobs, each under its lock, and revoke each token at its service.
 
 Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer
 blob, and they treat an older one as stale and read it again (a homeserver can serve an old copy).

@@ -350,8 +350,11 @@ impl<'a> Vault<'a> {
     ) -> Result<u64> {
         let me = self.client_key();
         let mut recipients = vec![me];
+        // Read under the blob's lock: a device signed out meanwhile is in the index already, so
+        // it is dropped here (and the key rotates past it) whatever list the caller had
+        let out = revoked_keys(&self.index().await?);
         for k in others {
-            if !recipients.contains(k) {
+            if !recipients.contains(k) && !out.contains(k) {
                 recipients.push(*k);
             }
         }
@@ -434,6 +437,21 @@ impl<'a> Vault<'a> {
         out.dedup();
         Ok(out)
     }
+}
+
+/// The keys the device list says were signed out: listed in `revoked` by key, or entries whose
+/// grant id is there.
+fn revoked_keys(ix: &Index) -> Vec<ClientKey> {
+    let mut out: Vec<ClientKey> = ix.revoked.iter().filter_map(|r| r.client_key).collect();
+    for e in &ix.clients {
+        let jti = pubky::GrantClaims::decode(&e.proof.grant)
+            .ok()
+            .map(|c| c.jti.to_string());
+        if ix.is_revoked(&e.client_key, jti.as_deref()) && !out.contains(&e.client_key) {
+            out.push(e.client_key);
+        }
+    }
+    out
 }
 
 /// How long a write lock is asked for (the homeserver caps it at 60 s).
@@ -1198,14 +1216,37 @@ pub struct SignOutReport {
     pub rotated: Vec<String>,
     /// Sign-ins this node can't read, so another device must rotate them.
     pub not_readable_here: Vec<String>,
+    /// Sign-ins that couldn't be rotated now (busy, unreadable): signing out again retries them,
+    /// and the next write of each leaves the device out anyway.
+    pub failed: Vec<NotDone>,
+}
+
+/// A sign-in a sign-out couldn't handle now, and why.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotDone {
+    pub service: String,
+    pub why: String,
+}
+
+/// What "Sign out everywhere" did.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct EverywhereReport {
+    /// Sign-ins deleted.
+    pub removed: Vec<String>,
+    /// Sign-ins still there (busy: another device was refreshing them): sign out again.
+    pub left: Vec<NotDone>,
 }
 
 impl Vault<'_> {
-    /// Sign a device out (VAULT.md, "Revocation"): it moves to `revoked` (by key and grant id, so
-    /// it can't add itself back), and every sign-in this node can read gets a new data key wrapped
-    /// only to the remaining trusted devices. `after` runs per rotated sign-in (the service-side
-    /// part: a forced refresh, a token revocation, where the service allows it). This node can't
-    /// sign itself out here: that would lock it out of its own vault.
+    /// Sign a device out (VAULT.md, "Revocation"): it moves to `revoked` (by key and grant id),
+    /// this node remembers that for good, and every sign-in this node can read gets a new data key
+    /// wrapped only to the remaining trusted devices. One sign-in that can't be rotated now
+    /// doesn't stop the others ([`SignOutReport::failed`]). `after` runs per rotated sign-in (the
+    /// service-side part: a forced refresh, a token revocation, where the service allows it).
+    ///
+    /// The device's Pubky session isn't revoked here (that needs Ring): until it is, the device
+    /// can still write vault files, but no client that remembers the sign-out gives it a key.
+    /// This node can't sign itself out, by key or through its own grant.
     pub async fn sign_out_device<F, Fut>(&self, device: &ClientKey, after: F) -> Result<SignOutReport>
     where
         F: Fn(String, SignIn) -> Fut,
@@ -1214,25 +1255,35 @@ impl Vault<'_> {
         if *device == self.client_key() {
             return Err(VaultError::Format("this node can't sign itself out of the vault").into());
         }
+        let my_grant = match self.session.as_grant() {
+            Some(g) => Some(g.grant_id().await.to_string()),
+            None => None,
+        };
         // 1. The device list: out of `clients`, into `revoked`
         let held = self.lock(spec::INDEX_PATH).await?;
         let r = async {
             let mut ix = self.index().await?;
-            let jti = ix.clients.iter().find(|e| e.client_key == *device).and_then(|e| {
-                self.check(&ix, e).1.or_else(|| {
+            let jti = ix
+                .clients
+                .iter()
+                .find(|e| e.client_key == *device)
+                .and_then(|e| {
                     pubky::GrantClaims::decode(&e.proof.grant)
                         .ok()
                         .map(|c| c.jti.to_string())
                 })
-            });
+                // An old key of this node under the same grant (a restored node made a new
+                // key): sign out the key only, or the node would sign itself out
+                .filter(|j| my_grant.as_deref() != Some(j.as_str()));
             ix.clients.retain(|e| e.client_key != *device);
-            if !ix.is_revoked(device, jti.as_deref()) {
-                ix.revoked.push(spec::Revoked {
-                    client_key: Some(*device),
-                    grant_id: jti,
-                    at: now(),
-                });
-            }
+            let rec = spec::Revoked {
+                client_key: Some(*device),
+                grant_id: jti,
+                at: now(),
+            };
+            // Remembered here first: the list itself can be written back without it
+            self.remember(std::slice::from_ref(&rec))?;
+            ix.add_revoked([&rec]);
             let body = serde_json::to_vec(&ix).map_err(|_| VaultError::Format("index"))?;
             self.put_locked(&held, spec::INDEX_PATH, body).await?;
             Ok::<Index, VaultStoreError>(ix)
@@ -1240,66 +1291,107 @@ impl Vault<'_> {
         .await;
         self.unlock(held).await;
         let ix = r?;
-        // 2. Every sign-in: rotate past it
+        // 2. Every sign-in: rotate past it, each on its own
         let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
         let mut report = SignOutReport::default();
         for service in self.services().await? {
-            let path = Self::blob_path(&service)?;
-            let held = self.lock(&path).await?;
-            let r = async {
-                let Some(env) = self.envelope(&service).await? else {
-                    return Ok(Rotation::Gone);
-                };
-                if !env.has_recipient(device) {
-                    return Ok(Rotation::NeverHad);
-                }
-                let Ok((_, sign_in)) = spec::open_sign_in(&self.owner, &path, &env, self.secret) else {
-                    return Ok(Rotation::NotReadableHere);
-                };
-                let others: Vec<ClientKey> = trusted
-                    .iter()
-                    .copied()
-                    .filter(|k| k != device && *k != self.client_key())
-                    .collect();
-                self.write_held(&held, &service, &path, &sign_in, &others).await?;
-                Ok::<Rotation, VaultStoreError>(Rotation::Rotated)
-            }
-            .await;
-            self.unlock(held).await;
-            match r? {
-                Rotation::Rotated => {
+            match self.rotate_past(&service, device, &trusted).await {
+                Ok(Rotation::Rotated) => {
                     if let Some(o) = self.read(&service).await.ok().flatten() {
                         after(service.clone(), o.sign_in).await;
                     }
                     report.rotated.push(service);
                 }
-                Rotation::NotReadableHere => report.not_readable_here.push(service),
-                Rotation::Gone | Rotation::NeverHad => {}
+                Ok(Rotation::NotReadableHere) => report.not_readable_here.push(service),
+                Ok(Rotation::Gone | Rotation::NeverHad) => {}
+                Err(e) => report.failed.push(NotDone {
+                    service,
+                    why: e.to_string(),
+                }),
             }
         }
         Ok(report)
     }
 
-    /// "Sign out everywhere": delete every sign-in (and its lease); the device list stays, so the
-    /// devices can take new sign-ins. `before` runs per sign-in this node can read, before it goes
-    /// (the service-side revocation). Returns the services removed.
-    pub async fn sign_out_everywhere<F, Fut>(&self, before: F) -> Result<Vec<String>>
+    /// Rotate one sign-in past a signed-out device, under its lock.
+    async fn rotate_past(
+        &self,
+        service: &str,
+        device: &ClientKey,
+        trusted: &[ClientKey],
+    ) -> Result<Rotation> {
+        let path = Self::blob_path(service)?;
+        let held = self.lock(&path).await?;
+        let r = async {
+            let Some(env) = self.envelope(service).await? else {
+                return Ok(Rotation::Gone);
+            };
+            if !env.has_recipient(device) {
+                return Ok(Rotation::NeverHad);
+            }
+            let Ok((_, sign_in)) = spec::open_sign_in(&self.owner, &path, &env, self.secret) else {
+                return Ok(Rotation::NotReadableHere);
+            };
+            let others: Vec<ClientKey> = trusted
+                .iter()
+                .copied()
+                .filter(|k| k != device && *k != self.client_key())
+                .collect();
+            self.write_held(&held, service, &path, &sign_in, &others).await?;
+            Ok::<Rotation, VaultStoreError>(Rotation::Rotated)
+        }
+        .await;
+        self.unlock(held).await;
+        r
+    }
+
+    /// "Sign out everywhere": delete every sign-in (and its lease), each under its lock; the
+    /// device list stays, so the devices can take new sign-ins. `before` runs per sign-in this node
+    /// can read, before it goes (the service-side revocation). A sign-in another device is
+    /// refreshing right now is left and reported.
+    pub async fn sign_out_everywhere<F, Fut>(&self, before: F) -> Result<EverywhereReport>
     where
         F: Fn(String, SignIn) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let mut gone = Vec::new();
+        let mut report = EverywhereReport::default();
         for service in self.services().await? {
-            if let Some(o) = self.read(&service).await.ok().flatten() {
-                before(service.clone(), o.sign_in).await;
+            match self.delete_one(&service, &before).await {
+                Ok(()) => report.removed.push(service),
+                Err(e) => report.left.push(NotDone {
+                    service,
+                    why: e.to_string(),
+                }),
             }
-            self.delete(&service).await?;
-            if let Some(lp) = spec::lease_path(&service) {
-                let _ = self.session.storage().delete(lp.as_str()).await;
-            }
-            gone.push(service);
         }
-        Ok(gone)
+        Ok(report)
+    }
+
+    async fn delete_one<F, Fut>(&self, service: &str, before: &F) -> Result<()>
+    where
+        F: Fn(String, SignIn) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let path = Self::blob_path(service)?;
+        let held = self.lock(&path).await?;
+        if let Some(o) = self.read(service).await.ok().flatten() {
+            before(service.to_string(), o.sign_in).await;
+        }
+        let storage = self.session.storage();
+        let r = match &held.lock {
+            Some(l) => storage.delete_locked(l).await.map(|_| ()),
+            None => storage.delete(path.as_str()).await.map(|_| ()),
+        };
+        self.unlock(held).await;
+        match r {
+            Ok(()) => {}
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(lp) = spec::lease_path(service) {
+            let _ = storage.delete(lp.as_str()).await;
+        }
+        Ok(())
     }
 }
 
