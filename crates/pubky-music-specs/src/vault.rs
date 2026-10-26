@@ -236,10 +236,21 @@ impl Index {
         if ix.version != VERSION {
             return Err(VaultError::UnsupportedVersion(ix.version));
         }
-        if ix.clients.len() > MAX_CLIENTS {
-            return Err(VaultError::TooLarge);
-        }
+        // More than MAX_CLIENTS entries is read anyway (the byte cap bounds it): entries that
+        // don't verify could otherwise make the whole list unreadable
         Ok(ix)
+    }
+
+    /// Add `more` to the signed-out list, skipping ones already in it. Returns how many were new.
+    pub fn add_revoked<'r>(&mut self, more: impl IntoIterator<Item = &'r Revoked>) -> usize {
+        let mut n = 0;
+        for r in more {
+            if !self.revoked.iter().any(|x| x.same_client(r)) {
+                self.revoked.push(r.clone());
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Whether a client (by key or by its grant id) was signed out.
@@ -296,6 +307,34 @@ pub struct Revoked {
     pub at: u64,
 }
 
+impl Revoked {
+    /// It names a client: a key, or a grant id of the SDK's form (base64url, at most 64
+    /// characters). Records that name nobody are ignored.
+    pub fn is_well_formed(&self) -> bool {
+        let grant_ok = |g: &str| {
+            !g.is_empty()
+                && g.len() <= 64
+                && g.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        match (&self.client_key, &self.grant_id) {
+            (_, Some(g)) if !grant_ok(g) => false,
+            (Some(_), _) | (None, Some(_)) => true,
+            (None, None) => false,
+        }
+    }
+
+    /// It names `key`, or the grant `grant_id`.
+    pub fn names(&self, key: &ClientKey, grant_id: Option<&str>) -> bool {
+        self.client_key.as_ref() == Some(key) || (grant_id.is_some() && self.grant_id.as_deref() == grant_id)
+    }
+
+    /// The same signed-out client (same key and grant id), whenever it was recorded.
+    pub fn same_client(&self, other: &Revoked) -> bool {
+        self.client_key == other.client_key && self.grant_id == other.grant_id
+    }
+}
+
 /// The data a client signs in its custom proof.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,7 +386,7 @@ pub fn client_entry_problem(
         return Some("the grant is someone else's");
     }
     if !caps.iter().any(|c| covers_vault(c)) {
-        return Some("the grant doesn't cover the vault with read and write");
+        return Some("its grant doesn't name the vault (an app with access to a wider folder isn't trusted with the sign-ins)");
     }
     let Ok(d) = serde_json::from_value::<ClientProofData>(data.clone()) else {
         return Some("the proof's data isn't a vault client's");
@@ -364,13 +403,18 @@ pub fn client_entry_problem(
     None
 }
 
-/// Whether a capability (`<scope>:<actions>`) covers [`VAULT_DIR`] with `r` and `w`.
+/// Whether a capability (`<scope>:<actions>`) names [`VAULT_DIR`] itself with `r` and `w`. An
+/// ancestor (`/:rw`, `/priv/pubky.music/:rw`) doesn't count: the person approved that app for a
+/// wider folder in Ring, not for their streaming sign-ins.
 pub fn covers_vault(cap: &str) -> bool {
     let Some((scope, actions)) = cap.rsplit_once(':') else {
         return false;
     };
-    scope.ends_with('/') && VAULT_DIR.starts_with(scope) && actions.contains('r') && actions.contains('w')
+    scope == VAULT_DIR && actions.contains('r') && actions.contains('w')
 }
+
+/// The capability a vault client asks Ring for.
+pub const VAULT_CAPABILITY: &str = "/priv/pubky.music/vault/:rw";
 
 /// `<service>.lease.json`: who refreshes, until when (Unix seconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -17,6 +17,12 @@ A release run that is still building finishes and publishes; newer pushes queue 
    there too) and move the CHANGELOG entries under a heading for the version.
 2. Merge to `main`, then tag that commit: `git tag -s v0.2.0 -m v0.2.0 && git push origin v0.2.0`.
    The workflow refuses a tag that does not match the workspace version.
+3. Once the release run has published the image, pin the Umbrel app to it: in
+   `deploy/umbrel/pubky-music-node/docker-compose.yml` set the node's image to
+   `ghcr.io/gillohner/pubky-music-node:<version>@sha256:<index digest>`, where the digest is the
+   multi-arch index's (`Docker-Content-Digest` of `/v2/gillohner/pubky-music-node/manifests/<version>`
+   on ghcr.io), and in `umbrel-app.yml` set `version` and `releaseNotes` (what is new since the
+   last pin).
 
 ## What is built
 
