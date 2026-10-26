@@ -182,6 +182,11 @@ fn settings_app(s: &NodeState) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
+/// [`app_from`], for the node's list of apps.
+pub(crate) fn app_origin(s: &NodeState) -> Option<&'static str> {
+    app_from(s)
+}
+
 /// Where the app comes from: `config`, `settings` or nowhere yet.
 fn app_from(s: &NodeState) -> Option<&'static str> {
     if endpoints(s).creds.configured() {

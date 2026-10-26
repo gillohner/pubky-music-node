@@ -27,6 +27,15 @@ pub(crate) fn is_not_found(e: &pubky::Error) -> bool {
     )
 }
 
+/// The homeserver answers 507 when the person's storage is full (their quota is used up).
+pub fn is_full(e: &HomeserverError) -> bool {
+    matches!(
+        e,
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if *status == reqwest::StatusCode::INSUFFICIENT_STORAGE
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -995,5 +1004,24 @@ mod capability_tests {
             "Server responded with an error: 403 Forbidden - Session does not have read access to path"
         ));
         assert!(!is_capability_error("connection reset"));
+    }
+}
+
+#[cfg(test)]
+mod full_tests {
+    use super::*;
+
+    #[test]
+    fn a_507_is_a_full_homeserver_and_nothing_else_is() {
+        let server = |status: u16| {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+            }))
+        };
+        assert!(is_full(&server(507)));
+        assert!(!is_full(&server(404)));
+        assert!(!is_full(&server(413)));
+        assert!(!is_full(&HomeserverError::Transport("reset".into())));
     }
 }

@@ -37,6 +37,9 @@
 /* Light: follows the system unless Settings › Appearance picks one (data-theme on <html>) */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
+  --pl-accent: var(--src-l, var(--accent));
+  --pl-strong: color-mix(in srgb, var(--src-l, var(--accent-strong)) 78%, #000);
+  --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 94% / 0.5);
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -65,6 +68,9 @@
   }
 }
 :root[data-theme="light"] {
+  --pl-accent: var(--src-l, var(--accent));
+  --pl-strong: color-mix(in srgb, var(--src-l, var(--accent-strong)) 78%, #000);
+  --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 94% / 0.5);
   color-scheme: light;
   --bg: #f5f5f8;
   --surface: #ffffff;
@@ -264,7 +270,7 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .pop-item .state { margin-left: auto; font-size: 11px; color: var(--muted); }
 .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 25; }
 .overlay {
-  position: fixed; inset: 0 0 var(--player) 0; z-index: 20; overflow: auto;
+  position: fixed; inset: 0 0 var(--player) 0; z-index: 20; overflow: auto; overscroll-behavior-y: contain;
   background: radial-gradient(1200px 600px at 20% 0%, rgba(139, 124, 246, 0.16), transparent 60%), var(--bg);
   animation: rise 0.25s var(--ease);
 }
@@ -272,12 +278,8 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .np-page { max-width: 1100px; margin: 0 auto; padding: 24px 32px 48px; }
 .np-top { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
 .np-top .spacer { flex: 1; }
-.np-hero { display: grid; grid-template-columns: minmax(220px, 420px) 1fr; gap: 40px; align-items: start; }
 .np-big { width: 100%; aspect-ratio: 1; border-radius: 16px; overflow: hidden; background: var(--surface-3); box-shadow: var(--shadow); }
 .np-big img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.np-meta h1 { font-size: 34px; margin-top: 8px; }
-.np-meta .artist { font-size: 18px; color: var(--fg-2); margin-top: 6px; }
-.np-meta .album { color: var(--muted); margin-top: 2px; }
 .np-progress { margin: 22px 0 6px; max-width: 520px; }
 .path { margin-top: 26px; border: 1px solid var(--line); border-radius: 12px; background: var(--glass); overflow: hidden; }
 .path-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
@@ -287,13 +289,11 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .path-row .pn { font-weight: 600; }
 .path-row .pf { color: var(--muted); }
 .path-row .pnote { grid-column: 3; color: var(--muted); font-size: 12px; }
-.upnext { margin-top: 26px; }
 .lyrics { margin-top: 26px; }
 .lyrics h3 { margin-bottom: 8px; }
 .lyric-lines { max-height: 320px; overflow-y: auto; padding-right: 8px; scrollbar-width: thin; }
 .lyric-line { margin: 0 0 8px; color: var(--muted); font-size: 15px; line-height: 1.45; transition: color .2s, transform .2s; transform-origin: left center; }
 .lyric-line.on { color: var(--fg); font-weight: 600; transform: scale(1.03); }
-.upnext h3 { margin-bottom: 8px; }
 .toast {
   position: fixed; left: 50%; bottom: calc(var(--player) + 18px); transform: translate(-50%, 8px);
   background: var(--surface-3); color: var(--fg); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
@@ -489,19 +489,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .shell.expanded .node-status { justify-content: flex-start; }
 }
 @media (max-width: 720px) {
-  /* The player wraps to two rows on phones: its row takes the height it needs (a fixed row hid
-     play, previous, next and the seek bar below the screen) */
-  .shell { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "content" "player"; }
-  .sidebar { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 50; transform: translateX(-100%); transition: transform 0.2s var(--ease); --sidebar: 260px; }
-  .sidebar.open { transform: none; box-shadow: var(--shadow); }
-  .sidebar .brand-name, .sidebar .nav-label, .sidebar .nav-item span, .sidebar .node-text { display: initial; }
-  .sidebar .nav-item { justify-content: flex-start; padding: 10px; }
-  .menu-btn { display: inline-flex; }
   .topbar { padding: 0 14px; }
   .main { padding: 18px 14px 28px; }
-  .player { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto; height: auto; padding: 8px 12px; gap: 10px; }
-  .player-center { grid-column: 1 / -1; order: 3; }
-  .player-right { gap: 6px; }
   .quality .qtext { display: none; }
   .zone-btn span { max-width: 90px; }
   .hero { grid-template-columns: 1fr; }
@@ -517,7 +506,6 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .track .row-actions .icon-btn:not([data-act="more"]) { display: none; }
   .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
   .track.compact { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; }
-  .np-hero { grid-template-columns: 1fr; }
   .np-page { padding: 16px; }
   .kv { grid-template-columns: 1fr; }
 }
@@ -765,7 +753,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .crumbs .lnk { color: var(--muted); }
 .np-title .lnk, .np-sub .lnk { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Appearance switch (Settings) */
-.themeswitch { gap: 6px; }
+.themeswitch, .layoutswitch { gap: 6px; }
 /* A field the user is sent to (Sources › Search …): a short ring */
 .nudge { animation: nudge 0.9s var(--ease); }
 @keyframes nudge { 0% { box-shadow: 0 0 0 0 var(--accent-soft); } 40% { box-shadow: 0 0 0 6px var(--accent-soft); } 100% { box-shadow: 0 0 0 0 transparent; } }
@@ -800,9 +788,9 @@ a.btn { text-decoration: none; }
 .roonfile { border-top: 1px solid var(--line); padding: 10px 0 4px; }
 .roonfile .name { font-weight: 600; overflow-wrap: anywhere; }
 .misses { padding-left: 18px; max-height: 240px; overflow: auto; }
-/* Thumb-sized player controls on phones (at least 44 px, WCAG target size) */
-@media (max-width: 720px) {
-  .player #prev, .player #next { width: 44px; height: 44px; }
+/* Thumb-sized player controls on touch screens (at least 44 px, WCAG target size) */
+@media (pointer: coarse) {
+  .player #prev, .player #next, .player #shufflebtn, .player #repeatbtn { width: 44px; height: 44px; }
   .player .zone-btn { min-height: 44px; }
   .player .quality { min-height: 44px; min-width: 44px; padding: 0 12px; justify-content: center; }
 }
@@ -964,7 +952,7 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .ytpanel.small .embedhead .muted { display: none; }
 .ytpanel #ytmin .ic { transition: transform 0.15s; }
 .ytpanel.small #ytmin .ic { transform: rotate(180deg); }
-@media (max-width: 720px) { .ytpanel { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); } }
+html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); }
 
 /* Player bar: the cover opens Now playing; Now playing's Pubky row */
 .np-artbtn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 6px; }
@@ -1006,35 +994,62 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
 .faces-line { gap: 8px; }
 .hero.person .blurb { max-width: 60ch; }
-/* Phones (UX review #2): a bottom bar (Home, Search, Library, Queue) and a one-row mini player
-   above it (cover and title, play/pause, zone); the full transport lives in Now playing */
+/* The shell at three sizes (docs/ux/responsive.md). html[data-shell] comes from the window width
+   and Settings › Appearance › Layout: phone (tabs, a mini player above them), tablet (a rail),
+   desktop (the sidebar). The full transport lives in Now playing on phones. */
 .bottomnav { display: none; }
 .np-transport { display: none; }
-@media (max-width: 720px) {
-  .shell { grid-template-rows: minmax(0, 1fr) auto auto; grid-template-areas: "content" "player" "bnav"; }
-  .bottomnav { grid-area: bnav; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
-  .bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
-  .bnav .ic { width: 22px; height: 22px; }
-  .bnav.on { color: var(--accent-strong); }
-  .bnav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .player { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto; align-items: center; min-height: 64px; padding: 6px 10px; gap: 8px; }
-  .player-center { grid-column: auto; order: 0; }
-  .player-center .seek { display: none; }
-  .player-center .transport > :not(#toggle) { display: none; }
-  .player-right .quality, .player-right .jobchip .jc-text { display: none; }
-  .player .np-art { width: 44px; height: 44px; }
-  body.np-open .player { display: none; }
-  .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
-  .np-transport .icon-btn { width: 44px; height: 44px; }
-  .np-transport .icon-btn.play { width: 56px; height: 56px; }
-  /* Now playing fills the screen down to the bottom bar; seek and transport right under the title */
-  body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
-  .np-meta { display: flex; flex-direction: column; }
-  .np-meta .np-progress { order: 1; }
-  .np-meta .np-transport { order: 2; margin-bottom: 14px; }
-  .np-meta .np-pubky { order: 3; }
-  .np-meta .path { order: 4; }
-  .np-meta > :not(.np-progress):not(.np-transport):not(.np-pubky):not(.path) { order: 0; }
+.me-btn { display: none; }
+.bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; min-width: 44px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
+.bnav .ic { width: 22px; height: 22px; }
+.bnav:hover { color: var(--fg); }
+.bnav.on { color: var(--accent-strong); }
+.bnav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.libnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+.libnav::-webkit-scrollbar { display: none; }
+.libnav .chip { flex: none; }
+.main > .libnav + * { margin-top: 14px; }
+html[data-shell="desktop"] .libnav { display: none; }
+html[data-shell="desktop"] .main > .libnav + * { margin-top: 0; }
+
+html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; grid-template-areas: "content" "player" "bnav"; }
+html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
+html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
+html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
+html[data-shell="phone"] .search { flex: 1 1 auto; }
+html[data-shell="phone"] .topbar-right:empty { display: none; }
+html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
+html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
+html[data-shell="phone"] .bnav.rail-only { display: none; }
+/* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
+html[data-shell="phone"] .player { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
+html[data-shell="phone"] .player-right { order: 1; gap: 6px; }
+html[data-shell="phone"] .player-center { order: 2; grid-column: auto; }
+html[data-shell="phone"] .player-center .seek, html[data-shell="phone"] .player-center .transport > :not(#toggle) { display: none; }
+html[data-shell="phone"] .player-right .quality, html[data-shell="phone"] .player-right .jobchip .jc-text, html[data-shell="phone"] .volume { display: none; }
+html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
+html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
+html[data-shell="phone"] body.np-open .player { display: none; }
+html[data-shell="phone"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+html[data-shell="phone"] .np-transport .icon-btn { width: 44px; height: 44px; }
+html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
+/* Now playing fills the screen down to the tabs */
+html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
+
+/* Tablets: a rail (Home, Search, Library, Zones; Settings at the foot) and the full player bar */
+html[data-shell="tablet"] .shell { grid-template-columns: 84px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--player); grid-template-areas: "bnav content" "player player"; }
+html[data-shell="tablet"] .sidebar, html[data-shell="tablet"] .menu-btn, html[data-shell="tablet"] .volume { display: none; }
+html[data-shell="tablet"] .bottomnav { grid-area: bnav; display: flex; flex-direction: column; gap: 6px; padding: 14px 8px; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
+html[data-shell="tablet"] .bnav { min-height: 58px; }
+html[data-shell="tablet"] .bnav.rail-only { margin-top: auto; }
+html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
+html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
+/* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
+@media (max-width: 700px) {
+  html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; }
+  html[data-shell="tablet"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+  html[data-shell="tablet"] .np-transport .icon-btn { width: 44px; height: 44px; }
+  html[data-shell="tablet"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
 }
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
@@ -1089,7 +1104,7 @@ body.kiosk .main { padding: 0; }
 .selbox input { width: 18px; height: 18px; accent-color: var(--accent); }
 .selbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player) + 14px); z-index: 40; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: calc(100vw - 24px); padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow); }
 .selcount { font-weight: 600; margin-right: 4px; }
-@media (max-width: 720px) { .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; } }
+html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
 @media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
 /* One way back: the breadcrumb on wide screens, the back link on phones (UX review) */
@@ -1126,6 +1141,19 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
 
+/* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
+.nav-item.nav-offline { display: none; }
+body.offline .nav-item.nav-offline { display: flex; }
+body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
+body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
+body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
+body.offline .track .lnk[data-act="song"], body.offline .track .lnk[data-act="tartist"] { pointer-events: none; }
+body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
+body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip,
+body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
+.dl-note { margin-top: 4px; }
+body.offline [data-bnav="home"] { display: none; }
+body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 /* The source line on item pages (STEWARD-UX-PLAYER-SOURCES §1): small, one line, no pills */
 .srcline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
 .srcline .src, .srcline .srcrest { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
@@ -1139,3 +1167,99 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .srcline .chiplink:hover, .srcline .chiplink:focus-visible { color: var(--accent-strong); background: var(--surface-2); opacity: 1; }
 .srcline .chiplink .ic { width: 13px; height: 13px; }
 .srcline .srcmore { font-size: 13px; color: var(--muted); }
+
+/* Now playing on one screen (docs/ux/responsive.md, build step 2): the player, and the sheets
+   (Queue, Lyrics, Details, Sources, Tags) over it on phones or beside it on tablets and desktops */
+.np2 { max-width: none; height: 100%; display: flex; flex-direction: column; padding: 10px 24px 16px; }
+.np2 .np-top { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; flex: none; }
+.np2 .np-top .icon-btn { width: 44px; height: 44px; }
+.np-zone { gap: 6px; min-height: 36px; max-width: 60%; min-width: 0; }
+.np-zone-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np2 .np-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.np-player { display: flex; flex-direction: column; gap: 10px; min-height: 0; width: 100%; max-width: 520px; margin: 0 auto; }
+.np2 .np-big { width: min(100%, max(160px, calc(100dvh - var(--player) - 340px))); margin: 0 auto; flex: none; }
+.np-titlerow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.np-titles { flex: 1; min-width: 0; }
+.np-titles h1 { font-size: 24px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-titles .artist { color: var(--fg-2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-heart { width: 44px; height: 44px; flex: none; color: var(--fg-2); }
+.np-heart.on { color: var(--accent-strong); }
+@media (pointer: coarse) { .np-zone, .np-sheet-tabs .chip, .np-sheet-foot .btn { min-height: 44px; } }
+.np-quality { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line-strong); background: none; color: var(--fg-2); font: inherit; font-size: 13px; cursor: pointer; }
+.np-quality:hover { color: var(--fg); border-color: var(--fg-2); }
+.np-quality .qdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.np-times { display: flex; justify-content: space-between; }
+.np-tabs { display: none; }
+.np-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; background: none; border: 0; border-radius: 10px; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.np-tab .ic { width: 20px; height: 20px; }
+.np-tab:hover, .np-tab.on { color: var(--accent-strong); }
+.np-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.np-sheet { display: flex; flex-direction: column; min-height: 0; }
+.np-sheet[hidden] { display: none; }
+.np-sheet-head { display: flex; align-items: center; gap: 8px; flex: none; padding-bottom: 10px; }
+.np-sheet-tabs { flex: 1; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.np-sheet-tabs::-webkit-scrollbar { display: none; }
+.np-sheet-tabs .chip { flex: none; }
+.np-sheet-head .grab, .np-sheet-close, .np-strip { display: none; }
+.np-sheet-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.np-sheet-body .path { margin-top: 0; }
+.np-sheet-meta { margin: 0 0 6px; }
+.np-queue { margin-top: 4px; }
+.np-sheet-foot { margin-top: 12px; }
+.np-qitem { width: 100%; min-height: 48px; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: var(--fg); cursor: pointer; }
+.np-qitem:first-child { border-top: 0; }
+.np-qitem:hover { background: var(--surface-2); }
+.np-qitem .grow { display: flex; flex-direction: column; min-width: 0; }
+.np-qitem .name, .np-qitem .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-facts { margin-top: 14px; }
+/* Tablets and desktops: the player left, the open sheet as a panel right */
+.np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
+.np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }
+.np2:not(.compact) .np-player { justify-content: flex-start; padding-top: 8px; }
+/* Compact (phones, narrow tablets): the five sheets in a row under the transport; an open sheet takes the screen below a strip */
+.np2.compact { padding: 6px 16px 8px; }
+.np2.compact .np-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin-top: auto; }
+.np2.compact.has-sheet .np-player, .np2.compact.has-sheet .np-top { display: none; }
+.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 520px))); }
+.np2.compact .np-strip { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; }
+.np2.compact .np-strip-art { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
+.np2.compact .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np2.compact .np-strip-text { flex: 1; min-width: 0; }
+.np2.compact .np-strip-text .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np2.compact .np-strip-text .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np2.compact .np-strip .icon-btn.play { width: 48px; height: 48px; }
+.np2.compact .np-sheet { height: 100%; background: var(--surface); border-radius: 16px 16px 0 0; margin: 0 -16px -8px; padding: 6px 16px 8px; box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.12); }
+.np2.compact .np-sheet-head { flex-wrap: wrap; }
+.np2.compact .np-sheet-head .grab { display: block; flex: 0 0 100%; height: 4px; margin-bottom: 6px; background: linear-gradient(var(--line-strong), var(--line-strong)) center / 40px 4px no-repeat; }
+.np2.compact .np-sheet-close { display: inline-flex; width: 44px; height: 44px; }
+
+/* Lists (docs/ux/responsive.md, build step 3) */
+/* Song rows follow a finger sideways (right: play next, left: add to a playlist); the label shows in
+   the gap the row leaves */
+.track, .srow, [data-srow] { touch-action: pan-y pinch-zoom; }
+/* touch screens: a long press is the row's menu, not text selection or the callout */
+@media (hover: none) { .track, .srow, [data-srow] { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; } }
+.swiping { position: relative; transition: none; z-index: 1; }
+.swiping::before { content: attr(data-swipe-label); position: absolute; top: 50%; transform: translateY(-50%); font-size: 11px; letter-spacing: -0.01em; font-weight: 600; color: var(--muted); white-space: nowrap; pointer-events: none; }
+.swiping[data-swipe-label="Play next"]::before { right: calc(100% + 8px); }
+.swiping[data-swipe-label="Add to playlist"]::before { left: calc(100% + 8px); }
+.swipe-ready::before { color: var(--accent-strong); }
+/* Phones and tablets: the section chips stay at the top while a list scrolls under them */
+html:not([data-shell="desktop"]) .main > .libnav { position: sticky; top: -24px; z-index: 6; margin-top: -8px; padding: 8px 0; background: var(--bg); }
+@media (max-width: 720px) { html:not([data-shell="desktop"]) .main > .libnav { top: -18px; } }
+/* the Sources page's side list sticks below the pinned chips */
+html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
+/* Dense lists on tablets and desktops: shorter rows, smaller covers */
+:where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
+:where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
+:where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
+
+/* Colour from where it plays (docs/ux/responsive.md §6): the player bar and Now playing take the
+   source's accent (--src-l / --src-d, set on <html> with data-src); lists keep the app's theme */
+:root { --pl-accent: var(--src-d, var(--accent)); --pl-strong: color-mix(in srgb, var(--src-d, var(--accent-strong)) 75%, #fff); --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 12% / 0.5); }
+html[data-src] .player, html[data-src] #nowplaying { --accent: var(--pl-accent); --accent-strong: var(--pl-strong); --accent-soft: color-mix(in srgb, var(--pl-accent) 16%, transparent); }
+html[data-src] .player .icon-btn.play, html[data-src] #nowplaying .icon-btn.play { background: var(--accent); color: var(--on-accent); }
+html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); }
+html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
+/* and a soft gradient from the cover behind Now playing */
+html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }

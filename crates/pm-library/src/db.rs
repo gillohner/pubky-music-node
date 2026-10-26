@@ -34,6 +34,10 @@ pub struct Library {
     conn: Mutex<Connection>,
 }
 
+/// How far ahead of the node a device's clock may run for [`Library::record_play_at`] to keep a
+/// play at the device's time (seconds).
+pub const PLAY_CLOCK_SLACK: i64 = 3600;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LibraryStats {
     pub tracks: u64,
@@ -816,12 +820,14 @@ impl Library {
 
     // ----- favourites -------------------------------------------------------
 
-    /// Add (or revive) a favourite; returns the row. Idempotent.
+    /// Add (or revive) a favourite; returns the row. Idempotent: a live favourite keeps its time,
+    /// a revived one (cleared, not yet synced) takes the new time.
     pub fn add_favourite(&self, id: &str, uri: &str, created_at: i64) -> Result<FavouriteRow> {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO favourites(id, uri, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, NULL, 0)
              ON CONFLICT(uri) DO UPDATE SET deleted = 0,
+                 created_at = CASE WHEN favourites.deleted = 1 THEN excluded.created_at ELSE favourites.created_at END,
                  synced_at = CASE WHEN favourites.deleted = 1 THEN NULL ELSE favourites.synced_at END",
             params![id, uri, created_at],
         )?;
@@ -1560,6 +1566,31 @@ impl Library {
             params![track.0, zone, now_unix()],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// A play at a given time (a device that played offline reports it later). The same track,
+    /// zone and time again is not recorded twice (a resent report), checked on the device's own
+    /// time before anything is changed; returns whether it was new. A device clock up to
+    /// [`PLAY_CLOCK_SLACK`] ahead is kept as it is, so its resent reports still match; a time
+    /// further in the future counts as now.
+    pub fn record_play_at(&self, track: TrackId, zone: Option<&str>, at: i64) -> Result<bool> {
+        let conn = self.lock();
+        let seen: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plays WHERE track_id = ?1 AND zone IS ?2 AND played_at = ?3)",
+            params![track.0, zone, at],
+            |r| r.get(0),
+        )?;
+        if seen {
+            return Ok(false);
+        }
+        let now = now_unix();
+        let at = if at > now + PLAY_CLOCK_SLACK { now } else { at };
+        let n = conn.execute(
+            "INSERT INTO plays(track_id, zone, played_at) SELECT ?1, ?2, ?3
+             WHERE NOT EXISTS (SELECT 1 FROM plays WHERE track_id = ?1 AND zone IS ?2 AND played_at = ?3)",
+            params![track.0, zone, at],
+        )?;
+        Ok(n > 0)
     }
 
     /// Newest plays first.
@@ -2925,6 +2956,28 @@ mod play_history_tests {
     use super::*;
 
     #[test]
+    fn plays_made_offline_keep_their_time_and_count_once() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
+        let then = now_unix() - 3600;
+        assert!(lib.record_play_at(a, Some("app"), then).unwrap());
+        // The same report again (the answer got lost): not a second play
+        assert!(!lib.record_play_at(a, Some("app"), then).unwrap());
+        // From a device whose clock runs a few minutes ahead: its time, so a resend still matches
+        let ahead = now_unix() + 300;
+        assert!(lib.record_play_at(a, Some("app"), ahead).unwrap());
+        assert!(!lib.record_play_at(a, Some("app"), ahead).unwrap());
+        // Far in the future: now
+        assert!(lib.record_play_at(a, None, now_unix() + 86_400).unwrap());
+        let h = lib.history(10).unwrap();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].played_at, ahead);
+        assert!(h[1].played_at <= now_unix());
+        assert_eq!(h[2].played_at, then);
+        assert_eq!(lib.play_count(a).unwrap(), 3);
+    }
+
+    #[test]
     fn plays_feed_history_and_counts() {
         let lib = Library::open_in_memory().unwrap();
         let a = lib.upsert_track(&sample_track("/m/a.flac", "A")).unwrap();
@@ -2983,6 +3036,11 @@ mod play_history_tests {
         // Re-adding after a purge starts fresh.
         let fresh = lib.add_favourite("id1", uri, 9_000).unwrap();
         assert_eq!(fresh.created_at, 9_000);
+        // Hearted again while the clear waits to be pushed: the new time
+        assert!(lib.remove_favourite(uri).unwrap());
+        let revived = lib.add_favourite("id1", uri, 12_000).unwrap();
+        assert_eq!(revived.created_at, 12_000);
+        assert!(!revived.deleted);
         // Album / artist lookups by MBID.
         let album = track.album.as_ref().unwrap();
         let found = lib

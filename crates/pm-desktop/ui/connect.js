@@ -87,6 +87,12 @@
         return;
       } catch (e) {
         if (mine !== attempt) return;
+        // Away from the node with music on this device: play it now; the app comes back to the
+        // node by itself when it answers (open_offline)
+        if (i === 0 && String(e).startsWith("Can't reach") && await invoke('has_downloads').catch(() => false)) {
+          $('saved-msg').textContent = String(e) + '. Playing what this device keeps meanwhile…';
+          try { await invoke('open_offline'); return; } catch (err) { /* fall through to the retries */ }
+        }
         show('retry');
         show('other');
         // Only an unreachable node is worth waiting for; a refused token is not

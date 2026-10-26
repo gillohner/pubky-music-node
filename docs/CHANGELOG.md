@@ -17,6 +17,49 @@ Newest first. Dates are when the change landed on `main`.
   - Media servers (usually a server in that house), drives, gPodder (per-node cursors) and SoundCloud (its token sits in the admin's client setting) stay on the node for now. So do librespot's, Soloist's and yt-dlp's machine state.
   - `POST /v1/vault/sync` runs it now.
   - Tested with two nodes of one person on a real homeserver: migrate, take, push and pull, a local sign-out, a first-contact conflict, and sign out everywhere. The rules are unit-tested one by one.
+- **Sign-ins are no longer copied to the settings backup** (STEWARD-SOCIAL-V1-MUSIC.md A0): `/priv/pubky.music/settings.json` is plain JSON the homeserver's operator can read, and it held the TIDAL session (access and refresh tokens). The node now leaves out every sign-in the encrypted backup seals, the node's own secrets and tokens, and any key named like a session or credential; a restore ignores them in an older copy. The file is replaced on each sync, so the next sync removes what an older node wrote.
+- **The API says when the homeserver is full** (the owner's upload request; the screens are mn-app's): a homeserver's 507 becomes "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota" on the upload (`full: true`), in a failed save, and as a 507 for a single copy; folder copies stop at the first such file instead of sending the rest only to be refused. `GET /v1/storage` keeps when it happened (`full_at`, for that account) until an upload goes through or files are deleted. On another homeserver, whose quota nobody can read, it reports the music files that homeserver lists (`used_from: your music files there`); the bundled one still reports the exact quota and use.
+- **Service apps in one list** (ADR 0016 step 2, the admin side): `GET /v1/node/apps` names every app the node uses for everyone (Spotify, TIDAL, Qobuz, SoundCloud, YouTube, Last.fm, Jamendo, AcoustID, the drives, the artist-image services), whether each is set and from where, where to get one, and the route that sets it; never a secret. Settings › This node can show them on one screen.
+- **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):
+  - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection, and a song is kept only once its file is whole. A song whose file was cleared is downloaded again. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
+  - **One node's music stays with that node:** each node gets its own folder on the device. A sync with another node (a friend's, or a reinstall) sends nothing from it.
+  - **Offline:** when the node is out of reach, the app serves the web UI from the device. It shows Downloads (albums, playlists, favourites, all songs), plays them in the app, and queues plays and hearts. Everything that needs the node is hidden. The local server answers only the app itself. The app goes back to the node as soon as it answers.
+  - **The desktop and Android app:** it syncs every 15 minutes while connected, always with the node's current address and token, and opens Downloads when the node can't be reached and music is kept.
+  - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once, also from a device whose clock runs up to an hour fast. `PUT` and `DELETE /v1/favourites` take `at`, the time of an offline change: a heart cleared offline stays if it was set again after the clear.
+  - What to keep is chosen from the Downloads screen and the Download buttons in the next PR. Until then, `cargo run -p pm-offline --example offline` keeps albums by hand.
+
+- **Colour from where it plays** (STEWARD-UX-RESPONSIVE.md §6):
+  - While a song streams from a service, the player bar and Now playing take its accent: the play button, the scrubber and the quality label.
+    - It covers TIDAL, Qobuz, Spotify, Deezer, YouTube, SoundCloud, Bandcamp, Plex, Jellyfin, Jamendo, Audius, the Internet Archive and Subsonic.
+    - Your own files keep ours.
+    - Each accent is checked in both themes: at least 4.5:1 as text on the page, and for the play button's ink on it.
+    - Lists keep the app's theme.
+  - Now playing's background takes a soft gradient from the cover.
+  - Settings › Appearance › Colour has both switches (on by default), kept on this device until settings live on your homeserver.
+
+- **Lists for thumbs** (build step 3 of docs/ux/responsive.md):
+  - **Song rows on touch screens:** swipe right to play next, left to add to a playlist (the owner's choice). A long press opens the row's menu, now on iPhones too. The swipes run the row's own menu items, so every kind of song row behaves the same.
+  - **Section chips:** on phones and tablets they stay at the top while a list scrolls under them.
+  - **Dense lists:** Settings › Appearance › Layout has a Dense lists switch for tablets and desktops (shorter rows, smaller covers), kept on this device.
+
+- **Now playing on one screen** (build step 2 of docs/ux/responsive.md):
+  - The cover, the title with the heart, the quality label, the scrubber and the transport fit a phone screen with nothing below the fold.
+  - Queue, Lyrics, Details, Sources and Tags are sheets.
+    - Phones: a row under the transport opens a sheet over the player, with a strip that keeps play/pause in reach. Drag the sheet down to close it.
+    - Tablets and desktops: the sheet is a panel beside the player (Queue by default).
+  - **Queue sheet:** tap a song to play it now. Reordering and clearing stay on the Queue page, a tap away.
+  - **Sources sheet:** where else the song plays, in the same order as the song page.
+  - **Quality label:** opens Details (the signal path).
+  - **Top bar:** the zone is a chip that opens the zone picker. Dashboard, the sleep timer, DSP and the song page sit behind ⋯.
+  - The open sheet stays open while songs change.
+
+- **One app shell for phone, tablet and desktop** (STEWARD-UX-RESPONSIVE.md; build step 1 of docs/ux/responsive.md):
+  - Phones (under 600 px) get tabs: Home, Search, Library, Zones. The mini player sits above them as a card with the cover, the title, the zone and play/pause.
+  - Swipe up on the mini player opens Now playing; swipe down from its top closes it.
+  - Tablets (600–1024 px) get a rail with the same four, plus Settings at the foot, and the full player bar. Desktops keep the sidebar.
+  - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
+  - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
+  - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
 - **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
 - **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
 - **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
