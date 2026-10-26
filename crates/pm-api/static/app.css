@@ -1052,7 +1052,12 @@ html[data-shell="tablet"] .bnav.rail-only { margin-top: auto; }
 html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
 html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
 /* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
-@media (max-width: 700px) { html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; } }
+@media (max-width: 700px) {
+  html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; }
+  html[data-shell="tablet"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+  html[data-shell="tablet"] .np-transport .icon-btn { width: 44px; height: 44px; }
+  html[data-shell="tablet"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
+}
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
 .picker { max-height: 50vh; overflow: auto; margin: 10px 0; }

@@ -1079,7 +1079,7 @@
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
   const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = shellMode() === 'phone';
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
@@ -2826,7 +2826,7 @@
           try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
           const srcs = state.sources;
-          const phone = shellMode() === 'phone';
+          const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
