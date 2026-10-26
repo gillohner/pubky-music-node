@@ -809,7 +809,13 @@ pub struct LoginFlow {
 /// public tag namespace (`/pub/pubky.music/`, where Nexus indexes tags on
 /// external links today), and the v1 social and music namespaces it moves to
 /// (`social/v1`, `music/v1`; STEWARD-PLAN step 3), so one approval covers both.
-pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+///
+/// The app's private folder is asked for by its parts (the node record, the settings backup, the
+/// person's preferences, their files, the sources vault), never as `/priv/pubky.music/` itself:
+/// pubky's canonical form drops a capability that a broader one covers, so a signer or a
+/// homeserver that normalises would lose the vault capability, and the vault counts only when it
+/// is named itself. A session from before, with the whole folder, still covers every part.
+pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/node.json:rw,/priv/pubky.music/settings.json:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
@@ -968,6 +974,18 @@ mod capability_tests {
             missing.contains(&"/priv/pubky.music/vault/:rw".to_string()),
             "a session from before the vault asks again"
         );
+        // A session approved with the set from before the parts still covers today's set
+        let before: Vec<&str> = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw"
+            .split(',')
+            .collect();
+        assert_eq!(
+            missing_capabilities(&before, LOGIN_CAPABILITIES),
+            Vec::<String>::new()
+        );
+        // Normalising the set changes nothing (no entry covers another), so a signer or a
+        // homeserver that normalises can't drop the vault or anything else
+        let caps: pubky::Capabilities = LOGIN_CAPABILITIES.parse().unwrap();
+        assert_eq!(caps.normalize().to_string(), LOGIN_CAPABILITIES);
         assert_eq!(
             missing_capabilities(&["/pub/social/v1/:r"], "/pub/social/v1/:rw"),
             vec!["/pub/social/v1/:rw".to_string()],
