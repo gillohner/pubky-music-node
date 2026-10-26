@@ -12,6 +12,8 @@ Newest first. Dates are when the change landed on `main`.
 - **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Only a grant that names the vault itself (`/priv/pubky.music/vault/:rw`) counts: an app approved for all storage is not trusted with the sign-ins. The node asks Ring for that capability, and an older sign-in is asked to sign in again. Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
   - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
   - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Each client remembers every sign-out it has seen in a local file, because the device list is writable by the devices it lists. A signed-out device that writes the list back without its record stays signed out, and the next registration writes the record back. Who gets a key is read under each blob's lock.
+  - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
   - Vault files are written under the homeserver's WebDAV lock.
   - Tested on a real homeserver with forged, borrowed and garbage entries.
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
@@ -19,6 +21,10 @@ Newest first. Dates are when the change landed on `main`.
   - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
   - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
   - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
+- **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
+  - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
+  - Listeners may download what they may play. The homeserver's files come through the node.
+  - Transcodes use ffmpeg where the node has it (501 otherwise; the original always works).
 - **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:
   - a random data key per blob, wrapped to each client's X25519 key (pubky-noise's primitives: X25519, HKDF-SHA-256, XChaCha20-Poly1305);
   - a device list in `index.json`, whose entries prove themselves with the pubky SDK's grant proofs (Ring's grant plus a custom proof over the client key; no app holds the identity secret);
