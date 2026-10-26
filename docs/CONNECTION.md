@@ -52,13 +52,17 @@ One WebSocket per controller carries every change. The REST API (`/v1/...`) carr
   Controllers that never ping (`pm-client`, older UIs) are not held to this.
 
 **The web UI** (`crates/pm-api/static/app.js`, "connection + events"):
-- **Reconnects** with exponential backoff and jitter: the delay doubles from 0.5 s up to 30 s, and the
-  actual wait is drawn at random between half and all of it, so many controllers don't reconnect in
-  step after a node restart. It retries at once when:
-  - the network comes back (`online`);
-  - the page becomes visible again (phones and laptops suspend sockets in the background);
-  - the user clicks the status or "Retry now";
-  - a change is waiting to be sent.
+- **Reconnects** with backoff and jitter:
+  - For the first 20 s of an outage, and while a change is held, it retries at most every 1.5 s, so a restarted node is picked up within about a second.
+  - After that, the delay doubles from 2 s up to 30 s.
+  - The actual wait is drawn at random between half and all of the delay, so many controllers don't reconnect in step.
+  - The time of the next retry is on `#conn` as `data-retry-at` (ms since the epoch), for tests.
+  - Only the latest reconnect attempt reports its result.
+  - It retries at once when:
+    - the network comes back (`online`);
+    - the page becomes visible again (phones and laptops suspend sockets in the background);
+    - the user clicks the status or "Retry now";
+    - a change is waiting to be sent.
 - **Resyncs without a reload.** Each reconnect re-reads `/v1/info`, takes the zones from the snapshot,
   and refreshes the queue, Now Playing and the zones view.
   - If `boot` changed (the node restarted) or `library_rev` changed (the library changed while the UI
@@ -119,8 +123,7 @@ Today a node is reached outside the LAN over HTTPS (the address it publishes on 
   | Check | Result |
   | :-- | :-- |
   | both controllers notice a killed node | 2 ms (the socket closes; a vanished host takes ≤ 20 s, two missed pings) |
-  | both resync after the node is back (3.3 s outage) | 0.3–0.6 s for the controller with a held change (it retries at once), 1.5–1.7 s for the other (backoff) |
-  | the same in CI (2026-10-26, about 5 s outages) | up to 2.4 s with a held change; up to 8 s for the other by design (the retry that finds the node back can be a 4–8 s backoff step), so the check allows 9 s |
+  | both resync after the node is back (4.7 s outage) | 0.2–0.4 s for the controller with a held change (it retries at once), 0.6–0.9 s for the other (fast phase) |
   | a pause pressed during the outage | goes through when the node is back, and both controllers show it |
   | a change on one controller shows on the other | 0.11 s |
   | after 20 s down | offline, "retrying in N s" |

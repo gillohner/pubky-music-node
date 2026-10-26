@@ -4,10 +4,19 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Faster reconnects after a short outage** (mn-infra's note on #114's review):
+  - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
+  - A held change re-checks every second, so it is never refused while the node is already back.
+  - The next retry time is on `#conn` as `data-retry-at`, for tests.
+
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
 - **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
 
 ## 2026-10-25
 
+- **Each device's downloads** (STEWARD-DOWNLOADS.md): `/v1/devices` registers a person's phones and laptops, and `/v1/devices/{id}/downloads` is what each keeps offline (songs, albums, playlists, favourites) and has.
+  - The node answers with what the device still wants: a kept playlist's or album's new songs, new favourites. It also shows each device's storage.
+  - Listeners have their own devices and keep songs and albums. The screens are mn-app's.
 - **Which sources may be kept offline** (STEWARD-DOWNLOADS.md): every source says `downloadable` in `GET /v1/sources`, and the app shows "keep offline" only there.
   - Yes: the Internet Archive, podcasts, and the person's own Plex, Jellyfin, OpenSubsonic and Audiobookshelf.
   - No: TIDAL, Qobuz, Deezer, Spotify and YouTube in either mode (their terms allow offline copies only in their own apps), radio, and Bandcamp streams. Not yet: Jamendo, SoundCloud and Audius, which allow it per track.
