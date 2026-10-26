@@ -864,15 +864,14 @@ pub fn file_url_blocking(
     judge_file_url(status, &v)
 }
 
-async fn file_url(s: &NodeState, id: &str) -> Result<String, StreamError> {
+async fn file_url(s: &NodeState, id: &str, format: u32) -> Result<String, StreamError> {
     let (app, sess) = ready(s).map_err(|e| StreamError::Track(e.message))?;
-    let st = load(&s.library.lock().expect("library poisoned"));
     let resp = s
         .http_client()
         .get(format!("{}/track/getFileUrl", api_base()))
         .header("X-App-Id", &app.id)
         .header("X-User-Auth-Token", &sess.token)
-        .query(&file_url_query(&app, id, format_id(&st), now()))
+        .query(&file_url_query(&app, id, format, now()))
         .send()
         .await
         .map_err(|e| StreamError::Track(format!("Qobuz: {}", e.without_url())))?;
@@ -934,7 +933,9 @@ pub(crate) async fn stream(
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
-    let r = file_url(&s, &id).await;
+    // Use one snapshot for the request and its response type, even if quality changes in flight.
+    let format = format_id(&load(&s.library.lock().expect("library poisoned")));
+    let r = file_url(&s, &id, format).await;
     record(&s.library, &r);
     let url = r.map_err(|e| match e {
         StreamError::Mode(m) => ApiError::new(StatusCode::BAD_GATEWAY, m),
@@ -950,8 +951,9 @@ pub(crate) async fn stream(
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
     let len = resp.content_length();
+    let content_type = if format == 5 { "audio/mpeg" } else { "audio/flac" };
     let mut out = axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, "audio/flac")
+        .header(axum::http::header::CONTENT_TYPE, content_type)
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     if let Some(n) = len {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);

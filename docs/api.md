@@ -205,7 +205,7 @@ Without a token, keep the listener on localhost. Remote access by pubkey (M5) wr
 | POST | `/v1/sources/bandcamp/collection/{id}/download` | `{format?}` (optional body) | Downloads one purchase into `<data_dir>/bandcamp` (a library folder, scanned after); 409 when Bandcamp offers no download or it is already running |
 | GET | `/v1/sources/bandcamp/downloads` | | This run's downloads: `[{id, title, state: queued\|downloading\|unpacking\|done\|failed, format?, bytes, total?, folder?, error?}]` |
 | GET | `/v1/sources/bandcamp/stream/{key}` | | A Bandcamp stream for browsers, relayed with a fresh token |
-| GET | `/v1/sources/qobuz/stream/{id}` | | The track as FLAC for browsers, relayed by the node |
+| GET | `/v1/sources/qobuz/stream/{id}` | | The track for browsers, relayed by the node in the selected quality: MP3 320 kbps (`audio/mpeg`) for `mp3`, FLAC (`audio/flac`) for `cd` or `max` |
 | POST / DELETE | `/v1/sources/tidal/unofficial/login` | | POST starts the device sign-in (the code to enter at link.tidal.com, in `pending`; the node waits for the approval); DELETE forgets the session |
 | GET / DELETE | `/v1/sources/tidal/status` (DELETE `…/session`) | | `{configured, signed_in, user_id?, country?, scope?, expires_at?, redirect_uri, requested_scopes, access_tier?, playback_limit?}` (`playback_limit` such as `FULL_REQUIRES_HIGHER_ACCESS_TIER` means TIDAL serves previews to this app's tier); DELETE forgets the tokens |
 | GET | `/v1/sources/tidal/collection` (POST `…/import`) | | `{tracks, albums}` of the signed-in user's TIDAL collection as source hits; POST favourites them on the node (`{imported, skipped}`; ISRC where TIDAL has one, else the TIDAL link) |

@@ -8143,8 +8143,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let secret_ok = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let expected_format = Arc::new(std::sync::atomic::AtomicU32::new(27));
         let file_base = base.clone();
         let ok2 = secret_ok.clone();
+        let format2 = expected_format.clone();
+        let mp3 = b"synthetic MP3 stream";
         let album = serde_json::json!({"id": "0060253780968", "title": "Random Access Memories", "artist": {"name": "Daft Punk"}, "upc": "0886443927087",
             "release_date_original": "2013-05-17", "image": {"large": "https://img/600.jpg"}, "maximum_bit_depth": 24, "maximum_sampling_rate": 88.2,
             "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "track_number": 8, "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108"}]}});
@@ -8172,7 +8175,7 @@ mod tests {
             .route(
                 "/track/getFileUrl",
                 get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                    let (base, ok) = (file_base.clone(), ok2.clone());
+                    let (base, ok, format) = (file_base.clone(), ok2.clone(), format2.clone());
                     async move {
                         let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
                         if !ok.load(std::sync::atomic::Ordering::SeqCst) || q["request_sig"] != want {
@@ -8181,12 +8184,15 @@ mod tests {
                         if q["track_id"] == "2" {
                             return (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "sample": true})));
                         }
-                        assert_eq!(q["format_id"], "27", "hi-res plan, max quality");
-                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27, "mime_type": "audio/flac"})))
+                        let format = format.load(std::sync::atomic::Ordering::SeqCst);
+                        assert_eq!(q["format_id"], format.to_string(), "the selected quality reaches Qobuz");
+                        let (file, mime) = if format == 5 { ("file.mp3", "audio/mpeg") } else { ("file.flac", "audio/flac") };
+                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/{file}"), "format_id": format, "mime_type": mime})))
                     }
                 }),
             )
-            .route("/file.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }));
+            .route("/file.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/file.mp3", get(move || async move { mp3.as_slice() }));
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         qobuz::set_api_base(&base);
 
@@ -8316,6 +8322,36 @@ mod tests {
             app.clone().oneshot(req).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+        // The browser relay labels the format requested from Qobuz, including MP3 (format 5).
+        // Changing quality affects the next request, including switching back to either FLAC mode.
+        for (quality, format, mime, bytes) in [
+            ("mp3", 5, "audio/mpeg", mp3.as_slice()),
+            ("cd", 6, "audio/flac", flac.as_slice()),
+            ("max", 27, "audio/flac", flac.as_slice()),
+        ] {
+            let (st, q) = call(
+                &app,
+                "PUT",
+                "/v1/sources/qobuz/quality",
+                Some(serde_json::json!({"id": quality})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{q}");
+            expected_format.store(format, std::sync::atomic::Ordering::SeqCst);
+            let req = Request::builder()
+                .uri("/v1/sources/qobuz/stream/5966783")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.headers()["content-type"], mime, "{quality}");
+            assert_eq!(resp.headers()["content-length"], bytes.len().to_string());
+            assert_eq!(
+                resp.into_body().collect().await.unwrap().to_bytes().as_ref(),
+                bytes,
+                "{quality}"
+            );
+        }
         // Qobuz refusing the app switches the source off, says why, and Retry switches it on
         secret_ok.store(false, std::sync::atomic::Ordering::SeqCst);
         let req = Request::builder()
