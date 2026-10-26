@@ -49,13 +49,19 @@ fn app(id: &'static str, name: &'static str, configured: bool, from: Option<Stri
 
 /// Every node app, as `GET /v1/node/apps` lists it.
 pub fn list(s: &NodeState) -> Vec<NodeApp> {
-    let (qobuz, soundcloud, lastfm, tidal_full) = {
+    // A value stored before origins were recorded has none: it was entered in Settings
+    let origin = |f: String| if f.is_empty() { "settings".to_string() } else { f };
+    let (qobuz, soundcloud, lastfm, tidal_full, acoustid_own) = {
         let lib = s.library.lock().expect("library poisoned");
         (
-            crate::qobuz::app_of(&lib).map(|a| a.from),
-            crate::soundcloud::client_of(&lib).map(|c| c.from),
-            crate::lastfm::app_of(&lib).map(|a| a.from),
-            crate::tidal_unofficial::client_of(&lib).map(|c| c.from),
+            crate::qobuz::app_of(&lib).map(|a| origin(a.from)),
+            crate::soundcloud::client_of(&lib).map(|c| origin(c.from)),
+            crate::lastfm::app_of(&lib).map(|a| origin(a.from)),
+            crate::tidal_unofficial::client_of(&lib).map(|c| origin(c.from)),
+            lib.get_setting(crate::identify::KEY_SETTING)
+                .ok()
+                .flatten()
+                .is_some_and(|k| !k.trim().is_empty()),
         )
     };
     let tidal = crate::tidal::app_id(s);
@@ -66,34 +72,54 @@ pub fn list(s: &NodeState) -> Vec<NodeApp> {
             "config"
         }
     });
+    // The build's own app where the value is the project's, else the node's config
+    let built_or_config = |id: &str, built: Option<&str>| {
+        if built == Some(id) {
+            "builtin".to_string()
+        } else {
+            "config".to_string()
+        }
+    };
     let (google, onedrive) = {
         let d = s.drives.read().expect("drives");
+        let from = |p: crate::drives::Provider, built: Option<&'static str>| {
+            d.apps.get(&p).map(|a| built_or_config(&a.client_id, built))
+        };
         (
-            d.apps.contains_key(&crate::drives::Provider::Google),
-            d.apps.contains_key(&crate::drives::Provider::Onedrive),
+            from(
+                crate::drives::Provider::Google,
+                option_env!("PM_PROJECT_GOOGLE_CLIENT_ID"),
+            ),
+            from(
+                crate::drives::Provider::Onedrive,
+                option_env!("PM_PROJECT_ONEDRIVE_CLIENT_ID"),
+            ),
         )
     };
-    let acoustid = s.acoustid.read().expect("acoustid");
-    let acoustid_from = if acoustid.api_key.is_empty() {
-        None
-    } else if acoustid.api_key != acoustid.configured {
-        Some("settings")
-    } else {
-        Some("config")
+    let acoustid_from = {
+        let a = s.acoustid.read().expect("acoustid");
+        if a.api_key.trim().is_empty() {
+            None
+        } else if acoustid_own {
+            Some("settings".to_string())
+        } else {
+            Some(built_or_config(&a.api_key, crate::project_apps::acoustid_key()))
+        }
     };
-    let jamendo = crate::jamendo::configured(s);
+    let jamendo = {
+        let j = s.jamendo.read().expect("jamendo");
+        (!j.creds.client_id.trim().is_empty())
+            .then(|| built_or_config(&j.creds.client_id, crate::project_apps::jamendo_client_id()))
+    };
+    let spotify = crate::spotify::app_origin(s);
     let mut out = vec![
         NodeApp {
-            set: Some("PUT /v1/sources/spotify/app"),
+            // node.toml wins over Settings: the route refuses then
+            set: (spotify != Some("config")).then_some("PUT /v1/sources/spotify/app"),
             status: Some("GET /v1/sources/spotify/status"),
             get_one: Some("https://developer.spotify.com/dashboard"),
             note: Some("In development mode Spotify lets 25 people in: add each one under User Management"),
-            ..app(
-                "spotify",
-                "Spotify",
-                crate::spotify::app_origin(s).is_some(),
-                crate::spotify::app_origin(s).map(str::to_string),
-            )
+            ..app("spotify", "Spotify", spotify.is_some(), spotify.map(str::to_string))
         },
         NodeApp {
             status: Some("GET /v1/sources/tidal/status"),
@@ -146,7 +172,7 @@ pub fn list(s: &NodeState) -> Vec<NodeApp> {
             status: Some("GET /v1/sources/jamendo/status"),
             get_one: Some("https://devportal.jamendo.com"),
             note: Some("Set in node.toml ([jamendo] client_id) or PM_JAMENDO_CLIENT_ID"),
-            ..app("jamendo", "Jamendo", jamendo, Some("config".into()))
+            ..app("jamendo", "Jamendo", jamendo.is_some(), jamendo)
         },
         NodeApp {
             set: Some("PUT /v1/library/identify/settings"),
@@ -156,18 +182,18 @@ pub fn list(s: &NodeState) -> Vec<NodeApp> {
                 "acoustid",
                 "AcoustID",
                 acoustid_from.is_some(),
-                acoustid_from.map(str::to_string),
+                acoustid_from,
             )
         },
         NodeApp {
             status: Some("GET /v1/library/drives"),
-            note: Some("Set in node.toml ([drives] google_client_id, google_client_secret)"),
-            ..app("google-drive", "Google Drive", google, Some("config".into()))
+            note: Some("Set in node.toml ([drives] google_client_id, google_client_secret) or PM_GOOGLE_DRIVE_CLIENT_ID / _SECRET"),
+            ..app("google-drive", "Google Drive", google.is_some(), google)
         },
         NodeApp {
             status: Some("GET /v1/library/drives"),
-            note: Some("Set in node.toml ([drives] onedrive_client_id)"),
-            ..app("onedrive", "OneDrive", onedrive, Some("config".into()))
+            note: Some("Set in node.toml ([drives] onedrive_client_id) or PM_ONEDRIVE_CLIENT_ID"),
+            ..app("onedrive", "OneDrive", onedrive.is_some(), onedrive)
         },
         NodeApp {
             note: Some("Artist images; this build's key"),
