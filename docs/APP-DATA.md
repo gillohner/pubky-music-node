@@ -16,8 +16,9 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 | `/priv/pubky.music/` | the person's Pubky Music clients | the app's private folder | — |
 | `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, token, version, updated_at, iroh?}`, so the person's own devices find their node | unversioned; readers ignore unknown members |
 | `/priv/pubky.music/settings.json` | the node, after every sync and change | the settings backup: `{version, saved_at, node, contact, folders, settings: {key: value}}`, restored after one Ring sign-in on a new or reinstalled node | `version: 1` |
-| `/priv/pubky.music/files/` | the node (uploads, copies, imports) and the person | the person's own music files, any audio format; names are the node's (`<id>-<name>.<ext>`) | — |
-| `/priv/pubky.music/vault/` | every Pubky Music client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`) | `version: 1` in each file |
+| `/priv/pubky.music/files/` | the node (uploads, copies, imports) and the person | the person's own music files, any audio format; the node names them `<16 hex digits of the BLAKE3 hash>-<name>` | — |
+| `/priv/pubky.music/files/.pubky-music-layout-check` | the node, once | an empty probe that shows how the homeserver lays out its files | — |
+| `/priv/pubky.music/vault/` | every Pubky Music client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`) | the index and the sign-ins carry `version: 1` |
 | `/priv/pubky.music/vault/index.json` | the same clients | the vault's device list, every entry with a grant proof (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.json` | the same clients | one sign-in's envelope (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.lease.json` | the same clients | a refresh lease, only on homeservers without locks (VAULT.md) | — |
@@ -47,4 +48,5 @@ data.
 The node's sign-in requests `/priv/pubky.music/vault/:rw` (named on its own: VAULT.md trusts no wider
 grant), `/priv/pubky.music/:rw` and `/pub/pubky.music/:rw` for the app data above. It also requests the
 social and music folders (`/pub|priv/social/v1/:rw`, `/pub|priv/music/v1/:rw`), and `/priv/pubky.app/:rw`
-and `/pub/pubky.app/:rw` for the move from older objects (`pm_pubky::homeserver::LOGIN_CAPABILITIES`).
+and `/pub/pubky.app/:rw` for the move from older objects (`pm_pubky::homeserver::LOGIN_CAPABILITIES`). The
+desktop app asks Ring only for `/priv/pubky.music/:r`, to read the node record and find the person's node.

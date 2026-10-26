@@ -15,6 +15,10 @@ pub const FILES_DIR: &str = "/priv/pubky.music/files/";
 pub const VAULT_DIR: &str = crate::vault::VAULT_DIR;
 /// The vault's device list.
 pub const VAULT_INDEX_PATH: &str = crate::vault::INDEX_PATH;
+/// Written into [`FILES_DIR`] once to find out how the homeserver lays out its files.
+pub const FILES_LAYOUT_PROBE: &str = "/priv/pubky.music/files/.pubky-music-layout-check";
+/// What the desktop app asks Ring for: read the person's node record.
+pub const DESKTOP_RING_CAPS: &str = "/priv/pubky.music/:r";
 /// Music tags: social `PubkyAppTag`s kept in the app's public namespace until the Nexus behind
 /// Pinakes indexes `social/v1/tags` (ADR 0014).
 pub const TAG_DIR: &str = "/pub/pubky.music/tags/";
@@ -27,6 +31,7 @@ pub const ALL: &[&str] = &[
     FILES_DIR,
     VAULT_DIR,
     VAULT_INDEX_PATH,
+    FILES_LAYOUT_PROBE,
     TAG_DIR,
 ];
 
@@ -41,7 +46,7 @@ mod tests {
                 "{p} is outside the app's namespace"
             );
             assert!(
-                doc.contains(&format!("`{p}")),
+                doc.contains(&format!("`{p}`")),
                 "docs/APP-DATA.md doesn't list {p}"
             );
         }

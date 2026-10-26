@@ -142,7 +142,7 @@ pub(crate) fn validate_image_url(url: &str, max: usize) -> Result<(), SchemaErro
 /// namespace; under `pubky.app/tags/` it is parsed as a pubky.app tag, which
 /// must target `pubky://` objects, and is dropped. pubky-social-specs v1
 /// names no music namespace, so the node uses its own.
-pub const TAG_NAMESPACE: &str = "pubky.music";
+pub const TAG_NAMESPACE: &str = pm_appdata::paths::APP_NAMESPACE;
 /// `/pub/pubky.music/tags/`: where the node writes tags.
 pub const TAG_DIR: &str = pm_appdata::paths::TAG_DIR;
 /// Where the node wrote tags before 2026-10-21 (Nexus never indexed these;

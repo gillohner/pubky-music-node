@@ -11,7 +11,7 @@
 //! - the `ext.music` hints a playlist carries on its items and on the collection ([`ext`]), and the
 //!   readers that treat them as hostile input.
 //!
-//! Canonical music URLs (what `embed` and collection items point at) follow the node's ADR 0001:
+//! Canonical music URLs (what `embed` and collection items point at), in order of preference:
 //! the MusicBrainz URL first, then the ISRC URL, then the service URL. This crate does not pick
 //! them; it only requires that a review or listen names one.
 //!
@@ -21,8 +21,7 @@
 //! a name treat the source as unknown and fall back to the item's canonical URL.
 //!
 //! The crate is generic: any app can read and write these objects. It holds no app's own data (no
-//! settings, credentials, vault or library): Pubky Music's is `pm-appdata` in the node's repository
-//! (docs/APP-DATA.md). It depends on nothing but the social specs and serde, so it can live in its
+//! settings, credentials, vault or library); each app keeps that under its own namespace. It depends on nothing but the social specs and serde, so it can live in its
 //! own repository like the Mapky and Eventky specs.
 
 #![forbid(unsafe_code)]

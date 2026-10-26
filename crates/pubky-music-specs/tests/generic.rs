@@ -34,12 +34,14 @@ fn no_app_data_and_no_node_crates_in_the_spec() {
             f.display()
         );
     }
+    // No node crate in any form: `pm-x = …`, `[dependencies.pm-x]`, `package = "pm-x"`,
+    // `path = "../pm-x"`. Comments don't count.
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     for line in manifest.lines() {
-        let dep = line.split('=').next().unwrap_or("").trim();
+        let code = line.split('#').next().unwrap_or("");
         assert!(
-            !dep.starts_with("pm-"),
-            "Cargo.toml depends on a node crate: {line}"
+            !code.contains("pm-") && !code.contains("pm_"),
+            "Cargo.toml names a node crate: {line}"
         );
     }
 }
