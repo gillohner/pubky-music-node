@@ -2211,7 +2211,14 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
     if lib.get_track(TrackId(req.track_id))?.is_none() {
         return Err(ApiError::not_found(format!("track {}", req.track_id)));
     }
-    lib.record_play(TrackId(req.track_id), req.zone.as_deref())?;
+    match req.played_at {
+        Some(at) => {
+            lib.record_play_at(TrackId(req.track_id), req.zone.as_deref(), at)?;
+        }
+        None => {
+            lib.record_play(TrackId(req.track_id), req.zone.as_deref())?;
+        }
+    }
     let plays = lib.history(1)?;
     Ok(Json(History { plays }))
 }

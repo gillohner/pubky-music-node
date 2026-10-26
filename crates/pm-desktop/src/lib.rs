@@ -13,6 +13,7 @@
 mod android;
 mod crash;
 mod node;
+mod offline;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
 mod settings;
@@ -38,7 +39,12 @@ struct AppState {
     player_port: Option<u16>,
     /// The iroh tunnel to the node, while the node is reached through it (ADR 0013).
     tunnel: tokio::sync::Mutex<Option<pm_remote::ClientTunnel>>,
+    /// Music kept on this device (`pm-offline`); `None` when its folder can't be opened.
+    offline: Option<Arc<offline::Offline>>,
 }
+
+/// Set while the offline page waits for the node to come back (one waiter at a time).
+static RETURNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl AppState {
     fn current(&self) -> Option<Settings> {
@@ -95,9 +101,19 @@ fn is_app_page(u: &url::Url) -> bool {
 /// Navigation stays on the app's pages and the node's origin; anything else
 /// (an "Open on …" link, a streaming service's sign-in) opens in the
 /// system browser.
-fn allow_navigation(app: &AppHandle, current: &Arc<Mutex<Option<Settings>>>, u: &url::Url) -> bool {
+fn allow_navigation(
+    app: &AppHandle,
+    current: &Arc<Mutex<Option<Settings>>>,
+    offline_origin: &Arc<Mutex<Option<String>>>,
+    u: &url::Url,
+) -> bool {
     tracing::debug!(url = %u, "navigation");
     if is_app_page(u) {
+        return true;
+    }
+    // The offline page (pm-offline's server on 127.0.0.1)
+    let here = u.origin().ascii_serialization();
+    if offline_origin.lock().ok().and_then(|o| o.clone()).as_deref() == Some(here.as_str()) {
         return true;
     }
     let node_origin = current.lock().ok().and_then(|s| s.as_ref()?.origin());
@@ -147,6 +163,11 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     }
     state.store(Some(s.clone()));
     show_node(app, &s)?;
+    // Keep this device's downloads in step with the current node (read again at every round)
+    if let Some(o) = &state.offline {
+        let app = app.clone();
+        o.spawn_sync(move || app.state::<AppState>().current());
+    }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
@@ -167,6 +188,50 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
             if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
                 state.store(Some(s));
             }
+        });
+    }
+    Ok(())
+}
+
+/// Whether this device keeps any music (the connect page offers it while the node is away).
+#[tauri::command]
+fn has_downloads(state: State<'_, AppState>) -> bool {
+    let node_id = state.current().map(|s| s.node_id).unwrap_or_default();
+    state.offline.as_ref().is_some_and(|o| o.has_downloads(&node_id))
+}
+
+/// The node is out of reach: play what this device keeps, and go back to the node as soon as it
+/// answers again.
+#[tauri::command]
+async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let o = state
+        .offline
+        .clone()
+        .ok_or("Offline music is off on this device")?;
+    let node_id = state.current().map(|s| s.node_id).unwrap_or_default();
+    if !o.has_downloads(&node_id) {
+        return Err("Nothing is downloaded to this device yet".into());
+    }
+    let page = url::Url::parse(&o.page(&node_id).await?).map_err(|e| e.to_string())?;
+    app.get_webview_window(MAIN)
+        .ok_or("the window is gone")?
+        .navigate(page)
+        .map_err(|e| e.to_string())?;
+    if !RETURNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let state = app.state::<AppState>();
+                let Some(s) = state.current() else { break };
+                if let Ok((s, info)) = reach(&app, &state, s).await {
+                    if let Err(e) = connected(&app, &state, s, &info) {
+                        tracing::warn!("back from offline: {e}");
+                    }
+                    break;
+                }
+            }
+            RETURNING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
     Ok(())
@@ -405,6 +470,8 @@ pub fn run() {
             ring_connect,
             open_ring,
             forget,
+            has_downloads,
+            open_offline,
             crash_report,
             crash_dismiss,
             crash_share
@@ -426,11 +493,18 @@ pub fn run() {
             #[cfg(not(any(desktop, target_os = "android")))]
             let player_port = None;
             let shared = Arc::new(Mutex::new(initial.clone()));
+            let offline_origin: Arc<Mutex<Option<String>>> = Arc::default();
+            let offline = app
+                .path()
+                .app_local_data_dir()
+                .ok()
+                .and_then(|d| offline::Offline::open(d.join("offline"), offline_origin.clone()));
             app.manage(AppState {
                 settings: shared.clone(),
                 path,
                 player_port,
                 tunnel: Default::default(),
+                offline,
             });
 
             let handle = app.handle().clone();
@@ -439,7 +513,7 @@ pub fn run() {
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .initialization_script(init_script(initial.as_ref()))
-                .on_navigation(move |u| allow_navigation(&handle, &guard, u))
+                .on_navigation(move |u| allow_navigation(&handle, &guard, &offline_origin, u))
                 .on_page_load(move |w, payload| {
                     if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         return;

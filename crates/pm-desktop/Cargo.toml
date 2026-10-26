@@ -21,6 +21,7 @@ tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
 pm-pubky = { path = "../pm-pubky" }
+pm-offline = { path = "../pm-offline" }
 pm-discovery = { path = "../pm-discovery" }
 pm-remote = { path = "../pm-remote" }
 tauri = { version = "=2.12.1", features = [] }
