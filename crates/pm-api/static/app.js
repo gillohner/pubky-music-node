@@ -773,7 +773,7 @@
     closeJobPop();
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
-        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
+        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : deviceOf(z) ? `${deviceOf(z).name} · ${DAC_SHORT[deviceOf(z).mode] || deviceOf(z).mode}` : z.output)}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
       </button>`).join('')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
@@ -784,6 +784,8 @@
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
+    // A DAC plugged in since: fetch the outputs again and update the lines under each zone
+    if (isOwner()) api('GET', '/outputs').then((o) => { state.outputs = o; for (const b of $$('[data-zone]', zonePop)) { const z = state.zones[b.dataset.zone]; const d = deviceOf(z); const sub = $('.sub', b); if (d && sub) sub.textContent = `${d.name} · ${DAC_SHORT[d.mode] || d.mode}`; } }).catch(() => {});
   };
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { search.focus(); if (search.value.trim()) runSearch(); return; } setView(k); });
   $('#jobchip').onclick = () => {
@@ -843,7 +845,21 @@
   // "AAC 320 kbps · Deezer", "MP3 128 kbps · preview", "FLAC 96/24 · local file", and "→ 48 kHz"
   // when the node converts for the zone. Null when the node doesn't say (older nodes).
   const kHz = (hz) => String(Math.round(hz / 100) / 10);
-  const streamLabel = (np, long = false) => {
+  // USB DACs and other devices on the app's own output (STEWARD-ANDROID-USB-DAC.md): the node
+  // reports them as `device` on the output; nothing shows until it does
+  const DAC_MODE = { bit_perfect: 'Bit-perfect (Android)', exclusive: 'Exclusive USB', shared: 'Shared' };
+  const DAC_SHORT = { bit_perfect: 'bit-perfect', exclusive: 'exclusive USB', shared: 'shared' };
+  const DAC_HELP = {
+    bit_perfect: 'Android passes each song to it unchanged, at the song’s own rate; other sounds are muted while music plays.',
+    exclusive: 'This app drives it directly, at any rate it takes; Android’s audio isn’t involved.',
+    shared: 'Android mixes the music with other sounds and usually converts it to 48 kHz.',
+  };
+  const outputOf = (z) => (z && (state.outputs || []).find((o) => o.id === z.output)) || null;
+  const deviceOf = (z) => { const o = outputOf(z); return o && o.device ? o.device : null; };
+  const dacCaps = (d) => [d.max_rate ? `up to ${kHz(d.max_rate)} kHz` : '', d.max_bits ? `${d.max_bits} bit` : '', d.dsd ? `DSD (${d.dsd === 'native' ? 'native' : 'DoP'})` : ''].filter(Boolean).join(' · ');
+  // This app's own output (the app's init script names it), when the node knows its device
+  const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
+  const streamLabel = (np, long = false, z = null) => {
     const f = np && np.format; if (!f) return null;
     const sf = np.source_format; const of = np.output_format;
     const what = sf && sf.kind === 'dsd' ? `DSD${Math.round(sf.rate_hz / 44100)}`
@@ -852,6 +868,8 @@
     const tier = f.tier ? ` ${f.tier.charAt(0).toUpperCase()}${f.tier.slice(1)}` : '';
     const from = f.preview ? 'preview' : f.service === 'library' ? 'local file' : f.service === 'stream' ? 'stream' : f.service === 'download' ? 'downloaded' : `${SERVICE_NAMES[f.service] || srcName(f.service)}${tier}`;
     const conv = sf && of && sf.kind !== 'dsd' && of.kind !== 'dsd' ? (of.rate_hz !== sf.rate_hz ? ` → ${kHz(of.rate_hz)} kHz` : of.bits < sf.bits ? ` → ${of.bits} bit` : '') : '';
+    const dev = deviceOf(z);
+    if (dev) return long ? `${what}${conv} · ${from} → ${dev.name} · ${DAC_SHORT[dev.mode] || dev.mode}` : `${what}${conv} → ${dev.name} · ${DAC_SHORT[dev.mode] || dev.mode}`;
     return `${what}${conv} · ${from}`;
   };
   // Why the node converts, from the signal path's own notes (resample, requantize, DSD to PCM)
@@ -929,7 +947,7 @@
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
     q.className = 'quality ' + (h ? 'q-' + h : '');
-    const sl = streamLabel(np);
+    const sl = streamLabel(np, false, z);
     $('.qtext', q).textContent = sl || (h ? LABEL[h] : 'In this browser'); q.setAttribute('aria-label', `Sound quality: ${sl || (h ? LABEL[h] : 'played by this browser')}. Change the quality`);
     q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
   };
@@ -989,7 +1007,7 @@
             ${np.stream_title ? '' : '<div class="np-pubky" id="nppubky" aria-live="polite"></div>'}
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small" style="display:flex;justify-content:space-between"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
-            ${streamLabel(np) ? `<div class="npqual"><span class="qtext-long">${esc(streamLabel(np, true))}</span><button class="btn sm ghost" id="npqual">Quality</button></div>` : ''}
+            ${streamLabel(np) ? `<div class="npqual"><span class="qtext-long">${esc(streamLabel(np, true, z))}</span><button class="btn sm ghost" id="npqual">Quality</button></div>` : ''}
             <div class="path">
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${np.signal_path ? esc(fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format)) : ''}</span></div>
               ${np.signal_path ? np.signal_path.stages.map((s) => `<div class="path-row"><span class="pd" style="background:${colour[s.quality]}"></span><span class="pn">${esc(s.name)}</span><span class="pf">${esc(fmtFormat(s.in_format))} → ${esc(fmtFormat(s.out_format))}</span>${s.note ? `<span class="pnote">${esc(s.note)}</span>` : ''}</div>`).join('') : `<div class="path-row"><span class="pd" style="background:var(--muted)"></span><span class="pn">browser</span><span class="pf">the original file, decoded by this browser</span></div>`}
@@ -1030,6 +1048,7 @@
       <div class="set-rows">
         <div class="set-row"><div class="set-label"><div class="set-name">Arriving</div><p class="set-help">${esc(arriving)}</p></div></div>
         ${zonePlays ? `<div class="set-row"><div class="set-label"><div class="set-name">On ${esc(z.name)}</div><p class="set-help">${esc(zonePlays)}${conv.length ? `. Changed on the way: ${esc(conv.join('; '))}` : ', as it arrives'}.</p></div></div>` : ''}
+        ${deviceOf(z) ? `<div class="set-row"><div class="set-label"><div class="set-name">${esc(deviceOf(z).name)}</div><p class="set-help">${esc(DAC_MODE[deviceOf(z).mode] || deviceOf(z).mode)}: ${esc(DAC_HELP[deviceOf(z).mode] || '')}${deviceOf(z).note ? ' ' + esc(deviceOf(z).note) : ''}</p></div>${appOutput() && appOutput().id === z.output ? '<div class="set-ctl"><button class="btn sm ghost" data-qdev>Settings</button></div>' : ''}</div>` : ''}
         <div class="set-row" id="qsvc"><div class="set-label"><div class="set-name">${esc(svc === 'library' ? 'Your files' : SERVICE_NAMES[svc] || srcName(svc) || 'Source')}</div><p class="set-help muted">${svc === 'library' ? 'Your files play as they are.' : '<span class="spin"></span> Asking for its quality choices…'}</p></div></div>
       </div>
       <div class="dialog-actions">${isOwner() ? '<button class="btn ghost" data-qplay>Play from order</button><button class="btn ghost" data-qout>Output and DSP</button>' : ''}<button class="btn" data-qclose>Close</button></div>`;
@@ -1040,6 +1059,7 @@
     $('[data-qclose]', d).onclick = () => done();
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
     const qp = $('[data-qplay]', d); if (qp) qp.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'playback'); };
+    const qd = $('[data-qdev]', d); if (qd) qd.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'device'); };
     const qo = $('[data-qout]', d); if (qo) qo.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     if (svc === 'library') return;
@@ -1193,7 +1213,7 @@
     if (hs) return hs[1] ? { v: 'sources', arg: { source: hs[1] } } : { v: 'sources' };
     const p = location.pathname.replace(/\/+$/, '') || '/';
     const st = p.match(/^\/settings\/([a-z]+)$/);
-    if (st && SETTINGS_TABS.some(([k]) => k === st[1])) return { v: 'settings', arg: st[1] };
+    if (st && (SETTINGS_TABS.some(([k]) => k === st[1]) || st[1] === 'device')) return { v: 'settings', arg: st[1] };
     let m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
     if (m && (m[2].startsWith('lib-') || uriOf(m[1], m[2]))) return { v: 'item', arg: { kind: m[1], id: m[2] } };
     m = p.match(/^\/home\/([a-z-]+)$/);
@@ -3592,7 +3612,7 @@
             break;
           }
           const info = await api('GET', '/info'); state.info = info;
-          const outs = await api('GET', '/outputs');
+          const outs = await api('GET', '/outputs'); state.outputs = outs;
           const folders = await api('GET', '/library/folders').catch(() => []);
           const shares = await api('GET', '/library/webdav').catch(() => []);
           const drv = await api('GET', '/library/drives').catch(() => ({ providers: [], roots: [] }));
@@ -3606,7 +3626,11 @@
           if (state.view !== 'settings') return;
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS.filter(([k]) => k !== 'remote' || (tunnel && tunnel.available)), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          // This app's own output with a device on it (a USB DAC on the phone): its own tab
+          const myOut = appOutput();
+          const deviceTabName = /android|ios/.test((window.pmDesktop && window.pmDesktop.platform) || '') ? 'This phone' : 'This computer';
+          const settingsTabs = SETTINGS_TABS.flatMap((t) => (t[0] === 'playback' && myOut ? [t, ['device', deviceTabName, 'zone']] : [t]));
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs.filter(([k]) => k !== 'remote' || (tunnel && tunnel.available)), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -3678,7 +3702,14 @@
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
-          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          const dv = myOut && myOut.device;
+          const deviceTab = !dv ? '' : group(esc(dv.name), row('Playing through it', `${esc(DAC_MODE[dv.mode] || dv.mode)}. ${esc(DAC_HELP[dv.mode] || '')}`, '')
+              + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
+              + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''))
+            + group('Settings', row('Preferred mode', 'Auto uses bit-perfect where Android allows it, then exclusive USB, then shared.', `<select class="input" id="dvmode" aria-label="Preferred mode">${['auto', ...(dv.modes || [])].map((m) => `<option value="${esc(m)}" ${((dv.settings && dv.settings.mode) || 'auto') === m ? 'selected' : ''}>${m === 'auto' ? 'Auto' : esc(DAC_MODE[m] || m)}</option>`).join('')}</select>`)
+              + row('Use the DAC’s volume', 'The volume buttons set the DAC itself and the music stays untouched. On by default in bit-perfect and exclusive USB.', `<label><input type="checkbox" id="dvvol" ${!dv.settings || dv.settings.dac_volume !== false ? 'checked' : ''}> On</label>`)
+              + row('Upsample to the DAC’s top rate', `Off plays every song at its own rate, unchanged.${dv.max_rate ? ` On converts everything to ${kHz(dv.max_rate)} kHz first.` : ''}`, `<label><input type="checkbox" id="dvup" ${dv.settings && dv.settings.upsample ? 'checked' : ''}> On</label>`));
+          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${dv ? panel('device', deviceTab) : ''}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           // Fix my files' tags: the list first, then the write
@@ -3695,6 +3726,11 @@
           };
           const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
+          // This phone: the device settings go to the node, which passes them to the app's player
+          const putDev = async (body, what) => { try { const o = await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); state.outputs = (state.outputs || []).map((x) => (x.id === o.id ? o : x)); toast(`${what}: applies from the next song`); renderBar(); } catch (e) { toast(e.message, 'error'); } };
+          const dvm = $('#dvmode'); if (dvm) dvm.onchange = () => putDev({ mode: dvm.value }, 'Mode saved');
+          const dvv = $('#dvvol'); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The DAC’s volume' : 'Volume in the app');
+          const dvu = $('#dvup'); if (dvu) dvu.onchange = () => putDev({ upsample: dvu.checked }, dvu.checked ? 'Upsampling on' : 'Upsampling off');
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
           const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
           const sts = $('#stsave'); if (sts) sts.onclick = async () => { sts.disabled = true; try { await api('POST', '/storage/save'); toast('Saving to your homeserver'); } catch (e) { toast(e.message, 'error'); } render(); };
@@ -4158,6 +4194,7 @@
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
+        api('GET', '/outputs').then((o) => { state.outputs = o; renderBar(); }).catch(() => {});
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
