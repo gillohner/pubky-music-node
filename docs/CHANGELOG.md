@@ -11,6 +11,7 @@ Newest first. Dates are when the change landed on `main`.
   - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
   - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
   - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
 - **Faster reconnects after a short outage** (mn-infra's note on #114's review):
   - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
   - A held change re-checks every second, so it is never refused while the node is already back.
