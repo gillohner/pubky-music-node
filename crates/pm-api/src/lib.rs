@@ -34,6 +34,7 @@ pub mod bandcamp;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
+pub mod devices;
 pub mod discover;
 pub mod downloads;
 pub mod drives;
@@ -92,6 +93,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod vault;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -602,6 +604,22 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
+        .route("/devices", get(devices::list))
+        .route(
+            "/devices/{id}",
+            axum::routing::put(devices::register).delete(devices::forget),
+        )
+        .route(
+            "/devices/{id}/downloads",
+            get(devices::get_downloads).put(devices::put_downloads).layer(
+                axum::extract::DefaultBodyLimit::max(devices::DOWNLOADS_BODY_LIMIT),
+            ),
+        )
+        .route("/vault", get(vault::get))
+        .route("/vault/register", post(vault::register))
+        .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
+        .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
+        .route("/vault/new-key", post(vault::new_key))
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",

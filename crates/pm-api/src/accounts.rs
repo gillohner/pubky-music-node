@@ -127,6 +127,7 @@ pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
 /// Routes a listener may never use (reads included): the owner's settings and data.
 const OWNER_ONLY: &[&str] = &[
     "/people",
+    "/vault",
     "/party",
     "/remote",
     "/homeserver",
@@ -172,6 +173,7 @@ const LISTENER_READS: &[&str] = &[
     "/radio/curated",
     "/podcasts/search",
     "/zones",
+    "/devices",
 ];
 
 /// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
@@ -220,6 +222,10 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     }
     // The page asks who is signed in, and a listener may sign out
     if path == "/me" || path.starts_with("/me/") {
+        return None;
+    }
+    // Their own phones and laptops and what those keep offline (devices.rs checks the owner)
+    if path.starts_with("/devices/") {
         return None;
     }
     Some("listeners' own playlists, favourites and history are not built yet; this change would land in the owner's")

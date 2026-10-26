@@ -224,6 +224,10 @@ only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for
 
 ## Umbrel
 
+**Install:** in umbrelOS, App Store › ⋯ › Community App Stores, add
+`https://github.com/gillohner/pubky-music-umbrel`, open the "Pubky Music" store and install Pubky Music
+Node. That repository mirrors `deploy/umbrel/` (the `umbrel-mirror` workflow; docs/RELEASING.md).
+
 `deploy/umbrel/` is an Umbrel community app store (`umbrel-app-store.yml`, store id `pubky-music`)
 with one app, `pubky-music-node`: the node with its own Pubky homeserver inside, as in the compose
 bundle (PostgreSQL, pubky-homeserver v0.16.2 with Pubky's config wrapper, cloudflared). Umbrel's
@@ -248,12 +252,12 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
   Music uploaded or copied into your homeserver (Library › Add music) is played from the
   homeserver's own files, read-only, with no second copy.
 - **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
-  published as its own repository (asked of the owner); add that repository's URL in Umbrel's
-  App Store › Community App Stores.
-- **The image:** until the first release tag, the app pins an `edge` build by digest
-  (multi-arch, amd64 and arm64); its version is that build's commit. Images are published to
-  `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
-  `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
+  published as its own repository, [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel);
+  add `https://github.com/gillohner/pubky-music-umbrel` in Umbrel's App Store › Community App Stores.
+- **The image:** the app pins a release image by digest (now `0.1.0`), multi-arch (amd64 and
+  arm64). Images are published to `ghcr.io/gillohner/pubky-music-node` by
+  `.github/workflows/release.yml`: every `v*` tag gives `<version>`, `<major.minor>` and `latest`,
+  and every push to main `edge`. A new release updates the pin (docs/RELEASING.md).
 
 ## Reaching the node from outside the house
 
