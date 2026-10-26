@@ -322,6 +322,7 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         return Ok(None);
     };
     let v = token_request(s, &[("grant_type", "refresh_token"), ("refresh_token", &refresh)]).await?;
+    let was = u.access_token.clone();
     u.access_token = v["access_token"]
         .as_str()
         .ok_or_else(|| upstream("no access_token"))?
@@ -330,7 +331,16 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
     if let Some(r) = v["refresh_token"].as_str() {
         u.refresh_token = Some(r.to_string());
     }
-    store_user(s, Some(&u))?;
+    // Only over the session this refresh started from (the vault may have changed it meanwhile)
+    let lib = s.library.lock().expect("library poisoned");
+    let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
+    let raw = serde_json::to_string(&u).expect("serializes");
+    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+        return Ok(lib
+            .get_setting(USER_KEY)?
+            .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+            .map(|c| c.access_token));
+    }
     Ok(Some(u.access_token))
 }
 

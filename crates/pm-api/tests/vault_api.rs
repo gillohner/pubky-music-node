@@ -377,7 +377,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     // Nothing changed: nothing moves
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     let quiet = json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "removed": [],
-        "conflicts": [], "not_usable": [], "not_readable": [], "failed": [], "forgotten": []});
+        "conflicts": [], "not_usable": [], "not_readable": [], "failed": [], "forgotten": [], "details": []});
     assert_eq!(r, quiet);
 
     // A node restored from a backup made without a passphrase would have the sync records and
@@ -427,6 +427,22 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     call(&a1, "POST", "/v1/vault/register").await;
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
     assert_eq!(r["conflicts"], json!(["listenbrainz"]), "{r}");
+    // Settings gets why, each side's account (never a token), and what can be taken
+    assert_eq!(r["details"][0]["service"], "listenbrainz", "{r}");
+    assert_eq!(r["details"][0]["reason"], "other_account");
+    assert_eq!(r["details"][0]["node"]["account"], "b");
+    assert_eq!(r["details"][0]["vault"]["account"], "a");
+    assert_eq!(r["details"][0]["vault"]["written_by"], "node");
+    assert_eq!(r["details"][0]["can_take"], json!(["node", "vault"]));
+    assert!(
+        !r.to_string().contains("lb-1") && !r.to_string().contains("lb-2"),
+        "a token in {r}"
+    );
+    // A take that can't apply is a 409 with the reason; a service the node doesn't keep is a 400
+    let (st, v) = post_json(&a2, "/v1/vault/sync", json!({"service": "tidal", "take": "node"})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let (st, _) = post_json(&a2, "/v1/vault/sync", json!({"service": "plex", "take": "node"})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
     assert_eq!(get(&n2, "listenbrainz.account").as_deref(), Some(lb2));
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(r, quiet, "the vault keeps node 1's");

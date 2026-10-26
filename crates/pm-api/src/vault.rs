@@ -238,8 +238,9 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
         .remember_revocations(&revoked);
-    // No sync may run between the wipe and the node's own copies going aside
-    let _pass = s.vault_pass.lock().await;
+    // No sync may run between the wipe and the node's own copies going aside (one running is
+    // waited for briefly, then this answers 409: try again)
+    let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
     let report = vault
         .sign_out_everywhere(|service, _| async move {
             tracing::info!(service, "vault: sign-in removed");
@@ -248,10 +249,15 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
         .map_err(vault_error)?;
     // The node's own copies go aside now, not at the next sync. The vault is already wiped
     // here, so a sync that fails is reported, not an error
-    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault, None, true).await {
-        Ok(c) => (c.signed_out, None),
-        Err(e) => (Vec::new(), Some(e.to_string())),
-    };
+    let (signed_out_here, cache_error) =
+        match crate::vault_cache::within(crate::vault_cache::sync_held(&s, &vault, None, true)).await {
+            Ok(c) => {
+                // Settings shows this pass, not the one from before the wipe
+                crate::vault_cache::record_last_sync(&s, &c);
+                (c.signed_out, None)
+            }
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
     Ok(Json(Everywhere {
         report,
         revoked_at_service: Vec::new(),
@@ -309,11 +315,21 @@ pub(crate) async fn sync_now(
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
         .remember_revocations(&revoked);
-    Ok(Json(
-        crate::vault_cache::pass(&s, &vault, settle.as_ref().map(|x| (x.service.as_str(), x.take)))
-            .await
-            .map_err(vault_error)?,
-    ))
+    let r = crate::vault_cache::pass(&s, &vault, settle.as_ref().map(|x| (x.service.as_str(), x.take)))
+        .await
+        .map_err(vault_error)?;
+    // A take that couldn't be applied says why, as an error (the pass itself still ran)
+    if let Some(st) = r.settled.as_ref().filter(|st| st.did == "not_applied") {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} wasn't settled: {}",
+                st.service,
+                st.why.clone().unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(Json(r))
 }
 
 /// `POST /v1/vault/new-key {"confirm": true}`: give the node a new vault key, for a node that was

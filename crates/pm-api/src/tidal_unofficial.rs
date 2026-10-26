@@ -567,8 +567,19 @@ fn token_blocking(
         session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib);
-        st.session = Some(fresh.clone());
-        save(&lib, &st);
+        // Only over the session this renewal started from (the vault may have changed it
+        // meanwhile); otherwise the session there now is the one to use
+        if st
+            .session
+            .as_ref()
+            .is_some_and(|c| c.access_token == sess.access_token)
+        {
+            st.session = Some(fresh.clone());
+            save(&lib, &st);
+        } else {
+            tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
+            return Ok(st.session.map(|c| (c, quality)));
+        }
     }
     Ok(Some((fresh, quality)))
 }

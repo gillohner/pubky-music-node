@@ -455,7 +455,18 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         }
     };
     let fresh = session_from(&v, Some(&u))?;
-    store_user(s, Some(&fresh))?;
+    // Only over the session this refresh started from (the vault may have changed it meanwhile)
+    let lib = s.library.lock().expect("library poisoned");
+    let still =
+        |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == u.access_token);
+    let raw = serde_json::to_string(&fresh).expect("session serializes");
+    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+        // Use what is there now, if anything
+        return Ok(lib
+            .get_setting(USER_KEY)?
+            .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+            .map(|c| c.access_token));
+    }
     Ok(Some(fresh.access_token))
 }
 

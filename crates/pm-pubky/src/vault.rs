@@ -37,6 +37,9 @@ pub enum VaultStoreError {
     NeedsVaultGrant,
     #[error("the node's record of signed-out devices: {0}")]
     Local(#[from] std::io::Error),
+    /// The homeserver didn't finish in time (what was being done, and how long it had).
+    #[error("{0}: the homeserver didn't answer in time")]
+    TimedOut(String),
     /// The service refreshed the tokens but they couldn't be written to the vault. `sign_in`
     /// holds them: after a rotation they are the only ones that still work, so the caller uses
     /// them and writes them again later.

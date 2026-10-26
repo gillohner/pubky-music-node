@@ -220,6 +220,28 @@ pub fn lineage_at(lineage: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Store a refreshed session in `key` only while the setting still holds the session the refresh
+/// started from (`still` says so of the stored value), under one library guard. A sign-in the
+/// vault put there meanwhile (pulled, or moved aside) wins, and the refresh is dropped: written
+/// blindly, it would bring back what was signed out, or overwrite a newer sign-in. Returns
+/// whether it was stored.
+pub fn store_refreshed(lib: &Library, key: &str, still: impl Fn(&str) -> bool, new: &str) -> bool {
+    match lib.get_setting(key) {
+        Ok(Some(cur)) if still(&cur) => lib.set_setting(key, new).is_ok(),
+        Ok(_) => {
+            tracing::info!(
+                key,
+                "a refreshed sign-in was dropped: the sign-in changed meanwhile"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(key, "a refreshed sign-in wasn't stored: {e}");
+            false
+        }
+    }
+}
+
 /// The id of the node's sign-in for a service, made the first time it is asked for (time 0: the
 /// sign-in was already there, nobody knows since when).
 fn local_lineage(lib: &Library, service: &str) -> Result<String, String> {
@@ -269,6 +291,56 @@ pub struct CacheReport {
     pub failed: Vec<String>,
     /// Lost on this node without a sign-out (its app for the service changed): left in the vault.
     pub forgotten: Vec<String>,
+    /// What Settings shows for each service in `conflicts` or `not_usable`: never a token.
+    pub details: Vec<Detail>,
+    /// What a `take` did (`POST /v1/vault/sync {service, take}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled: Option<Settled>,
+}
+
+/// One copy of a sign-in, as Settings names it.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct CopyInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// When it was signed in (Unix seconds), where known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in_at: Option<u64>,
+    /// `node` or `another client` (a phone, the desktop app), for the vault's copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_by: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub way: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+}
+
+/// A service in `conflicts` or `not_usable`: why, each side, and which side can be taken.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Detail {
+    pub service: String,
+    /// `other_account` (two different accounts), `other_app` (made with an app this node doesn't
+    /// have), `other_client` (written by a client that isn't a node), `both_changed` (one account,
+    /// two new sign-ins).
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<CopyInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault: Option<CopyInfo>,
+    /// `node` and/or `vault`: what `take` can choose.
+    pub can_take: Vec<&'static str>,
+}
+
+/// What a `take` did.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Settled {
+    pub service: String,
+    /// `pushed`, `pulled`, `failed` (the write didn't go through; try again) or `not_applied`.
+    pub did: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 // ---- what travels ----
@@ -324,22 +396,25 @@ pub fn carried(lib: &Library, b: &Bridge) -> Result<Option<Map<String, Value>>, 
 
 /// Put what travels into the node's settings: whole values replace the setting, members replace
 /// those members and leave the rest of the object. What the copy doesn't have is removed.
-pub fn apply(lib: &Library, b: &Bridge, travels: &Map<String, Value>) {
+/// A write that fails is an error: the caller then records nothing, so the next pass doesn't
+/// take a half-applied copy for the node's own.
+pub fn apply(lib: &Library, b: &Bridge, travels: &Map<String, Value>) -> Result<(), String> {
+    let e = |e: pm_library::LibraryError| e.to_string();
     for c in b.carry {
         match &c.part {
             Part::Whole => match travels.get(c.key) {
                 Some(Value::String(v)) => {
-                    let _ = lib.set_setting(c.key, v);
+                    lib.set_setting(c.key, v).map_err(e)?;
                 }
                 Some(other) => {
-                    let _ = lib.set_setting(c.key, &other.to_string());
+                    lib.set_setting(c.key, &other.to_string()).map_err(e)?;
                 }
                 None => {
-                    let _ = lib.delete_setting(c.key);
+                    lib.delete_setting(c.key).map_err(e)?;
                 }
             },
             Part::Members(ms) => {
-                let raw = lib.get_setting(c.key).ok().flatten();
+                let raw = lib.get_setting(c.key).map_err(e)?;
                 let mut obj = raw
                     .as_ref()
                     .and_then(|r| object_of(&Value::String(r.clone())))
@@ -356,30 +431,35 @@ pub fn apply(lib: &Library, b: &Bridge, travels: &Map<String, Value>) {
                     }
                 }
                 if obj.is_empty() {
-                    let _ = lib.delete_setting(c.key);
+                    lib.delete_setting(c.key).map_err(e)?;
                 } else {
-                    let _ = lib.set_setting(c.key, &Value::Object(obj).to_string());
+                    lib.set_setting(c.key, &Value::Object(obj).to_string())
+                        .map_err(e)?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Signed out elsewhere: what travels moves to `vault.signed_out.<key>` (kept, not used) and
 /// goes from the setting.
-pub fn move_aside(lib: &Library, b: &Bridge) {
-    let Ok(Some(travels)) = carried(lib, b) else {
-        return;
+/// The copy aside is written first: a failure leaves the sign-in where it was, never gone.
+pub fn move_aside(lib: &Library, b: &Bridge) -> Result<(), String> {
+    let Some(travels) = carried(lib, b)? else {
+        return Ok(());
     };
-    let _ = lib.delete_setting(&lineage_key(b.service));
     for (key, v) in &travels {
         let aside = match v {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        let _ = lib.set_setting(&format!("{SIGNED_OUT_PREFIX}{key}"), &aside);
+        lib.set_setting(&format!("{SIGNED_OUT_PREFIX}{key}"), &aside)
+            .map_err(|e| e.to_string())?;
     }
-    apply(lib, b, &Map::new());
+    apply(lib, b, &Map::new())?;
+    let _ = lib.delete_setting(&lineage_key(b.service));
+    Ok(())
 }
 
 /// What the node noted about the sign-in it had ([`Bridge::reset`]) doesn't apply to one it
@@ -790,8 +870,39 @@ fn app_for(b: &Bridge, travels: Option<&Map<String, Value>>, node_app: Option<St
 
 /// One pass over every bridge, waiting for any other pass (or "Sign out everywhere") to end.
 pub async fn sync(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
-    let _pass = s.vault_pass.lock().await;
-    sync_held(s, vault, None, false).await
+    let _pass = take_pass(s).await?;
+    within(sync_held(s, vault, None, false)).await
+}
+
+/// The longest one pass may take: the homeserver client has no timeouts of its own, and a pass
+/// that hangs would hold up "Sync now" and "Sign out everywhere".
+pub const PASS_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+/// The longest a request waits for a pass that is running.
+pub const WAIT_FOR_PASS: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`NodeState::vault_pass`], waited for at most [`WAIT_FOR_PASS`] (then 409: a sync is running).
+pub(crate) async fn take_pass(s: &NodeState) -> Result<tokio::sync::MutexGuard<'_, ()>, VaultStoreError> {
+    tokio::time::timeout(WAIT_FOR_PASS, s.vault_pass.lock())
+        .await
+        .map_err(|_| VaultStoreError::Busy("the vault (a sync is running)".into()))
+}
+
+/// `f`, given at most [`PASS_FOR`].
+pub(crate) async fn within<T>(
+    f: impl std::future::Future<Output = Result<T, VaultStoreError>>,
+) -> Result<T, VaultStoreError> {
+    tokio::time::timeout(PASS_FOR, f)
+        .await
+        .map_err(|_| VaultStoreError::TimedOut("syncing the sign-ins".into()))?
+}
+
+/// Keep a pass's report for Settings (`GET /v1/vault`'s `last_sync`).
+pub(crate) fn record_last_sync(s: &NodeState, r: &CacheReport) {
+    let lib = s.library.lock().expect("library poisoned");
+    let _ = lib.set_setting(
+        LAST_SYNC_KEY,
+        &json!({ "at": pm_library::db::now_unix(), "report": r }).to_string(),
+    );
 }
 
 /// [`sync`] with [`NodeState::vault_pass`] already held. `take` settles one service's conflict
@@ -893,16 +1004,104 @@ pub(crate) async fn sync_held(
         if what == Do::Remove && seen.as_ref().is_some_and(|x| x.app != node_app) {
             what = Do::Forget;
         }
+        // Which side can be taken, and what Settings shows, for a service in conflict or not
+        // usable here
+        let can_take: Vec<&'static str> = {
+            let mut v = Vec::new();
+            if mine.is_some() {
+                v.push("node");
+            }
+            // Only a node's copy made with this node's app: anything else would swap a working
+            // sign-in for one this node can't use
+            if their_side.as_ref().is_some_and(|t| t.from_a_node && t.our_app) {
+                v.push("vault");
+            }
+            v
+        };
+        let reason = |t: Option<&VaultSide>| -> &'static str {
+            match t {
+                Some(t) if !t.from_a_node => "other_client",
+                Some(t) if !t.our_app => "other_app",
+                Some(t)
+                    if t.side.account.is_some()
+                        && my_side.as_ref().is_some_and(|m| m.account == t.side.account) =>
+                {
+                    "both_changed"
+                }
+                _ => "other_account",
+            }
+        };
         // The person settles it
+        let mut taking = None;
         if let Some((svc, how)) = take {
-            if svc == b.service && matches!(what, Do::Conflict | Do::NotUsable) {
-                what = match how {
-                    Take::Node if mine.is_some() => Do::Push,
-                    Take::Vault if their_side.as_ref().is_some_and(|t| t.from_a_node) => Do::Pull,
-                    _ => what,
+            if svc == b.service {
+                let side = match how {
+                    Take::Node => "node",
+                    Take::Vault => "vault",
                 };
+                if !matches!(what, Do::Conflict | Do::NotUsable) {
+                    report.settled = Some(Settled {
+                        service: service.clone(),
+                        did: "not_applied",
+                        why: Some("there is no conflict to settle for this service now".into()),
+                    });
+                } else if !can_take.contains(&side) {
+                    let why = match how {
+                        Take::Node => "this node has no sign-in for it",
+                        Take::Vault => match reason(their_side.as_ref()) {
+                            "other_client" => "the vault's copy was written by a client that isn't a node",
+                            "other_app" => {
+                                "the vault's copy was made with another app; sign in on this node instead"
+                            }
+                            _ => "the vault has no copy this node can take",
+                        },
+                    };
+                    report.settled = Some(Settled {
+                        service: service.clone(),
+                        did: "not_applied",
+                        why: Some(why.into()),
+                    });
+                } else {
+                    what = if side == "node" { Do::Push } else { Do::Pull };
+                    taking = Some(side);
+                }
             }
         }
+        let settled_as = |did: &'static str| Settled {
+            service: b.service.to_string(),
+            did,
+            why: None,
+        };
+        let detail = || Detail {
+            service: b.service.to_string(),
+            reason: reason(their_side.as_ref()),
+            node: mine.as_ref().map(|m| {
+                let si = sign_in_for(b, m, None, None, "");
+                CopyInfo {
+                    account: account(m),
+                    name: si.user.as_ref().and_then(|u| u.name.clone()),
+                    signed_in_at: lineage.as_deref().map(lineage_at).filter(|t| *t > 0),
+                    expires_at: si.expires_at,
+                    ..CopyInfo::default()
+                }
+            }),
+            vault: theirs.as_ref().map(|o| CopyInfo {
+                account: o.sign_in.user.as_ref().map(|u| u.id.clone()),
+                name: o.sign_in.user.as_ref().and_then(|u| u.name.clone()),
+                signed_in_at: node_lineage(&o.sign_in)
+                    .as_deref()
+                    .map(lineage_at)
+                    .filter(|t| *t > 0),
+                written_by: Some(if node_settings(&o.sign_in).is_some() {
+                    "node"
+                } else {
+                    "another client"
+                }),
+                way: o.sign_in.way.clone(),
+                expires_at: o.sign_in.expires_at,
+            }),
+            can_take: can_take.clone(),
+        };
         let record = |lib: &Library,
                       revision: u64,
                       travels: &Map<String, Value>,
@@ -977,11 +1176,22 @@ pub(crate) async fn sync_held(
                         } else {
                             report.pushed.push(service);
                         }
+                        if taking.is_some() {
+                            report.settled = Some(settled_as("pushed"));
+                        }
                     }
-                    Ok(None) => report.failed.push(service),
+                    Ok(None) => {
+                        report.failed.push(service);
+                        if taking.is_some() {
+                            report.settled = Some(settled_as("failed"));
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(service = b.service, "vault: not written this time: {e}");
                         report.failed.push(service);
+                        if taking.is_some() {
+                            report.settled = Some(settled_as("failed"));
+                        }
                     }
                 }
             }
@@ -993,7 +1203,14 @@ pub(crate) async fn sync_held(
                 if carried(&lib, b).ok().flatten().map(|m| hash(&m)) != mine.as_ref().map(hash) {
                     continue;
                 }
-                apply(&lib, b, &travels);
+                if let Err(e) = apply(&lib, b, &travels) {
+                    tracing::warn!(service = b.service, "vault: not taken this time: {e}");
+                    report.failed.push(service);
+                    if taking.is_some() {
+                        report.settled = Some(settled_as("failed"));
+                    }
+                    continue;
+                }
                 reset_after_pull(&lib, b);
                 let lin = node_lineage(&o.sign_in);
                 match &lin {
@@ -1006,13 +1223,20 @@ pub(crate) async fn sync_held(
                 }
                 record(&lib, o.sign_in.revision, &travels, lin, false);
                 report.pulled.push(service);
+                if taking.is_some() {
+                    report.settled = Some(settled_as("pulled"));
+                }
             }
             Do::MoveAside => {
                 let lib = s.library.lock().expect("library poisoned");
                 if carried(&lib, b).ok().flatten().map(|m| hash(&m)) != mine.as_ref().map(hash) {
                     continue;
                 }
-                move_aside(&lib, b);
+                if let Err(e) = move_aside(&lib, b) {
+                    tracing::warn!(service = b.service, "vault: not moved aside this time: {e}");
+                    report.failed.push(service);
+                    continue;
+                }
                 let _ = lib.delete_setting(&synced_key(b.service));
                 report.signed_out.push(service);
             }
@@ -1046,9 +1270,13 @@ pub(crate) async fn sync_held(
                         record(&lib, o.sign_in.revision, m, lineage.clone(), true);
                     }
                 }
+                report.details.push(detail());
                 report.conflicts.push(service)
             }
-            Do::NotUsable => report.not_usable.push(service),
+            Do::NotUsable => {
+                report.details.push(detail());
+                report.not_usable.push(service)
+            }
         }
     }
     Ok(report)
@@ -1097,15 +1325,14 @@ pub async fn pass(
     vault: &Vault<'_>,
     take: Option<(&str, Take)>,
 ) -> Result<CacheReport, VaultStoreError> {
-    let _pass = s.vault_pass.lock().await;
-    vault.touch(&s.name).await?;
-    vault.share_with_trusted().await?;
-    let r = sync_held(s, vault, take, false).await?;
-    let lib = s.library.lock().expect("library poisoned");
-    let _ = lib.set_setting(
-        LAST_SYNC_KEY,
-        &json!({ "at": pm_library::db::now_unix(), "report": &r }).to_string(),
-    );
+    let _pass = take_pass(s).await?;
+    let r = within(async {
+        vault.touch(&s.name).await?;
+        vault.share_with_trusted().await?;
+        sync_held(s, vault, take, false).await
+    })
+    .await?;
+    record_last_sync(s, &r);
     Ok(r)
 }
 
@@ -1492,10 +1719,50 @@ mod tests {
         .unwrap();
         let mut travels = Map::new();
         travels.insert("lastfm.session".into(), json!({"key": "new", "user": "gil"}));
-        apply(&l, b, &travels);
+        apply(&l, b, &travels).unwrap();
         reset_after_pull(&l, b);
         let v: Value = serde_json::from_str(&l.get_setting("lastfm.session").unwrap().unwrap()).unwrap();
         assert_eq!(v, json!({"key": "new", "user": "gil", "submit": false}));
+    }
+
+    #[test]
+    fn a_refresh_is_stored_only_over_the_session_it_came_from() {
+        let l = lib();
+        l.set_setting("spotify.user", r#"{"access_token":"x1"}"#).unwrap();
+        let from_x1 = |cur: &str| cur.contains("\"x1\"");
+        // A pull put another sign-in there meanwhile: the late refresh of x1 is dropped
+        l.set_setting("spotify.user", r#"{"access_token":"y1"}"#).unwrap();
+        assert!(!store_refreshed(
+            &l,
+            "spotify.user",
+            from_x1,
+            r#"{"access_token":"x2"}"#
+        ));
+        assert_eq!(
+            l.get_setting("spotify.user").unwrap().as_deref(),
+            Some(r#"{"access_token":"y1"}"#)
+        );
+        // Moved aside meanwhile (gone): not brought back
+        l.delete_setting("spotify.user").unwrap();
+        assert!(!store_refreshed(
+            &l,
+            "spotify.user",
+            from_x1,
+            r#"{"access_token":"x2"}"#
+        ));
+        assert_eq!(l.get_setting("spotify.user").unwrap(), None);
+        // Still the session it started from: stored
+        l.set_setting("spotify.user", r#"{"access_token":"x1"}"#).unwrap();
+        assert!(store_refreshed(
+            &l,
+            "spotify.user",
+            from_x1,
+            r#"{"access_token":"x2"}"#
+        ));
+        assert_eq!(
+            l.get_setting("spotify.user").unwrap().as_deref(),
+            Some(r#"{"access_token":"x2"}"#)
+        );
     }
 
     #[test]
@@ -1529,7 +1796,7 @@ mod tests {
             )
             .unwrap();
         assert!(carried(&other, b).unwrap().is_none(), "no session: not signed in");
-        apply(&other, b, &m);
+        apply(&other, b, &m).unwrap();
         let v: Value =
             serde_json::from_str(&other.get_setting("tidal.unofficial").unwrap().unwrap()).unwrap();
         assert_eq!(v["enabled"], false);
@@ -1537,7 +1804,7 @@ mod tests {
         assert_eq!(v["health"]["detail"], "y");
         assert_eq!(v["session"]["access_token"], "a2");
         // Moved aside: the session goes, the rest stays
-        move_aside(&other, b);
+        move_aside(&other, b).unwrap();
         let v: Value =
             serde_json::from_str(&other.get_setting("tidal.unofficial").unwrap().unwrap()).unwrap();
         assert!(v.get("session").is_none());
@@ -1567,7 +1834,7 @@ mod tests {
         // A copy without the cookie (signed out elsewhere) removes it here
         let mut gone = m.clone();
         gone.remove("bandcamp.identity");
-        apply(&l, b, &gone);
+        apply(&l, b, &gone).unwrap();
         assert_eq!(l.get_setting("bandcamp.identity").unwrap(), None);
     }
 
