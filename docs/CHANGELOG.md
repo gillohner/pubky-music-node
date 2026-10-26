@@ -8,6 +8,10 @@ Newest first. Dates are when the change landed on `main`.
   - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
   - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
   - Sources and a playlist song's "Play this song from" menu use the same order.
+- **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
+  - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
+  - Listeners may download what they may play. The homeserver's files come through the node.
+  - Transcodes use ffmpeg where the node has it (501 otherwise; the original always works).
 - **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:
   - a random data key per blob, wrapped to each client's X25519 key (pubky-noise's primitives: X25519, HKDF-SHA-256, XChaCha20-Poly1305);
   - a device list in `index.json`, whose entries prove themselves with the pubky SDK's grant proofs (Ring's grant plus a custom proof over the client key; no app holds the identity secret);

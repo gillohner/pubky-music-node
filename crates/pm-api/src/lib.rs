@@ -35,6 +35,7 @@ pub mod bundled;
 pub mod dash;
 pub mod deezer;
 pub mod discover;
+pub mod downloads;
 pub mod drives;
 pub mod events;
 pub mod favourites;
@@ -234,6 +235,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/backup/schedule/run", post(backup::run_schedule))
         .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
+        .route("/library/tracks/{id}/download", get(downloads::download))
         .route("/library/search", get(search))
         .route("/library/loudness", get(loudness::get))
         .route("/library/loudness/measure", post(loudness::measure))
