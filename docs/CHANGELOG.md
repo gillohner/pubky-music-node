@@ -4,19 +4,6 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
-- **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
-- **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
-- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
-- **Faster reconnects after a short outage** (mn-infra's note on #114's review):
-  - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
-  - A held change re-checks every second, so it is never refused while the node is already back.
-  - The next retry time is on `#conn` as `data-retry-at`, for tests.
-
-- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
-- **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
-
-## 2026-10-25
-
 - **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
   - After every sign-in, at startup and every 15 minutes, the node's sign-ins for TIDAL, TIDAL full tracks, Spotify, Qobuz, Bandcamp, Last.fm, ListenBrainz and Jamendo are kept in step with the person's vault, one pass at a time. These are the person's own sign-ins only, not the node's apps or keys, which the admin sets once (ADR 0016).
   - The two sides are compared by content. A sign-in only on the node moves in once; one only in the vault fills the node. After that, whichever side changed since the last sync wins.
@@ -30,6 +17,19 @@ Newest first. Dates are when the change landed on `main`.
   - Media servers (usually a server in that house), drives, gPodder (per-node cursors) and SoundCloud (its token sits in the admin's client setting) stay on the node for now. So do librespot's, Soloist's and yt-dlp's machine state.
   - `POST /v1/vault/sync` runs it now.
   - Tested with two nodes of one person on a real homeserver: migrate, take, push and pull, a local sign-out, a first-contact conflict, and sign out everywhere. The rules are unit-tested one by one.
+- **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
+- **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
+- **Faster reconnects after a short outage** (mn-infra's note on #114's review):
+  - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
+  - A held change re-checks every second, so it is never refused while the node is already back.
+  - The next retry time is on `#conn` as `data-retry-at`, for tests.
+
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
+- **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
+
+## 2026-10-25
+
 - **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.
   - CI checks the image's encoders and transcodes a real file to each format.
 - **Each device's downloads** (STEWARD-DOWNLOADS.md): `/v1/devices` registers a person's phones and laptops, and `/v1/devices/{id}/downloads` is what each keeps offline (songs, albums, playlists, favourites) and has.
