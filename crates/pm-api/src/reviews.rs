@@ -20,6 +20,7 @@ fn target(r: &ReviewRef) -> FavouriteRef {
         track_id: r.track_id,
         album_id: r.album_id,
         artist_id: r.artist_id,
+        at: None,
     }
 }
 

@@ -163,6 +163,41 @@ pub(crate) fn set(lib: &Library, r: &FavouriteRef, on: bool) -> Result<String, A
     Ok(uri.to_url())
 }
 
+/// [`set`] for a change a device made at `at` (Unix seconds) and sends later (an offline heart).
+/// For a published favourite, a clear older than the heart the node has is skipped (the song was
+/// hearted again since), and a new heart keeps the time it was made. Node-only favourites have
+/// no time: the last change to arrive wins. Returns the key and whether it is a favourite now.
+pub(crate) fn set_at(
+    lib: &Library,
+    r: &FavouriteRef,
+    on: bool,
+    at: Option<i64>,
+) -> Result<(String, bool), ApiError> {
+    if let Some(at) = at {
+        if unidentified(lib, r)?.is_none() {
+            let uri = canonical_for(lib, r)?;
+            let url = uri.to_url();
+            let live = lib.favourite_by_uri(&url)?.filter(|f| !f.deleted);
+            match (on, live) {
+                // Hearted after the second the clear was made in (within it, the clear wins)
+                (false, Some(f)) if f.created_at >= at.saturating_add(1).saturating_mul(1_000_000) => {
+                    return Ok((url, true))
+                }
+                (true, None) => {
+                    let f = Favourite {
+                        created_at: at.clamp(0, pm_library::db::now_unix()) * 1_000_000,
+                        ..Favourite::new(uri)
+                    };
+                    lib.add_favourite(&f.id, &url, f.created_at)?;
+                    return Ok((url, true));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((set(lib, r, on)?, on))
+}
+
 /// Node-only favourites identified since become ordinary ones (synced with the next sync).
 fn promote_local(lib: &Library) -> Result<(), ApiError> {
     let ids = local_ids(lib);
@@ -282,19 +317,16 @@ pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
     Json(r): Json<FavouriteRef>,
 ) -> ApiResult<FavouriteChanged> {
-    let uri = set(&s.library.lock().expect("library poisoned"), &r, true)?;
+    let (uri, favourite) = set_at(&s.library.lock().expect("library poisoned"), &r, true, r.at)?;
     s.notify_library();
-    Ok(Json(FavouriteChanged { uri, favourite: true }))
+    Ok(Json(FavouriteChanged { uri, favourite }))
 }
 
 pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
     Query(r): Query<FavouriteRef>,
 ) -> ApiResult<FavouriteChanged> {
-    let uri = set(&s.library.lock().expect("library poisoned"), &r, false)?;
+    let (uri, favourite) = set_at(&s.library.lock().expect("library poisoned"), &r, false, r.at)?;
     s.notify_library();
-    Ok(Json(FavouriteChanged {
-        uri,
-        favourite: false,
-    }))
+    Ok(Json(FavouriteChanged { uri, favourite }))
 }

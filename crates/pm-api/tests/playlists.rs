@@ -309,6 +309,77 @@ async fn playlist_lifecycle() {
     assert_eq!(f["favourite"], true);
     let uri = f["uri"].as_str().unwrap().to_string();
     assert!(uri.starts_with("https://musicbrainz.org/"), "{uri}");
+    // A clear made offline before the heart was set doesn't undo it; a later one does
+    let (st, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}&at=1000"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], true, "an older clear is skipped");
+    let (_, all) = call(&app, "GET", "/v1/favourites", None).await;
+    assert!(all["uris"].as_array().unwrap().iter().any(|x| *x == uri.as_str()));
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 5;
+    let (st, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}&at={later}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], false);
+    // A heart made offline keeps its time, so a clear from before it is skipped too
+    let (st, f) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": tagged_id, "at": 2000})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], true);
+    let (_, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}&at=1500"),
+        None,
+    )
+    .await;
+    assert_eq!(f["favourite"], true);
+    // Hearted at T0 (2000), cleared at T1.5 and hearted again at T2 (both now): a clear made
+    // offline at T1 (3000) doesn't undo the T2 heart
+    let (_, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(f["favourite"], false);
+    let (_, f) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": tagged_id})),
+    )
+    .await;
+    assert_eq!(f["favourite"], true);
+    let (st, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}&at=3000"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], true, "the heart set again after the clear stays");
     if let Some(u) = untagged {
         let (st, e) = call(
             &app,
