@@ -271,6 +271,10 @@ pub struct FavouriteRef {
     pub album_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_id: Option<i64>,
+    /// When the change was made (Unix seconds), for a change a device made offline and sends
+    /// later (`PUT`/`DELETE /v1/favourites`): a clear older than the node's heart is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
 }
 
 impl FavouriteRef {

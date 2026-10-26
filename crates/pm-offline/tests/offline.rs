@@ -16,6 +16,12 @@ struct Seen {
     ranges: Vec<(i64, Option<String>)>,
     manifests: Vec<Value>,
     devices: Vec<Value>,
+    /// The node's id in `/v1/info` ("n1" when empty).
+    node_id: String,
+    /// Added to the first byte a 206 says it starts at (a node that answers another range).
+    range_shift: usize,
+    /// What `/v1/playlists/{id}` answers instead of the playlist.
+    playlist_status: Option<u16>,
 }
 
 type Fake = Arc<Mutex<Seen>>;
@@ -82,9 +88,14 @@ async fn download(State(f): State<Fake>, Path(id): Path<i64>, h: HeaderMap) -> R
             .trim_end_matches('-')
             .parse()
             .unwrap();
+        let said = from + f.lock().unwrap().range_shift;
+        let len = body.len();
         return (
             StatusCode::PARTIAL_CONTENT,
-            [(header::ETAG, etag)],
+            [
+                (header::ETAG, etag),
+                (header::CONTENT_RANGE, format!("bytes {said}-{}/{len}", len - 1)),
+            ],
             body[from..].to_vec(),
         )
             .into_response();
@@ -109,7 +120,13 @@ fn fake_node(f: Fake) -> Router {
         .route("/app.js", get(|| async { "console.log('app')" }))
         .route(
             "/v1/info",
-            get(|| async { Json(json!({"id": "n1", "name": "Home", "version": "0.1.0"})) }),
+            get(|State(f): State<Fake>| async move {
+                let id = match f.lock().unwrap().node_id.as_str() {
+                    "" => "n1".to_string(),
+                    id => id.to_string(),
+                };
+                Json(json!({"id": id, "name": "Home", "version": "0.1.0"}))
+            }),
         )
         .route(
             "/v1/me",
@@ -136,8 +153,13 @@ fn fake_node(f: Fake) -> Router {
         )
         .route(
             "/v1/playlists/{id}",
-            get(|Path(id): Path<String>| async move {
+            get(|State(f): State<Fake>, Path(id): Path<String>| async move {
+                if let Some(code) = f.lock().unwrap().playlist_status {
+                    let code = StatusCode::from_u16(code).unwrap();
+                    return (code, Json(json!({"error": "no"}))).into_response();
+                }
                 Json(json!({"summary": {"id": id, "name": "Mix"}, "tracks": [{"id": 2}, {"id": 99}]}))
+                    .into_response()
             }),
         )
         .route(
@@ -222,7 +244,7 @@ async fn a_device_syncs_then_plays_offline() {
             s.plays,
             [json!({"track_id": 1, "zone": "offline", "played_at": 100})]
         );
-        assert_eq!(s.hearts_off, ["track_id=1"]);
+        assert_eq!(s.hearts_off, ["track_id=1&at=102"], "with the time of the change");
         assert_eq!(s.devices, [json!({"name": "Pixel 8", "kind": "android"})]);
         let last = s.manifests.last().unwrap();
         assert_eq!(
@@ -354,4 +376,191 @@ async fn an_unreachable_node_keeps_the_queue() {
         Err(pm_offline::SyncError::Unreachable(_))
     ));
     assert_eq!(store.queued().len(), 1);
+}
+
+fn opts() -> SyncOptions {
+    SyncOptions {
+        name: "Laptop".into(),
+        kind: "desktop".into(),
+    }
+}
+
+#[tokio::test]
+async fn another_node_gets_nothing_from_this_store() {
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let node = Node::new(&base, "tok").unwrap();
+    pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(
+        store.index().node_id,
+        "n1",
+        "the first sync ties the store to its node"
+    );
+    store.push(Event::Play { track_id: 1, at: 5 }).unwrap();
+    store
+        .set_keep(Keep {
+            albums: vec![7],
+            ..Default::default()
+        })
+        .unwrap();
+
+    // The same address now answers as another node (a friend's, or a reinstall)
+    let before = {
+        let mut s = seen.lock().unwrap();
+        s.node_id = "n2".into();
+        (s.manifests.len(), s.devices.len(), s.plays.len())
+    };
+    let r = pm_offline::sync(&store, &node, &opts()).await;
+    assert!(
+        matches!(&r, Err(pm_offline::SyncError::OtherNode { kept, node }) if kept == "n1" && node == "n2"),
+        "{r:?}"
+    );
+    assert!(matches!(
+        pm_offline::flush(&store, &node).await,
+        Err(pm_offline::SyncError::OtherNode { .. })
+    ));
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(
+            (s.manifests.len(), s.devices.len(), s.plays.len()),
+            before,
+            "no plays, hearts, keeps or device"
+        );
+    }
+    assert_eq!(store.queued().len(), 1, "kept for its own node");
+    assert_eq!(
+        pm_offline::node_dir(dir.path(), "n2"),
+        dir.path().join("n2"),
+        "the app keeps each node in its own folder"
+    );
+}
+
+#[tokio::test]
+async fn a_download_is_kept_only_when_whole() {
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .set_keep(Keep {
+            tracks: vec![1, 2],
+            ..Default::default()
+        })
+        .unwrap();
+    // Song 2 stopped after 300 bytes, and the node answers the resume with another range
+    std::fs::write(dir.path().join("files/2.flac.part"), &song(2)[..300]).unwrap();
+    std::fs::write(dir.path().join("files/2.flac.etag"), "\"e2\"").unwrap();
+    seen.lock().unwrap().range_shift = 10;
+    let node = Node::new(&base, "tok").unwrap();
+    let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(r.downloaded, [1]);
+    assert_eq!(r.failed.len(), 1, "{:?}", r.failed);
+    assert_eq!(r.failed[0].0, 2);
+    assert!(!dir.path().join("files/2.flac").exists(), "never a corrupt file");
+    assert!(!store.index().tracks.contains_key(&2));
+
+    // Next time the whole file comes again
+    seen.lock().unwrap().range_shift = 0;
+    let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(r.downloaded, [2]);
+    assert_eq!(std::fs::read(dir.path().join("files/2.flac")).unwrap(), song(2));
+
+    // A file the system cleared is no longer reported, so the node asks for it again
+    std::fs::remove_file(dir.path().join("files/1.flac")).unwrap();
+    let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(r.downloaded, [1]);
+    let s = seen.lock().unwrap();
+    let first = &s.manifests[s.manifests.len() - 2];
+    let have: Vec<i64> = first["have"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["track_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(have, [2]);
+    assert_eq!(std::fs::read(dir.path().join("files/1.flac")).unwrap(), song(1));
+}
+
+#[tokio::test]
+async fn a_kept_playlist_goes_only_when_deleted() {
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .set_keep(Keep {
+            playlists: vec!["p1".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    let node = Node::new(&base, "tok").unwrap();
+    pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert!(store.index().playlists.contains_key("p1"));
+    for code in [500, 401, 403] {
+        seen.lock().unwrap().playlist_status = Some(code);
+        pm_offline::sync(&store, &node, &opts()).await.unwrap();
+        assert!(store.index().playlists.contains_key("p1"), "kept after {code}");
+    }
+    seen.lock().unwrap().playlist_status = Some(404);
+    pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert!(
+        store.index().playlists.is_empty(),
+        "gone when deleted on the node"
+    );
+}
+
+/// A raw request, to send any `Host` and path.
+async fn raw_get(addr: std::net::SocketAddr, path: &str, host: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).await.unwrap();
+    out
+}
+
+#[tokio::test]
+async fn the_local_server_answers_only_itself_and_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    std::fs::write(dir.path().join("ui/index.html"), "<html>the web UI</html>").unwrap();
+    std::fs::write(dir.path().join("ui/app.js"), "console.log('app')").unwrap();
+    std::fs::write(dir.path().join("ui/other.txt"), "not a UI file").unwrap();
+    store.push(Event::Play { track_id: 1, at: 1 }).unwrap();
+    let (addr, _task) = pm_offline::server::serve(store).await.unwrap();
+    let me = format!("127.0.0.1:{}", addr.port());
+
+    let ok = raw_get(addr, "/app.js", &me).await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    assert!(ok.ends_with("console.log('app')"));
+    let local = raw_get(addr, "/v1/info", &format!("localhost:{}", addr.port())).await;
+    assert!(local.starts_with("HTTP/1.1 200"), "{local}");
+    // Only the UI's own files; anything else is the page
+    for path in [
+        "/other.txt",
+        "/../queue.jsonl",
+        "/C:queue.jsonl",
+        "/%2e%2e/index.json",
+        "/ui/app.js",
+    ] {
+        let r = raw_get(addr, path, &me).await;
+        assert!(r.ends_with("<html>the web UI</html>"), "{path}: {r}");
+    }
+    // A page that rebinds its own name to 127.0.0.1
+    for path in ["/v1/offline", "/v1/me", "/"] {
+        let r = raw_get(addr, path, &format!("evil.example:{}", addr.port())).await;
+        assert!(r.starts_with("HTTP/1.1 403"), "{path}: {r}");
+    }
+    let posted = reqwest::Client::new()
+        .post(format!("http://{me}/v1/library/history"))
+        .header(header::ORIGIN, "https://evil.example")
+        .json(&json!({"track_id": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), 403);
 }

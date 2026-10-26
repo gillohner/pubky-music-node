@@ -34,6 +34,10 @@ pub struct Library {
     conn: Mutex<Connection>,
 }
 
+/// How far ahead of the node a device's clock may run for [`Library::record_play_at`] to keep a
+/// play at the device's time (seconds).
+pub const PLAY_CLOCK_SLACK: i64 = 3600;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LibraryStats {
     pub tracks: u64,
@@ -1562,12 +1566,23 @@ impl Library {
         Ok(conn.last_insert_rowid())
     }
 
-    /// A play at a given time (a device that played offline reports it later). Times in the
-    /// future count as now. The same track, zone and time again is not recorded twice (a resent
-    /// report); returns whether it was new.
+    /// A play at a given time (a device that played offline reports it later). The same track,
+    /// zone and time again is not recorded twice (a resent report), checked on the device's own
+    /// time before anything is changed; returns whether it was new. A device clock up to
+    /// [`PLAY_CLOCK_SLACK`] ahead is kept as it is, so its resent reports still match; a time
+    /// further in the future counts as now.
     pub fn record_play_at(&self, track: TrackId, zone: Option<&str>, at: i64) -> Result<bool> {
-        let at = at.min(now_unix());
         let conn = self.lock();
+        let seen: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plays WHERE track_id = ?1 AND zone IS ?2 AND played_at = ?3)",
+            params![track.0, zone, at],
+            |r| r.get(0),
+        )?;
+        if seen {
+            return Ok(false);
+        }
+        let now = now_unix();
+        let at = if at > now + PLAY_CLOCK_SLACK { now } else { at };
         let n = conn.execute(
             "INSERT INTO plays(track_id, zone, played_at) SELECT ?1, ?2, ?3
              WHERE NOT EXISTS (SELECT 1 FROM plays WHERE track_id = ?1 AND zone IS ?2 AND played_at = ?3)",
@@ -2946,13 +2961,18 @@ mod play_history_tests {
         assert!(lib.record_play_at(a, Some("app"), then).unwrap());
         // The same report again (the answer got lost): not a second play
         assert!(!lib.record_play_at(a, Some("app"), then).unwrap());
-        // From the future: now
+        // From a device whose clock runs a few minutes ahead: its time, so a resend still matches
+        let ahead = now_unix() + 300;
+        assert!(lib.record_play_at(a, Some("app"), ahead).unwrap());
+        assert!(!lib.record_play_at(a, Some("app"), ahead).unwrap());
+        // Far in the future: now
         assert!(lib.record_play_at(a, None, now_unix() + 86_400).unwrap());
         let h = lib.history(10).unwrap();
-        assert_eq!(h.len(), 2);
-        assert!(h[0].played_at <= now_unix());
-        assert_eq!(h[1].played_at, then);
-        assert_eq!(lib.play_count(a).unwrap(), 2);
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].played_at, ahead);
+        assert!(h[1].played_at <= now_unix());
+        assert_eq!(h[2].played_at, then);
+        assert_eq!(lib.play_count(a).unwrap(), 3);
     }
 
     #[test]

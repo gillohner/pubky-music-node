@@ -5,8 +5,9 @@
 
 use crate::store::{now, Event, Store};
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -46,13 +47,43 @@ pub fn router(store: Arc<Store>) -> Router {
         .with_state(store)
 }
 
-/// Serve on `127.0.0.1` (a free port). Returns the address and the server's task.
+/// Whether a request is for this server by its own name: `Host` is `127.0.0.1:<port>` or
+/// `localhost:<port>`, and an `Origin`, when sent, is that same server. A page that rebinds its
+/// own name to 127.0.0.1, or posts from another site, is refused.
+fn is_local(headers: &HeaderMap, port: u16) -> bool {
+    let ours = |host: &str| host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
+    let host_ok = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| ours(&h.to_ascii_lowercase()));
+    let origin_ok = match headers.get(header::ORIGIN) {
+        None => true,
+        Some(o) => o
+            .to_str()
+            .ok()
+            .and_then(|o| o.to_ascii_lowercase().strip_prefix("http://").map(str::to_string))
+            .is_some_and(|h| ours(&h)),
+    };
+    host_ok && origin_ok
+}
+
+/// Serve on `127.0.0.1` (a free port). Returns the address and the server's task. Only requests
+/// addressed to this server by its own name are answered (403 otherwise).
 pub async fn serve(
     store: Arc<Store>,
 ) -> std::io::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let addr = listener.local_addr()?;
-    let app = router(store);
+    let port = addr.port();
+    let app = router(store).layer(axum::middleware::from_fn(
+        move |req: Request, next: Next| async move {
+            if is_local(req.headers(), port) {
+                next.run(req).await
+            } else {
+                err(StatusCode::FORBIDDEN, "not for this address")
+            }
+        },
+    ));
     let task = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!("offline server stopped: {e}");
@@ -369,16 +400,21 @@ async fn unheart(State(s): State<Arc<Store>>, Query(h): Query<Heart>) -> Respons
     set_heart(&s, h.track_id, false).await
 }
 
-/// The cached web UI: its files by name, every other path (the UI's own routes) the page.
+/// The cached web UI: its files by name, every other path (the UI's own routes) the page. Only
+/// the known names are served; nothing from the path is joined to a folder.
 async fn ui(State(s): State<Arc<Store>>, uri: Uri) -> Response {
-    let name = uri.path().trim_start_matches('/');
+    let asked = uri.path().trim_start_matches('/');
+    let name = crate::sync::UI_FILES
+        .iter()
+        .map(|(_, f)| *f)
+        .find(|f| *f == asked)
+        .unwrap_or("index.html");
     let dir = s.ui_dir();
-    let file = if !name.is_empty() && !name.contains('/') && !name.contains("..") && dir.join(name).is_file()
-    {
-        dir.join(name)
+    let file = dir.join(if dir.join(name).is_file() {
+        name
     } else {
-        dir.join("index.html")
-    };
+        "index.html"
+    });
     if !file.is_file() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -392,7 +428,37 @@ async fn ui(State(s): State<Arc<Store>>, uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_range;
+    use super::{is_local, parse_range};
+    use axum::http::{header, HeaderMap};
+
+    #[test]
+    fn only_requests_for_this_server() {
+        let h = |host: &str, origin: Option<&str>| {
+            let mut m = HeaderMap::new();
+            m.insert(header::HOST, host.parse().unwrap());
+            if let Some(o) = origin {
+                m.insert(header::ORIGIN, o.parse().unwrap());
+            }
+            m
+        };
+        assert!(is_local(&h("127.0.0.1:4000", None), 4000));
+        assert!(is_local(&h("localhost:4000", None), 4000));
+        assert!(is_local(
+            &h("127.0.0.1:4000", Some("http://127.0.0.1:4000")),
+            4000
+        ));
+        // DNS rebinding: the page's own name
+        assert!(!is_local(&h("evil.example:4000", None), 4000));
+        assert!(!is_local(&h("127.0.0.1:4001", None), 4000));
+        assert!(!is_local(&h("127.0.0.1", None), 4000));
+        // Another site posting to the server
+        assert!(!is_local(
+            &h("127.0.0.1:4000", Some("https://evil.example")),
+            4000
+        ));
+        assert!(!is_local(&h("127.0.0.1:4000", Some("null")), 4000));
+        assert!(!is_local(&HeaderMap::new(), 4000));
+    }
 
     #[test]
     fn ranges() {

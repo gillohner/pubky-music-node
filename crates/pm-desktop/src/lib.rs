@@ -163,13 +163,10 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     }
     state.store(Some(s.clone()));
     show_node(app, &s)?;
-    // Keep this device's downloads in step while the node is the current one
+    // Keep this device's downloads in step with the current node (read again at every round)
     if let Some(o) = &state.offline {
         let app = app.clone();
-        let url = s.node_url.clone();
-        o.spawn_sync(s.clone(), move |_| {
-            app.state::<AppState>().current().map(|c| c.node_url) == Some(url.clone())
-        });
+        o.spawn_sync(move || app.state::<AppState>().current());
     }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
@@ -199,7 +196,8 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
 /// Whether this device keeps any music (the connect page offers it while the node is away).
 #[tauri::command]
 fn has_downloads(state: State<'_, AppState>) -> bool {
-    state.offline.as_ref().is_some_and(|o| o.has_downloads())
+    let node_id = state.current().map(|s| s.node_id).unwrap_or_default();
+    state.offline.as_ref().is_some_and(|o| o.has_downloads(&node_id))
 }
 
 /// The node is out of reach: play what this device keeps, and go back to the node as soon as it
@@ -210,10 +208,11 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         .offline
         .clone()
         .ok_or("Offline music is off on this device")?;
-    if !o.has_downloads() {
+    let node_id = state.current().map(|s| s.node_id).unwrap_or_default();
+    if !o.has_downloads(&node_id) {
         return Err("Nothing is downloaded to this device yet".into());
     }
-    let page = url::Url::parse(&o.page().await?).map_err(|e| e.to_string())?;
+    let page = url::Url::parse(&o.page(&node_id).await?).map_err(|e| e.to_string())?;
     app.get_webview_window(MAIN)
         .ok_or("the window is gone")?
         .navigate(page)

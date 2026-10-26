@@ -5,10 +5,11 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-26
 
 - **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):
-  - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
-  - **Offline:** when the node is out of reach, the app serves the web UI from the device. It shows Downloads (albums, playlists, favourites, all songs), plays them in the app, and queues plays and hearts. Everything that needs the node is hidden. The app goes back to the node as soon as it answers.
-  - **The desktop and Android app:** it syncs every 15 minutes while connected, and opens Downloads when the node can't be reached and music is kept.
-  - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once.
+  - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection, and a song is kept only once its file is whole. A song whose file was cleared is downloaded again. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
+  - **One node's music stays with that node:** each node gets its own folder on the device. A sync with another node (a friend's, or a reinstall) sends nothing from it.
+  - **Offline:** when the node is out of reach, the app serves the web UI from the device. It shows Downloads (albums, playlists, favourites, all songs), plays them in the app, and queues plays and hearts. Everything that needs the node is hidden. The local server answers only the app itself. The app goes back to the node as soon as it answers.
+  - **The desktop and Android app:** it syncs every 15 minutes while connected, always with the node's current address and token, and opens Downloads when the node can't be reached and music is kept.
+  - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once, also from a device whose clock runs up to an hour fast. `PUT` and `DELETE /v1/favourites` take `at`, the time of an offline change: a heart cleared offline stays if it was set again after the clear.
   - What to keep is chosen from the Downloads screen and the Download buttons in the next PR. Until then, `cargo run -p pm-offline --example offline` keeps albums by hand.
 
 - **Faster reconnects after a short outage** (mn-infra's note on #114's review):

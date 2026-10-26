@@ -21,6 +21,9 @@ pub enum SyncError {
     Io(#[from] std::io::Error),
     #[error("unexpected answer from the node: {0}")]
     Format(String),
+    /// The store belongs to another node: nothing was sent or changed.
+    #[error("this device's downloads are from another node ({kept}), not this one ({node})")]
+    OtherNode { kept: String, node: String },
 }
 
 impl From<reqwest::Error> for SyncError {
@@ -31,6 +34,21 @@ impl From<reqwest::Error> for SyncError {
 }
 
 type Result<T> = std::result::Result<T, SyncError>;
+
+/// How long a small JSON request, a cover or a web UI file may take.
+const JSON_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the node may stay silent in the middle of an answer (a dropped Wi-Fi without a
+/// reset): the sync then stops, keeps what it has, and the next one goes on from there.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The web UI's files, kept for offline use: the node's path and the file name in `ui/`.
+pub(crate) const UI_FILES: [(&str, &str); 5] = [
+    ("/", "index.html"),
+    ("/app.js", "app.js"),
+    ("/app.css", "app.css"),
+    ("/icon.svg", "icon.svg"),
+    ("/manifest.webmanifest", "manifest.webmanifest"),
+];
 
 /// The node, with this device's token.
 pub struct Node {
@@ -44,6 +62,7 @@ impl Node {
     pub fn new(base: &str, token: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            .read_timeout(READ_TIMEOUT)
             .build()?;
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
@@ -73,7 +92,7 @@ impl Node {
     }
 
     async fn json(&self, m: Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut rb = self.req(m, path);
+        let mut rb = self.req(m, path).timeout(JSON_TIMEOUT);
         if let Some(b) = body {
             rb = rb.json(&b);
         }
@@ -120,9 +139,35 @@ fn refused_for_good(e: &SyncError) -> bool {
     matches!(e, SyncError::Status(c, _) if (400..500).contains(c) && ![401, 403, 408, 429].contains(c))
 }
 
-/// Send what was done offline, oldest first. Stops at the first error that may pass (the node
-/// went away); what wasn't sent stays queued. Returns how many were sent or refused for good.
+/// The node's id from its `/v1/info`. A store that has none yet becomes this node's; a store
+/// of another node is refused ([`SyncError::OtherNode`]) before anything is sent.
+fn ensure_node(store: &Store, info: &Value) -> Result<()> {
+    let id = info
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if id.is_empty() {
+        return Err(SyncError::Format("the node doesn't say its id (/v1/info)".into()));
+    }
+    let kept = store.index().node_id;
+    if kept.is_empty() {
+        store.update(|ix| ix.node_id = id)?;
+    } else if kept != id {
+        return Err(SyncError::OtherNode { kept, node: id });
+    }
+    Ok(())
+}
+
+/// Send what was done offline, oldest first, after checking the store is this node's. Stops at
+/// the first error that may pass (the node went away); what wasn't sent stays queued. Returns
+/// how many were sent or refused for good.
 pub async fn flush(store: &Store, node: &Node) -> Result<usize> {
+    ensure_node(store, &node.get("/v1/info").await?)?;
+    flush_queue(store, node).await
+}
+
+async fn flush_queue(store: &Store, node: &Node) -> Result<usize> {
     let events = store.queued();
     let mut done = 0;
     let mut stop = None;
@@ -136,22 +181,27 @@ pub async fn flush(store: &Store, node: &Node) -> Result<usize> {
                 )
                 .await
                 .map(drop),
+            // With the time of the change: the node skips a clear older than the heart it has
             Event::Favourite {
-                track_id, on: true, ..
+                track_id,
+                on: true,
+                at,
             } => node
                 .json(
                     Method::PUT,
                     "/v1/favourites",
-                    Some(json!({ "track_id": track_id })),
+                    Some(json!({ "track_id": track_id, "at": at })),
                 )
                 .await
                 .map(drop),
             Event::Favourite {
-                track_id, on: false, ..
+                track_id,
+                on: false,
+                at,
             } => node
                 .json(
                     Method::DELETE,
-                    &format!("/v1/favourites?track_id={track_id}"),
+                    &format!("/v1/favourites?track_id={track_id}&at={at}"),
                     None,
                 )
                 .await
@@ -199,6 +249,24 @@ fn ext_of(container: &str) -> String {
     }
 }
 
+/// `Content-Range: bytes <first>-<last>/<total>`: the first byte, and the total length when the
+/// node knows it.
+fn content_range(h: &header::HeaderMap) -> Option<(u64, Option<u64>)> {
+    let v = h.get(header::CONTENT_RANGE)?.to_str().ok()?;
+    let (range, total) = v.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let (first, last) = range.split_once('-')?;
+    let first: u64 = first.trim().parse().ok()?;
+    let last: u64 = last.trim().parse().ok()?;
+    if last < first {
+        return None;
+    }
+    let total = match total.trim() {
+        "*" => None,
+        t => Some(t.parse::<u64>().ok().filter(|t| *t > last)?),
+    };
+    Some((first, total.or(Some(last + 1))))
+}
+
 enum Got {
     Done(KeptTrack),
     /// 202: the node is still making the smaller copy.
@@ -243,10 +311,20 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
             .header(header::IF_RANGE, et.trim());
     }
     let mut resp = rb.send().await?;
-    let append = match resp.status() {
+    // Whether the answer continues the partial file, and the whole file's length if known
+    let (append, total) = match resp.status() {
         StatusCode::ACCEPTED => return Ok(Got::Preparing),
-        StatusCode::PARTIAL_CONTENT => true,
-        StatusCode::OK => false,
+        StatusCode::PARTIAL_CONTENT => match content_range(resp.headers()) {
+            Some((first, total)) if first == have => (true, total),
+            _ => {
+                // Not the rest of what the device has: ask for the whole file next time
+                let _ = tokio::fs::remove_file(&etag_file).await;
+                return Err(SyncError::Format(format!(
+                    "the node sent another part of song {id} than asked for"
+                )));
+            }
+        },
+        StatusCode::OK => (false, resp.content_length()),
         StatusCode::RANGE_NOT_SATISFIABLE => {
             // The partial file doesn't fit the node's any more: start again next time
             let _ = tokio::fs::remove_file(&part).await;
@@ -277,9 +355,25 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
     f.flush().await?;
     f.sync_all().await?;
     drop(f);
+    let bytes = tokio::fs::metadata(&part).await?.len();
+    match total {
+        Some(t) if bytes < t => {
+            // Cut short: the partial file stays, and the next sync resumes it
+            return Err(SyncError::Format(format!(
+                "song {id} stopped at {bytes} of {t} bytes"
+            )));
+        }
+        Some(t) if bytes > t => {
+            let _ = tokio::fs::remove_file(&part).await;
+            let _ = tokio::fs::remove_file(&etag_file).await;
+            return Err(SyncError::Format(format!(
+                "song {id} came to {bytes} bytes, not {t}"
+            )));
+        }
+        _ => {}
+    }
     tokio::fs::rename(&part, &dest).await?;
     let _ = tokio::fs::remove_file(&etag_file).await;
-    let bytes = tokio::fs::metadata(&dest).await?.len();
     Ok(Got::Done(KeptTrack {
         track,
         file: name,
@@ -295,6 +389,7 @@ async fn fetch_cover(store: &Store, node: &Node, album: i64) -> Result<()> {
     }
     let r = node
         .req(Method::GET, &format!("/v1/library/albums/{album}/cover"))
+        .timeout(JSON_TIMEOUT)
         .send()
         .await?;
     if !r.status().is_success() {
@@ -321,15 +416,9 @@ async fn fetch_cover(store: &Store, node: &Node, album: i64) -> Result<()> {
 
 /// The web UI the node serves, kept for offline use (failures keep the previous copy).
 async fn cache_ui(store: &Store, node: &Node) {
-    for (path, file) in [
-        ("/", "index.html"),
-        ("/app.js", "app.js"),
-        ("/app.css", "app.css"),
-        ("/icon.svg", "icon.svg"),
-        ("/manifest.webmanifest", "manifest.webmanifest"),
-    ] {
+    for (path, file) in UI_FILES {
         let got = async {
-            let r = Node::checked(node.req(Method::GET, path)).await?;
+            let r = Node::checked(node.req(Method::GET, path).timeout(JSON_TIMEOUT)).await?;
             Ok::<_, SyncError>(r.bytes().await?)
         }
         .await;
@@ -345,7 +434,25 @@ async fn cache_ui(store: &Store, node: &Node) {
     }
 }
 
+/// Tell the node what the device keeps and has. Songs whose file is gone (the system or the
+/// person cleared it) are dropped from the index first, so the node asks for them again.
 async fn put_manifest(store: &Store, node: &Node) -> Result<Value> {
+    let files = store.files_dir();
+    let gone: Vec<i64> = store
+        .index()
+        .tracks
+        .iter()
+        .filter(|(_, t)| !files.join(&t.file).is_file())
+        .map(|(id, _)| *id)
+        .collect();
+    if !gone.is_empty() {
+        tracing::info!("offline: {} kept songs lost their file", gone.len());
+        store.update(|ix| {
+            for id in &gone {
+                ix.tracks.remove(id);
+            }
+        })?;
+    }
     let ix = store.index();
     let have: Vec<Value> = ix
         .tracks
@@ -364,6 +471,8 @@ async fn put_manifest(store: &Store, node: &Node) -> Result<Value> {
 /// away (what was done so far is kept, and the next sync goes on from there).
 pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<SyncReport> {
     let info = node.get("/v1/info").await?;
+    // Never another node's plays, hearts or keeps
+    ensure_node(store, &info)?;
     let me = node.get("/v1/me").await.ok();
     let device = store.index().device_id;
     node.json(
@@ -373,7 +482,7 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
     )
     .await?;
     let mut report = SyncReport {
-        sent: flush(store, node).await?,
+        sent: flush_queue(store, node).await?,
         ..Default::default()
     };
     cache_ui(store, node).await;
@@ -427,7 +536,8 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
         let _ = fetch_cover(store, node, a).await;
     }
 
-    let keep = store.index().keep;
+    let ix = store.index();
+    let keep = ix.keep;
     let mut playlists = std::collections::BTreeMap::new();
     for p in &keep.playlists {
         match node.get(&format!("/v1/playlists/{p}")).await {
@@ -436,7 +546,14 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
             }
             Err(e @ SyncError::Unreachable(_)) => return Err(e),
             // Deleted on the node: nothing to keep
-            Err(_) => {}
+            Err(SyncError::Status(404, _)) => {}
+            // Anything else may pass: keep what the device had
+            Err(e) => {
+                tracing::info!("offline: kept the old playlist {p}: {e}");
+                if let Some(old) = ix.playlists.get(p) {
+                    playlists.insert(p.clone(), old.clone());
+                }
+            }
         }
     }
     let favourites = if keep.favourites {
@@ -467,6 +584,21 @@ mod tests {
         assert_eq!(ext_of("vorbis"), "ogg");
         assert_eq!(ext_of("../x"), "bin");
         assert_eq!(ext_of(""), "bin");
+    }
+
+    #[test]
+    fn content_ranges() {
+        let h = |v: &str| {
+            let mut m = header::HeaderMap::new();
+            m.insert(header::CONTENT_RANGE, v.parse().unwrap());
+            m
+        };
+        assert_eq!(content_range(&h("bytes 300-999/1000")), Some((300, Some(1000))));
+        assert_eq!(content_range(&h("bytes 300-999/*")), Some((300, Some(1000))));
+        assert_eq!(content_range(&h("bytes 300-999/500")), None);
+        assert_eq!(content_range(&h("bytes 9-3/10")), None);
+        assert_eq!(content_range(&h("bytes */1000")), None);
+        assert_eq!(content_range(&header::HeaderMap::new()), None);
     }
 
     #[test]

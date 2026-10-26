@@ -1,58 +1,117 @@
 //! Music kept on this device (STEWARD-DOWNLOADS.md), through `pm-offline`: a sync with the node
-//! while it is reachable, and the web UI from a local server while it isn't.
+//! while it is reachable, and the web UI from a local server while it isn't. Each node keeps its
+//! own folder (`offline/<node id>/`), so one node's plays, hearts and keeps never reach another.
 
 use crate::settings::Settings;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How often the device syncs while connected.
 const SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
 
+/// The local server, for one node's store.
+struct Server {
+    node_id: String,
+    origin: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
 pub struct Offline {
-    store: Arc<pm_offline::Store>,
-    /// `http://127.0.0.1:<port>` once the local server runs; the navigation guard reads it.
+    /// `offline/` in the app's data folder; each node's store is in a folder under it.
+    base: PathBuf,
+    /// The store opened last (most often the only one), by node id.
+    open: Mutex<Option<(String, Arc<pm_offline::Store>)>>,
+    server: tokio::sync::Mutex<Option<Server>>,
+    /// `http://127.0.0.1:<port>` while the local server runs; the navigation guard reads it.
     origin: Arc<Mutex<Option<String>>>,
-    syncing: AtomicBool,
+    /// Raised by every [`Offline::spawn_sync`]: an older loop sees it and stops.
+    generation: AtomicU64,
+    /// One sync at a time, also while a replaced loop finishes its last one.
+    syncing: tokio::sync::Mutex<()>,
 }
 
 impl Offline {
-    /// The store in the app's data folder, or `None` when it can't be opened (offline music is
-    /// then off; everything else works).
-    pub fn open(dir: std::path::PathBuf, origin: Arc<Mutex<Option<String>>>) -> Option<Arc<Self>> {
-        match pm_offline::Store::open(dir) {
-            Ok(store) => Some(Arc::new(Self {
-                store: Arc::new(store),
-                origin,
-                syncing: AtomicBool::new(false),
-            })),
+    /// Offline music in `base`, or `None` when the folder can't be made (offline music is then
+    /// off; everything else works).
+    pub fn open(base: PathBuf, origin: Arc<Mutex<Option<String>>>) -> Option<Arc<Self>> {
+        if let Err(e) = std::fs::create_dir_all(&base) {
+            tracing::warn!("offline music is off: {e}");
+            return None;
+        }
+        Some(Arc::new(Self {
+            base,
+            open: Mutex::new(None),
+            server: Default::default(),
+            origin,
+            generation: AtomicU64::new(0),
+            syncing: Default::default(),
+        }))
+    }
+
+    /// The store of the node with this id, opened once. `None` without an id (a node that never
+    /// answered) or when it can't be opened.
+    fn store(&self, node_id: &str) -> Option<Arc<pm_offline::Store>> {
+        if node_id.is_empty() {
+            return None;
+        }
+        let mut open = self.open.lock().ok()?;
+        if let Some((id, s)) = open.as_ref() {
+            if id == node_id {
+                return Some(s.clone());
+            }
+        }
+        match pm_offline::Store::open(pm_offline::node_dir(&self.base, node_id)) {
+            Ok(s) => {
+                let s = Arc::new(s);
+                *open = Some((node_id.to_string(), s.clone()));
+                Some(s)
+            }
             Err(e) => {
-                tracing::warn!("offline music is off: {e}");
+                tracing::warn!("offline music for this node is off: {e}");
                 None
             }
         }
     }
 
-    pub fn has_downloads(&self) -> bool {
-        !self.store.index().tracks.is_empty()
+    /// Whether this device keeps music from the node with this id. Doesn't make its folder.
+    pub fn has_downloads(&self, node_id: &str) -> bool {
+        !node_id.is_empty()
+            && pm_offline::node_dir(&self.base, node_id)
+                .join("index.json")
+                .is_file()
+            && self.store(node_id).is_some_and(|s| !s.index().tracks.is_empty())
     }
 
-    /// Start the local server (once) and give the address of its Downloads page.
-    pub async fn page(&self) -> Result<String, String> {
-        let existing = self.origin.lock().ok().and_then(|o| o.clone());
-        let origin = match existing {
-            Some(o) => o,
-            None => {
-                let (addr, _task) = pm_offline::server::serve(self.store.clone())
+    /// Start the local server for this node's store (once; again for another node) and give the
+    /// address of its Downloads page.
+    pub async fn page(&self, node_id: &str) -> Result<String, String> {
+        let store = self
+            .store(node_id)
+            .ok_or("Nothing is downloaded from this node")?;
+        let mut server = self.server.lock().await;
+        let origin = match server.as_ref() {
+            Some(s) if s.node_id == node_id && !s.task.is_finished() => s.origin.clone(),
+            _ => {
+                if let Some(old) = server.take() {
+                    old.task.abort();
+                }
+                let (addr, task) = pm_offline::server::serve(store)
                     .await
                     .map_err(|e| format!("Can't start offline playback: {e}"))?;
-                let o = format!("http://{addr}");
-                if let Ok(mut cur) = self.origin.lock() {
-                    *cur = Some(o.clone());
-                }
-                o
+                let origin = format!("http://{addr}");
+                *server = Some(Server {
+                    node_id: node_id.to_string(),
+                    origin: origin.clone(),
+                    task,
+                });
+                origin
             }
         };
+        if let Ok(mut cur) = self.origin.lock() {
+            *cur = Some(origin.clone());
+        }
         Ok(format!("{origin}/downloads"))
     }
 
@@ -68,34 +127,47 @@ impl Offline {
         }
     }
 
-    /// Sync now and then every [`SYNC_EVERY`] while `still(&s)` says this node is the current one.
-    /// One sync loop at a time.
-    pub fn spawn_sync(self: &Arc<Self>, s: Settings, still: impl Fn(&Settings) -> bool + Send + 'static) {
-        if self.syncing.swap(true, Ordering::SeqCst) {
-            return;
-        }
+    /// Sync now and then every [`SYNC_EVERY`], with the settings `current` gives at each round
+    /// (the node's address, the tunnel's port and the token may change between rounds). A newer
+    /// call replaces this loop; it stops when there is no node any more.
+    pub fn spawn_sync(self: &Arc<Self>, current: impl Fn() -> Option<Settings> + Send + 'static) {
+        let mine = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
-                match pm_offline::Node::new(s.base(), &s.token) {
-                    Ok(node) => match pm_offline::sync(&me.store, &node, &Self::device()).await {
-                        Ok(r) => tracing::info!(
-                            downloaded = r.downloaded.len(),
-                            removed = r.removed.len(),
-                            sent = r.sent,
-                            failed = r.failed.len(),
-                            "offline: synced"
-                        ),
-                        Err(e) => tracing::info!("offline: sync stopped: {e}"),
-                    },
-                    Err(e) => tracing::warn!("offline: {e}"),
+                {
+                    let _one = me.syncing.lock().await;
+                    if me.generation.load(Ordering::SeqCst) != mine {
+                        break;
+                    }
+                    let Some(s) = current() else { break };
+                    me.sync_once(&s).await;
                 }
                 tokio::time::sleep(SYNC_EVERY).await;
-                if !still(&s) {
+                if me.generation.load(Ordering::SeqCst) != mine {
                     break;
                 }
             }
-            me.syncing.store(false, Ordering::SeqCst);
         });
+    }
+
+    async fn sync_once(&self, s: &Settings) {
+        let Some(store) = self.store(&s.node_id) else {
+            tracing::info!("offline: no sync without the node's id");
+            return;
+        };
+        match pm_offline::Node::new(s.base(), &s.token) {
+            Ok(node) => match pm_offline::sync(&store, &node, &Self::device()).await {
+                Ok(r) => tracing::info!(
+                    downloaded = r.downloaded.len(),
+                    removed = r.removed.len(),
+                    sent = r.sent,
+                    failed = r.failed.len(),
+                    "offline: synced"
+                ),
+                Err(e) => tracing::info!("offline: sync stopped: {e}"),
+            },
+            Err(e) => tracing::warn!("offline: {e}"),
+        }
     }
 }

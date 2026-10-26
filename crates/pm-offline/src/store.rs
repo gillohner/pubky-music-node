@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -66,6 +66,11 @@ pub struct Index {
     /// The id this install registered under (`PUT /v1/devices/{id}`), made once.
     #[serde(default)]
     pub device_id: String,
+    /// The id of the node this store belongs to (`/v1/info`'s `id`), set at the first sync. A
+    /// sync with any other node is refused, so one node's plays, hearts and keeps never reach
+    /// another.
+    #[serde(default)]
+    pub node_id: String,
     /// The node's `/v1/info` at the last sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<Value>,
@@ -135,7 +140,24 @@ pub(crate) fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// A device's offline store, in one folder.
+/// The folder for one node's store under `base`: `base/<node id>`. The id is a UUID; anything
+/// else is made safe for a file name.
+pub fn node_dir(base: &Path, node_id: &str) -> PathBuf {
+    let safe: String = node_id
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    base.join(if safe.is_empty() { "_".to_string() } else { safe })
+}
+
+/// A device's offline store, in one folder (one per node, see [`node_dir`]).
 pub struct Store {
     dir: PathBuf,
     index: Mutex<Index>,
@@ -245,9 +267,20 @@ impl Store {
         let _q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(self.queue_path())?;
-        let mut line = serde_json::to_vec(&e).map_err(std::io::Error::other)?;
+        let mut line = Vec::new();
+        // A line torn by a crash ends without a newline: end it, so this event stays whole
+        if f.metadata()?.len() > 0 {
+            let mut last = [0u8; 1];
+            f.seek(SeekFrom::End(-1))?;
+            f.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                line.push(b'\n');
+            }
+        }
+        line.extend(serde_json::to_vec(&e).map_err(std::io::Error::other)?);
         line.push(b'\n');
         f.write_all(&line)?;
         f.sync_all()
@@ -326,5 +359,41 @@ mod tests {
         s.push(Event::Play { track_id: 3, at: 12 }).unwrap();
         s.drop_sent(sending.len()).unwrap();
         assert_eq!(s.queued(), [Event::Play { track_id: 3, at: 12 }]);
+    }
+
+    #[test]
+    fn a_torn_line_loses_only_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        s.push(Event::Play { track_id: 1, at: 10 }).unwrap();
+        // A crash in the middle of writing the next event
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(d.path().join("queue.jsonl"))
+            .unwrap();
+        f.write_all(br#"{"kind":"play","track_"#).unwrap();
+        drop(f);
+        s.push(Event::Play { track_id: 3, at: 12 }).unwrap();
+        assert_eq!(
+            s.queued(),
+            [
+                Event::Play { track_id: 1, at: 10 },
+                Event::Play { track_id: 3, at: 12 }
+            ]
+        );
+        s.drop_sent(1).unwrap();
+        assert_eq!(s.queued(), [Event::Play { track_id: 3, at: 12 }]);
+    }
+
+    #[test]
+    fn each_node_has_its_own_folder() {
+        let base = Path::new("/data/offline");
+        assert_eq!(
+            node_dir(base, "6f1c0a52-9a3e-4c3b-8d27-1f0e2a3b4c5d"),
+            base.join("6f1c0a52-9a3e-4c3b-8d27-1f0e2a3b4c5d")
+        );
+        assert_eq!(node_dir(base, "../x"), base.join("___x"));
+        assert_eq!(node_dir(base, "C:x"), base.join("C_x"));
+        assert_eq!(node_dir(base, ""), base.join("_"));
     }
 }
