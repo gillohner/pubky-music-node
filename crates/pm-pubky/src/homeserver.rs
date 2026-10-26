@@ -952,19 +952,18 @@ mod capability_tests {
             missing.contains(&"/priv/pubky.music/vault/:rw".to_string()),
             "a session from before the vault asks again"
         );
-        // A session with the whole private folder still covers each part
+        // A session approved with the set from before the parts still covers today's set
+        let before: Vec<&str> = "/priv/pubky.music/vault/:rw,/priv/pubky.music/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw"
+            .split(',')
+            .collect();
         assert_eq!(
-            missing_capabilities(
-                &["/priv/pubky.music/:rw", "/priv/pubky.music/vault/:rw"],
-                "/priv/pubky.music/node.json:rw,/priv/pubky.music/settings.json:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/priv/pubky.music/vault/:rw"
-            ),
+            missing_capabilities(&before, LOGIN_CAPABILITIES),
             Vec::<String>::new()
         );
-        // The login asks for parts only, so normalising it can't drop the vault
+        // Normalising the set changes nothing (no entry covers another), so a signer or a
+        // homeserver that normalises can't drop the vault or anything else
         let caps: pubky::Capabilities = LOGIN_CAPABILITIES.parse().unwrap();
-        let normal = caps.clone().normalize().to_string();
-        assert!(normal.contains("/priv/pubky.music/vault/:rw"), "{normal}");
-        assert!(!LOGIN_CAPABILITIES.split(',').any(|c| c == "/priv/pubky.music/:rw"));
+        assert_eq!(caps.normalize().to_string(), LOGIN_CAPABILITIES);
         assert_eq!(
             missing_capabilities(&["/pub/social/v1/:r"], "/pub/social/v1/:rw"),
             vec!["/pub/social/v1/:rw".to_string()],

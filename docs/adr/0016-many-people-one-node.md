@@ -46,8 +46,10 @@ directions, and the node's apps set once by the admin.
 - **On a remote homeserver:**
   - When the person joins, they approve the node in Ring with `/priv/pubky.music/files/:r`. That is read
     only, and narrower than the brief's `/priv/pubky.music/:r`, which would also cover the vault and history.
-    Their data capabilities come with it (`/priv/pubky.music/:rw` without the vault, and the
-    social/music folders, as LOGIN_CAPABILITIES has today).
+    Their data capabilities come with it (the private folder's parts, without the vault, and the
+    social/music folders, as LOGIN_CAPABILITIES lists them; since #117 the private folder is asked for
+    by its parts, so that normalising the set can't drop the vault). A new part, such as `shares.json`
+    below, has to be added to LOGIN_CAPABILITIES, and sessions approved before are then asked again.
   - The node lists the files through that session, reads tags with ranged GETs (FLAC and ID3 metadata sit at
     the start; MP4 may need the end too), and fetches the audio when it plays or a device downloads (#97).
   - It keeps a capped cache, not a master copy.
