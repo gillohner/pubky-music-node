@@ -487,10 +487,121 @@ async fn two_clients_refresh_at_once_with_the_lease_file() {
     two_clients_refresh_at_once(true, std::time::Duration::from_millis(300)).await;
 }
 
-/// A slow service: the holder renews its lock while it waits, and the other client still waits.
+/// A service slower than the lock's 30 s: the holder renews it, so at 31 s another client still
+/// finds the sign-in locked (the Claude review of #92: 12 s didn't test renewal).
 #[tokio::test]
 async fn a_slow_refresh_keeps_its_lock() {
-    two_clients_refresh_at_once(false, std::time::Duration::from_secs(12)).await;
+    use pm_pubky::vault::Refreshed;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let ka = ClientSecret::generate();
+    let va = Vault::new(&sessions[0], &ka);
+    va.write("tidal", &expired(), &[]).await.unwrap();
+    let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(33));
+    let path = blob_path("tidal").unwrap();
+    let (r, probe) = tokio::join!(va.refresh("tidal", false, |s| svc.refresh(s)), async {
+        tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+        sessions[1]
+            .storage()
+            .lock(path.as_str(), std::time::Duration::from_secs(5))
+            .await
+    });
+    assert!(probe.is_err(), "the lock lapsed after 30 s");
+    let r = r.unwrap();
+    assert!(matches!(r, Refreshed::ByUs(_)), "{r:?}");
+    assert_eq!(r.sign_in().tokens["refresh_token"], "rt-1");
+}
+
+/// The same with the lease file: it is renewed, so a client that comes at 31 s waits for the
+/// refresh instead of refreshing the used-up token itself.
+#[tokio::test]
+async fn a_slow_refresh_keeps_its_lease() {
+    use pm_pubky::vault::Refreshed;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let (ka, kb) = (ClientSecret::generate(), ClientSecret::generate());
+    let va = Vault::new(&sessions[0], &ka).lease_only();
+    let vb = Vault::new(&sessions[1], &kb).lease_only();
+    va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
+    let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(33));
+    let (ra, rb) = tokio::join!(va.refresh("tidal", false, |s| svc.refresh(s)), async {
+        tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+        vb.refresh("tidal", false, |s| svc.refresh(s)).await
+    });
+    assert_eq!(svc.calls(), 1, "B took a lapsed lease");
+    assert!(matches!(ra.unwrap(), Refreshed::ByUs(_)));
+    let rb = rb.unwrap();
+    assert!(matches!(rb, Refreshed::ByAnother(_)), "{rb:?}");
+    assert_eq!(rb.sign_in().tokens["refresh_token"], "rt-1");
+}
+
+/// The Claude review of #92: once the service has rotated the token, the new one is the only one
+/// that works. When it can't be written (here: too large for a blob), the caller gets it back.
+#[tokio::test]
+async fn a_refresh_that_cant_be_saved_hands_the_new_tokens_back() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 1).await;
+    let ka = ClientSecret::generate();
+    let va = Vault::new(&sessions[0], &ka);
+    va.write("tidal", &expired(), &[]).await.unwrap();
+    let svc = RotatingService::new("rt-0", std::time::Duration::ZERO);
+    let r = va
+        .refresh("tidal", false, |s| async {
+            let mut s = svc.refresh(s).await?;
+            s.tokens.insert("id_token".into(), json!("x".repeat(70 * 1024)));
+            Ok(s)
+        })
+        .await;
+    match r {
+        Err(VaultStoreError::Unsaved { sign_in, .. }) => {
+            assert_eq!(sign_in.tokens["refresh_token"], "rt-1")
+        }
+        other => panic!("{other:?}"),
+    }
+    // The vault still has the old copy, and no lock is left: a write goes through
+    assert_eq!(
+        va.read("tidal").await.unwrap().unwrap().sign_in.tokens["refresh_token"],
+        "rt-0"
+    );
+    va.write("tidal", &expired(), &[]).await.unwrap();
+}
+
+/// The Claude review of #92: a write while the service answers that changes no tokens (here a
+/// new device added, unlocked under the lease) is kept, and the new tokens go into it.
+#[tokio::test]
+async fn a_device_added_during_a_refresh_keeps_its_key() {
+    use pm_pubky::vault::Refreshed;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let keys: Vec<ClientSecret> = (0..3).map(|_| ClientSecret::generate()).collect();
+    let va = Vault::new(&sessions[0], &keys[0]).lease_only();
+    let vb = Vault::new(&sessions[1], &keys[1]);
+    let vc = Vault::new(&sessions[2], &keys[2]);
+    va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
+    let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(3));
+    let (ra, wb) = tokio::join!(va.refresh("tidal", false, |s| svc.refresh(s)), async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let cur = vb.read("tidal").await.unwrap().unwrap().sign_in;
+        vb.write("tidal", &cur, &[va.client_key(), vc.client_key()]).await
+    });
+    wb.unwrap();
+    let ra = ra.unwrap();
+    assert!(matches!(ra, Refreshed::ByUs(_)), "{ra:?}");
+    let c = vc.read("tidal").await.unwrap().unwrap();
+    assert_eq!(c.sign_in.tokens["refresh_token"], "rt-1");
+    assert_eq!(c.sign_in.revision, 3);
 }
 
 /// Revocation (item 5): "Sign out this device" rotates past it and keeps it out; a sign-in this
@@ -630,4 +741,73 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
     );
     assert_eq!(vn.share_with_trusted().await.unwrap(), 0);
     assert!(vb.read("tidal").await.is_err());
+}
+
+/// The Claude review of #91: `index.json` is writable by the devices it lists, the signed-out ones
+/// too. A signed-out phone that writes the list back without its record, and its entry back in,
+/// stays signed out for a node that remembers revocations; the node's next registration puts the
+/// record back in the list.
+#[tokio::test]
+async fn a_signed_out_device_that_rewrites_the_list_stays_signed_out() {
+    use pubky_music_specs::vault::{Index, Revoked, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let (kn, kd) = (ClientSecret::generate(), ClientSecret::generate());
+    let file = std::env::temp_dir().join(format!("pm-revoked-{}.json", &kn.public().to_hex()[..12]));
+    let node = Vault::new(&sessions[0], &kn).remember_revocations(&file);
+    let phone = Vault::new(&sessions[1], &kd);
+    node.register("Node").await.unwrap();
+    phone.register("Phone").await.unwrap();
+    node.write_shared("tidal", &sign_in("before")).await.unwrap();
+    assert!(phone.read("tidal").await.is_ok());
+    let full: Index = phone.index().await.unwrap();
+
+    // The node signs the phone out (the index first, as #93's sign-out does)
+    let jti = node
+        .trusted(&full)
+        .into_iter()
+        .find(|t| t.client_key == phone.client_key())
+        .unwrap()
+        .grant_id;
+    let mut ix = node.index().await.unwrap();
+    ix.revoked.push(Revoked {
+        client_key: Some(phone.client_key()),
+        grant_id: Some(jti),
+        at: 1,
+    });
+    sessions[0]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    let seen = node.index().await.unwrap();
+    assert!(!node
+        .trusted(&seen)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+
+    // The phone writes the list back as it was before, with its valid entry and no record
+    sessions[1]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&full).unwrap())
+        .await
+        .unwrap();
+    assert!(phone.index().await.unwrap().revoked.is_empty());
+    // The node still doesn't trust it, and gives it no key to what is written next
+    let ix = node.index().await.unwrap();
+    assert!(!node
+        .trusted(&ix)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+    node.write_shared("tidal", &sign_in("after")).await.unwrap();
+    assert!(phone.read("tidal").await.is_err());
+    assert_eq!(node.share_with_trusted().await.unwrap(), 0);
+    assert!(phone.read("tidal").await.is_err());
+    // The node's next registration writes the record back
+    node.register("Node").await.unwrap();
+    assert!(phone.index().await.unwrap().is_revoked(&phone.client_key(), None));
+    let _ = std::fs::remove_file(&file);
 }

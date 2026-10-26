@@ -236,10 +236,21 @@ impl Index {
         if ix.version != VERSION {
             return Err(VaultError::UnsupportedVersion(ix.version));
         }
-        if ix.clients.len() > MAX_CLIENTS {
-            return Err(VaultError::TooLarge);
-        }
+        // More than MAX_CLIENTS entries is read anyway (the byte cap bounds it): entries that
+        // don't verify could otherwise make the whole list unreadable
         Ok(ix)
+    }
+
+    /// Add `more` to the signed-out list, skipping ones already in it. Returns how many were new.
+    pub fn add_revoked<'r>(&mut self, more: impl IntoIterator<Item = &'r Revoked>) -> usize {
+        let mut n = 0;
+        for r in more {
+            if !self.revoked.iter().any(|x| x.same_client(r)) {
+                self.revoked.push(r.clone());
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Whether a client (by key or by its grant id) was signed out.
@@ -294,6 +305,13 @@ pub struct Revoked {
     pub grant_id: Option<String>,
     /// Unix seconds.
     pub at: u64,
+}
+
+impl Revoked {
+    /// The same signed-out client (same key and grant id), whenever it was recorded.
+    pub fn same_client(&self, other: &Revoked) -> bool {
+        self.client_key == other.client_key && self.grant_id == other.grant_id
+    }
 }
 
 /// The data a client signs in its custom proof.

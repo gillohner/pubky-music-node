@@ -9,7 +9,7 @@ use crate::homeserver::{is_not_found, HomeserverError};
 use pubky::PubkySession;
 use pubky_music_specs::vault::{
     self as spec, ClientEntry, ClientKey, ClientProofData, ClientSecret, DataKey, Envelope, Index, Proof,
-    SignIn, VaultError,
+    Revoked, SignIn, VaultError,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -25,7 +25,7 @@ pub enum VaultStoreError {
     BadService(String),
     #[error("the sign-in for {0} was made on a device this node can't read for; sign out of it there, or delete it, first")]
     NotOurs(String),
-    #[error("this node was signed out of the vault; approve it again in Pubky Ring as a new device")]
+    #[error("this node was signed out of your streaming sign-ins on another device; its vault key is never trusted again, so it needs a new key before it can be approved in Pubky Ring")]
     Revoked,
     #[error("this sign-in can't prove itself to other devices; sign the node in again with Pubky Ring")]
     NoGrant,
@@ -35,6 +35,32 @@ pub enum VaultStoreError {
     Refresh(String),
     #[error("this node's Pubky sign-in doesn't include your streaming sign-ins yet; sign it in again with Pubky Ring")]
     NeedsVaultGrant,
+    #[error("the node's record of signed-out devices: {0}")]
+    Local(#[from] std::io::Error),
+    /// The service refreshed the tokens but they couldn't be written to the vault. `sign_in`
+    /// holds them: after a rotation they are the only ones that still work, so the caller uses
+    /// them and writes them again later.
+    #[error("the new {service} tokens couldn't be saved to the vault yet: {reason}")]
+    Unsaved {
+        service: String,
+        sign_in: Box<SignIn>,
+        reason: String,
+    },
+}
+
+impl VaultStoreError {
+    /// The homeserver's HTTP status, where the error is one.
+    fn http_status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::Homeserver(HomeserverError::Pubky(e)) => status(e),
+            _ => None,
+        }
+    }
+
+    /// Worth trying again shortly: the homeserver or the network, not the data.
+    fn transient(&self) -> bool {
+        matches!(self, Self::Busy(_) | Self::Homeserver(_))
+    }
 }
 
 impl From<pubky::Error> for VaultStoreError {
@@ -73,32 +99,98 @@ pub fn load_or_create_client_secret(path: &Path) -> std::io::Result<ClientSecret
         std::fs::create_dir_all(dir)?;
     }
     let secret = ClientSecret::generate();
+    // Written whole to a file of its own, then linked into place, so another process never
+    // reads a half-written key
+    let tmp = tmp_beside(path);
+    write_private(&tmp, &secret.to_bytes())?;
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(secret),
+        // Another process made it first: use theirs
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(path),
+        Err(e) => Err(e),
+    }
+}
+
+/// A file name next to `path` that no other writer, in this process or another, uses.
+fn tmp_beside(path: &Path) -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{n}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Write `bytes` to `path` (mode 0600 on unix), replacing what is there, and sync it.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
+    o.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    match o.open(path) {
-        Ok(mut f) => {
-            use std::io::Write;
-            f.write_all(&secret.to_bytes())?;
-            f.sync_all()?;
-            Ok(secret)
-        }
-        // Another process made it first: use theirs, once it has finished writing it
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            for _ in 0..40 {
-                if std::fs::metadata(path).is_ok_and(|m| m.len() == 32) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            read(path)
-        }
+    let mut f = o.open(path)?;
+    use std::io::Write;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// The most signed-out clients a node remembers locally.
+const MAX_LOCAL_REVOKED: usize = 4096;
+
+/// The signed-out clients this node has seen, from its own file (none when there is no file).
+fn read_local_revoked(path: &Path) -> std::io::Result<Vec<Revoked>> {
+    match std::fs::read(path) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e),
     }
+}
+
+/// Add `revoked` to the file of signed-out clients at `path`, and return everything in either.
+/// The file only grows (up to [`MAX_LOCAL_REVOKED`]).
+pub fn remember_revoked(path: &Path, revoked: &[Revoked]) -> std::io::Result<Vec<Revoked>> {
+    let mut local = Index {
+        revoked: read_local_revoked(path)?,
+        ..Index::default()
+    };
+    let room = MAX_LOCAL_REVOKED.saturating_sub(local.revoked.len());
+    // The oldest records matter most: a flood of made-up ones only fills what is left
+    let mut new: Vec<&Revoked> = Vec::new();
+    for r in revoked {
+        if new.len() < room
+            && !local
+                .revoked
+                .iter()
+                .chain(new.iter().copied())
+                .any(|x| x.same_client(r))
+        {
+            new.push(r);
+        }
+    }
+    if local.add_revoked(new) > 0 {
+        write_local_revoked(path, &local.revoked)?;
+    }
+    local.add_revoked(revoked);
+    Ok(local.revoked)
+}
+
+/// Replace the node's file of signed-out clients (written whole, then renamed into place).
+fn write_local_revoked(path: &Path, list: &[Revoked]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = serde_json::to_vec_pretty(list).map_err(std::io::Error::other)?;
+    let tmp = tmp_beside(path);
+    write_private(&tmp, &body)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// A blob opened by this node.
@@ -122,6 +214,8 @@ pub struct Vault<'a> {
     lease_only: bool,
     /// The device kind this client signs into its proof (`node`, `desktop`, …).
     device: Option<&'static str>,
+    /// This client's own record of signed-out clients (VAULT.md, "Revocation is remembered").
+    revocations: Option<&'a Path>,
 }
 
 impl<'a> Vault<'a> {
@@ -132,6 +226,24 @@ impl<'a> Vault<'a> {
             secret,
             lease_only: false,
             device: None,
+            revocations: None,
+        }
+    }
+
+    /// Remember every signed-out client in the file at `path`, and keep trusting none of them
+    /// even when a later `index.json` no longer lists them. Every real client sets this: the
+    /// device list is writable by the clients it lists, the signed-out ones too.
+    pub fn remember_revocations(mut self, path: &'a Path) -> Self {
+        self.revocations = Some(path);
+        self
+    }
+
+    /// Record `revoked` in this client's own list (with whatever the list had), and return the
+    /// union of the two.
+    pub fn remember(&self, revoked: &[Revoked]) -> Result<Vec<Revoked>> {
+        match self.revocations {
+            Some(path) => Ok(remember_revoked(path, revoked)?),
+            None => Ok(revoked.to_vec()),
         }
     }
 
@@ -426,11 +538,22 @@ impl Vault<'_> {
         }
     }
 
-    /// The device list (an empty one when there is none yet).
+    /// The device list (an empty one when there is none yet), with every signed-out client this
+    /// node remembers added to `revoked`, so writing it back puts dropped records back.
     pub async fn index(&self) -> Result<Index> {
         match self.read_bytes(spec::INDEX_PATH, spec::MAX_INDEX_BYTES).await? {
-            Some(b) => Ok(Index::parse(&b)?),
-            None => Ok(Index::default()),
+            Some(b) => {
+                let mut ix = Index::parse(&b)?;
+                let all = self.remember(&ix.revoked)?;
+                ix.add_revoked(&all);
+                Ok(ix)
+            }
+            None => {
+                let mut ix = Index::default();
+                let all = self.remember(&[])?;
+                ix.add_revoked(&all);
+                Ok(ix)
+            }
         }
     }
 
@@ -544,6 +667,13 @@ impl Vault<'_> {
             .create_custom_pop(data)
             .await
             .map_err(|_| VaultStoreError::NoGrant)?;
+        // Other devices check the caps in the grant, so check those too
+        let grant_caps = pubky::GrantClaims::decode(&pop.grant)
+            .map(|c| c.caps.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if !grant_caps.iter().any(|c| spec::covers_vault(c)) {
+            return Err(VaultStoreError::NeedsVaultGrant);
+        }
         let held = self.lock(spec::INDEX_PATH).await?;
         let r = async {
             let mut ix = self.index().await?;
@@ -565,6 +695,16 @@ impl Vault<'_> {
                     e.proof = proof;
                 }
                 None => {
+                    if ix.clients.len() >= spec::MAX_CLIENTS {
+                        // Make room by dropping entries nobody trusts (junk, expired, signed out)
+                        let keep: Vec<bool> = ix
+                            .clients
+                            .iter()
+                            .map(|e| self.check(&ix, e).0.is_none())
+                            .collect();
+                        let mut k = keep.into_iter();
+                        ix.clients.retain(|_| k.next().unwrap_or(true));
+                    }
                     if ix.clients.len() >= spec::MAX_CLIENTS {
                         return Err(VaultError::TooLarge.into());
                     }
@@ -601,10 +741,20 @@ impl Vault<'_> {
     }
 
     /// Write a sign-in for every trusted device (and this node).
+    ///
+    /// Who is trusted is read under the blob's lock: a device signed out meanwhile is in the
+    /// index before its sign-out takes any blob lock, so it is never wrapped to again.
     pub async fn write_shared(&self, service: &str, sign_in: &SignIn) -> Result<u64> {
-        let ix = self.index().await?;
-        let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
-        self.write(service, sign_in, &others).await
+        let path = Self::blob_path(service)?;
+        let held = self.lock(&path).await?;
+        let r = async {
+            let ix = self.index().await?;
+            let others: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+            self.write_held(&held, service, &path, sign_in, &others).await
+        }
+        .await;
+        self.unlock(held).await;
+        r
     }
 
     /// Give every trusted device that has no key yet the blobs this node can open (a new device:
@@ -614,39 +764,55 @@ impl Vault<'_> {
         let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
         let mut changed = 0;
         for service in self.services().await? {
-            let path = Self::blob_path(&service)?;
-            let Some(env) = self.envelope(&service).await? else {
-                continue;
-            };
-            if !env.has_recipient(&self.client_key()) || trusted.iter().all(|k| env.has_recipient(k)) {
-                continue;
-            }
-            let held = self.lock(&path).await?;
-            let r = async {
-                // Read again under the lock
-                let Some(mut env) = self.envelope(&service).await? else {
-                    return Ok(false);
-                };
-                let mut added = false;
-                for k in &trusted {
-                    if !env.has_recipient(k) {
-                        spec::add_recipient(&self.owner, &path, &mut env, self.secret, k)?;
-                        added = true;
-                    }
-                }
-                if added {
-                    let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
-                    self.put_locked(&held, &path, body).await?;
-                }
-                Ok::<bool, VaultStoreError>(added)
-            }
-            .await;
-            self.unlock(held).await;
-            if r? {
-                changed += 1;
+            match self.share_one(&service, &trusted).await {
+                Ok(true) => changed += 1,
+                Ok(false) => {}
+                // One blob that can't be shared now doesn't stop the others; the next touch
+                // tries it again
+                Err(e) => tracing::warn!(service = %service, "vault: not shared with new devices yet: {e}"),
             }
         }
         Ok(changed)
+    }
+
+    /// Wrap one blob to the trusted devices that have no key in it. `hint` is the trusted list
+    /// read before any lock, only to skip blobs with nothing to do; who gets a key is decided
+    /// from the index read again under the blob's lock.
+    async fn share_one(&self, service: &str, hint: &[ClientKey]) -> Result<bool> {
+        let path = Self::blob_path(service)?;
+        let Some(env) = self.envelope(service).await? else {
+            return Ok(false);
+        };
+        let me = self.client_key();
+        if !env.has_recipient(&me) || hint.iter().all(|k| env.has_recipient(k)) {
+            return Ok(false);
+        }
+        let held = self.lock(&path).await?;
+        let r = async {
+            let ix = self.index().await?;
+            let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
+            let Some(mut env) = self.envelope(service).await? else {
+                return Ok(false);
+            };
+            if !env.has_recipient(&me) {
+                return Ok(false);
+            }
+            let mut added = false;
+            for k in &trusted {
+                if !env.has_recipient(k) {
+                    spec::add_recipient(&self.owner, &path, &mut env, self.secret, k)?;
+                    added = true;
+                }
+            }
+            if added {
+                let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
+                self.put_locked(&held, &path, body).await?;
+            }
+            Ok::<bool, VaultStoreError>(added)
+        }
+        .await;
+        self.unlock(held).await;
+        r
     }
 }
 
@@ -656,6 +822,10 @@ const LEASE_SETTLE: Duration = Duration::from_secs(2);
 const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 /// How long a client waits for another one's refresh before giving up.
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
+/// The longest a service is given to answer a refresh; then the lock is let go.
+const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// Tries at writing refreshed tokens before handing them back unsaved.
+const SAVE_TRIES: u32 = 6;
 
 /// What [`Vault::refresh`] did.
 #[derive(Debug)]
@@ -676,6 +846,14 @@ impl Refreshed {
     }
 }
 
+/// How refreshed tokens were saved.
+enum Saved {
+    /// Written, as returned.
+    Ours(SignIn),
+    /// Another client's fresh copy was there: used instead.
+    Theirs(SignIn),
+}
+
 /// The service refused the refresh (`String`: its words, never a token).
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -687,6 +865,10 @@ impl Vault<'_> {
     /// tokens and `expires_at`; it's called only when the tokens are due (or `force`, after the
     /// service refused them) and nobody refreshed them meanwhile. It never sees a token that wasn't
     /// read under the lock (or the lease).
+    ///
+    /// Once the service has answered, its new tokens are written back, retried if the write
+    /// fails, or returned in [`VaultStoreError::Unsaved`]: they may be the only ones that still
+    /// work. Dropping this future after the service answered loses them, so callers let it run.
     pub async fn refresh<F, Fut>(&self, service: &str, force: bool, refresh: F) -> Result<Refreshed>
     where
         F: FnOnce(SignIn) -> Fut,
@@ -780,63 +962,159 @@ impl Vault<'_> {
             release(held).await;
             return Ok(Refreshed::ByAnother(cur.sign_in));
         }
-        let recipients = cur.recipients.clone();
-        // The service call, with the lock renewed while it runs
-        let call = refresh(cur.sign_in.clone());
+        // The service call, with the lock (or the lease) renewed while it runs, and a limit
+        let call = tokio::time::timeout(CALL_FOR, refresh(cur.sign_in.clone()));
         tokio::pin!(call);
         let mut renew = tokio::time::interval(RENEW_EVERY);
         renew.tick().await;
-        let mut lost = false;
         let outcome = loop {
             tokio::select! {
                 out = &mut call => break out,
-                _ = renew.tick() => {
-                    if let Some(l) = held.lock.as_mut() {
-                        if self.session.storage().refresh_lock(l, LOCK_FOR).await.is_err() {
-                            lost = true;
-                        }
-                    }
-                }
+                _ = renew.tick() => self.renew(&mut held, service).await,
             }
         };
         let mut fresh = match outcome {
-            Ok(s) => s,
-            Err(e) => {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 release(held).await;
                 return Err(VaultStoreError::Refresh(e.0));
+            }
+            Err(_) => {
+                release(held).await;
+                return Err(VaultStoreError::Refresh(format!(
+                    "the service didn't answer in {} s",
+                    CALL_FOR.as_secs()
+                )));
             }
         };
         fresh.last_refresh = Some(spec::LastRefresh {
             client: self.client_key(),
             at: now(),
         });
-        if lost {
-            // The lock lapsed while the service answered: take it again and write only if nobody
-            // wrote meanwhile; otherwise theirs stands and ours is dropped.
-            release(held).await;
-            held = self.lock(path).await?;
-            match self.read(service).await {
-                Ok(Some(o)) if o.sign_in.revision == cur.sign_in.revision => {}
-                Ok(Some(o)) => {
-                    self.unlock(held).await;
-                    return Ok(Refreshed::ByAnother(o.sign_in));
+        fresh.service = service.to_string();
+        // From here `fresh` may hold the only refresh token that still works: it is written, or
+        // handed back
+        let saved = self.save_refreshed(&mut held, service, path, &cur, &fresh).await;
+        release(held).await;
+        match saved {
+            Ok(Saved::Ours(s)) => Ok(Refreshed::ByUs(s)),
+            Ok(Saved::Theirs(s)) => Ok(Refreshed::ByAnother(s)),
+            // Removed meanwhile (signed out everywhere), or rotated without this node (it was
+            // signed out): not ours to keep
+            Err(e @ (VaultStoreError::NotOurs(_) | VaultStoreError::Vault(VaultError::NotARecipient)))
+            | Err(e @ VaultStoreError::Vault(VaultError::Format("the sign-in was removed meanwhile"))) => {
+                Err(e)
+            }
+            Err(e) => Err(VaultStoreError::Unsaved {
+                service: service.to_string(),
+                sign_in: Box::new(fresh),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    /// Write tokens the service just gave, trying again while the homeserver fails (and taking
+    /// the lock again when it lapsed: ours are the live tokens, so waiting is worth it).
+    async fn save_refreshed(
+        &self,
+        held: &mut Locked,
+        service: &str,
+        path: &str,
+        cur: &Opened,
+        fresh: &SignIn,
+    ) -> Result<Saved> {
+        let deadline = tokio::time::Instant::now() + WAIT_FOR_OTHERS;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let e = match self.save_once(held, service, path, cur, fresh).await {
+                Ok(s) => return Ok(s),
+                Err(e) => e,
+            };
+            if !e.transient() || attempt >= SAVE_TRIES || tokio::time::Instant::now() >= deadline {
+                return Err(e);
+            }
+            tracing::warn!(
+                service,
+                attempt,
+                "vault: the refreshed sign-in isn't saved yet: {e}"
+            );
+            let lapsed = matches!(
+                e.http_status(),
+                Some(reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::LOCKED)
+            );
+            if lapsed && held.lock.is_some() {
+                let old = std::mem::replace(held, Locked { lock: None });
+                self.unlock(old).await;
+                *held = loop {
+                    match self.lock(path).await {
+                        Ok(h) => break h,
+                        Err(VaultStoreError::Busy(_)) if tokio::time::Instant::now() < deadline => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
+            } else {
+                tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+            }
+        }
+    }
+
+    /// One try at writing refreshed tokens. The blob is read again first:
+    /// - another client's fresh copy (newer, other tokens, not due) stands, and ours are dropped;
+    /// - a copy written meanwhile without new tokens (a new device, a sign-out rotation, a
+    ///   setting) is kept, with our tokens in it and wrapped to its recipients.
+    async fn save_once(
+        &self,
+        held: &Locked,
+        service: &str,
+        path: &str,
+        cur: &Opened,
+        fresh: &SignIn,
+    ) -> Result<Saved> {
+        let Some(now_o) = self.read(service).await? else {
+            return Err(VaultError::Format("the sign-in was removed meanwhile").into());
+        };
+        let theirs = &now_o.sign_in;
+        if theirs.revision > cur.sign_in.revision
+            && theirs.tokens != cur.sign_in.tokens
+            && !theirs.needs_refresh(now())
+        {
+            return Ok(Saved::Theirs(now_o.sign_in));
+        }
+        let mut s = if theirs.revision == cur.sign_in.revision {
+            fresh.clone()
+        } else {
+            let mut s = theirs.clone();
+            s.tokens = fresh.tokens.clone();
+            s.expires_at = fresh.expires_at;
+            s.scopes = fresh.scopes.clone();
+            s.last_refresh = fresh.last_refresh;
+            if fresh.user.is_some() {
+                s.user = fresh.user.clone();
+            }
+            s
+        };
+        let me = self.client_key();
+        let others: Vec<ClientKey> = now_o.recipients.iter().copied().filter(|k| *k != me).collect();
+        s.revision = self.write_held(held, service, path, &s, &others).await?;
+        Ok(Saved::Ours(s))
+    }
+
+    /// Renew what keeps other clients out while the service answers: the lock, or our lease.
+    async fn renew(&self, held: &mut Locked, service: &str) {
+        match held.lock.as_mut() {
+            Some(l) => {
+                if let Err(e) = self.session.storage().refresh_lock(l, LOCK_FOR).await {
+                    // It still has up to 20 s; the write takes it again if it lapsed
+                    tracing::warn!(service, "vault: the lock wasn't renewed: {e}");
                 }
-                Ok(None) | Err(_) => {
-                    self.unlock(held).await;
-                    return Err(VaultStoreError::Busy(path.to_string()));
+            }
+            None => {
+                if let Err(e) = self.renew_lease(service).await {
+                    tracing::warn!(service, "vault: the lease wasn't renewed: {e}");
                 }
             }
         }
-        let others: Vec<ClientKey> = recipients
-            .into_iter()
-            .filter(|k| *k != self.client_key())
-            .collect();
-        let r = self.write_held(&held, service, path, &fresh, &others).await;
-        release(held).await;
-        let revision = r?;
-        fresh.revision = revision;
-        fresh.service = service.to_string();
-        Ok(Refreshed::ByUs(fresh))
     }
 
     /// Take the refresh lease (VAULT.md): `false` while another client's lease is live or ours
@@ -867,13 +1145,38 @@ impl Vault<'_> {
         Ok(read().await?.is_some_and(|l| l.client == me))
     }
 
-    /// Give the lease back (only ours).
+    /// Push our lease's `until` on while the service answers (only while it is still ours).
+    async fn renew_lease(&self, service: &str) -> Result<()> {
+        let path =
+            spec::lease_path(service).ok_or_else(|| VaultStoreError::BadService(service.to_string()))?;
+        let me = self.client_key();
+        let ours = self
+            .read_bytes(&path, 1024)
+            .await?
+            .and_then(|b| serde_json::from_slice::<spec::Lease>(&b).ok())
+            .is_some_and(|l| l.client == me);
+        if !ours {
+            return Ok(());
+        }
+        let lease = spec::Lease {
+            client: me,
+            until: now() + spec::LOCK_SECONDS,
+        };
+        let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
+        self.session.storage().put(path.as_str(), body).await?;
+        Ok(())
+    }
+
+    /// Give the lease back: only ours, and only while it is live. Once it has run out another
+    /// client may be taking it, and deleting could remove theirs.
     async fn drop_lease(&self, service: &str) {
         let Some(path) = spec::lease_path(service) else {
             return;
         };
         if let Ok(Some(b)) = self.read_bytes(&path, 1024).await {
-            if serde_json::from_slice::<spec::Lease>(&b).is_ok_and(|l| l.client == self.client_key()) {
+            if serde_json::from_slice::<spec::Lease>(&b)
+                .is_ok_and(|l| l.client == self.client_key() && l.until > now() + 1)
+            {
                 let _ = self.session.storage().delete(path.as_str()).await;
             }
         }
@@ -1019,6 +1322,67 @@ mod tests {
             let s = ClientSecret::generate();
             assert_eq!(s.public().0, pubky_noise::derive_static_public_key(&s.to_bytes()));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_processes_making_the_key_at_once_get_the_same_key() {
+        let dir = std::env::temp_dir().join(format!("pm-vault-race-{}", rand_suffix()));
+        let path = dir.join("vault").join("client.key");
+        let keys: Vec<[u8; 32]> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| load_or_create_client_secret(&path).unwrap().public().0))
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(keys.windows(2).all(|w| w[0] == w[1]));
+        // Nothing left behind but the key
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(left.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn signed_out_clients_are_remembered_even_when_the_list_drops_them() {
+        use pubky_music_specs::vault::{ClientKey, Revoked};
+        let dir = std::env::temp_dir().join(format!("pm-vault-revoked-{}", rand_suffix()));
+        let path = dir.join("vault-revoked.json");
+        let r = |n: u8, g: &str| Revoked {
+            client_key: Some(ClientKey([n; 32])),
+            grant_id: Some(g.into()),
+            at: 1,
+        };
+        // Nothing yet
+        assert!(remember_revoked(&path, &[]).unwrap().is_empty());
+        // The list signs out D: remembered
+        assert_eq!(remember_revoked(&path, &[r(1, "d")]).unwrap(), [r(1, "d")]);
+        // A later list without D (D rewrote it) still gives D back, and adds E
+        assert_eq!(
+            remember_revoked(&path, &[r(2, "e")]).unwrap(),
+            [r(1, "d"), r(2, "e")]
+        );
+        assert_eq!(remember_revoked(&path, &[]).unwrap().len(), 2);
+        // The file is private
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // A flood fills the room left and no more; the old records stay
+        let flood: Vec<Revoked> = (0..MAX_LOCAL_REVOKED + 10)
+            .map(|i| r(3, &i.to_string()))
+            .collect();
+        let all = remember_revoked(&path, &flood).unwrap();
+        assert_eq!(all.len(), MAX_LOCAL_REVOKED + 12, "this read sees them all");
+        let kept = remember_revoked(&path, &[]).unwrap();
+        assert_eq!(kept.len(), MAX_LOCAL_REVOKED);
+        assert_eq!(&kept[..2], [r(1, "d"), r(2, "e")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn rand_suffix() -> String {
+        ClientSecret::generate().public().to_hex()[..12].to_string()
     }
 
     #[cfg(unix)]
