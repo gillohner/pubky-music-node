@@ -27,6 +27,13 @@ pub enum SyncError {
     Store(String),
 }
 
+impl SyncError {
+    /// The homeserver refused a write because the person's storage is full (507).
+    pub fn is_full(&self) -> bool {
+        matches!(self, SyncError::Homeserver(e) if pm_pubky::homeserver::is_full(e))
+    }
+}
+
 pub struct PubkySync {
     homeserver: NodeHomeserver,
     session: PubkySession,

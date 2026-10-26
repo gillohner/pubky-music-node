@@ -197,8 +197,31 @@ pub struct HomeserverStorage {
     pub user: Option<String>,
     /// The owner's storage quota on the bundled homeserver: MB, `"unlimited"`, or null.
     pub quota_mb: Option<serde_json::Value>,
-    /// The owner's files on the bundled homeserver, in bytes.
+    /// The owner's files on the homeserver, in bytes: all of them on the bundled one; on
+    /// another homeserver, what this node put there (its copies of them), since another
+    /// homeserver tells nobody its quota or what else is stored.
     pub used_bytes: Option<u64>,
+    /// What `used_bytes` counts: `homeserver files` (bundled) or `this node's uploads` (another
+    /// homeserver, whose quota is unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_from: Option<String>,
+    /// When the homeserver last answered that it is full (Unix seconds); cleared by the next
+    /// upload that goes through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_at: Option<i64>,
+}
+
+/// Where the time of the homeserver's last "full" answer is kept.
+const FULL_KEY: &str = "storage.full_at";
+
+/// Note that the homeserver answered "full" (507), or that an upload went through again.
+pub(crate) fn note_full(s: &NodeState, full: bool) {
+    let lib = s.library.lock().expect("library poisoned");
+    let _ = if full {
+        lib.set_setting(FULL_KEY, &pm_library::db::now_unix().to_string())
+    } else {
+        lib.delete_setting(FULL_KEY).map(|_| ())
+    };
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -289,6 +312,26 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Storage
         Some(h) => h.await.ok(),
         None => None,
     };
+    // Another homeserver: what this node put there, from its own copies of those files
+    let (used_bytes, used_from) = match (used_bytes, bundled, user.is_some()) {
+        (Some(b), _, _) => (Some(b), Some("homeserver files".to_string())),
+        (None, false, true) => {
+            let d = s.mirror_dir.clone();
+            let b = tokio::task::spawn_blocking(move || if d.is_dir() { dir_size(&d) } else { 0 })
+                .await
+                .ok();
+            (b, b.map(|_| "this node's uploads".to_string()))
+        }
+        _ => (None, None),
+    };
+    let full_at = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(FULL_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok());
     let n = pending(&s);
     let save = s.storage_save.lock().expect("save").clone();
     let running = s.sync_activity.lock().expect("sync activity").running;
@@ -342,6 +385,8 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Storage
             user,
             quota_mb,
             used_bytes,
+            used_from,
+            full_at,
         },
         saving: Saving {
             state: state.into(),

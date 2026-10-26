@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Uploads say when the homeserver is full** (the owner's upload request): a homeserver's 507 becomes "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota" on the upload (`full: true`), and `GET /v1/storage` keeps when it happened (`full_at`) until an upload goes through. On another homeserver, whose quota nobody can read, the storage line now shows what this node put there (`used_from: this node's uploads`); the bundled one still shows the exact quota and use.
 - **Service apps in one list** (ADR 0016 step 2, the admin side): `GET /v1/node/apps` names every app the node uses for everyone (Spotify, TIDAL, Qobuz, SoundCloud, YouTube, Last.fm, Jamendo, AcoustID, the drives, the artist-image services), whether each is set and from where, where to get one, and the route that sets it; never a secret. Settings › This node can show them on one screen.
 - **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):
   - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection, and a song is kept only once its file is whole. A song whose file was cleared is downloaded again. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
