@@ -32,7 +32,9 @@ pub struct Bridge {
     pub settings: &'static [&'static str],
 }
 
-/// Every sign-in the node keeps for the person, by source.
+/// Every sign-in the node keeps for the person, by source. Only the person's own sign-ins: the
+/// node's apps (Spotify client id, Qobuz app, SoundCloud client, Last.fm and YouTube keys, a TIDAL
+/// client of the admin's) are set once by the admin and never enter a vault (ADR 0016).
 pub const BRIDGES: &[Bridge] = &[
     Bridge {
         service: "tidal",
@@ -40,31 +42,27 @@ pub const BRIDGES: &[Bridge] = &[
     },
     Bridge {
         service: "tidal-full",
-        settings: &["tidal.unofficial", "tidal.unofficial_client"],
+        settings: &["tidal.unofficial"],
     },
     Bridge {
         service: "spotify",
-        settings: &["spotify.user", "spotify.app"],
+        settings: &["spotify.user"],
     },
     Bridge {
         service: "qobuz",
-        settings: &["qobuz.unofficial", "qobuz.app"],
+        settings: &["qobuz.unofficial"],
     },
     Bridge {
         service: "soundcloud",
-        settings: &["soundcloud.unofficial", "soundcloud.client"],
+        settings: &["soundcloud.unofficial"],
     },
     Bridge {
         service: "bandcamp",
         settings: &["bandcamp.unofficial", "bandcamp.identity"],
     },
     Bridge {
-        service: "youtube",
-        settings: &["youtube.api_key"],
-    },
-    Bridge {
         service: "lastfm",
-        settings: &["lastfm.session", "lastfm.app"],
+        settings: &["lastfm.session"],
     },
     Bridge {
         service: "listenbrainz",
@@ -76,7 +74,7 @@ pub const BRIDGES: &[Bridge] = &[
     },
     Bridge {
         service: "plex",
-        settings: &["plex.server", "plex.client_id"],
+        settings: &["plex.server"],
     },
     Bridge {
         service: "jellyfin",
@@ -474,8 +472,19 @@ mod tests {
             assert!(seen.insert(b.service), "{} twice", b.service);
             assert!(!b.settings.is_empty());
         }
-        // What stays on the machine
-        for local in ["spotify.librespot", "spotify.soloist", "youtube.unofficial"] {
+        // What stays on the machine, and the node's apps (ADR 0016: the admin's, not a person's)
+        for local in [
+            "spotify.librespot",
+            "spotify.soloist",
+            "youtube.unofficial",
+            "youtube.api_key",
+            "spotify.app",
+            "qobuz.app",
+            "soundcloud.client",
+            "lastfm.app",
+            "tidal.unofficial_client",
+            "plex.client_id",
+        ] {
             assert!(BRIDGES.iter().all(|b| !b.settings.contains(&local)), "{local}");
         }
     }

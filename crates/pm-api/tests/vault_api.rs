@@ -240,23 +240,30 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
     let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
     set(&n1, "tidal.user", tidal_v1);
-    set(&n1, "youtube.api_key", "AIza-test-key");
+    set(
+        &n1,
+        "jamendo.user",
+        r#"{"access_token":"jam-1","refresh_token":"jam-r","user_id":"42"}"#,
+    );
 
     // Node 1: its two sign-ins move into the vault
     let (st, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(r["migrated"], json!(["tidal", "youtube"]), "{r}");
+    assert_eq!(r["migrated"], json!(["tidal", "jamendo"]), "{r}");
     // ...and stay where they were on the node
     assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal_v1));
 
     // Node 2 joins: it can't read them until node 1 shares them
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["not_readable"], json!(["tidal", "youtube"]), "{r}");
+    assert_eq!(r["not_readable"], json!(["tidal", "jamendo"]), "{r}");
     call(&a1, "POST", "/v1/vault/sync").await;
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["pulled"], json!(["tidal", "youtube"]), "{r}");
+    assert_eq!(r["pulled"], json!(["tidal", "jamendo"]), "{r}");
     assert_eq!(get(&n2, "tidal.user").as_deref(), Some(tidal_v1));
-    assert_eq!(get(&n2, "youtube.api_key").as_deref(), Some("AIza-test-key"));
+    assert_eq!(
+        get(&n2, "jamendo.user").as_deref(),
+        Some(r#"{"access_token":"jam-1","refresh_token":"jam-r","user_id":"42"}"#)
+    );
 
     // Node 2's source refreshes TIDAL locally: it reaches node 1
     let tidal_v2 = r#"{"access_token":"at-2","refresh_token":"rt-2","user_id":"7","country":"CH"}"#;
@@ -299,10 +306,10 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     // Sign out everywhere from node 1: aside on node 1 now, on node 2 at its next sync
     let (st, r) = call(&a1, "POST", "/v1/vault/sign-out-everywhere").await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(r["removed"], json!(["tidal", "youtube"]));
-    assert_eq!(r["signed_out_here"], json!(["tidal", "youtube"]));
+    assert_eq!(r["removed"], json!(["jamendo", "tidal"]));
+    assert_eq!(r["signed_out_here"], json!(["tidal", "jamendo"]));
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["signed_out"], json!(["tidal", "youtube"]), "{r}");
+    assert_eq!(r["signed_out"], json!(["tidal", "jamendo"]), "{r}");
     for n in [&n1, &n2] {
         assert_eq!(get(n, "tidal.user"), None, "the node no longer uses it");
         assert_eq!(

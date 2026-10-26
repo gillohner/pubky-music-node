@@ -5,7 +5,7 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-25
 
 - **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
-  - After every sign-in, at startup and every 15 minutes, the node's sign-ins (TIDAL, TIDAL full, Spotify, Qobuz, SoundCloud, Bandcamp, YouTube key, Last.fm, ListenBrainz, Jamendo, Plex, Jellyfin, your server, Audiobookshelf, drives, gPodder) are kept in step with the person's vault. A sign-in only on the node moves in once; one only in the vault (from another node) fills the node; then the newer side wins.
+  - After every sign-in, at startup and every 15 minutes, the node's sign-ins (TIDAL, TIDAL full, Spotify, Qobuz, SoundCloud, Bandcamp, Last.fm, ListenBrainz, Jamendo, Plex, Jellyfin, your server, Audiobookshelf, drives, gPodder; the person's own sign-ins only, not the node's apps or keys, which the admin sets once, ADR 0016) are kept in step with the person's vault. A sign-in only on the node moves in once; one only in the vault (from another node) fills the node; then the newer side wins.
   - Each blob carries the node's settings as they are, plus the standard token members where there's an OAuth session, for the person's other clients.
   - Nothing is deleted from the node's settings: "Sign out everywhere" moves the node's copies aside.
   - `POST /v1/vault/sync` runs it now.
