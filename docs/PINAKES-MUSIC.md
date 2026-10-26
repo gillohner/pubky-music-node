@@ -98,7 +98,7 @@ What this repository does with each item of the steward's note:
   node has no events view).
 - **Matching the owner's own library:** `POST /v1/tags/bulk` (Settings → Pubky → "Tag my whole library on
   Pubky") writes one tag per identified track on its canonical MusicBrainz URL; Pinakes then joins each to
-  its group. *(Updated 2026-10-26.)* What the node writes is pubky-social-specs v1 (ADR 0014): social v1
+  its group. What the node writes is pubky-social-specs v1 (ADR 0014): social v1
   tags in `/pub/social/v1/tags/`, bookmarks, `collection` posts for playlists, and `pubky-music-specs`
   `review` and `listen` posts. The "posts with custom content" (ADR 0006) were the older envelope, not v1;
   the node only reads them for the one-time move.

@@ -1860,7 +1860,10 @@ async fn the_listen_history_lands_where_the_setting_says() {
     .unwrap();
     let content: serde_json::Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
     assert_eq!(body["kind"], "listen");
-    assert_eq!(content["played_at"], v1::micros_of(&first).unwrap());
+    // The id is when it was written; played_at when it played, in microseconds
+    let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
+    assert_eq!(content["played_at"], h["listens"][0]["played_at"]);
+    assert!(content["played_at"].as_i64().unwrap() <= v1::micros_of(&first).unwrap());
     assert_eq!(content["source"]["service"], "tidal");
 
     call(
@@ -1938,6 +1941,59 @@ async fn the_listen_history_lands_where_the_setting_says() {
     assert!(listens(v1::Root::Priv).await.is_empty(), "deleted, not imported");
     let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
     assert!(h["listens"].as_array().unwrap().is_empty(), "{h}");
+
+    // After the delete, another node imports old plays (ListenBrainz): written now, played a year
+    // ago. A second node that has the delete time (from the settings copy) pulls it and keeps it
+    sync.backup_settings(&a).await;
+    let second = node(dir.path(), "second");
+    let sync_2 = Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        sync.session().clone(),
+    ));
+    second.set_sync(Some(sync_2.clone()));
+    sync_2.restore_settings(&second, false).await.unwrap().unwrap();
+    assert!(
+        second
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listens.cleared_before")
+            .unwrap()
+            .is_some(),
+        "the second node knows when the history was deleted"
+    );
+    let mut imported = pm_pubky::Activity::new(
+        &pm_model::MusicUri::parse("https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862")
+            .unwrap(),
+        pm_pubky::ActivitySource::Unknown,
+        None,
+    );
+    imported.played_at -= 365 * 86_400_000_000;
+    let imported_id = v1::id_of(pm_pubky::ids::now_micros());
+    let v1_post = v1::to_v1(&pm_pubky::MusicContent::Activity(imported)).unwrap();
+    let path = v1_post
+        .version_path(
+            &imported_id,
+            None,
+            v1::Root::Priv,
+            &v1::PubkyId::try_from(z32.strip_prefix("pubky").unwrap()).unwrap(),
+        )
+        .unwrap();
+    homeserver
+        .write_object(sync.session(), &path, &v1_post.to_json())
+        .await
+        .unwrap();
+    for (n, s) in [(&second, &sync_2), (&a, &sync)] {
+        let r = s.sync(&n.library).await.unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let (_, h) = call(&router(n.clone()), "GET", "/v1/me/listens", None).await;
+        assert_eq!(h["listens"].as_array().unwrap().len(), 1, "kept and pulled: {h}");
+        assert_eq!(h["listens"][0]["id"], imported_id);
+    }
+    assert!(
+        listens(v1::Root::Priv).await.contains_key(&imported_id),
+        "still on the homeserver"
+    );
 }
 
 /// Profiles read the social v1 profile first, then the older pubky.app one; following writes

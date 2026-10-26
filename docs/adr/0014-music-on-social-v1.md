@@ -76,8 +76,9 @@ caps it at 10,000 songs.
 
 The owner's decision: listen history is an option, private or public. `pubky-music-specs` accepts a
 `listen` under `/pub/music/v1/posts/` as well as `/priv/`. Every other listen rule stays: `embed`
-names the music, no `parent`, no attachments, no lock, `played_at` in milliseconds after 2000,
-`duration_ms` at most a day, and `source` well formed. A public listen's `source.uri` passes the
+names the music, no `parent`, no attachments, no lock, `played_at` from 2000 on (in microseconds,
+with older millisecond values still read: see the next amendment), `duration_ms` at most a day, and
+`source` well formed. A public listen's `source.uri` passes the
 reference gate under the public root, so it cannot point at a private object.
 
 - The person chooses where the node writes listens: off (nothing is written), private (the default)

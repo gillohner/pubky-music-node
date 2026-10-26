@@ -703,6 +703,8 @@ pub(crate) async fn play(
         .get(&ZoneId::new(&body.zone))
         .ok_or_else(|| ApiError::not_found(format!("no zone {}", body.zone)))?;
     let p = load_playlist(&s, &id)?;
+    // The owner (playlists are the owner's) takes the zone back from a listener
+    crate::listens::zone_changed_by(&s, &body.zone, true);
     // Songs play from where they play (pins, orders); the library's albums play whole, in place
     let mut songs = p.clone();
     songs.items.retain(|i| i.kind() == Some(ItemKind::Track));

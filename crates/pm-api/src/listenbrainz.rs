@@ -429,12 +429,9 @@ pub(crate) async fn import_listens(
             };
             let uri = pm_model::MusicUri::recording(mbid);
             let lib = s.library.lock().expect("library poisoned");
-            let id = pm_pubky::ids::timestamp_id(at * 1_000_000);
-            if lib.get_music_post(&id)?.is_some() {
-                continue;
-            }
             // A listen where the history setting says (checked above: not off). No source:
             // a source is where it played, which ListenBrainz does not say
+            // (the same song at the same time again is the listen already there)
             match crate::listens::record(
                 &lib,
                 &uri,

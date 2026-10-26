@@ -422,13 +422,19 @@ async fn set_follow(s: &NodeState, id: &str, on: bool) -> ApiResult<Followed> {
             )
             .await
         {
+            // The v1 follow is the follow; the older copy only helps today's Nexus
             Ok(()) => {
-                hs.write_object(
-                    sync.session(),
-                    &legacy_path,
-                    &pubky_app_specs::PubkyAppFollow::new(),
-                )
-                .await
+                if let Err(e) = hs
+                    .write_object(
+                        sync.session(),
+                        &legacy_path,
+                        &pubky_app_specs::PubkyAppFollow::new(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%legacy_path, error = %e, "followed on v1 only");
+                }
+                Ok(())
             }
             e => e,
         }

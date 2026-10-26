@@ -122,7 +122,9 @@ impl MusicContent {
             MusicContent::Review(r) => r.validate(id)?,
             MusicContent::Activity(a) => a.validate(id)?,
         }
-        if let Some(id) = id {
+        // A play's id is when its listen was written (any timestamp id: an import writes old
+        // plays now, and other apps mint their own); everything else is created at its id
+        if let Some(id) = id.filter(|_| !matches!(self, MusicContent::Activity(_))) {
             let expected = ids::timestamp_id(self.created_micros());
             if id != expected {
                 return Err(SchemaError::Id {

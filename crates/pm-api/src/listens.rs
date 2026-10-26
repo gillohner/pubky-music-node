@@ -15,6 +15,16 @@
 //! itself (`visibility: node`). The node's own play counts (Home's recently and most played)
 //! keep working whatever the setting.
 //!
+//! **Whose play it is.** The node does not know who queued each song on a zone, so a zone play
+//! is the owner's listen only when no party is open on that zone and the owner, not a listener,
+//! was the last to change the zone's queue or transport (`plays_are_the_owners`). Party guests'
+//! and listeners' plays never land in the owner's history, private or public. Two limits:
+//! - the mark that a listener has a zone is kept in memory only: a node restart hands every
+//!   zone back to the owner;
+//! - only `/v1/zones/…` requests set it. Other controllers (the Subsonic jukebox, LMS players,
+//!   UPnP control points) don't, so their plays count as the owner's, as they are signed in
+//!   with the owner's credentials or sit on the owner's network.
+//!
 // TODO(pinakes): other people's public listens ("who played this", a friend's history) come from
 // Pinakes, which indexes `/pub/music/v1/posts/`; the node does not read them from homeservers.
 
@@ -34,8 +44,9 @@ use std::sync::Arc;
 
 /// Where listens go: `off`, `private` or `public`.
 const SETTING: &str = "listens.history";
-/// When the owner last deleted the history (microseconds): older listens the sync still finds
-/// on the homeserver are deleted, not imported.
+/// When the owner last deleted the history (microseconds): listens the sync still finds on the
+/// homeserver that were **written** before then (their newest version's edit id) are deleted,
+/// not imported. A listen written later stays, whenever it was played (an import of old plays).
 const CLEARED: &str = "listens.cleared_before";
 /// A node play and a listen post this close (seconds) are the same play.
 const TWIN_SECS: i64 = 5;
@@ -53,8 +64,11 @@ pub(crate) fn cleared_before(lib: &Library) -> Option<i64> {
 }
 
 /// Record one play as a listen post where the setting says; `None` when the history is off.
-/// `played_at` (microseconds) defaults to now. A listen with the same id (the same microsecond)
-/// is kept as it is, so an import that runs twice writes nothing twice.
+/// `played_at` (microseconds) defaults to now. The post's id is the time it is **written**, not
+/// played (nudged forward past an id in use), so a deleted history can tell a listen written
+/// before the delete from one imported later with an older `played_at` ([`cleared_before`]).
+/// The same song at the same `played_at` is the same listen: an import that runs twice writes
+/// nothing twice.
 pub(crate) fn record(
     lib: &Library,
     uri: &MusicUri,
@@ -71,14 +85,56 @@ pub(crate) fn record(
     if let Some(t) = played_at {
         a.played_at = t;
     }
+    let url = uri.to_url();
+    if let Some(same) = lib
+        .music_posts_between(TYPE_ACTIVITY, a.played_at, a.played_at)?
+        .iter()
+        .find(|r| listen_entry(lib, r).is_some_and(|e| e.uri == url))
+    {
+        return Ok(Some(same.id.clone()));
+    }
     let post = MusicPost::new(MusicContent::Activity(a));
-    let id = post.create_id();
+    let mut written = pm_pubky::ids::now_micros();
+    let mut id = pm_pubky::ids::timestamp_id(written);
+    while lib.get_music_post(&id)?.is_some() {
+        written += 1;
+        id = pm_pubky::ids::timestamp_id(written);
+    }
     post.validate(Some(&id))
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    if lib.get_music_post(&id)?.is_none() {
-        store(lib, &post, &id, visibility)?;
-    }
+    store(lib, &post, &id, visibility)?;
     Ok(Some(id))
+}
+
+/// A listener (not the owner) changed this zone's queue or transport, or the owner did. The
+/// node cannot tell who queued each song, so a zone a listener changed last is in their hands:
+/// its plays are not the owner's listens until the owner changes it again. In memory only (a
+/// restart hands the zone back), and set only by `/v1/zones/…` requests, not by the Subsonic
+/// jukebox or other controllers (see the module docs).
+pub(crate) fn zone_changed_by(s: &NodeState, zone: &str, owner: bool) {
+    let mut hands = s.zones_in_listeners_hands.lock().expect("zone hands");
+    if owner {
+        hands.remove(zone);
+    } else {
+        hands.insert(zone.to_string());
+    }
+}
+
+/// Whether a play on this zone goes into the owner's history: not while a party is open on it
+/// (guests' songs and the owner's are mixed), and not while a listener changed it last.
+pub(crate) fn plays_are_the_owners(s: &NodeState, zone: &str) -> bool {
+    !s.zones_in_listeners_hands
+        .lock()
+        .expect("zone hands")
+        .contains(zone)
+        && !crate::party::open_on(s, zone)
+}
+
+/// The zone a write request changes (`/v1/zones/{id}/…`), if any.
+pub(crate) fn zone_of_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1").unwrap_or(path).strip_prefix("/zones/")?;
+    let (zone, what) = rest.split_once('/')?;
+    (!zone.is_empty() && !what.is_empty()).then_some(zone)
 }
 
 /// A zone started an item: a listen of a library song with a music URL (`track:<id>`), or of a

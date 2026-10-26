@@ -36,7 +36,7 @@ Newest first. Dates are when the change landed on `main`.
   - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
   - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
 
-- **Collections** (mn-social, STEWARD-SOCIAL-V1-MUSIC.md Part A.2): a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
+- **Collections** (STEWARD-SOCIAL-V1-MUSIC.md Part A.2): a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
   - Each has a layout: `list`, `grid` or `visual`.
   - `/v1/collections` and `/v1/playlists` are the same resource. Answers add `layout`, `tracks_only` and `entries`: each item with its kind and what the library has of it.
   - Playing one queues its songs and the library's albums; artists and posts are listed as `missing`.
@@ -50,7 +50,8 @@ Newest first. Dates are when the change landed on `main`.
   - `POST /v1/me/listens/visibility` moves the whole history between roots, and `DELETE /v1/me/listens` deletes it (listens another node wrote before then are deleted when the sync finds them).
   - The sync brings listens other nodes wrote into the history.
   - The ListenBrainz import asks first when the history is public, and leaves `source` out.
-  - Listeners can't read the owner's history.
+  - Listeners can't read the owner's history. A zone play is the owner's listen only when no party is open on the zone and the owner was the last to change it; guests' and listeners' plays never enter the owner's history.
+  - A listen's post id is when it was written, so deleting the history removes listens written before then, and an import of old plays made later stays.
 - **Tags are social v1 tags** (Part A.4): the node writes `/pub/social/v1/tags/<id>.json` (same id as before), which Nexus indexes as resource tags. The sync moves the older `/pub/pubky.app/tags/` and `/pub/pubky.music/tags/` tags once and reads them until then. Other apps' v1 tags are read once and not fetched again.
 - **Follows and profiles on social v1** (Part A.6): following writes `/pub/social/v1/follows/<key>.json` as well as the pubky.app follow (until Nexus indexes v1 follows); a profile from a homeserver is read from `/pub/social/v1/profile.json` first.
 - **pubky-social-specs from crates.io:** `=1.0.0-rc.1` replaces the git pin `acde362` (the same data model).
@@ -62,7 +63,7 @@ Newest first. Dates are when the change landed on `main`.
   - new kinds `listening` (feed only, `FEED_ONLY_KINDS` for the Nexus fork) and `session` (`host` a pubky user);
   - a hyphenated service vocabulary (`SERVICE_NAMES`, `service_name`);
   - `ext.music.original` on a duplicate.
-- **Bookmarks, by name** (mn-social, STEWARD-SOCIAL-V1-MUSIC.md Part A.1): favourites are called bookmarks, as in social specs v1.
+- **Bookmarks, by name** (STEWARD-SOCIAL-V1-MUSIC.md Part A.1): favourites are called bookmarks, as in social specs v1.
   - The API is `/v1/bookmarks`; answers say `bookmarked`. `/v1/favourites` answers the same for one release, with a `Deprecation` header (docs/api.md, Deprecated).
   - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
   - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.

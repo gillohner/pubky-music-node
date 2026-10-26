@@ -834,6 +834,12 @@ async fn auth(
     if let Some(why) = refusal {
         return accounts::refused(why).into_response();
     }
+    // Who changed a zone last decides whether its plays are the owner's listens (listens.rs)
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        if let Some(zone) = listens::zone_of_path(req.uri().path()) {
+            listens::zone_changed_by(&state, zone, caller.role == accounts::Role::Owner);
+        }
+    }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
     let not_owner = caller.role != accounts::Role::Owner;
     req.extensions_mut().insert(caller);

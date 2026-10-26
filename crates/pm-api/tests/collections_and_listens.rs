@@ -50,10 +50,25 @@ async fn call(
     uri: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value) {
-    let req = Request::builder()
+    call_as(app, "", method, uri, body).await
+}
+
+/// The same with a bearer token (none when empty).
+async fn call_as(
+    app: &axum::Router,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if !token.is_empty() {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let req = req
         .body(match body {
             Some(b) => Body::from(b.to_string()),
             None => Body::empty(),
@@ -72,6 +87,11 @@ async fn call(
 
 /// A node with one tagged song (and so its album) in the library; returns it and the track id.
 async fn node(dir: &std::path::Path) -> (Arc<NodeState>, axum::Router, i64) {
+    node_with(dir, None).await
+}
+
+/// The same, with an owner token (so listeners can be told apart).
+async fn node_with(dir: &std::path::Path, token: Option<&str>) -> (Arc<NodeState>, axum::Router, i64) {
     let music = dir.join("music");
     std::fs::create_dir(&music).unwrap();
     write_wav(&music.join("song.wav"), "Song");
@@ -87,7 +107,7 @@ async fn node(dir: &std::path::Path) -> (Arc<NodeState>, axum::Router, i64) {
             art_dir: dir.join("art"),
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
-            token: None,
+            token: token.map(str::to_string),
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
@@ -105,7 +125,15 @@ async fn node(dir: &std::path::Path) -> (Arc<NodeState>, axum::Router, i64) {
     );
     s.zones_for_all_outputs();
     let app = router(s.clone());
-    let (st, _) = call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    let owner = token.unwrap_or("");
+    let (st, _) = call_as(
+        &app,
+        owner,
+        "POST",
+        "/v1/library/scan",
+        Some(serde_json::json!({})),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     for _ in 0..500 {
         if !s.is_scanning() {
@@ -113,7 +141,7 @@ async fn node(dir: &std::path::Path) -> (Arc<NodeState>, axum::Router, i64) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let (_, found) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+    let (_, found) = call_as(&app, owner, "GET", "/v1/library/tracks?limit=10", None).await;
     let id = found["tracks"][0]["id"].as_i64().unwrap();
     (s, app, id)
 }
@@ -393,4 +421,75 @@ async fn the_listen_history_follows_its_setting() {
     assert_eq!(del["plays_cleared"], 1);
     let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
     assert!(h["listens"].as_array().unwrap().is_empty());
+}
+
+/// Whose play a zone play is: the owner's only (STEWARD review of #111). A listener's plays and
+/// those on a zone with an open party never become the owner's listens.
+#[tokio::test]
+async fn only_the_owners_zone_plays_are_listens() {
+    const OWNER: &str = "owner-token";
+    let dir = tempfile::tempdir().unwrap();
+    let (s, app, track_id) = node_with(dir.path(), Some(OWNER)).await;
+    let roster = serde_json::json!({"people": [
+        {"key": KEY, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    let listener = pm_api::accounts::mint(&s, KEY).unwrap();
+    // Plays a song on the zone as `who`; waits until the zone's event task has taken the play
+    // (it is in the node's play history), so the listen decision is made
+    let mut plays = 0;
+    let mut play = async |who: &str| {
+        let (st, r) = call_as(
+            &app,
+            who,
+            "POST",
+            "/v1/zones/null-output/queue",
+            Some(serde_json::json!({"track_ids": [track_id], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        plays += 1;
+        for _ in 0..500 {
+            let (_, h) = call_as(&app, OWNER, "GET", "/v1/library/history?limit=50", None).await;
+            if h["plays"].as_array().unwrap().len() >= plays {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        s.zones
+            .get(&pm_zones::ZoneId::new("null-output"))
+            .unwrap()
+            .wait_stopped()
+            .await;
+    };
+    let listens = async || {
+        let (_, h) = call_as(&app, OWNER, "GET", "/v1/me/listens", None).await;
+        h["listens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["id"].is_string())
+            .count()
+    };
+    play(OWNER).await;
+    assert_eq!(listens().await, 1, "the owner's play");
+    play(&listener).await;
+    assert_eq!(listens().await, 1, "a listener's play is not the owner's");
+    play(OWNER).await;
+    assert_eq!(listens().await, 2, "the owner took the zone back");
+    let (st, p) = call_as(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/party",
+        Some(serde_json::json!({"zone": "null-output", "hours": 1})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    play(OWNER).await;
+    assert_eq!(listens().await, 2, "a zone with a party open mixes guests' songs");
 }

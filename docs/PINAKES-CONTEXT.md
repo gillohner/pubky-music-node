@@ -35,7 +35,7 @@ it as a client.
 ## What Pinakes indexes
 - Every link Nexus reports as referenced, today through **tags**. The node writes social v1 tags
   (`/pub/social/v1/tags/:id.json`), which Nexus indexes on an external URL as resource tags
-  (upstream #1165). (Updated 2026-10-26: this used to say `/pub/pubky.app/tags/:id`.)
+  (upstream #1165).
 - Nexus reserves further reference kinds (reply, embed, collection, event).
 - **A playlist is a social v1 `collection` post** (`/pub/social/v1/posts/:id/:editId.json` while
   public; ADR 0014). There is no `/pub/pubky.music/playlists/` path.

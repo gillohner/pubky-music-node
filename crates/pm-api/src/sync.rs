@@ -834,7 +834,7 @@ impl PubkySync {
     /// Bring in v1 collections, reviews and listens, under either root, that are new or newer
     /// than the node's copy. A post under both roots (a public collection: its private draft and
     /// the published copy) is read from its newest version, public when that one is. At most
-    /// [`READS_PER_PASS`] posts are fetched per pass; the rest count as pending. Listens from
+    /// [`READS_PER_PASS`] posts are fetched per pass; the rest count as pending. Listens written
     /// before the history was deleted are deleted, not imported.
     async fn pull_v1(
         &self,
@@ -912,9 +912,11 @@ impl PubkySync {
                 let Some(content) = content else {
                     continue;
                 };
-                if let MusicContent::Activity(a) = &content {
-                    if cleared_before.is_some_and(|t| a.played_at <= t) {
-                        // Written elsewhere before the owner deleted the history: it goes too
+                if matches!(content, MusicContent::Activity(_)) {
+                    // Written (its newest version) before the owner deleted the history: it goes
+                    // too. The write time, not the play time: an import of old plays made after
+                    // the delete stays
+                    if cleared_before.is_some_and(|t| head.edited_micros() <= t) {
                         for path in heads.versions_of(&id) {
                             if let Err(e) = self.delete_quietly(&path).await {
                                 report.errors.push(format!("delete {path}: {e}"));
