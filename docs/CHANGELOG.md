@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
 - **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
 - **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
 

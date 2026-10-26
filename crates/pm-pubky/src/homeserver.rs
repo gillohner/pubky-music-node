@@ -701,6 +701,8 @@ pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
 /// The node's settings (contact, folders, streaming sessions, renderers, DSP)
 /// so a reinstalled or replaced node restores them after one Ring sign-in.
 pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
+/// The person's own preferences ("You" in Settings), read and written by every node they use.
+pub const PREFS_PATH: &str = "/priv/pubky.music/prefs.json";
 
 /// How the user's own devices find their node (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -735,6 +737,25 @@ impl NodeHomeserver {
         settings: &serde_json::Value,
     ) -> Result<(), HomeserverError> {
         self.write_object(session, NODE_SETTINGS_PATH, settings).await
+    }
+
+    pub async fn write_prefs(
+        &self,
+        session: &PubkySession,
+        prefs: &serde_json::Value,
+    ) -> Result<(), HomeserverError> {
+        self.write_object(session, PREFS_PATH, prefs).await
+    }
+
+    pub async fn read_prefs(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Option<serde_json::Value>, HomeserverError> {
+        let storage = session.storage();
+        if !storage.exists(PREFS_PATH).await? {
+            return Ok(None);
+        }
+        Ok(Some(storage.get_json(PREFS_PATH).await?))
     }
 
     pub async fn read_node_settings(
