@@ -168,6 +168,12 @@ fn creds(s: &NodeState) -> SpotifyCredentials {
     }
 }
 
+/// The public client id of the app the node's Spotify sign-ins are made with (`vault_cache`
+/// pulls only sign-ins made with it).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(creds(s).client_id).filter(|c| !c.trim().is_empty())
+}
+
 fn settings_app(s: &NodeState) -> Option<String> {
     let lib = s.library.lock().expect("library poisoned");
     lib.get_setting(APP_KEY)

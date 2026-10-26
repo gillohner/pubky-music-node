@@ -33,7 +33,7 @@ secret on the device. It is authorised by the person's identity, without ever ho
    "device": "node"}`. `device` is optional: `node`, `desktop`, `android`, `ios` or `browser` (for the icon;
    readers that don't know a value show a generic one).
    The result, `{grant, pop}`, is the root-signed grant JWS (it names the client key in `cnf`) and the proof JWS.
-3. It adds itself to `index.json`.
+3. It adds itself to `index.json`, under that file's lock (see "Editing `index.json`").
 
 A reader trusts an entry only if all of these hold:
 - `verify_custom_grant_pop` accepts the proof (both signatures, the grant bound to the proof, the grant
@@ -61,6 +61,26 @@ app must hold the root secret. A grant proof gives the same identity binding wit
 ```
 Times are Unix seconds. `last_used_at` is written at most once a day per client. A client listed in
 `revoked` (by key or grant id) never gets keys again, even if it re-adds itself.
+
+**Editing `index.json`.** Every change to the list (adding a client, `last_used_at`, signing one out)
+is a read-modify-write under that file's lock: `LOCK` on `index.json`, read it again, change it, `PUT`
+with the lock, unlock. Where `LOCK` answers `405`, use the lease (`index.lease.json`, as for blobs
+below). An edit made without the lock can drop a registration or a sign-out made at the same time.
+
+**Revocation is remembered by each client.** The `revoked` list is not tamper-proof. Every client
+listed in `index.json` can write it, a signed-out one too (its homeserver grant still allows that),
+and the homeserver can serve an older copy. So:
+- each client keeps its own append-only record of every `revoked` entry it has seen;
+- it trusts nobody in the union of that record and the list as served;
+- when it writes `index.json`, it writes the union back, so a dropped record returns.
+
+A list that drops a record therefore re-trusts nobody for a client that has seen the record. The same
+holds for epochs: clients remember the highest epoch they have seen.
+
+**Who gets a key is decided under the blob's lock.** A client that wraps a data key to the trusted
+clients (writing a blob, or adding a device) reads `index.json` again after it takes that blob's lock.
+A sign-out changes the index before it takes any blob lock, so a client signed out meanwhile is never
+wrapped to.
 
 ## The envelope
 
@@ -119,12 +139,18 @@ Times are Unix seconds. `last_used_at` is written at most once a day per client.
 - **Adding a device:** a client that sees a trusted entry with no recipient in a blob unwraps the data key and
   appends a recipient for it, keeping the epoch, under that blob's lock.
 - **Sign out this device:**
-  1. The entry moves to `revoked`.
+  1. The entry moves to `revoked` (under the index lock). Where Ring offers it, the person also revokes
+     the device's grant, so it loses write access to the vault folder.
   2. Every blob gets a new data key at `epoch` + 1, is encrypted again, and is wrapped only to the remaining
      trusted clients.
   3. The token is revoked at the service where its API allows that.
   - A removed device can still read what it saw before, nothing after.
-- **Sign out everywhere:** delete the blobs, and revoke each token at its service.
+  - One sign-in that can't be rotated now (locked by another client's refresh, unreadable) doesn't stop the
+    others: it is reported, and its next write leaves the device out anyway (writers read the index under the
+    blob's lock and never wrap to a signed-out client).
+  - A client never signs itself out through its own grant id: when the entry being signed out shares the
+    signer's grant (an old key of the same client), only its key goes into `revoked`.
+- **Sign out everywhere:** delete the blobs, each under its lock, and revoke each token at its service.
 
 Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer
 blob, and they treat an older one as stale and read it again (a homeserver can serve an old copy).
@@ -138,10 +164,17 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    every 10 s. This is the pubky SDK's `SessionStorage::lock` on homeservers from 0.16.2.
 2. Under the lock it reads the blob again. If another client has already refreshed it (higher `revision`, not
    expired), it uses that and unlocks.
-3. Otherwise it refreshes with the refresh token it just read. It writes the new tokens with `revision` + 1 and
-   `last_refresh` (`PUT` with the lock's `If` header), then unlocks.
-4. A client that finds the blob locked (`423`) waits 1–2 s and reads it again. It never refreshes a token it
-   didn't just read under the lock.
+3. Otherwise it refreshes with the refresh token it just read, giving the service at most 60 s (then it unlocks
+   and gives up). It writes the new tokens with `revision` + 1 and `last_refresh` (`PUT` with the lock's `If`
+   header), then unlocks.
+   - It reads the blob again just before writing. If another client's fresh copy is there (newer, other tokens,
+     not due), that one stands. If the blob was changed meanwhile without new tokens (a device added, a
+     sign-out rotation, a setting), it puts its tokens into that copy, wrapped to that copy's recipients.
+   - The new tokens may be the only ones that still work (the service has used up the old refresh token), so
+     they are never dropped: a failed write is tried again, taking the lock again if it lapsed. If it still
+     fails, the client keeps using them and writes them later.
+4. A client that finds the blob locked (`423`) retries the lock for about 2 s, then waits 1–2 s and reads the
+   blob again. It never refreshes a token it didn't just read under the lock.
 5. If renewing the lock fails while the service answers, the client locks again and writes only if nobody
    wrote meanwhile. At a service that rotates refresh tokens this can cost one refresh: the other client's
    call fails at the service, and its next read picks up the winner.
@@ -151,7 +184,12 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
    wait and read the blob again.
 2. Otherwise write your own lease (`until` = now + 30), wait 2 s, and read the lease again. Go on only if it is
    still yours.
-3. Refresh, write the blob, then delete the lease.
+3. Refresh, renewing the lease (`until` = now + 30) every 10 s while the service answers, write the blob, then
+   delete the lease. Delete it only while it is yours and still live: once it has run out another client may
+   be taking it.
+
+Leases compare `until` with the local clock, so a client whose clock is more than 30 s off can take a live
+lease. That costs a failed refresh at the service. Locks don't depend on clocks.
 
 Until every source refreshes through this protocol, a client other than the node uses the tokens it reads
 and leaves refreshing to the node (the node pushes its own refreshes within 15 minutes); otherwise two
@@ -163,3 +201,7 @@ client's token write and could undo a rotated refresh token.
 ## Limits
 
 Blob ≤ 64 KiB, index ≤ 256 KiB, ≤ 64 clients. Larger answers are refused unread.
+
+A reader still reads an `index.json` that lists more than 64 entries, within the byte limit, so entries
+that don't verify can't make the list unreadable. A client adding itself to a full list first drops the
+entries that aren't trusted. Their sign-outs stay in `revoked`.

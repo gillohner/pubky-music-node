@@ -1,35 +1,70 @@
 //! The node's sign-ins as a cache of the vault (STEWARD-VAULT.md item 6).
 //!
-//! Each source keeps its sign-in in the node's settings as it always has, and the sources read it
-//! there unchanged. This module keeps those settings and the person's vault in step:
-//! - the first time, a sign-in that exists only on the node is written into the vault (the
-//!   migration);
-//! - a sign-in that exists only in the vault (made on another device, or by another node) fills
-//!   the node's settings;
-//! - after that, the newer side wins: a vault revision the node hasn't seen replaces the node's
-//!   copy, and a node copy that changed since the last sync is written to the vault.
+//! Each source keeps its sign-in in the node's settings as it always has, and reads it there
+//! unchanged. This module keeps those settings and the person's vault in step, one service at a
+//! time ([`decide`]):
+//! - a sign-in only on the node moves into the vault once (the migration); one only in the vault
+//!   (made on another device or node) fills the node's settings;
+//! - after that, whichever side changed since the last sync wins, by content, not by revision (a
+//!   sign-out rotation bumps the revision without changing anything, and a blob made again after
+//!   "Sign out everywhere" starts at revision 1);
+//! - signing out of a source on the node removes it from the vault; a sign-in removed from the
+//!   vault elsewhere is moved aside on the node (`vault.signed_out.<key>`, never in a backup);
+//! - two different copies meeting for the first time are a conflict: both stay as they are, and
+//!   the report names it, rather than one silently replacing the other.
 //!
-//! The vault blob carries the node's settings verbatim (`node.settings`), so any node gets back
-//! exactly what it had. Where the setting holds an OAuth session, the standard members (`tokens`,
-//! `expires_at`, `user`) are filled too, for the person's other clients. Nothing is deleted from
-//! the node's settings. A sign-in that was removed from the vault elsewhere ("Sign out everywhere")
-//! is moved aside on the node, to `vault.signed_out.<key>`, so the node stops using it.
+//! Only the sign-in travels: the members of each setting that hold the credential ([`Carry`]).
+//! What belongs to the machine stays: whether a mode is switched on, its health, a pending
+//! device login, the download format. A sign-in made with another app than the node's (Spotify,
+//! TIDAL, Qobuz, Last.fm and Jamendo tokens belong to the app that made them) isn't pulled.
 //!
-//! What stays on the machine: librespot's credentials file, Soloist's and yt-dlp's program state.
+//! Not bridged yet, and why: media servers (Plex, Jellyfin, OpenSubsonic, Audiobookshelf: usually a
+//! server in that house, and Jellyfin's device id is per node), drives (their accounts live in
+//! memory), gPodder (its sync cursors are per node), SoundCloud (the person's token sits in the
+//! admin's client setting). Librespot's credentials file and yt-dlp's state stay on the machine.
 
 use crate::state::NodeState;
-use pm_pubky::vault::{Vault, VaultStoreError};
+use pm_library::Library;
+use pm_pubky::vault::{Opened, Vault, VaultStoreError};
 use pubky_music_specs::vault::{ServiceUser, SignIn, VaultError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// One sign-in the vault carries: its id there, and the node settings it lives in. The first
-/// setting is the sign-in itself (no sign-in without it); the others travel with it (the person's
-/// own app keys, their choices for that source).
+/// What of a setting travels with the sign-in.
+pub enum Part {
+    /// The whole value (a session object, a cookie).
+    Whole,
+    /// These members of a JSON object; the rest stays on the node.
+    Members(&'static [&'static str]),
+}
+
+/// One setting a sign-in lives in.
+pub struct Carry {
+    pub key: &'static str,
+    pub part: Part,
+}
+
+/// One sign-in the vault carries: its id there, the settings it lives in (the first is the
+/// sign-in itself: no sign-in without it), and the app its tokens belong to.
 pub struct Bridge {
     pub service: &'static str,
-    pub settings: &'static [&'static str],
+    pub carry: &'static [Carry],
+    pub app: Option<fn(&NodeState) -> Option<String>>,
+}
+
+const fn whole(key: &'static str) -> Carry {
+    Carry {
+        key,
+        part: Part::Whole,
+    }
+}
+
+const fn members(key: &'static str, m: &'static [&'static str]) -> Carry {
+    Carry {
+        key,
+        part: Part::Members(m),
+    }
 }
 
 /// Every sign-in the node keeps for the person, by source. Only the person's own sign-ins: the
@@ -38,71 +73,70 @@ pub struct Bridge {
 pub const BRIDGES: &[Bridge] = &[
     Bridge {
         service: "tidal",
-        settings: &["tidal.user"],
+        carry: &[whole("tidal.user")],
+        app: Some(crate::tidal::app_id),
     },
     Bridge {
         service: "tidal-full",
-        settings: &["tidal.unofficial"],
+        carry: &[members("tidal.unofficial", &["session"])],
+        app: Some(crate::tidal_unofficial::app_id),
     },
     Bridge {
         service: "spotify",
-        settings: &["spotify.user"],
+        carry: &[whole("spotify.user")],
+        app: Some(crate::spotify::app_id),
     },
     Bridge {
         service: "qobuz",
-        settings: &["qobuz.unofficial"],
-    },
-    Bridge {
-        service: "soundcloud",
-        settings: &["soundcloud.unofficial"],
+        carry: &[members("qobuz.unofficial", &["session"])],
+        app: Some(crate::qobuz::app_id),
     },
     Bridge {
         service: "bandcamp",
-        settings: &["bandcamp.unofficial", "bandcamp.identity"],
+        carry: &[
+            whole("bandcamp.identity"),
+            members("bandcamp.unofficial", &["fan"]),
+        ],
+        app: None,
     },
     Bridge {
         service: "lastfm",
-        settings: &["lastfm.session"],
+        carry: &[whole("lastfm.session")],
+        app: Some(crate::lastfm::app_id),
     },
     Bridge {
         service: "listenbrainz",
-        settings: &["listenbrainz.account"],
+        carry: &[whole("listenbrainz.account")],
+        app: None,
     },
     Bridge {
         service: "jamendo",
-        settings: &["jamendo.user"],
-    },
-    Bridge {
-        service: "plex",
-        settings: &["plex.server"],
-    },
-    Bridge {
-        service: "jellyfin",
-        settings: &["jellyfin.server"],
-    },
-    Bridge {
-        service: "subsonic",
-        settings: &["opensubsonic.server"],
-    },
-    Bridge {
-        service: "audiobookshelf",
-        settings: &["audiobookshelf.server"],
-    },
-    Bridge {
-        service: "drives",
-        settings: &["drives.accounts"],
-    },
-    Bridge {
-        service: "gpodder",
-        settings: &["podcasts.gpodder"],
+        carry: &[whole("jamendo.user")],
+        app: Some(crate::jamendo::app_id),
     },
 ];
 
-/// What the node last synced for a service: the vault revision and the hash of its settings.
+/// Where a moved-aside copy goes (a backup leaves these out, like the sign-ins themselves).
+pub const SIGNED_OUT_PREFIX: &str = "vault.signed_out.";
+
+/// What the node last synced for a service.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-struct Synced {
-    revision: u64,
-    hash: String,
+pub struct Synced {
+    /// The vault revision then (shown, not compared).
+    #[serde(default)]
+    pub revision: u64,
+    /// The hash of what travels, the same on both sides then.
+    pub hash: String,
+    /// The account it was for, when the sign-in names one.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The Pubky account whose vault it was.
+    #[serde(default)]
+    pub owner: String,
+    /// The two sides differed (a conflict): `hash` is the node's copy then, and nothing is taken
+    /// until they agree; a sign-out everywhere still moves the node's copy aside.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict: bool,
 }
 
 fn synced_key(service: &str) -> String {
@@ -116,233 +150,534 @@ pub struct CacheReport {
     pub migrated: Vec<String>,
     /// The node's copy changed: written to the vault.
     pub pushed: Vec<String>,
-    /// The vault's copy was newer (or new): the node's settings now hold it.
+    /// The vault's copy changed (or was new): the node's settings now hold it.
     pub pulled: Vec<String>,
     /// Removed from the vault elsewhere: moved aside on the node.
     pub signed_out: Vec<String>,
+    /// Signed out on this node: removed from the vault.
+    pub removed: Vec<String>,
+    /// Two different copies, neither known to be the newer: both left as they are.
+    pub conflicts: Vec<String>,
+    /// In the vault, but not usable here: made with another app, or written by a client that
+    /// isn't a node.
+    pub not_usable: Vec<String>,
     /// In the vault, but this node can't read it (another device must share it).
     pub not_readable: Vec<String>,
+    /// Couldn't be synced this time (the homeserver); the next pass tries again.
+    pub failed: Vec<String>,
 }
 
-/// The node's settings for a bridge, verbatim (`None` without the main one).
-fn local(s: &NodeState, b: &Bridge) -> Option<Map<String, Value>> {
-    let lib = s.library.lock().expect("library poisoned");
-    lib.get_setting(b.settings[0]).ok().flatten()?;
+// ---- what travels ----
+
+/// A setting's value as a JSON object, when it is one.
+fn object_of(v: &Value) -> Option<Map<String, Value>> {
+    match v {
+        Value::Object(o) => Some(o.clone()),
+        Value::String(raw) => match serde_json::from_str::<Value>(raw).ok()? {
+            Value::Object(o) => Some(o),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What of the node's settings travels for a bridge (`None`: not signed in here). Whole values are
+/// kept as the stored string, members as an object.
+pub fn carried(lib: &Library, b: &Bridge) -> Option<Map<String, Value>> {
     let mut m = Map::new();
-    for key in b.settings {
-        if let Ok(Some(v)) = lib.get_setting(key) {
-            m.insert((*key).to_string(), Value::String(v));
+    for (i, c) in b.carry.iter().enumerate() {
+        let raw = lib
+            .get_setting(c.key)
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty());
+        let part = match (&c.part, raw) {
+            (Part::Whole, Some(raw)) => Some(Value::String(raw)),
+            (Part::Members(ms), Some(raw)) => {
+                let obj = object_of(&Value::String(raw)).unwrap_or_default();
+                let sub: Map<String, Value> = ms
+                    .iter()
+                    .filter_map(|k| {
+                        obj.get(*k)
+                            .filter(|v| !v.is_null())
+                            .map(|v| ((*k).to_string(), v.clone()))
+                    })
+                    .collect();
+                (!sub.is_empty()).then_some(Value::Object(sub))
+            }
+            (_, None) => None,
+        };
+        match part {
+            Some(v) => {
+                m.insert(c.key.to_string(), v);
+            }
+            None if i == 0 => return None,
+            None => {}
         }
     }
     Some(m)
 }
 
-fn hash(m: &Map<String, Value>) -> String {
+/// Put what travels into the node's settings: whole values replace the setting, members replace
+/// those members and leave the rest of the object. What the copy doesn't have is removed.
+pub fn apply(lib: &Library, b: &Bridge, travels: &Map<String, Value>) {
+    for c in b.carry {
+        match &c.part {
+            Part::Whole => match travels.get(c.key) {
+                Some(Value::String(v)) => {
+                    let _ = lib.set_setting(c.key, v);
+                }
+                Some(other) => {
+                    let _ = lib.set_setting(c.key, &other.to_string());
+                }
+                None => {
+                    let _ = lib.delete_setting(c.key);
+                }
+            },
+            Part::Members(ms) => {
+                let raw = lib.get_setting(c.key).ok().flatten();
+                let mut obj = raw
+                    .as_ref()
+                    .and_then(|r| object_of(&Value::String(r.clone())))
+                    .unwrap_or_default();
+                let from = travels.get(c.key).and_then(object_of).unwrap_or_default();
+                for k in *ms {
+                    match from.get(*k) {
+                        Some(v) => {
+                            obj.insert((*k).to_string(), v.clone());
+                        }
+                        None => {
+                            obj.remove(*k);
+                        }
+                    }
+                }
+                let _ = lib.set_setting(c.key, &Value::Object(obj).to_string());
+            }
+        }
+    }
+}
+
+/// Signed out elsewhere: what travels moves to `vault.signed_out.<key>` (kept, not used) and
+/// goes from the setting.
+pub fn move_aside(lib: &Library, b: &Bridge) {
+    let Some(travels) = carried(lib, b) else {
+        return;
+    };
+    for (key, v) in &travels {
+        let aside = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let _ = lib.set_setting(&format!("{SIGNED_OUT_PREFIX}{key}"), &aside);
+    }
+    apply(lib, b, &Map::new());
+}
+
+pub fn hash(m: &Map<String, Value>) -> String {
     blake3::hash(serde_json::to_string(m).unwrap_or_default().as_bytes())
         .to_hex()
         .to_string()
 }
 
-/// A setting's value as JSON, when it is a JSON object.
-fn as_object(raw: &Value) -> Option<Map<String, Value>> {
-    match serde_json::from_str::<Value>(raw.as_str()?).ok()? {
-        Value::Object(o) => Some(o),
-        _ => None,
+/// The account a copy is for, from the usual members of what travels (`user_id`, `id`,
+/// `username`, `user`, Bandcamp's `fan.fan_id`), looking into a `session` too.
+pub fn account(travels: &Map<String, Value>) -> Option<String> {
+    fn find(o: &Map<String, Value>) -> Option<String> {
+        for k in ["user_id", "id", "username", "user"] {
+            match o.get(k) {
+                Some(Value::String(v)) if !v.is_empty() => return Some(v.clone()),
+                Some(Value::Number(n)) => return Some(n.to_string()),
+                _ => {}
+            }
+        }
+        for k in ["session", "fan"] {
+            if let Some(Value::Object(inner)) = o.get(k) {
+                if let Some(a) = find(inner) {
+                    return Some(a);
+                }
+            }
+        }
+        o.get("fan_id").map(|v| v.to_string())
+    }
+    travels.values().filter_map(object_of).find_map(|o| find(&o))
+}
+
+/// The OAuth session in what travels, if any (at the top of the main value, or under `session`).
+fn session_of(b: &Bridge, travels: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let obj = object_of(travels.get(b.carry[0].key)?)?;
+    match obj.get("session") {
+        Some(Value::Object(o)) if o.contains_key("access_token") => Some(o.clone()),
+        _ => obj.contains_key("access_token").then_some(obj),
     }
 }
 
-/// The vault sign-in for the node's settings: verbatim under `node.settings`, and the standard
-/// members where the main setting is an OAuth session (at the top, or under `session`).
-pub fn sign_in_from(service: &str, settings: &Map<String, Value>, main: &str) -> SignIn {
-    let mut s: SignIn = serde_json::from_value(json!({ "service": service })).expect("a minimal sign-in");
-    s.extra.insert("node".into(), json!({ "settings": settings }));
-    let Some(obj) = settings.get(main).and_then(as_object) else {
-        return s;
+/// The vault sign-in for what travels. It starts from the vault's current copy (`base`), so the
+/// members other clients put in (`label`, `way`, `scopes`, `settings`, unknown ones) are kept, and
+/// sets the node's copy (`node.settings`), the app it was made with, and the standard members
+/// where it is an OAuth session.
+pub fn sign_in_for(
+    b: &Bridge,
+    travels: &Map<String, Value>,
+    base: Option<&SignIn>,
+    app: Option<String>,
+) -> SignIn {
+    let mut s: SignIn = match base {
+        Some(o) => o.clone(),
+        None => serde_json::from_value(json!({ "service": b.service })).expect("a minimal sign-in"),
     };
-    let sess = match obj.get("session") {
-        Some(Value::Object(o)) if o.contains_key("access_token") => o.clone(),
-        _ => obj.clone(),
-    };
-    if let Some(at) = sess.get("access_token").and_then(Value::as_str) {
-        s.tokens.insert("access_token".into(), json!(at));
-        s.tokens.insert("token_type".into(), json!("bearer"));
-        if let Some(rt) = sess.get("refresh_token").and_then(Value::as_str) {
-            s.tokens.insert("refresh_token".into(), json!(rt));
-        }
-        s.expires_at = sess
-            .get("expires_at")
-            .and_then(Value::as_i64)
-            .and_then(|e| u64::try_from(e).ok());
+    s.service = b.service.to_string();
+    s.extra.insert("node".into(), json!({ "settings": travels }));
+    if app.is_some() {
+        s.client_id = app;
     }
-    let id = ["user_id", "id", "username"]
-        .iter()
-        .find_map(|k| match sess.get(*k) {
-            Some(Value::String(v)) => Some(v.clone()),
-            Some(Value::Number(n)) => Some(n.to_string()),
-            _ => None,
-        });
-    if let Some(id) = id {
+    let sess = session_of(b, travels);
+    let mut tokens = Map::new();
+    if let Some(sess) = &sess {
+        if let Some(at) = sess.get("access_token").and_then(Value::as_str) {
+            tokens.insert("access_token".into(), json!(at));
+            tokens.insert("token_type".into(), json!("bearer"));
+            if let Some(rt) = sess.get("refresh_token").and_then(Value::as_str) {
+                tokens.insert("refresh_token".into(), json!(rt));
+            }
+        }
+    }
+    s.tokens = tokens;
+    s.expires_at = sess
+        .as_ref()
+        .and_then(|x| x.get("expires_at"))
+        .and_then(Value::as_i64)
+        .and_then(|e| u64::try_from(e).ok());
+    let id = account(travels);
+    s.user = id.map(|id| {
         let pick = |keys: &[&str]| {
-            keys.iter()
-                .find_map(|k| sess.get(*k).and_then(Value::as_str).map(str::to_string))
+            keys.iter().find_map(|k| {
+                sess.as_ref()
+                    .and_then(|x| x.get(*k))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
         };
-        s.user = Some(ServiceUser {
+        ServiceUser {
             id,
             name: pick(&["display_name", "name", "username"]),
             country: pick(&["country", "country_code"]),
             extra: Map::new(),
-        });
-    }
+        }
+    });
     s
 }
 
-/// The node settings a vault sign-in carries, if a node wrote it.
-fn node_settings(s: &SignIn) -> Option<Map<String, Value>> {
+/// What a node wrote into a vault sign-in (`None`: written by a client that isn't a node).
+pub fn node_settings(s: &SignIn) -> Option<Map<String, Value>> {
     match s.extra.get("node")?.get("settings")? {
         Value::Object(o) => Some(o.clone()),
         _ => None,
     }
 }
 
-fn apply(s: &NodeState, b: &Bridge, settings: &Map<String, Value>) {
-    let lib = s.library.lock().expect("library poisoned");
-    for key in b.settings {
-        if let Some(Value::String(v)) = settings.get(*key) {
-            let _ = lib.set_setting(key, v);
+/// A hash of a vault copy: of what travels when a node wrote it, else of its standard members.
+fn vault_hash(s: &SignIn) -> String {
+    match node_settings(s) {
+        Some(m) => hash(&m),
+        None => {
+            let std = json!({ "tokens": s.tokens, "expires_at": s.expires_at, "user": s.user.as_ref().map(|u| &u.id) });
+            format!("std:{}", blake3::hash(std.to_string().as_bytes()).to_hex())
         }
     }
 }
 
-fn remember(s: &NodeState, service: &str, synced: &Synced) {
-    let lib = s.library.lock().expect("library poisoned");
+// ---- deciding ----
+
+/// One side of a service, as [`decide`] sees it.
+#[derive(Debug, Clone, Default)]
+pub struct Side {
+    pub hash: String,
+    pub account: Option<String>,
+    pub expires_at: Option<u64>,
+}
+
+/// The vault's side, with what the node needs to take it.
+#[derive(Debug, Clone, Default)]
+pub struct VaultSide {
+    pub side: Side,
+    /// A node wrote it (so the node can take it as it is).
+    pub from_a_node: bool,
+    /// Made with the app this node has (or no app is involved).
+    pub our_app: bool,
+}
+
+/// What to do for one service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Do {
+    Nothing,
+    /// Both the same: remember it.
+    InStep,
+    /// Write the node's copy (first time: the migration).
+    Push,
+    /// Take the vault's copy.
+    Pull,
+    /// Removed from the vault elsewhere: move the node's copy aside.
+    MoveAside,
+    /// Signed out on the node: remove it from the vault.
+    Remove,
+    /// Nothing on either side any more: forget the record.
+    Forget,
+    Conflict,
+    NotUsable,
+}
+
+/// The sync rules for one service (module docs). `seen` is what both sides held at the last sync.
+pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultSide>) -> Do {
+    let pull = |t: &VaultSide| {
+        if t.from_a_node && t.our_app {
+            Do::Pull
+        } else {
+            Do::NotUsable
+        }
+    };
+    // Never write over a sign-in another kind of client made for another account
+    let push = |m: &Side, t: Option<&VaultSide>| match t {
+        Some(t) if !t.from_a_node && t.side.account.is_some() && t.side.account != m.account => Do::Conflict,
+        _ => Do::Push,
+    };
+    match (mine, theirs) {
+        (None, None) => {
+            if seen.is_some() {
+                Do::Forget
+            } else {
+                Do::Nothing
+            }
+        }
+        (Some(m), None) => match seen {
+            None => Do::Push,
+            // Unchanged here and gone from the vault: signed out elsewhere
+            Some(s) if m.hash == s.hash => Do::MoveAside,
+            // Changed here too: a new account signed in here goes out; a refresh of the old one
+            // doesn't bring back what was signed out
+            Some(s) if m.account != s.account => Do::Push,
+            Some(_) => Do::MoveAside,
+        },
+        (None, Some(t)) => match seen {
+            None => pull(t),
+            // Unchanged in the vault and gone here: signed out here
+            Some(s) if t.side.hash == s.hash => Do::Remove,
+            // Changed in the vault too: another account signed in elsewhere is taken; a refresh of
+            // the old one doesn't undo the sign-out
+            Some(s) if t.side.account != s.account => pull(t),
+            Some(_) => Do::Remove,
+        },
+        (Some(m), Some(t)) => {
+            if m.hash == t.side.hash {
+                return Do::InStep;
+            }
+            let Some(s) = seen.filter(|s| !s.conflict) else {
+                // First contact with two different copies (or still that conflict)
+                return Do::Conflict;
+            };
+            let here = m.hash != s.hash;
+            let there = t.side.hash != s.hash;
+            match (here, there) {
+                (false, false) => Do::InStep,
+                (true, false) => push(m, Some(t)),
+                (false, true) => pull(t),
+                (true, true) => {
+                    let new_here = m.account != s.account;
+                    let new_there = t.side.account != s.account;
+                    match (new_here, new_there) {
+                        (true, false) => push(m, Some(t)),
+                        (false, true) => pull(t),
+                        (true, true) => Do::Conflict,
+                        // Both refreshed the same account: the one that lasts longer
+                        (false, false) => {
+                            if m.expires_at > t.side.expires_at {
+                                push(m, Some(t))
+                            } else {
+                                pull(t)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- doing ----
+
+fn remember(lib: &Library, service: &str, synced: &Synced) {
     let _ = lib.set_setting(
         &synced_key(service),
         &serde_json::to_string(synced).unwrap_or_default(),
     );
 }
 
-fn last_synced(s: &NodeState, service: &str) -> Option<Synced> {
-    let lib = s.library.lock().expect("library poisoned");
+fn last_synced(lib: &Library, service: &str, owner: &str) -> Option<Synced> {
     lib.get_setting(&synced_key(service))
         .ok()
         .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
+        .and_then(|v| serde_json::from_str::<Synced>(&v).ok())
+        // Another Pubky account's vault: nothing synced with this one yet
+        .filter(|s| s.owner == owner)
 }
 
-/// Removed from the vault elsewhere: the node's copy moves to `vault.signed_out.<key>` (kept,
-/// not used), and the sync record goes.
-fn move_aside(s: &NodeState, b: &Bridge) {
-    let lib = s.library.lock().expect("library poisoned");
-    if let Ok(Some(v)) = lib.get_setting(b.settings[0]) {
-        let _ = lib.set_setting(&format!("vault.signed_out.{}", b.settings[0]), &v);
-        let _ = lib.delete_setting(b.settings[0]);
+fn side_of(b: &Bridge, travels: &Map<String, Value>) -> Side {
+    Side {
+        hash: hash(travels),
+        account: account(travels),
+        expires_at: session_of(b, travels)
+            .and_then(|x| x.get("expires_at").and_then(Value::as_i64))
+            .and_then(|e| u64::try_from(e).ok()),
     }
-    let _ = lib.delete_setting(&synced_key(b.service));
 }
 
-/// One pass over every bridge (see the module docs).
+/// One pass over every bridge, waiting for any other pass (or "Sign out everywhere") to end.
 pub async fn sync(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
+    let _pass = s.vault_pass.lock().await;
+    sync_held(s, vault).await
+}
+
+/// [`sync`] with [`NodeState::vault_pass`] already held.
+pub(crate) async fn sync_held(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
     let mut report = CacheReport::default();
+    let owner = vault.owner().to_string();
     for b in BRIDGES {
-        let mine = local(s, b);
-        let theirs = match vault.read(b.service).await {
+        let service = b.service.to_string();
+        let theirs: Option<Opened> = match vault.read(b.service).await {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
-                report.not_readable.push(b.service.into());
+                report.not_readable.push(service);
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                tracing::warn!(service = b.service, "vault: not synced this time: {e}");
+                report.failed.push(service);
+                continue;
+            }
         };
-        let seen = last_synced(s, b.service);
-        match (mine, theirs) {
-            (None, None) => {}
-            (Some(m), None) => {
-                if seen.is_some() {
-                    // We had synced it, and it's gone from the vault: signed out elsewhere
-                    move_aside(s, b);
-                    report.signed_out.push(b.service.into());
-                } else {
-                    let revision = vault
-                        .write_shared(b.service, &sign_in_from(b.service, &m, b.settings[0]))
-                        .await?;
-                    remember(
-                        s,
-                        b.service,
-                        &Synced {
-                            revision,
-                            hash: hash(&m),
-                        },
-                    );
-                    report.migrated.push(b.service.into());
-                }
+        let app = b.app.and_then(|f| f(s));
+        let (mine, seen) = {
+            let lib = s.library.lock().expect("library poisoned");
+            (carried(&lib, b), last_synced(&lib, b.service, &owner))
+        };
+        let my_side = mine.as_ref().map(|m| side_of(b, m));
+        let their_side = theirs.as_ref().map(|o| {
+            let from_a_node = node_settings(&o.sign_in);
+            VaultSide {
+                side: match &from_a_node {
+                    Some(m) => side_of(b, m),
+                    None => Side {
+                        hash: vault_hash(&o.sign_in),
+                        account: o.sign_in.user.as_ref().map(|u| u.id.clone()),
+                        expires_at: o.sign_in.expires_at,
+                    },
+                },
+                from_a_node: from_a_node.is_some(),
+                our_app: b.app.is_none() || o.sign_in.client_id.is_none() || o.sign_in.client_id == app,
             }
-            (None, Some(o)) => {
-                if let Some(settings) = node_settings(&o.sign_in) {
-                    apply(s, b, &settings);
-                    let m = local(s, b).unwrap_or_default();
-                    remember(
-                        s,
-                        b.service,
-                        &Synced {
-                            revision: o.sign_in.revision,
-                            hash: hash(&m),
-                        },
-                    );
-                    report.pulled.push(b.service.into());
-                }
-            }
-            (Some(m), Some(o)) => {
-                let h = hash(&m);
-                let seen = seen.unwrap_or_default();
-                // Both changed since the last sync, for different accounts: the person just signed
-                // in again on this node, so its sign-in wins over the vault's refresh of the old one
-                let ours = sign_in_from(b.service, &m, b.settings[0]);
-                let another_account = matches!(
-                    (&ours.user, &o.sign_in.user), (Some(x), Some(y)) if x.id != y.id
-                );
-                let node_wins = h != seen.hash && another_account;
-                if o.sign_in.revision > seen.revision && !node_wins {
-                    // The vault moved on (another device refreshed or signed in again): it wins
-                    match node_settings(&o.sign_in) {
-                        Some(settings) => {
-                            apply(s, b, &settings);
-                            let m = local(s, b).unwrap_or_default();
-                            remember(
-                                s,
-                                b.service,
-                                &Synced {
-                                    revision: o.sign_in.revision,
-                                    hash: hash(&m),
-                                },
-                            );
-                            report.pulled.push(b.service.into());
-                        }
-                        // Written by a client that isn't a node: keep ours, write it back
-                        None if h != seen.hash => {
-                            let mut si = sign_in_from(b.service, &m, b.settings[0]);
-                            si.settings = o.sign_in.settings.clone();
-                            let revision = vault.write_shared(b.service, &si).await?;
-                            remember(s, b.service, &Synced { revision, hash: h });
-                            report.pushed.push(b.service.into());
-                        }
-                        None => remember(
-                            s,
-                            b.service,
-                            &Synced {
-                                revision: o.sign_in.revision,
-                                hash: h,
-                            },
-                        ),
+        });
+        let record = |lib: &Library, revision: u64, travels: &Map<String, Value>| {
+            remember(
+                lib,
+                b.service,
+                &Synced {
+                    revision,
+                    hash: hash(travels),
+                    account: account(travels),
+                    owner: owner.clone(),
+                    conflict: false,
+                },
+            )
+        };
+        match decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref()) {
+            Do::Nothing => {}
+            Do::InStep => {
+                if let (Some(m), Some(o)) = (&mine, &theirs) {
+                    let lib = s.library.lock().expect("library poisoned");
+                    if seen
+                        .as_ref()
+                        .is_none_or(|x| x.conflict || x.hash != hash(m) || x.revision != o.sign_in.revision)
+                    {
+                        record(&lib, o.sign_in.revision, m);
                     }
-                } else if h != seen.hash {
-                    let mut si = sign_in_from(b.service, &m, b.settings[0]);
-                    // Keep what other clients put in (the quality choice)
-                    si.settings = o.sign_in.settings.clone();
-                    let revision = vault.write_shared(b.service, &si).await?;
-                    remember(s, b.service, &Synced { revision, hash: h });
-                    report.pushed.push(b.service.into());
                 }
             }
+            Do::Push => {
+                let m = mine.as_ref().expect("push has a node copy");
+                let si = sign_in_for(b, m, theirs.as_ref().map(|o| &o.sign_in), app.clone());
+                match vault.write_shared(b.service, &si).await {
+                    Ok(revision) => {
+                        record(&s.library.lock().expect("library poisoned"), revision, m);
+                        if seen.is_none() && theirs.is_none() {
+                            report.migrated.push(service);
+                        } else {
+                            report.pushed.push(service);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(service = b.service, "vault: not written this time: {e}");
+                        report.failed.push(service);
+                    }
+                }
+            }
+            Do::Pull => {
+                let o = theirs.as_ref().expect("pull has a vault copy");
+                let travels = node_settings(&o.sign_in).unwrap_or_default();
+                let lib = s.library.lock().expect("library poisoned");
+                // A source that changed its sign-in since this pass read it wins: next pass
+                if carried(&lib, b).map(|m| hash(&m)) != mine.as_ref().map(hash) {
+                    continue;
+                }
+                apply(&lib, b, &travels);
+                record(&lib, o.sign_in.revision, &travels);
+                report.pulled.push(service);
+            }
+            Do::MoveAside => {
+                let lib = s.library.lock().expect("library poisoned");
+                if carried(&lib, b).map(|m| hash(&m)) != mine.as_ref().map(hash) {
+                    continue;
+                }
+                move_aside(&lib, b);
+                let _ = lib.delete_setting(&synced_key(b.service));
+                report.signed_out.push(service);
+            }
+            Do::Remove => match vault.remove(b.service).await {
+                Ok(()) => {
+                    let _ = s
+                        .library
+                        .lock()
+                        .expect("library poisoned")
+                        .delete_setting(&synced_key(b.service));
+                    report.removed.push(service);
+                }
+                Err(e) => {
+                    tracing::warn!(service = b.service, "vault: not removed this time: {e}");
+                    report.failed.push(service);
+                }
+            },
+            Do::Forget => {
+                let _ = s
+                    .library
+                    .lock()
+                    .expect("library poisoned")
+                    .delete_setting(&synced_key(b.service));
+            }
+            Do::Conflict => {
+                if let (Some(m), Some(o)) = (&mine, &theirs) {
+                    let synced = Synced {
+                        revision: o.sign_in.revision,
+                        hash: hash(m),
+                        account: account(m),
+                        owner: owner.clone(),
+                        conflict: true,
+                    };
+                    let lib = s.library.lock().expect("library poisoned");
+                    if seen.as_ref() != Some(&synced) {
+                        remember(&lib, b.service, &synced);
+                    }
+                }
+                report.conflicts.push(service)
+            }
+            Do::NotUsable => report.not_usable.push(service),
         }
     }
     Ok(report)
@@ -362,7 +697,10 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
             }
             match crate::vault::client_secret(&s) {
                 Ok(secret) => {
-                    let vault = Vault::new(sync.session(), &secret).device("node");
+                    let revoked = crate::vault::revoked_file(&s);
+                    let vault = Vault::new(sync.session(), &secret)
+                        .device("node")
+                        .remember_revocations(&revoked);
                     match pass(&s, &vault).await {
                         Ok(r) if r != CacheReport::default() => tracing::info!(?r, "vault: sign-ins synced"),
                         Ok(_) => {}
@@ -379,11 +717,12 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
 /// Where the last pass's report is kept (`GET /v1/vault` shows it).
 pub const LAST_SYNC_KEY: &str = "vault.last_sync";
 
-/// Register, share, sync: one round of [`start`]. The report is kept for Settings.
+/// Register, share, sync: one round of [`start`], one at a time. The report is kept for Settings.
 pub async fn pass(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
+    let _pass = s.vault_pass.lock().await;
     vault.touch(&s.name).await?;
     vault.share_with_trusted().await?;
-    let r = sync(s, vault).await?;
+    let r = sync_held(s, vault).await?;
     let lib = s.library.lock().expect("library poisoned");
     let _ = lib.set_setting(
         LAST_SYNC_KEY,
@@ -396,62 +735,267 @@ pub async fn pass(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, Vault
 mod tests {
     use super::*;
 
-    fn settings(pairs: &[(&str, &str)]) -> Map<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
-            .collect()
+    fn bridge(service: &str) -> &'static Bridge {
+        BRIDGES.iter().find(|b| b.service == service).unwrap()
+    }
+
+    fn lib() -> Library {
+        Library::open_in_memory().unwrap()
+    }
+
+    fn side(hash: &str, account: &str) -> Side {
+        Side {
+            hash: hash.into(),
+            account: Some(account.into()),
+            expires_at: None,
+        }
+    }
+
+    fn vside(hash: &str, account: &str) -> VaultSide {
+        VaultSide {
+            side: side(hash, account),
+            from_a_node: true,
+            our_app: true,
+        }
+    }
+
+    fn seen(hash: &str, account: &str) -> Synced {
+        Synced {
+            revision: 1,
+            hash: hash.into(),
+            account: Some(account.into()),
+            owner: "o".into(),
+            conflict: false,
+        }
     }
 
     #[test]
-    fn an_oauth_session_fills_the_standard_members() {
-        // Spotify's shape: top-level tokens, expires_at in seconds, user fields
-        let m = settings(&[
-            (
-                "spotify.user",
-                r#"{"access_token":"at","refresh_token":"rt","expires_at":1761403600,"user_id":"gil","display_name":"Gil","country":"CH","scope":"x"}"#,
-            ),
-            ("spotify.app", r#"{"client_id":"own-app"}"#),
-        ]);
-        let s = sign_in_from("spotify", &m, "spotify.user");
-        assert_eq!(s.tokens["access_token"], "at");
+    fn the_sync_rules() {
+        let s = seen("h1", "7");
+        // First time: migrate, take, or a conflict when the two differ
+        assert_eq!(decide(None, Some(&side("a", "7")), None), Do::Push);
+        assert_eq!(decide(None, None, Some(&vside("a", "7"))), Do::Pull);
+        assert_eq!(
+            decide(None, Some(&side("a", "7")), Some(&vside("a", "7"))),
+            Do::InStep
+        );
+        assert_eq!(
+            decide(None, Some(&side("a", "7")), Some(&vside("b", "9"))),
+            Do::Conflict,
+            "two nodes with their own sign-ins: neither replaces the other"
+        );
+        // A conflict stays one until the two agree; a wipe of the vault then moves ours aside
+        let mut c = seen("a", "7");
+        c.conflict = true;
+        assert_eq!(
+            decide(Some(&c), Some(&side("a", "7")), Some(&vside("b2", "9"))),
+            Do::Conflict
+        );
+        assert_eq!(
+            decide(Some(&c), Some(&side("b2", "9")), Some(&vside("b2", "9"))),
+            Do::InStep
+        );
+        assert_eq!(decide(Some(&c), Some(&side("a", "7")), None), Do::MoveAside);
+        // Unchanged on both sides, even when the vault's revision moved (a sign-out rotation)
+        assert_eq!(
+            decide(Some(&s), Some(&side("h1", "7")), Some(&vside("h1", "7"))),
+            Do::InStep
+        );
+        // One side changed: it wins
+        assert_eq!(
+            decide(Some(&s), Some(&side("h2", "7")), Some(&vside("h1", "7"))),
+            Do::Push
+        );
+        assert_eq!(
+            decide(Some(&s), Some(&side("h1", "7")), Some(&vside("h2", "7"))),
+            Do::Pull
+        );
+        // A blob made again after Sign out everywhere (revision 1 again) is a change, by content
+        assert_eq!(
+            decide(Some(&s), Some(&side("h1", "7")), Some(&vside("new", "9"))),
+            Do::Pull
+        );
+        // Signed out on this node: removed from the vault, not pulled back
+        assert_eq!(decide(Some(&s), None, Some(&vside("h1", "7"))), Do::Remove);
+        assert_eq!(
+            decide(Some(&s), None, Some(&vside("h2", "7"))),
+            Do::Remove,
+            "a refresh elsewhere"
+        );
+        assert_eq!(
+            decide(Some(&s), None, Some(&vside("h2", "9"))),
+            Do::Pull,
+            "a new account elsewhere"
+        );
+        // Removed from the vault elsewhere: aside here, unless a new account signed in here
+        assert_eq!(decide(Some(&s), Some(&side("h1", "7")), None), Do::MoveAside);
+        assert_eq!(
+            decide(Some(&s), Some(&side("h2", "7")), None),
+            Do::MoveAside,
+            "a refresh here"
+        );
+        assert_eq!(
+            decide(Some(&s), Some(&side("h2", "9")), None),
+            Do::Push,
+            "a new account here"
+        );
+        assert_eq!(decide(Some(&s), None, None), Do::Forget);
+        // Both changed: the new account wins; the same account, the longer-lived copy
+        assert_eq!(
+            decide(Some(&s), Some(&side("x", "9")), Some(&vside("y", "7"))),
+            Do::Push
+        );
+        assert_eq!(
+            decide(Some(&s), Some(&side("x", "7")), Some(&vside("y", "9"))),
+            Do::Pull
+        );
+        assert_eq!(
+            decide(Some(&s), Some(&side("x", "8")), Some(&vside("y", "9"))),
+            Do::Conflict
+        );
+        let mut later = side("x", "7");
+        later.expires_at = Some(200);
+        let mut earlier = vside("y", "7");
+        earlier.side.expires_at = Some(100);
+        assert_eq!(decide(Some(&s), Some(&later), Some(&earlier)), Do::Push);
+        earlier.side.expires_at = Some(300);
+        assert_eq!(decide(Some(&s), Some(&later), Some(&earlier)), Do::Pull);
+        // Another app's tokens, or a copy no node wrote: not taken
+        let mut other_app = vside("h2", "7");
+        other_app.our_app = false;
+        assert_eq!(
+            decide(Some(&s), Some(&side("h1", "7")), Some(&other_app)),
+            Do::NotUsable
+        );
+        let mut phone = vside("p", "9");
+        phone.from_a_node = false;
+        assert_eq!(decide(None, None, Some(&phone)), Do::NotUsable);
+        // A phone signed in to another account: left alone
+        assert_eq!(
+            decide(Some(&s), Some(&side("h2", "7")), Some(&phone)),
+            Do::NotUsable
+        );
+        // ...and a new account here doesn't write over a phone's sign-in for another account
+        let mut phone7 = vside("p7", "7");
+        phone7.from_a_node = false;
+        assert_eq!(
+            decide(Some(&s), Some(&side("x", "9")), Some(&phone7)),
+            Do::Conflict
+        );
+    }
+
+    #[test]
+    fn only_the_sign_in_travels() {
+        let l = lib();
+        let b = bridge("tidal-full");
+        l.set_setting(
+            "tidal.unofficial",
+            r#"{"enabled":true,"quality":"max","session":{"access_token":"a2","refresh_token":"r2","expires_at":5,"user_id":"42"},"health":{"ok":true,"detail":"","at":9}}"#,
+        )
+        .unwrap();
+        let m = carried(&l, b).unwrap();
+        assert_eq!(
+            m["tidal.unofficial"],
+            json!({"session": {"access_token":"a2","refresh_token":"r2","expires_at":5,"user_id":"42"}})
+        );
+        assert_eq!(account(&m).as_deref(), Some("42"));
+        // Health changing doesn't change what travels
+        l.set_setting(
+            "tidal.unofficial",
+            r#"{"enabled":true,"quality":"max","session":{"access_token":"a2","refresh_token":"r2","expires_at":5,"user_id":"42"},"health":{"ok":false,"detail":"x","at":10}}"#,
+        )
+        .unwrap();
+        assert_eq!(hash(&carried(&l, b).unwrap()), hash(&m));
+        // Another node takes the session and keeps its own switch and health
+        let other = lib();
+        other
+            .set_setting(
+                "tidal.unofficial",
+                r#"{"enabled":false,"quality":"high","health":{"ok":false,"detail":"y","at":1}}"#,
+            )
+            .unwrap();
+        assert!(carried(&other, b).is_none(), "no session: not signed in");
+        apply(&other, b, &m);
+        let v: Value =
+            serde_json::from_str(&other.get_setting("tidal.unofficial").unwrap().unwrap()).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["quality"], "high");
+        assert_eq!(v["health"]["detail"], "y");
+        assert_eq!(v["session"]["access_token"], "a2");
+        // Moved aside: the session goes, the rest stays
+        move_aside(&other, b);
+        let v: Value =
+            serde_json::from_str(&other.get_setting("tidal.unofficial").unwrap().unwrap()).unwrap();
+        assert!(v.get("session").is_none());
+        assert_eq!(v["quality"], "high");
+        assert!(other
+            .get_setting("vault.signed_out.tidal.unofficial")
+            .unwrap()
+            .unwrap()
+            .contains("a2"));
+        assert!(carried(&other, b).is_none());
+    }
+
+    #[test]
+    fn bandcamp_carries_its_cookie_and_signs_out_of_it() {
+        let l = lib();
+        let b = bridge("bandcamp");
+        l.set_setting(
+            "bandcamp.unofficial",
+            r#"{"enabled":true,"fan":{"fan_id":5},"format":"flac"}"#,
+        )
+        .unwrap();
+        assert!(carried(&l, b).is_none(), "no cookie: not signed in");
+        l.set_setting("bandcamp.identity", "cookie-1").unwrap();
+        let m = carried(&l, b).unwrap();
+        assert_eq!(m["bandcamp.identity"], "cookie-1");
+        assert_eq!(account(&m).as_deref(), Some("5"));
+        // A copy without the cookie (signed out elsewhere) removes it here
+        let mut gone = m.clone();
+        gone.remove("bandcamp.identity");
+        apply(&l, b, &gone);
+        assert_eq!(l.get_setting("bandcamp.identity").unwrap(), None);
+    }
+
+    #[test]
+    fn the_vault_copy_keeps_what_other_clients_put_in() {
+        let l = lib();
+        let b = bridge("spotify");
+        l.set_setting(
+            "spotify.user",
+            r#"{"access_token":"at","refresh_token":"rt","expires_at":1761403600,"user_id":"gil","display_name":"Gil","country":"CH"}"#,
+        )
+        .unwrap();
+        let m = carried(&l, b).unwrap();
+        let mut base: SignIn = serde_json::from_value(json!({
+            "service": "spotify", "label": "gil@example.org", "way": "app", "scopes": ["streaming"],
+            "settings": {"quality": "max"}, "future_member": 1
+        }))
+        .unwrap();
+        base.revision = 4;
+        let s = sign_in_for(b, &m, Some(&base), Some("app-1".into()));
+        assert_eq!(s.label.as_deref(), Some("gil@example.org"));
+        assert_eq!(s.way.as_deref(), Some("app"));
+        assert_eq!(s.scopes, ["streaming"]);
+        assert_eq!(s.extra["future_member"], 1);
+        assert_eq!(s.client_id.as_deref(), Some("app-1"));
         assert_eq!(s.tokens["refresh_token"], "rt");
-        assert_eq!(s.tokens["token_type"], "bearer");
         assert_eq!(s.expires_at, Some(1761403600));
         let u = s.user.clone().unwrap();
         assert_eq!(
             (u.id.as_str(), u.name.as_deref(), u.country.as_deref()),
             ("gil", Some("Gil"), Some("CH"))
         );
-        // Verbatim for nodes, both settings
         assert_eq!(node_settings(&s).unwrap(), m);
         assert!(!format!("{s:?}").contains("\"rt\""), "Debug shows a token");
     }
 
     #[test]
-    fn a_nested_session_and_plain_values() {
-        // The unofficial modes keep the session under `session`
-        let m = settings(&[(
-            "tidal.unofficial",
-            r#"{"enabled":true,"quality":"max","session":{"access_token":"a2","refresh_token":"r2","expires_at":5,"user_id":42}}"#,
-        )]);
-        let s = sign_in_from("tidal-full", &m, "tidal.unofficial");
-        assert_eq!(s.tokens["access_token"], "a2");
-        assert_eq!(s.user.unwrap().id, "42");
-        // An API key is a plain string: carried verbatim, no standard members
-        let m = settings(&[("youtube.api_key", "AIza-not-real")]);
-        let s = sign_in_from("youtube", &m, "youtube.api_key");
-        assert!(s.tokens.is_empty() && s.user.is_none());
-        assert_eq!(node_settings(&s).unwrap(), m);
-    }
-
-    #[test]
     fn a_bridge_for_a_source_uses_its_source_id() {
         let sources: Vec<&str> = crate::streaming::services().iter().map(|s| s.id()).collect();
-        // Sign-ins of sources are named by the source's id (VAULT.md); the rest are integrations
         for b in BRIDGES {
             let base = b.service.split('-').next().unwrap_or(b.service);
-            let integration = ["lastfm", "listenbrainz", "drives", "gpodder"].contains(&b.service);
+            let integration = ["lastfm", "listenbrainz"].contains(&b.service);
             assert!(
                 integration || sources.contains(&base),
                 "{} is not a source id",
@@ -470,7 +1014,7 @@ mod tests {
                 b.service
             );
             assert!(seen.insert(b.service), "{} twice", b.service);
-            assert!(!b.settings.is_empty());
+            assert!(!b.carry.is_empty());
         }
         // What stays on the machine, and the node's apps (ADR 0016: the admin's, not a person's)
         for local in [
@@ -484,8 +1028,14 @@ mod tests {
             "lastfm.app",
             "tidal.unofficial_client",
             "plex.client_id",
+            "podcasts.gpodder",
+            "jellyfin.server",
+            "drives.accounts",
         ] {
-            assert!(BRIDGES.iter().all(|b| !b.settings.contains(&local)), "{local}");
+            assert!(
+                BRIDGES.iter().all(|b| b.carry.iter().all(|c| c.key != local)),
+                "{local}"
+            );
         }
     }
 }

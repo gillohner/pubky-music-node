@@ -12,7 +12,7 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use pm_pubky::vault::{Device, SignOutReport, Vault, VaultStoreError};
+use pm_pubky::vault::{Device, EverywhereReport, SignOutReport, Vault, VaultStoreError};
 use pubky_music_specs::vault::{ClientKey, ClientSecret};
 use serde::Serialize;
 use std::sync::Arc;
@@ -28,6 +28,12 @@ pub(crate) fn client_secret(s: &NodeState) -> Result<ClientSecret, ApiError> {
     })
 }
 
+/// The node's own record of signed-out devices: `<data>/vault/revoked.json` (VAULT.md,
+/// "Revocation is remembered by each client"). It only grows.
+pub(crate) fn revoked_file(s: &NodeState) -> std::path::PathBuf {
+    s.data_dir().join("vault").join("revoked.json")
+}
+
 fn signed_in(s: &NodeState) -> Result<Arc<crate::sync::PubkySync>, ApiError> {
     s.sync
         .lock()
@@ -39,10 +45,14 @@ fn signed_in(s: &NodeState) -> Result<Arc<crate::sync::PubkySync>, ApiError> {
 fn vault_error(e: VaultStoreError) -> ApiError {
     let status = match &e {
         VaultStoreError::Busy(_) => StatusCode::CONFLICT,
-        VaultStoreError::Revoked | VaultStoreError::NoGrant | VaultStoreError::NotOurs(_) => {
-            StatusCode::CONFLICT
-        }
+        VaultStoreError::Revoked
+        | VaultStoreError::NoGrant
+        | VaultStoreError::NeedsVaultGrant
+        | VaultStoreError::NotOurs(_) => StatusCode::CONFLICT,
+        // The device list is full
+        VaultStoreError::Vault(pubky_music_specs::vault::VaultError::TooLarge) => StatusCode::CONFLICT,
         VaultStoreError::BadService(_) => StatusCode::BAD_REQUEST,
+        VaultStoreError::Local(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_GATEWAY,
     };
     ApiError::new(status, e.to_string())
@@ -61,6 +71,10 @@ pub struct VaultSignIn {
     pub expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_refresh_at: Option<u64>,
+    /// Why it couldn't be read just now (the homeserver, or a file no client wrote); absent when
+    /// it was read, or when only another device can open it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
 }
 
 /// `GET /v1/vault`.
@@ -84,7 +98,24 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
     let registered = devices.iter().any(|d| d.this_node && d.trusted);
     let mut sign_ins = Vec::new();
     for service in vault.services().await? {
-        let env = vault.envelope(&service).await?;
+        // One sign-in that can't be read doesn't hide the others, or the device list
+        let unread = |service: String, epoch: u64, problem: Option<String>| VaultSignIn {
+            service,
+            readable: false,
+            epoch,
+            way: None,
+            expires_at: None,
+            last_refresh_at: None,
+            problem,
+        };
+        let env = match vault.envelope(&service).await {
+            Ok(e) => e,
+            Err(e) => {
+                sign_ins.push(unread(service, 0, Some(e.to_string())));
+                continue;
+            }
+        };
+        let epoch = env.as_ref().map_or(0, |e| e.epoch);
         match vault.read(&service).await {
             Ok(Some(o)) => sign_ins.push(VaultSignIn {
                 service,
@@ -93,15 +124,13 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
                 way: o.sign_in.way.clone(),
                 expires_at: o.sign_in.expires_at,
                 last_refresh_at: o.sign_in.last_refresh.map(|l| l.at),
+                problem: None,
             }),
-            _ => sign_ins.push(VaultSignIn {
-                service,
-                readable: false,
-                epoch: env.map_or(0, |e| e.epoch),
-                way: None,
-                expires_at: None,
-                last_refresh_at: None,
-            }),
+            Ok(None) => {}
+            Err(VaultStoreError::Vault(pubky_music_specs::vault::VaultError::NotARecipient)) => {
+                sign_ins.push(unread(service, epoch, None))
+            }
+            Err(e) => sign_ins.push(unread(service, epoch, Some(e.to_string()))),
         }
     }
     Ok(VaultView {
@@ -117,7 +146,10 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
 pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret).device("node");
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
     let mut v = view(&vault).await.map_err(vault_error)?;
     v.last_sync = s
         .library
@@ -135,7 +167,10 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView>
 pub(crate) async fn register(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret).device("node");
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
     vault.touch(&s.name).await.map_err(vault_error)?;
     vault.share_with_trusted().await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
@@ -149,6 +184,10 @@ pub struct SignedOut {
     /// Sign-ins whose tokens were also revoked or refreshed at the service: none yet (each
     /// source's vault integration adds its own).
     pub refreshed_at_service: Vec<String>,
+    /// Always true: the device's Pubky session stays valid until the person revokes it in Pubky
+    /// Ring. Until then it can still change or delete vault files, though no device that saw the
+    /// sign-out gives it a key again.
+    pub revoke_in_ring: bool,
 }
 
 /// `POST /v1/vault/devices/{key}/sign-out`: "Sign out this device". It can't read what is written
@@ -165,7 +204,10 @@ pub(crate) async fn sign_out_device(
             "this is the node itself: use Sign out everywhere, or sign the node out of Pubky",
         ));
     }
-    let vault = Vault::new(sync.session(), &secret).device("node");
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
     let report = vault
         .sign_out_device(&device, |service, _| async move {
             tracing::info!(service, "vault: rotated past a signed-out device");
@@ -175,26 +217,53 @@ pub(crate) async fn sign_out_device(
     Ok(Json(SignedOut {
         report,
         refreshed_at_service: Vec::new(),
+        revoke_in_ring: true,
     }))
 }
 
 /// `POST /v1/vault/sign-out-everywhere`: delete every sign-in from the vault (the devices stay
 /// listed and can take new sign-ins).
-pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiResult<serde_json::Value> {
+pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiResult<Everywhere> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret).device("node");
-    let removed = vault
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
+    // No sync may run between the wipe and the node's own copies going aside
+    let _pass = s.vault_pass.lock().await;
+    let report = vault
         .sign_out_everywhere(|service, _| async move {
             tracing::info!(service, "vault: sign-in removed");
         })
         .await
         .map_err(vault_error)?;
-    // The node's own copies go aside now, not at the next sync
-    let cache = crate::vault_cache::sync(&s, &vault).await.map_err(vault_error)?;
-    Ok(Json(serde_json::json!({
-        "removed": removed, "revoked_at_service": [], "signed_out_here": cache.signed_out
-    })))
+    // The node's own copies go aside now, not at the next sync. The vault is already wiped
+    // here, so a sync that fails is reported, not an error
+    let (signed_out_here, cache_error) = match crate::vault_cache::sync_held(&s, &vault).await {
+        Ok(c) => (c.signed_out, None),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
+    Ok(Json(Everywhere {
+        report,
+        revoked_at_service: Vec::new(),
+        signed_out_here,
+        cache_error,
+    }))
+}
+
+/// `POST /v1/vault/sign-out-everywhere`.
+#[derive(Debug, Serialize)]
+pub struct Everywhere {
+    #[serde(flatten)]
+    pub report: EverywhereReport,
+    /// Tokens also revoked at their service: none yet.
+    pub revoked_at_service: Vec<String>,
+    /// The node's own copies, moved aside now.
+    pub signed_out_here: Vec<String>,
+    /// Why the node couldn't move its copies aside now (its next sync does).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_error: Option<String>,
 }
 
 /// `POST /v1/vault/sync`: register, share, and sync the node's sign-ins with the vault now (it
@@ -202,7 +271,10 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
 pub(crate) async fn sync_now(State(s): State<Arc<NodeState>>) -> ApiResult<crate::vault_cache::CacheReport> {
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
-    let vault = Vault::new(sync.session(), &secret).device("node");
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
     Ok(Json(
         crate::vault_cache::pass(&s, &vault).await.map_err(vault_error)?,
     ))

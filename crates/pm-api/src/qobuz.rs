@@ -181,6 +181,11 @@ pub fn set_config_app(id: &str, secret: &str) {
     }
 }
 
+/// The app id the node's Qobuz sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    app_of(&s.library.lock().expect("library poisoned")).map(|a| a.id)
+}
+
 /// The app the owner set: in Settings, else node.toml, else `PM_QOBUZ_APP_ID` / `_SECRET`.
 pub fn app_of(lib: &pm_library::Library) -> Option<App> {
     let kept: Option<App> = lib

@@ -86,6 +86,11 @@ fn numeric(id: &str) -> Result<&str, ApiError> {
     Ok(id)
 }
 
+/// The client id the node's Jamendo sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(s.jamendo.read().expect("jamendo").creds.client_id.clone()).filter(|c| !c.trim().is_empty())
+}
+
 fn endpoints(s: &NodeState) -> Result<JamendoEndpoints, ApiError> {
     let e = s.jamendo.read().expect("jamendo").clone();
     if !e.creds.configured() {

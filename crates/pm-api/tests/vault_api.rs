@@ -190,15 +190,55 @@ async fn the_device_list_and_signing_out_through_the_api() {
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["rotated"], json!(["tidal"]));
     assert_eq!(r["refreshed_at_service"], json!([]));
+    assert_eq!(r["failed"], json!([]));
+    assert_eq!(r["revoke_in_ring"], true);
     assert!(phone.read("tidal").await.is_err());
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["devices"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(v["sign_ins"][0]["epoch"], 2);
+    // The node remembers the sign-out: the phone writes the list back without it, and the node
+    // still doesn't trust it
+    assert!(dir.path().join("vault/revoked.json").exists());
+    let mut ix = phone.index().await.unwrap();
+    let before_sign_out = ix.revoked.clone();
+    ix.revoked.clear();
+    phone_session
+        .storage()
+        .put(
+            pubky_music_specs::vault::INDEX_PATH,
+            serde_json::to_vec(&ix).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!before_sign_out.is_empty());
+    let (_, v) = call(&app, "GET", "/v1/vault").await;
+    assert!(
+        v["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["this_node"] == true || d["trusted"] == false),
+        "{v}"
+    );
+    // A blob no client wrote doesn't take the device list down
+    phone_session
+        .storage()
+        .put(
+            pubky_music_specs::vault::blob_path("junk").unwrap().as_str(),
+            b"junk".to_vec(),
+        )
+        .await
+        .unwrap();
+    let (st, v) = call(&app, "GET", "/v1/vault").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["sign_ins"][0]["problem"].is_string(), "{v}");
+    assert_eq!(v["sign_ins"][1]["readable"], true, "{v}");
 
     // Sign out everywhere
     let (st, r) = call(&app, "POST", "/v1/vault/sign-out-everywhere").await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(r["removed"], json!(["tidal"]));
+    assert_eq!(r["removed"], json!(["junk", "tidal"]));
+    assert_eq!(r["left"], json!([]));
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["sign_ins"], json!([]));
 }
@@ -298,20 +338,46 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     assert!(v["last_sync"]["at"].as_i64().is_some());
     // Nothing changed: nothing moves
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
-    assert_eq!(
-        r,
-        json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "not_readable": []})
-    );
+    let quiet = json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "removed": [],
+        "conflicts": [], "not_usable": [], "not_readable": [], "failed": []});
+    assert_eq!(r, quiet);
 
-    // Sign out everywhere from node 1: aside on node 1 now, on node 2 at its next sync
+    // Signing out of Jamendo on node 2 removes it from the vault, and node 1 follows; it doesn't
+    // come back on node 2's next pass
+    n2.library.lock().unwrap().delete_setting("jamendo.user").unwrap();
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["removed"], json!(["jamendo"]), "{r}");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["signed_out"], json!(["jamendo"]), "{r}");
+    assert_eq!(get(&n1, "jamendo.user"), None);
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r, quiet);
+
+    // Two nodes that each had their own ListenBrainz before: neither replaces the other
+    let (lb1, lb2) = (r#"{"token":"lb-1","user":"a"}"#, r#"{"token":"lb-2","user":"b"}"#);
+    set(&n1, "listenbrainz.account", lb1);
+    set(&n2, "listenbrainz.account", lb2);
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!(["listenbrainz"]), "{r}");
+    call(&a1, "POST", "/v1/vault/register").await;
+    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["conflicts"], json!(["listenbrainz"]), "{r}");
+    assert_eq!(get(&n2, "listenbrainz.account").as_deref(), Some(lb2));
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r, quiet, "the vault keeps node 1's");
+
+    // Sign out everywhere from node 1: aside on node 1 now, on node 2 at its next sync (its
+    // conflicting copy too)
     let (st, r) = call(&a1, "POST", "/v1/vault/sign-out-everywhere").await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(r["removed"], json!(["jamendo", "tidal"]));
-    assert_eq!(r["signed_out_here"], json!(["tidal", "jamendo"]));
+    assert_eq!(r["removed"], json!(["listenbrainz", "tidal"]));
+    assert_eq!(r["left"], json!([]));
+    assert_eq!(r["signed_out_here"], json!(["tidal", "listenbrainz"]));
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["signed_out"], json!(["tidal", "jamendo"]), "{r}");
+    assert_eq!(r["signed_out"], json!(["tidal", "listenbrainz"]), "{r}");
     for n in [&n1, &n2] {
         assert_eq!(get(n, "tidal.user"), None, "the node no longer uses it");
+        assert_eq!(get(n, "listenbrainz.account"), None);
         assert_eq!(
             get(n, "vault.signed_out.tidal.user").as_deref(),
             Some(tidal_v2),
@@ -319,6 +385,8 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         );
     }
     // ...and nothing comes back on the next pass
-    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["migrated"], json!([]), "{r}");
+    for a in [&a1, &a2] {
+        let (_, r) = call(a, "POST", "/v1/vault/sync").await;
+        assert_eq!(r, quiet);
+    }
 }

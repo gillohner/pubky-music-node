@@ -5,24 +5,30 @@ Newest first. Dates are when the change landed on `main`.
 ## 2026-10-25
 
 - **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
-  - After every sign-in, at startup and every 15 minutes, the node's sign-ins (TIDAL, TIDAL full, Spotify, Qobuz, SoundCloud, Bandcamp, Last.fm, ListenBrainz, Jamendo, Plex, Jellyfin, your server, Audiobookshelf, drives, gPodder; the person's own sign-ins only, not the node's apps or keys, which the admin sets once, ADR 0016) are kept in step with the person's vault. A sign-in only on the node moves in once; one only in the vault (from another node) fills the node; then the newer side wins.
-  - Each blob carries the node's settings as they are, plus the standard token members where there's an OAuth session, for the person's other clients.
-  - Nothing is deleted from the node's settings: "Sign out everywhere" moves the node's copies aside.
+  - After every sign-in, at startup and every 15 minutes, the node's sign-ins for TIDAL, TIDAL full tracks, Spotify, Qobuz, Bandcamp, Last.fm, ListenBrainz and Jamendo are kept in step with the person's vault, one pass at a time. These are the person's own sign-ins only, not the node's apps or keys, which the admin sets once (ADR 0016).
+  - The two sides are compared by content. A sign-in only on the node moves in once; one only in the vault fills the node. After that, whichever side changed since the last sync wins.
+  - Signing out of a source on the node removes it from the vault. "Sign out everywhere" moves each node's copy aside (`vault.signed_out.*`, never in a backup).
+  - Two different copies meeting for the first time (two nodes that each had their own) are reported as a conflict, and both stay. A sign-in made with another app than the node's isn't taken.
+  - Only the sign-in itself travels: the mode switch, health and download format stay on each node. Each blob keeps what other clients put in it.
+  - Media servers (usually a server in that house), drives, gPodder (per-node cursors) and SoundCloud (its token sits in the admin's client setting) stay on the node for now. So do librespot's, Soloist's and yt-dlp's machine state.
   - `POST /v1/vault/sync` runs it now.
-  - librespot's, Soloist's and yt-dlp's machine state stay local.
-  - Tested with two nodes of one person on a real homeserver.
+  - Tested with two nodes of one person on a real homeserver: migrate, take, push and pull, a local sign-out, a first-contact conflict, and sign out everywhere. The rules are unit-tested one by one.
 - **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
-  - Signing a device out records it as revoked, so it can't come back. Every sign-in the node can read gets a new data key the device doesn't have; the answer lists those the node can't read, for another device to rotate.
+  - Signing a device out records it as revoked, in the device list and in the node's own `<data>/vault/revoked.json`, so the node never trusts it again even if the device writes the list back. Its Pubky session stays valid until it is revoked in Pubky Ring, and the answer says so.
+  - Every sign-in the node can read gets a new data key the device doesn't have. The answer lists those the node can't read, for another device to rotate, and those it couldn't rotate now (busy or unreadable), which don't stop the others. Every later write leaves a signed-out device out.
+  - An old key of the node under the same grant signs out only that key, not the node. Sign out everywhere deletes each sign-in under its lock and lists any left. One unreadable sign-in no longer takes `GET /v1/vault` down, and "sign in again" answers 409.
   - Revoking tokens at the services comes with each source's vault integration, and the answer says so.
   - The screens are mn-app's.
 - **Vault refreshes don't race** (STEWARD-VAULT.md item 4). `Vault::refresh` takes the homeserver's WebDAV lock on the sign-in (30 s, renewed every 10 s while the service answers) and reads it again. If another client already refreshed it, it uses that; otherwise it refreshes the token it just read and writes it back with `last_refresh`.
   - Where locks are refused it uses the lease file instead.
   - A refused refresh is never written over the vault.
-  - Tested on a real homeserver against a fake service that rotates refresh tokens: two clients refresh at once, under the lock and with the lease file, and the service is asked once. A 12-second refresh keeps its lock.
-- **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
+  - New tokens are never dropped: a failed write is tried again, taking the lock again if it lapsed, and otherwise handed back to the caller. A write made meanwhile that changes no tokens (a new device) is kept. The lease is renewed like the lock, and the service gets at most 60 s.
+  - Tested on a real homeserver against a fake service that rotates refresh tokens: two clients refresh at once, under the lock and with the lease file, and the service is asked once. A 33-second refresh keeps its lock and its lease (another client at 31 s still waits). A refresh that can't be saved hands its tokens back.
 - **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Only a grant that names the vault itself (`/priv/pubky.music/vault/:rw`) counts: an app approved for all storage is not trusted with the sign-ins. The node asks Ring for that capability, and an older sign-in is asked to sign in again. Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
   - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
   - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Each client remembers every sign-out it has seen in a local file, because the device list is writable by the devices it lists. A signed-out device that writes the list back without its record stays signed out, and the next registration writes the record back. Who gets a key is read under each blob's lock.
+  - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
   - Vault files are written under the homeserver's WebDAV lock.
   - Tested on a real homeserver with forged, borrowed and garbage entries.
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
@@ -30,6 +36,10 @@ Newest first. Dates are when the change landed on `main`.
   - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
   - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
   - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
+- **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
+  - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
+  - Listeners may download what they may play. The homeserver's files come through the node.
+  - Transcodes use ffmpeg where the node has it (501 otherwise; the original always works).
 - **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:
   - a random data key per blob, wrapped to each client's X25519 key (pubky-noise's primitives: X25519, HKDF-SHA-256, XChaCha20-Poly1305);
   - a device list in `index.json`, whose entries prove themselves with the pubky SDK's grant proofs (Ring's grant plus a custom proof over the client key; no app holds the identity secret);
