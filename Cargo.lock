@@ -3658,6 +3658,7 @@ dependencies = [
  "libc",
  "md-5",
  "notify",
+ "pm-appdata",
  "pm-audio",
  "pm-discovery",
  "pm-endpoint",
