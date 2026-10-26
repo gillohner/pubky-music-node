@@ -61,6 +61,9 @@ jobs:
       # The cross-platform output compiles on Linux too (cpal uses ALSA there).
       - run: cargo clippy -p pm-out-local -p pm-endpoint --all-targets --features cpal -- -D warnings
       - run: cargo test -p pm-out-local --features alsa
+      # The sources vault (crates/pubky-music-specs/VAULT.md) is behind a feature: its vectors and refusals
+      - run: cargo clippy -p pubky-music-specs --all-targets --features vault -- -D warnings
+      - run: cargo test -p pubky-music-specs --features vault
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -257,6 +260,9 @@ jobs:
           export PM_BUNDLED_HS_FILES=$PWD/deploy/bundle/hsdata/data/files
           PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
           cargo test -p pm-api --test bundled_homeserver
+          # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
+          cargo test -p pm-pubky --test vault_homeserver
+          cargo test -p pm-api --test vault_api
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)

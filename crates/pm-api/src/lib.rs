@@ -36,6 +36,7 @@ pub mod dash;
 pub mod deezer;
 pub mod devices;
 pub mod discover;
+pub mod downloads;
 pub mod drives;
 pub mod events;
 pub mod favourites;
@@ -92,6 +93,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod vault;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -235,6 +237,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/backup/schedule/run", post(backup::run_schedule))
         .route("/library/folders/move", post(move_folder))
         .route("/library/tracks/{id}/file", get(track_file))
+        .route("/library/tracks/{id}/download", get(downloads::download))
         .route("/library/search", get(search))
         .route("/library/loudness", get(loudness::get))
         .route("/library/loudness/measure", post(loudness::measure))
@@ -610,6 +613,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/devices/{id}/downloads",
             get(devices::get_downloads).put(devices::put_downloads),
         )
+        .route("/vault", get(vault::get))
+        .route("/vault/register", post(vault::register))
+        .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
+        .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
+        .route("/vault/new-key", post(vault::new_key))
         .route("/people/invites", post(people::invite))
         .route(
             "/people/invites/{id}",
