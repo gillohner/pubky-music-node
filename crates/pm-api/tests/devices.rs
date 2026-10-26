@@ -270,6 +270,99 @@ async fn what_a_device_keeps_and_what_it_still_wants() {
     let (_, their_list) = call(&app, &listener, "GET", "/v1/devices", None).await;
     assert_eq!(their_list[0]["id"], theirs);
 
+    // A listener can't change or forget the owner's device
+    assert_eq!(
+        call(&app, &listener, "DELETE", &format!("/v1/devices/{phone}"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &app,
+            &listener,
+            "PUT",
+            &uri,
+            Some(json!({"keep": {"tracks": [a1]}}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    // Duplicates count once, and huge or odd reports are refused (the Claude review of #99)
+    let dup_albums: Vec<i64> = std::iter::repeat_n(album_a, 5_000).collect();
+    let (st, m) = call(
+        &app,
+        &listener,
+        "PUT",
+        &format!("/v1/devices/{theirs}/downloads"),
+        Some(json!({"keep": {"albums": dup_albums}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["keep"]["albums"], json!([album_a]));
+    let too_many: Vec<i64> = (1..=2_001).collect();
+    assert_eq!(
+        call(
+            &app,
+            &listener,
+            "PUT",
+            &format!("/v1/devices/{theirs}/downloads"),
+            Some(json!({"keep": {"albums": too_many}}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            &listener,
+            "PUT",
+            &format!("/v1/devices/{theirs}/downloads"),
+            Some(json!({"have": [{"track_id": a1, "bytes": u64::MAX}]}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            &listener,
+            "PUT",
+            &format!("/v1/devices/{theirs}/downloads"),
+            Some(json!({"have": [{"track_id": a1, "bytes": 1, "format": "wav"}]}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // A deleted playlist keeps nothing
+    let (st, _) = call(&app, OWNER, "DELETE", &format!("/v1/playlists/{pid}"), None).await;
+    assert!(st.is_success());
+    let (_, m) = call(&app, OWNER, "GET", &uri, None).await;
+    assert!(!ids(&m["wanted"]).contains(&p1), "{m}");
+    // The listener's music access goes: so do their devices
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PATCH",
+        &format!("/v1/people/{KEY}"),
+        Some(json!({"music": false})),
+    )
+    .await;
+    assert!(st.is_success());
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    assert_eq!(
+        call(&app, &listener, "GET", "/v1/devices", None).await.1,
+        json!([])
+    );
+
     // Bad input, and forgetting
     assert_eq!(
         call(

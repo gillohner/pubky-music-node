@@ -23,8 +23,25 @@ use std::sync::Arc;
 const PREFIX: &str = "device.";
 /// Most devices one person registers.
 const MAX_DEVICES: usize = 32;
-/// Most songs one manifest lists.
-const MAX_TRACKS: usize = 100_000;
+/// Most songs, albums and playlists one device keeps, and files it reports (each kept item costs a
+/// library read on every manifest).
+const MAX_KEEP_TRACKS: usize = 20_000;
+const MAX_KEEP_ALBUMS: usize = 2_000;
+const MAX_KEEP_PLAYLISTS: usize = 200;
+const MAX_HAVE: usize = 50_000;
+/// A file a device reports is at most this big (1 TiB): anything else is a bug or a lie.
+const MAX_FILE_BYTES: u64 = 1 << 40;
+/// The formats a device may say it keeps a song in.
+const FORMATS: &[&str] = &["original", "aac", "mp3", "opus"];
+
+/// Device records are read, changed and written back under this, so two requests can't undo
+/// each other (a GET's `last_seen` writing back over a PUT's new `keep`).
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn dedupe<T: Clone + Ord>(v: &mut Vec<T>) {
+    let mut seen = BTreeSet::new();
+    v.retain(|x| seen.insert(x.clone()));
+}
 
 /// An id an app picks once: 8–64 of `A-Z a-z 0-9 - _`.
 fn valid_id(id: &str) -> bool {
@@ -145,7 +162,7 @@ fn row(d: &Device) -> DeviceRow {
         kind: d.kind.clone(),
         last_seen: d.last_seen,
         files: d.have.len(),
-        bytes: d.have.iter().map(|h| h.bytes).sum(),
+        bytes: d.have.iter().fold(0u64, |a, h| a.saturating_add(h.bytes)),
     }
 }
 
@@ -191,6 +208,7 @@ pub(crate) async fn register(
     }
     let me = who(&c)?;
     let now = pm_library::db::now_unix();
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let d = match load(&s, &id)? {
         Some(d) if d.owner != me => {
             // Someone else's id: the same answer as a clash, without saying whose
@@ -233,12 +251,23 @@ pub(crate) async fn forget(
     Extension(c): Extension<Caller>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let d = mine(&s, &c, &id)?;
     s.library
         .lock()
         .expect("library poisoned")
         .delete_setting(&format!("{PREFIX}{}", d.id))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Forget every device of the listener with `key` (their music access went: People).
+pub(crate) fn forget_all_of(s: &NodeState, key: &str) {
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(devices) = all(s) else { return };
+    let lib = s.library.lock().expect("library poisoned");
+    for d in devices.iter().filter(|d| d.owner == key) {
+        let _ = lib.delete_setting(&format!("{PREFIX}{}", d.id));
+    }
 }
 
 /// A song the device should download.
@@ -266,43 +295,60 @@ pub struct Manifest {
     pub unkept: Vec<i64>,
 }
 
-/// Every song `keep` covers, as library ids (missing ones dropped), in order.
-fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<i64>, ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    let mut ids: Vec<i64> = Vec::new();
-    ids.extend(keep.tracks.iter().copied());
-    for a in &keep.albums {
-        ids.extend(lib.album_tracks(*a)?.iter().filter_map(|t| t.id.map(|i| i.0)));
-    }
-    for p in &keep.playlists {
-        // A playlist that was deleted keeps nothing
-        if let Ok(t) = crate::playlists::library_track_ids(&lib, p) {
-            ids.extend(t);
+/// Every song `keep` covers that the library has, each once, in order. Each kept item is read
+/// once (the caps above bound the work); albums and playlists named twice count once.
+fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiError> {
+    fn push(t: pm_model::Track, seen: &mut BTreeSet<i64>, out: &mut Vec<pm_model::Track>) {
+        if let Some(id) = t.id {
+            if seen.insert(id.0) {
+                out.push(t);
+            }
         }
     }
+    let lib = s.library.lock().expect("library poisoned");
+    let mut out: Vec<pm_model::Track> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for id in keep.tracks.iter().collect::<BTreeSet<_>>() {
+        if let Some(t) = lib.get_track(TrackId(*id))? {
+            push(t, &mut seen, &mut out);
+        }
+    }
+    let mut albums: BTreeSet<i64> = keep.albums.iter().copied().collect();
     if keep.favourites {
         let f = crate::favourites::collect(&lib)?;
-        ids.extend(f.tracks.iter().filter_map(|t| t.id.map(|i| i.0)));
-        for a in f.albums.iter().filter_map(|a| a.id) {
-            ids.extend(lib.album_tracks(a)?.iter().filter_map(|t| t.id.map(|i| i.0)));
+        for t in f.tracks {
+            push(t, &mut seen, &mut out);
+        }
+        albums.extend(f.albums.iter().filter_map(|a| a.id));
+    }
+    for a in albums {
+        for t in lib.album_tracks(a)? {
+            push(t, &mut seen, &mut out);
         }
     }
-    let mut seen = BTreeSet::new();
-    ids.retain(|i| seen.insert(*i));
-    // Only songs the library still has
-    ids.retain(|i| lib.get_track(TrackId(*i)).ok().flatten().is_some());
-    Ok(ids)
+    for p in keep.playlists.iter().collect::<BTreeSet<_>>() {
+        // A playlist that was deleted keeps nothing
+        if let Ok(ids) = crate::playlists::library_track_ids(&lib, p) {
+            for id in ids {
+                if seen.contains(&id) {
+                    continue;
+                }
+                if let Some(t) = lib.get_track(TrackId(id))? {
+                    push(t, &mut seen, &mut out);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn manifest(s: &NodeState, d: &Device) -> Result<Manifest, ApiError> {
     let kept = kept_tracks(s, &d.keep)?;
     let have: BTreeSet<i64> = d.have.iter().map(|h| h.track_id).collect();
-    let kept_set: BTreeSet<i64> = kept.iter().copied().collect();
-    let lib = s.library.lock().expect("library poisoned");
+    let kept_set: BTreeSet<i64> = kept.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
     let wanted = kept
-        .iter()
-        .filter(|i| !have.contains(i))
-        .filter_map(|i| lib.get_track(TrackId(*i)).ok().flatten())
+        .into_iter()
+        .filter(|t| t.id.is_some_and(|i| !have.contains(&i.0)))
         .map(|t| Wanted {
             track_id: t.id.map_or(0, |i| i.0),
             title: t.title.clone(),
@@ -326,9 +372,13 @@ pub(crate) async fn get_downloads(
     Extension(c): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Manifest> {
-    let mut d = mine(&s, &c, &id)?;
-    d.last_seen = pm_library::db::now_unix();
-    store(&s, &d)?;
+    let d = {
+        let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut d = mine(&s, &c, &id)?;
+        d.last_seen = pm_library::db::now_unix();
+        store(&s, &d)?;
+        d
+    };
     Ok(Json(manifest(&s, &d)?))
 }
 
@@ -349,31 +399,56 @@ pub(crate) async fn put_downloads(
     Path(id): Path<String>,
     Json(b): Json<Update>,
 ) -> ApiResult<Manifest> {
-    let mut d = mine(&s, &c, &id)?;
-    if let Some(k) = b.keep {
+    let mut keep = b.keep;
+    if let Some(k) = keep.as_mut() {
         if c.role != Role::Owner && (k.favourites || !k.playlists.is_empty()) {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "Not for listeners: playlists and favourites are the owner's; keep songs and albums",
             ));
         }
-        if k.tracks.len() + k.albums.len() > MAX_TRACKS {
+        dedupe(&mut k.tracks);
+        dedupe(&mut k.albums);
+        dedupe(&mut k.playlists);
+        if k.tracks.len() > MAX_KEEP_TRACKS
+            || k.albums.len() > MAX_KEEP_ALBUMS
+            || k.playlists.len() > MAX_KEEP_PLAYLISTS
+        {
             return Err(ApiError::bad_request(format!(
-                "at most {MAX_TRACKS} songs and albums"
+                "at most {MAX_KEEP_TRACKS} songs, {MAX_KEEP_ALBUMS} albums and {MAX_KEEP_PLAYLISTS} playlists"
             )));
         }
-        d.keep = k;
     }
-    if let Some(mut h) = b.have {
-        if h.len() > MAX_TRACKS {
-            return Err(ApiError::bad_request(format!("at most {MAX_TRACKS} files")));
-        }
+    let mut have = b.have;
+    if let Some(h) = have.as_mut() {
         let mut seen = BTreeSet::new();
         h.retain(|x| seen.insert(x.track_id));
-        d.have = h;
+        if h.len() > MAX_HAVE {
+            return Err(ApiError::bad_request(format!("at most {MAX_HAVE} files")));
+        }
+        if let Some(bad) = h
+            .iter()
+            .find(|x| x.bytes > MAX_FILE_BYTES || !FORMATS.contains(&x.format.as_str()))
+        {
+            return Err(ApiError::bad_request(format!(
+                "track {}: a file is at most 1 TiB, in original, aac, mp3 or opus",
+                bad.track_id
+            )));
+        }
     }
-    d.last_seen = pm_library::db::now_unix();
-    store(&s, &d)?;
+    let d = {
+        let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut d = mine(&s, &c, &id)?;
+        if let Some(k) = keep {
+            d.keep = k;
+        }
+        if let Some(h) = have {
+            d.have = h;
+        }
+        d.last_seen = pm_library::db::now_unix();
+        store(&s, &d)?;
+        d
+    };
     Ok(Json(manifest(&s, &d)?))
 }
 
