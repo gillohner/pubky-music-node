@@ -15,6 +15,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.
+  - CI checks the image's encoders and transcodes a real file to each format.
 - **Each device's downloads** (STEWARD-DOWNLOADS.md): `/v1/devices` registers a person's phones and laptops, and `/v1/devices/{id}/downloads` is what each keeps offline (songs, albums, playlists, favourites) and has.
   - The node answers with what the device still wants: a kept playlist's or album's new songs, new favourites. It also shows each device's storage.
   - Listeners have their own devices and keep songs and albums. The screens are mn-app's.
