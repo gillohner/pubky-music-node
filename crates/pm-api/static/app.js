@@ -913,9 +913,13 @@
     if (/^https?:/.test(u)) { try { const k = srcSvc(new URL(u).hostname); return SRC_ACCENT[k] ? k : null; } catch { return null; } }
     return null;
   };
+  let lastSrc;
   const setSourceColour = (np) => {
     const root = document.documentElement;
+    // the node's own word on the service once now-playing carries it (#94), else the item's uri
     const svc = np && colourOn('pm.srcColour') ? (np.format && np.format.service ? srcSvc(np.format.service) : svcOfItem(np.item)) : null;
+    if (svc === lastSrc) return; // renderBar runs several times a second: touch <html> only on a change
+    lastSrc = svc;
     const a = svc && SRC_ACCENT[svc];
     if (a) { root.dataset.src = svc; root.style.setProperty('--src-l', a[0]); root.style.setProperty('--src-d', a[1]); }
     else { delete root.dataset.src; root.style.removeProperty('--src-l'); root.style.removeProperty('--src-d'); }
@@ -925,11 +929,13 @@
   const artTints = new Map();
   const setArtTint = () => {
     const root = document.documentElement; const img = $('#nowplaying .np-big img');
-    const clear = () => { delete root.dataset.art; root.style.removeProperty('--np-tint'); };
+    const clear = () => { delete root.dataset.art; root.style.removeProperty('--np-h'); root.style.removeProperty('--np-s'); };
     if (!img || !colourOn('pm.artColour')) { clear(); return; }
     const src = img.currentSrc || img.src;
-    const apply = (c) => { if (c) { root.dataset.art = '1'; root.style.setProperty('--np-tint', c); } else clear(); };
-    if (artTints.has(src)) { apply(artTints.get(src)); return; }
+    const apply = (c) => { if (c) { root.dataset.art = '1'; root.style.setProperty('--np-h', String(c[0])); root.style.setProperty('--np-s', `${c[1]}%`); } else clear(); };
+    if (artTints.has(src)) { const c = artTints.get(src); if (c === 'pending') clear(); else apply(c); return; }
+    clear(); artTints.set(src, 'pending');
+    if (artTints.size > 200) artTints.delete(artTints.keys().next().value);
     const probe = new Image(); probe.crossOrigin = 'anonymous';
     probe.onload = () => {
       let c = null;
@@ -938,12 +944,18 @@
         g.drawImage(probe, 0, 0, 12, 12); const d = g.getImageData(0, 0, 12, 12).data;
         let r = 0; let gr = 0; let b = 0; let n = 0;
         for (let i = 0; i < d.length; i += 4) { const hi = Math.max(d[i], d[i + 1], d[i + 2]); const lo = Math.min(d[i], d[i + 1], d[i + 2]); if (hi < 24 || lo > 235) continue; r += d[i]; gr += d[i + 1]; b += d[i + 2]; n += 1; }
-        if (n) c = `rgb(${Math.round(r / n)} ${Math.round(gr / n)} ${Math.round(b / n)} / 0.34)`;
+        if (n) {
+          // hue and saturation only: the lightness is set per theme, so text on it keeps its contrast
+          const R = r / n / 255; const G = gr / n / 255; const B = b / n / 255; const hi = Math.max(R, G, B); const lo = Math.min(R, G, B); const l = (hi + lo) / 2; const dl = hi - lo;
+          const sat = dl ? dl / (1 - Math.abs(2 * l - 1)) : 0;
+          const hue = !dl ? 0 : hi === R ? 60 * (((G - B) / dl) % 6) : hi === G ? 60 * ((B - R) / dl + 2) : 60 * ((R - G) / dl + 4);
+          c = [Math.round((hue + 360) % 360), Math.round(Math.min(1, sat) * 100)];
+        }
       } catch { c = null; }
       artTints.set(src, c);
       const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) apply(c);
     };
-    probe.onerror = () => { artTints.set(src, null); clear(); };
+    probe.onerror = () => { artTints.set(src, null); const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) clear(); };
     probe.src = src;
   };
   const renderBar = () => {
@@ -1069,6 +1081,7 @@
     const keep = npKeep(); npGen += 1; const gen = npGen;
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
+      setTimeout(setArtTint, 0); // no cover: no tint
       overlay.innerHTML = `<div class="np-page np2"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
       $('#npq').onclick = () => setView('queue');
@@ -2349,7 +2362,7 @@
   const bindLayoutPick = () => {
     $$('[data-colour-pick]', main).forEach((c) => c.onchange = () => {
       try { if (c.checked) localStorage.removeItem(c.dataset.colourPick); else localStorage.setItem(c.dataset.colourPick, 'off'); } catch { /* no storage */ }
-      const z = currentZone(); setSourceColour(z && z.now_playing); setArtTint();
+      const z = currentZone(); lastSrc = undefined; setSourceColour(z && z.now_playing); setArtTint();
     });
     $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
       try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
