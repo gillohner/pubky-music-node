@@ -351,8 +351,8 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
-/// Async so that it runs off the main thread (see [`open_external`]): on Android the opener waits
-/// on the main thread for its answer.
+/// Async so that it never blocks the IPC thread (the UI thread on desktop) while the opener waits
+/// for Android's main thread (see [`open_external`]).
 #[tauri::command]
 async fn open_ring(app: AppHandle, url: String) -> Result<(), String> {
     if !url.starts_with("pubkyauth://") {
