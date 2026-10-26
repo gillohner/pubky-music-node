@@ -257,9 +257,9 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
   (multi-arch, amd64 and arm64); its version is that build's commit. Images are published to
   `ghcr.io/gillohner/pubky-music-node` by `.github/workflows/release.yml`: every `v*` tag gives
   `<version>`, `<major.minor>` and `latest`, and every push to main `edge`.
-
 - **Downloads:** the image includes ffmpeg, so phones can keep smaller copies (AAC, MP3, Opus)
   as well as the originals.
+
 ## Reaching the node from outside the house
 
 **Without any of the below:** once the node is signed in with Pubky Ring, the Pubky Music app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.
