@@ -119,6 +119,22 @@ fn covers(lib: &Library, row_id: &str, p: &Playlist) -> Vec<String> {
     out
 }
 
+/// A playlist's songs that are in the library, as track ids in order: its items found in the
+/// library, then its node-only songs (a device keeping the playlist offline downloads these).
+pub(crate) fn library_track_ids(lib: &Library, id: &str) -> Result<Vec<i64>, ApiError> {
+    let (_, p) = load(lib, id)?;
+    let mut out: Vec<i64> = p
+        .items
+        .iter()
+        .filter_map(|it| resolve(lib, it))
+        .chain(local_tracks(lib, id))
+        .filter_map(|t| t.id.map(|i| i.0))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|i| seen.insert(*i));
+    Ok(out)
+}
+
 /// Library tracks as playlist items, and the ids of those without a canonical identity: those
 /// stay in the playlist on this node only (constraint 4: never in social data).
 pub(crate) fn split_tracks(lib: &Library, ids: &[i64]) -> Result<(Vec<PlaylistItem>, Vec<i64>), ApiError> {
