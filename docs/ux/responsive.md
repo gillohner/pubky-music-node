@@ -29,6 +29,26 @@ A rail instead of tabs. Now playing in two columns: the player left, the sheet a
 - **Arrangement:** a sidebar (with a "Shared with you" group), dense lists with columns (title, artist, quality, time), the queue/lyrics/details panel docked right, and the player bar along the bottom.
 - **Now playing:** a full view with the panel beside the art.
 
+## Colour from where it plays (§6)
+| Spotify | TIDAL | Qobuz |
+| :-: | :-: | :-: |
+| ![](responsive/colour-spotify.png) | ![](responsive/colour-tidal.png) | ![](responsive/colour-qobuz.png) |
+
+- **The accent:** while a song plays, the player surfaces take one accent from where it streams: the quality label, the scrubber, the source chip and the play button. Local files and the homeserver keep ours.
+- **The cover:** Now playing gets a soft gradient from it.
+- **A tint only:** no logos beyond the small source mark, no copied layouts or fonts. Lists keep the app's own theme.
+- **Contrast:** each accent is checked in both themes and nudged where it fails: text on the background at least 4.5:1, the button's ink on the accent at least 4.5:1.
+
+  | Source | Light | Dark | Dark ink |
+  | :-- | :-- | :-- | :-- |
+  | Spotify | `#13803B` | `#1ED760` | yes |
+  | TIDAL | `#007C89` | `#33E8E0` | yes |
+  | Qobuz | `#1F5BD6` | `#6E9BFF` | yes |
+  | ours | `#5b45d6` | `#a596ff` | yes |
+
+  Each source declares its accent next to its features when this is built.
+- **Settings › Appearance:** Colour from source (on), Colour from album art (on), or neither. With reduced motion the colour switches without a fade.
+
 ## Layout option
 Settings › Home and layout:
 - **Layout:** Automatic, Compact or Comfortable.
@@ -39,9 +59,8 @@ Per person, saved on their homeserver (STEWARD-MULTI-USER.md).
 
 ## Decisions for the owner
 1. **The fourth tab:** Zones (drawn), or Queue?
-2. **Now playing's background:** a colour from the cover, or plain?
-3. **Swipe gestures on rows,** or long-press only?
-4. **Lyrics:** in place of the art, or in the sheet (drawn)?
+2. **Swipe gestures on rows,** or long-press only?
+3. **Lyrics:** in place of the art, or in the sheet (drawn)?
 
 ## Build order after the look
 Each step is one PR:

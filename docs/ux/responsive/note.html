@@ -7,17 +7,23 @@
   --bg: #f4f4f7; --surface: #ffffff; --fg: #17171c; --muted: #5f5f6b; --line: #d9d9e2;
   --accent: #5b45d6; --accent-soft: #ebe8fb;
   --wf-bg: #fbfbfd; --wf-box: #e3e3ea; --wf-box2: #cfcfda; --wf-ink: #3a3a46; --wf-accent: #5b45d6;
+  /* Source accents, contrast-checked: text on the background >= 4.5:1, the button's ink on the accent >= 4.5:1 */
+  --spotify: #13803B; --spotify-ink: #ffffff; --tidal: #007C89; --tidal-ink: #ffffff; --qobuz: #1F5BD6; --qobuz-ink: #ffffff;
   --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #111116; --surface: #1a1a21; --fg: #ececf2; --muted: #a2a2b0; --line: #2e2e39;
   --accent: #a596ff; --accent-soft: #2a2545;
-  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff; color-scheme: dark } }
+  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff;
+  --spotify: #1ED760; --spotify-ink: #111116; --tidal: #33E8E0; --tidal-ink: #111116; --qobuz: #6E9BFF; --qobuz-ink: #111116;
+  color-scheme: dark } }
 :root[data-theme="dark"] {
   --bg: #111116; --surface: #1a1a21; --fg: #ececf2; --muted: #a2a2b0; --line: #2e2e39;
   --accent: #a596ff; --accent-soft: #2a2545;
-  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff; color-scheme: dark }
+  --wf-bg: #1d1d25; --wf-box: #2c2c37; --wf-box2: #3a3a48; --wf-ink: #d4d4de; --wf-accent: #a596ff;
+  --spotify: #1ED760; --spotify-ink: #111116; --tidal: #33E8E0; --tidal-ink: #111116; --qobuz: #6E9BFF; --qobuz-ink: #111116;
+  color-scheme: dark }
 body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.55;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 64px; }
 .col { max-width: 72ch; margin-inline: auto; }
@@ -44,7 +50,7 @@ figure { margin: 0; display: flex; flex-direction: column; gap: 8px; min-width: 
 figcaption { font-size: 13px; color: var(--muted); max-width: 46ch; }
 figcaption b { color: var(--fg); font-weight: 600; }
 .wf { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--wf-bg); box-shadow: 0 1px 2px rgba(0,0,0,.06); max-width: 100%; }
-.screen { position: absolute; left: 0; top: 0; transform-origin: top left; color: var(--wf-ink); font-family: var(--sans); font-size: 14px; line-height: 1.3; background: var(--wf-bg); }
+.screen { box-sizing: border-box; position: absolute; left: 0; top: 0; transform-origin: top left; color: var(--wf-ink); font-family: var(--sans); font-size: 14px; line-height: 1.3; background: var(--wf-bg); }
 .screen * { box-sizing: border-box; }
 .b { background: var(--wf-box); border-radius: 8px; }
 .b2 { background: var(--wf-box2); border-radius: 8px; }
@@ -58,6 +64,15 @@ figcaption b { color: var(--fg); font-weight: 600; }
 .row { display: flex; align-items: center; gap: 10px; }
 .col2 { display: flex; flex-direction: column; gap: 8px; }
 .note { position: absolute; font-family: var(--mono); font-size: 11px; background: var(--wf-accent); color: #fff; padding: 2px 6px; border-radius: 4px; }
+/* Source-aware colour on the player: one accent per source, a soft gradient from the cover */
+.src-spotify { --src: var(--spotify); --src-ink: var(--spotify-ink); }
+.src-tidal { --src: var(--tidal); --src-ink: var(--tidal-ink); }
+.src-qobuz { --src: var(--qobuz); --src-ink: var(--qobuz-ink); }
+.np-src { background: linear-gradient(180deg, color-mix(in srgb, var(--art) 38%, var(--wf-bg)) 0%, var(--wf-bg) 72%); }
+.np-src .qlabel { border: 1.5px solid var(--src); color: var(--src); font-weight: 600; }
+.np-src .play { background: var(--src); color: var(--src-ink); display: flex; align-items: center; justify-content: center; font-size: 26px; }
+.np-src .fill { background: var(--src); }
+.np-src .mark { width: 10px; height: 10px; border-radius: 3px; background: var(--src); display: inline-block; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
@@ -254,6 +269,50 @@ figcaption b { color: var(--fg); font-weight: 600; }
   </div>
 </section>
 
+<section class="wide">
+  <h2>Colour from where it plays</h2>
+  <p style="max-width:72ch">While a song plays, the player takes an accent from where it streams: the quality label, the scrubber, the source chip and the play button. Now playing also gets a soft gradient from the cover. Local files and your homeserver keep our own accent. A tint only: no logos beyond the small source mark, no copied layouts or fonts. Lists and the rest of the app keep their own theme, so nothing else changes colour from song to song.</p>
+  <div class="figrow">
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-spotify" style="--art:#c8663b;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#c8663b"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">OGG 320 kbps</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>Spotify</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>Spotify.</b> The Spotify accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-tidal" style="--art:#2b4a8a;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#2b4a8a"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">FLAC 96/24 · Max</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>TIDAL</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>TIDAL.</b> The TIDAL accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+    <figure>
+      <div class="wf" data-w="390" data-h="844" data-s=".5"><div class="screen np-src src-qobuz" style="--art:#2f6f5e;width:390px;height:844px;padding:16px 24px 28px;display:flex;flex-direction:column;gap:16px">
+        <div class="row" style="justify-content:space-between"><span class="lab">⌄ collapse</span><span class="pill">Kitchen ▾</span><span class="lab">⋯</span></div>
+        <div style="width:342px;height:342px;margin-inline:auto;border-radius:10px;background:#2f6f5e"></div>
+        <div class="row" style="justify-content:space-between"><div class="col2" style="gap:6px"><b style="font-size:22px">Song title</b><span class="lab" style="font-size:15px">Artist · Album</span></div><div class="b circ" style="width:36px;height:36px"></div></div>
+        <div class="row" style="gap:8px"><span class="pill qlabel">FLAC 192/24</span><span class="pill" style="display:inline-flex;align-items:center;gap:6px"><span class="mark"></span>Qobuz</span></div>
+        <div class="col2" style="gap:4px"><div class="ln" style="width:100%;height:6px;position:relative;overflow:hidden"><div class="fill" style="position:absolute;inset:0 62% 0 0"></div></div><div class="row lab" style="justify-content:space-between"><span>1:32</span><span>4:12</span></div></div>
+        <div class="row" style="justify-content:space-between;padding:0 6px"><div class="b circ" style="width:32px;height:32px"></div><div class="b circ" style="width:44px;height:44px"></div><div class="circ play" style="width:72px;height:72px">❚❚</div><div class="b circ" style="width:44px;height:44px"></div><div class="b circ" style="width:32px;height:32px"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:auto;font-size:12px;text-align:center"><span>☰<br>Queue</span><span>❝<br>Lyrics</span><span>ⓘ<br>Details</span><span>⇄<br>Sources</span><span>#<br>Tags</span></div>
+      </div></div>
+      <figcaption><b>Qobuz.</b> The Qobuz accent on the quality label, the scrubber, the source chip and play; the background from this cover.</figcaption>
+    </figure>
+  </div>
+  <p style="max-width:72ch" class="lab">Each accent is checked in both themes and nudged where it fails: text on the background at least 4.5:1, and the play button's ink on the accent at least 4.5:1. On dark, bright accents (Spotify's green, TIDAL's cyan) take dark ink; white on them would fail. Switch the theme to see both. Settings › Appearance: <b>Colour from source</b> (on), <b>Colour from album art</b> (on), or neither. With reduced motion the colour changes without a fade.</p>
+</section>
+
 <section class="col">
   <h2>Layout, per person</h2>
   <p><b>Settings › Home and layout:</b> Layout <i>Automatic</i> (by width, as above), <i>Compact</i> (phone arrangement at any width), or <i>Comfortable</i> (tablet arrangement on a desktop); <i>Dense lists</i> on tablets and desktops; Home rows to show and their order. With per-person libraries (STEWARD-MULTI-USER.md) these are saved on each person's homeserver, so they follow you to every device.</p>
@@ -276,10 +335,9 @@ figcaption b { color: var(--fg); font-weight: 600; }
   <p>Each step: screenshots at 390, 820 and 1440 px in light and dark, before and after; the overlap, accessibility and click-every-button checks at all three widths.</p>
 
   <div class="ask">
-    <b>Four things to decide</b>
+    <b>Three things to decide</b>
     <ol>
       <li><b>The fourth tab:</b> Zones (where it plays, as drawn), or Queue (then Zones moves into the player's zone pill only)?</li>
-      <li><b>Now playing's background:</b> a soft colour taken from the cover (Apple Music, Spotify), or the plain theme background?</li>
       <li><b>Swipe gestures on rows:</b> swipe right for Play next and left for Add to playlist, as drawn, or long-press only?</li>
       <li><b>Lyrics:</b> in place of the art (Apple Music) or in the sheet with the others (as drawn)?</li>
     </ol>
