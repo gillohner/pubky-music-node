@@ -160,7 +160,7 @@
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
-    if (method !== 'GET' && path.startsWith('/me/prefs')) state.prefsCache = null;
+    if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r;
     try {
@@ -2588,8 +2588,8 @@
           // Your Home (Settings › You): your own layout where you set one, else the node's default
           if (!state.homeLayout) {
             const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
-            if (state.view !== 'home') break; // they went elsewhere while the homeserver answered
-            state.homeLayout = lay;
+            if (state.view !== 'home') return; // they went elsewhere while the homeserver answered
+            state.homeLayout = lay; state.homeSaved = lay;
           }
           const lay = state.homeLayout; const known = HOME_ROWS.map(([k]) => k);
           const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
@@ -3981,7 +3981,7 @@
           const fresh = (c) => c && Date.now() - c.at < 30000;
           const [nodeMap, prefs, apps] = await Promise.all([
             api('GET', '/node').catch(() => null),
-            fresh(state.prefsCache) ? state.prefsCache.v : api('GET', '/me/prefs').then((v) => { state.prefsCache = { at: Date.now(), v }; return v; }).catch(() => null),
+            fresh(state.prefsCache) ? state.prefsCache.v : (() => { const gen = state.prefsGen || 0; return api('GET', '/me/prefs').then((v) => { if (gen === (state.prefsGen || 0)) state.prefsCache = { at: Date.now(), v }; return v; }).catch(() => null); })(), // an answer older than a change isn't kept
             api('GET', '/node/apps').catch(() => null),
           ]);
           if (state.view !== 'settings') return;
@@ -4082,7 +4082,7 @@
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
-          const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
+          const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
           // Fix my files' tags: the list first, then the write
           const loadFixes = async () => {
