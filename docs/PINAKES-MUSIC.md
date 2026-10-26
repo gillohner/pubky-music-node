@@ -97,9 +97,11 @@ What this repository does with each item of the steward's note:
 - **`maybe_same` on event cards:** `Card::maybe_same` / `Details::maybe_same` (parsed, not yet shown: the
   node has no events view).
 - **Matching the owner's own library:** `POST /v1/tags/bulk` (Settings → Pubky → "Tag my whole library on
-  Pubky") writes one v1 `PubkyAppTag` per identified track on its canonical MusicBrainz URL; Pinakes then
-  joins each to its group. Everything the node writes stays on the v1 specs: bookmarks for favourites
-  (ADR 0010), tags (ADR 0011), posts with custom content for playlists, reviews and activity (ADR 0006).
+  Pubky") writes one tag per identified track on its canonical MusicBrainz URL; Pinakes then joins each to
+  its group. *(Updated 2026-10-26.)* What the node writes is pubky-social-specs v1 (ADR 0014): social v1
+  tags in `/pub/social/v1/tags/`, bookmarks, `collection` posts for playlists, and `pubky-music-specs`
+  `review` and `listen` posts. The "posts with custom content" (ADR 0006) were the older envelope, not v1;
+  the node only reads them for the one-time move.
 
 - **Which build the fixtures come from:** 8092 serves pubky/pinakes#21 or later (merged 17:09 UTC as
   c84d1b8). Its OpenAPI equals the merge commit's and has the `key` and `window` search parameters,

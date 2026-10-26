@@ -1,17 +1,12 @@
-//! Music objects as v1 `PubkyAppPost`s (pubky-app-specs 0.8) whose `content`
-//! is a JSON envelope: `{"type":"pubky.music/<kind>","v":2, ...fields}` (the node's working copy; the homeserver gets v1 objects, ADR 0014).
-//!
-//! Why a post and not an own object type: the v1 specs are what Nexus and
-//! every Pubky client already index and render, so a playlist written this
-//! way is a post other apps can at least show, reply to and tag, while this
-//! node reads the envelope. The playlist-specific social primitives come
-//! later; until then everything is written to the **private** posts folder
-//! (`/priv/pubky.app/posts/<id>`), readable only with the owner's session,
-//! and moving an object public is a path change, not a format change.
+//! The node's working copy of a music object: a pubky.app `PubkyAppPost` (pubky-app-specs 0.8)
+//! whose `content` is a JSON envelope, `{"type":"pubky.music/<kind>","v":2, ...fields}`. The
+//! homeserver gets pubky-social-specs v1 objects (ADR 0014, [`crate::v1`]); this form was written to
+//! `/priv/pubky.app/posts/<id>` before that, and those **legacy** files are only read, once per
+//! node, for the move to v1.
 //!
 //! Post shape: `kind: long` (the envelope is JSON, not prose), no parent or
 //! attachments; reviews and activity carry `embed: {kind: link, uri}` with
-//! the canonical music URL so generic clients show what the post is about.
+//! the canonical music URL.
 
 use super::{Activity, Playlist, Review, SchemaError, Validatable};
 use crate::ids;

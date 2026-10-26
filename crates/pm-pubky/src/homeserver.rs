@@ -189,23 +189,23 @@ impl NodeHomeserver {
         self.fetch(&user, path, visibility, session).await
     }
 
-    /// The signed-in user's v1 bookmarks of music URLs: `(path, uri, created_at)`. Bookmarks of
-    /// anything else, and invalid ones, are skipped.
+    /// The signed-in user's v1 bookmarks of music URLs and public posts: `(path, uri, created_at)`.
+    /// Bookmarks of anything else, and invalid ones, are skipped.
     pub async fn read_v1_bookmarks(
         &self,
         session: &PubkySession,
-    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
+    ) -> Result<Vec<(String, String, i64)>, HomeserverError> {
         self.read_v1_bookmarks_except(session, &Default::default()).await
     }
 
     /// The same, without downloading the bookmarks the caller already knows: `known` maps a
-    /// bookmark's file name to its music URL and time, and a listed file of that name is taken
+    /// bookmark's file name to its URI and time, and a listed file of that name is taken
     /// from it. A sync then costs a listing, not one request per bookmark.
     pub async fn read_v1_bookmarks_except(
         &self,
         session: &PubkySession,
-        known: &std::collections::HashMap<String, (pm_model::MusicUri, i64)>,
-    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
+        known: &std::collections::HashMap<String, (String, i64)>,
+    ) -> Result<Vec<(String, String, i64)>, HomeserverError> {
         let user = session.public_key();
         let mut out = Vec::new();
         let mut unknown = Vec::new();
@@ -555,7 +555,6 @@ impl NodeHomeserver {
     ) -> Result<(), HomeserverError> {
         self.write_object(session, &meta.path, &post.post).await
     }
-
 
     /// Delete an object the user wrote (remove a playlist, retract a review).
     pub async fn delete(&self, session: &PubkySession, path: &str) -> Result<(), HomeserverError> {

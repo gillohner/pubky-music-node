@@ -314,6 +314,9 @@ pub struct Bookmarks {
     pub artists: Vec<ArtistSummary>,
     #[serde(default)]
     pub other: Vec<String>,
+    /// Bookmarked public Pubky posts (`pubky://…/posts/<id>`): other people's collections, say.
+    #[serde(default)]
+    pub posts: Vec<String>,
     /// Every bookmarked canonical URL, for quick "is this bookmarked" checks.
     #[serde(default)]
     pub uris: Vec<String>,
@@ -778,6 +781,10 @@ pub struct CreatePlaylist {
     /// Public from the start (default private).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
+    /// For a duplicate: the public collection it copies (`pubky://…/posts/<id>`), kept in
+    /// `ext.music.original`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 /// `?keep_source=true` on a provider playlist import pins every song to its track on that
@@ -1930,6 +1937,14 @@ pub struct ListenImport {
     pub imported: usize,
     /// Listens ListenBrainz could not name by a MusicBrainz recording.
     pub skipped: usize,
+}
+
+/// `POST /v1/listenbrainz/import?public=` : `public=true` confirms that the listens become public
+/// (asked when the listen history setting is public).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenImportQuery {
+    #[serde(default)]
+    pub public: Option<bool>,
 }
 
 fn is_zero(n: &u32) -> bool {

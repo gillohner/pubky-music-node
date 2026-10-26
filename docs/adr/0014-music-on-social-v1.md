@@ -17,12 +17,13 @@ Music uses the shared social objects and only adds what is musical.
 
 | Music thing | v1 object | Path |
 | :-- | :-- | :-- |
-| Tags on a song, album or artist | social `tag` on the canonical music URL | `/pub/pubky.music/tags/` for now, see below |
-| Favourites | social `bookmark` (private) | `/priv/social/v1/bookmarks/` |
-| Comments, threads | social `post`, `embed` or `parent` = the music URL | `/{pub,priv}/social/v1/posts/` |
-| Playlists | social `collection` post, `layout: list`; items `{uri, note?, ext.music.source?}`; the collection's `ext.music.source_order` | `/{pub,priv}/social/v1/posts/` |
+| Tags on a song, album or artist | social `tag` on the canonical music URL | `/pub/social/v1/tags/` (amended 2026-10-26) |
+| Bookmarks (once "favourites") | social `bookmark` (private) of a music URL or a public post | `/priv/social/v1/bookmarks/` |
+| Comments, threads | social `post`, `parent` = the music URL | `/{pub,priv}/social/v1/posts/` |
+| Collections (a playlist is one of songs) | social `collection` post with its `layout`; items `{uri, note?, ext.music.source?, ext.music.added_at}` (songs, albums, artists, public posts); the collection's `ext.music.source_order` and, on a duplicate, `ext.music.original` | `/priv/social/v1/posts/`, also `/pub/` while public |
 | Ratings and reviews | music kind `review`: `{rating: 1–10, text?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` |
 | Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` (amended 2026-10-26, below) |
+| Now playing, sessions | music kinds `listening` (feed only) and `session`, `embed` = the music playing now | `/{pub,priv}/music/v1/posts/` |
 
 - **`crates/pubky-music-specs`** owns the two music kinds (`MusicPostKind { Review, Listen }` on
   `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
@@ -39,8 +40,9 @@ Music uses the shared social objects and only adds what is musical.
 - ~~**A listen is private only**; validation refuses it under `/pub/`.~~ A listen validates under
   either root since 2026-10-26 (amendment below).
 - **Canonical music URLs** stay ADR 0001: MusicBrainz first, then the ISRC URL, then the service URL.
-- **Tags stay at `/pub/pubky.music/tags/`** until the Nexus behind Pinakes indexes `social/v1/tags`
-  (question to the steward, 2026-10-21). They then move with the same one-time migration.
+- ~~**Tags stay at `/pub/pubky.music/tags/`** until the Nexus behind Pinakes indexes `social/v1/tags`
+  (question to the steward, 2026-10-21). They then move with the same one-time migration.~~ They
+  moved on 2026-10-26 (below).
 - **Migration** reads the node's existing `/priv/pubky.app/posts/` envelopes and `/priv/pubky.app/bookmarks/`
   once and writes the v1 objects. The old files are kept (RFC Part C: a migration never deletes).
 - If a shared rating kind lands in `social/v1` later, `review` switches to it.
@@ -84,3 +86,44 @@ reference gate under the public root, so it cannot point at a private object.
   no play time, no repeat plays, and public only. A history needs one listen post per play.
 - Other people's public listens are read through Pinakes (not built yet). In our Nexus fork a
   `listen` gets a graph node; the live `listening` kind is feed-only and expires.
+
+## Amendment (2026-10-26): collections, tags, times, new kinds (STEWARD-SOCIAL-V1-MUSIC.md Part A)
+
+**Collections.** A playlist is a collection of songs; a collection may also hold albums, artists and
+public Pubky posts (`pubky://<key>/pub/…/posts/<id>`, versionless).
+- It has a `layout`: `list` (the default), `grid` or `visual`.
+- **The public switch keeps the draft model.** Every version is written under `/priv/`. While the
+  collection is public, the same version is also published under `/pub/` (`plan_publish`). Making it
+  private deletes every public version; the private versions stay.
+- **Reading others' collections.** The node reads someone's public collections straight from their
+  homeserver, newest first. Posts are filtered by kind before the cap (50 collections, at most 1000 posts
+  read), so someone with many notes still shows theirs. Our Nexus fork indexes them later.
+- **Saving someone's collection:**
+  - *bookmark* it: a social bookmark of its link, which follows the original;
+  - *duplicate* it: a collection of your own, which names the original in `ext.music.original`.
+- `/v1/collections` and `/v1/playlists` are one resource (docs/api.md).
+
+**Tags** are social v1 tags at `/pub/social/v1/tags/<id>.json`, with the same id as before (the hash of
+`uri:label`). Upstream Nexus #1165 indexes a tag there on an external URL as a resource tag, and stops
+indexing `/pub/<app>/tags/`. The sync moves the node's older tags once and reads the old folders until
+then. ADR 0011 is amended.
+
+**Times are microseconds** (`*_at`), like social v1's `created_at`: `listen.played_at` and
+`ext.music.added_at` included.
+- Durations keep the `_ms` suffix and milliseconds.
+- Readers take an older millisecond time (anything below 3000-01-01 in milliseconds) as one.
+- The node writes its public collections again once, with microseconds.
+
+**New kinds:**
+- `listening` (now playing): `{started_at, expires_at, duration_ms?, source?}`. It is feed only:
+  `FEED_ONLY_KINDS`, which the Nexus fork mirrors, so it is shown and lets expire, with no graph node.
+- `session`: `{started_at, expires_at?, host: pubky://<key>, source?}`.
+- Both `embed` the music playing now, never a content `uri`.
+
+**Service names** are hyphenated (`apple-music`, `youtube-music`; `SERVICE_NAMES` lists the shared
+spellings). A listen's `source` is where it played: an imported listen (ListenBrainz) has none.
+
+**Follows and profiles.**
+- The node reads `/pub/social/v1/profile.json` first, then `/pub/pubky.app/profile.json`.
+- It writes the social v1 follow (`/pub/social/v1/follows/<key>.json`), and the older pubky.app follow
+  until Nexus indexes v1 follows.

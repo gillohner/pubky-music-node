@@ -1,13 +1,16 @@
-//! The music node's social objects (handoff §8.3), written as **v1
-//! `PubkyAppPost`s** whose `content` is a JSON envelope (see [`post`]):
+//! The node's working copy of its music objects, and the **legacy** pubky.app form they had
+//! before ADR 0014. What the homeserver gets is pubky-social-specs v1 ([`crate::v1`] converts at
+//! the boundary). The library keeps each object as a pubky.app `PubkyAppPost` whose `content` is a
+//! JSON envelope (see [`post`]); the paths below are only **read**, once per node, for the move to
+//! v1 (and deleted with an object):
 //!
-//! | Object | Envelope `type` | Post path (private by default) |
-//! | :-- | :-- | :-- |
-//! | [`Playlist`] | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` |
-//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` |
-//! | [`Activity`] | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` |
-//! | music tag | social v1 tag ([`crate::v1::music_tag`]) | `/pub/social/v1/tags/<id>.json` (before 2026-10-26 a `PubkyAppTag` in [`TAG_DIR`]) |
-//! | bookmark | `PubkyAppBookmark` (reused as-is) | `/priv/pubky.app/bookmarks/<hash id>` |
+//! | Object | Envelope `type` | Legacy path (read for the move) | Written today |
+//! | :-- | :-- | :-- | :-- |
+//! | [`Playlist`] (a collection) | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` | social `collection` |
+//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` | music `review` or social note |
+//! | [`Activity`] (a play) | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` | music `listen` |
+//! | music tag | — | `/pub/pubky.app/tags/<id>`, then [`TAG_DIR`] | social v1 tag ([`crate::v1::music_tag`]) |
+//! | [`Bookmark`] | `PubkyAppBookmark` | `/priv/pubky.app/bookmarks/<hash id>` | social v1 bookmark |
 //!
 //! Ids are Timestamp IDs like every post. Objects follow the pubky-app-specs
 //! conventions: sanitize, then validate; lengths count Unicode scalar

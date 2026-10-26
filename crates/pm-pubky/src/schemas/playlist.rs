@@ -132,6 +132,10 @@ pub struct Playlist {
     /// How to show it: `list`, `grid` or `visual` ([`LAYOUTS`]); `None` is a list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// For a duplicate: the public collection it was copied from (`pubky://…/posts/<id>`,
+    /// `ext.music.original`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 impl Playlist {
@@ -151,6 +155,7 @@ impl Playlist {
             updated_at: now,
             source_order: None,
             layout: None,
+            original: None,
         }
         .sanitize()
     }
@@ -219,6 +224,7 @@ impl Validatable for Playlist {
                 .layout
                 .map(|l| l.trim().to_ascii_lowercase())
                 .filter(|l| !l.is_empty()),
+            original: self.original.map(|o| post_uri(&o).unwrap_or(o)),
         }
     }
 
@@ -257,6 +263,13 @@ impl Validatable for Playlist {
                     "layout must be one of {}",
                     LAYOUTS.join(", ")
                 )));
+            }
+        }
+        if let Some(o) = &self.original {
+            if post_uri(o).as_deref() != Some(o.as_str()) {
+                return Err(SchemaError::validation(
+                    "original must be a public Pubky post, pubky://<key>/pub/…/posts/<id>",
+                ));
             }
         }
         for item in &self.items {

@@ -277,7 +277,10 @@ async fn playlist_lifecycle() {
     let (st, status) = call(&app, "GET", "/v1/pubky", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(status["user"].is_null());
-    assert_eq!(status["unsynced"], 1);
+    // The playlist, and the listen of the song that played (listen history is private by default)
+    assert_eq!(status["unsynced"], 2);
+    let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
+    assert_eq!(h["listens"][0]["visibility"], "private", "{h}");
     let (st, _) = call(&app, "POST", "/v1/pubky/sync", None).await;
     assert_eq!(st, StatusCode::PRECONDITION_FAILED);
     let (st, _) = call(&app, "DELETE", &format!("/v1/playlists/{id}"), None).await;

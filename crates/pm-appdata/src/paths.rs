@@ -22,8 +22,8 @@ pub const VAULT_INDEX_PATH: &str = crate::vault::INDEX_PATH;
 pub const FILES_LAYOUT_PROBE: &str = "/priv/pubky.music/files/.pubky-music-layout-check";
 /// What the desktop app asks Ring for: read the person's node record.
 pub const DESKTOP_RING_CAPS: &str = "/priv/pubky.music/:r";
-/// Music tags: social `PubkyAppTag`s kept in the app's public namespace until the Nexus behind
-/// Pinakes indexes `social/v1/tags` (ADR 0014).
+/// Where the node kept music tags (`PubkyAppTag`s) from 2026-10-21 to 2026-10-26. Tags are social v1
+/// tags in `/pub/social/v1/tags/` now; the node only reads this folder until it has moved them out.
 pub const TAG_DIR: &str = "/pub/pubky.music/tags/";
 
 /// Every path above, for the doc check.

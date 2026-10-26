@@ -31,8 +31,13 @@ impl Bookmark {
 
     /// The id the spec derives from a URI.
     pub fn id_for(uri: &MusicUri) -> String {
+        Self::id_of(&uri.to_url())
+    }
+
+    /// The same for any URI the node bookmarks (a public post, say).
+    pub fn id_of(uri: &str) -> String {
         PubkyAppBookmark {
-            uri: uri.to_url(),
+            uri: uri.to_string(),
             created_at: 0,
         }
         .create_id()

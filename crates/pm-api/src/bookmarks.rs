@@ -5,6 +5,9 @@
 //! becomes an ordinary bookmark once it is identified. Albums and artists without an id answer
 //! 422 with the reason.
 //!
+//! A public Pubky post can be bookmarked too, by its `pubky://…/posts/<id>` link: someone's
+//! collection, say (answers list those in `posts`).
+//!
 //! `/v1/bookmarks` is the API; `/v1/favourites` answers the same for one release (deprecated).
 
 use crate::state::NodeState;
@@ -131,6 +134,15 @@ fn unidentified(lib: &Library, r: &ItemRef) -> Result<Option<(&'static str, &'st
 /// one kept on this node. Returns the key the page checks (`uri`, or `track:<id>`, `album:<id>`,
 /// `artist:<id>` for a node-only one).
 pub(crate) fn set(lib: &Library, r: &ItemRef, on: bool) -> Result<String, ApiError> {
+    // A public Pubky post (someone's collection): bookmarked by its link
+    if let Some(post) = r.uri.as_deref().and_then(pm_pubky::schemas::post_uri) {
+        if on {
+            add_uri(lib, &post)?;
+        } else {
+            lib.remove_bookmark(&post)?;
+        }
+        return Ok(post);
+    }
     if let Some((key, kind, id)) = unidentified(lib, r)? {
         let mut ids = local_of(lib, key);
         ids.retain(|x| *x != id);
@@ -166,15 +178,16 @@ pub(crate) fn set(lib: &Library, r: &ItemRef, on: bool) -> Result<String, ApiErr
 /// [`set`] for a change a device made at `at` (Unix seconds) and sends later (an offline
 /// bookmark). For a published bookmark, a clear older than the bookmark the node has is skipped
 /// (the song was bookmarked again since), and a new bookmark keeps the time it was made.
-/// Node-only bookmarks have no time: the last change to arrive wins. Returns the key and
-/// whether it is bookmarked now.
+/// Node-only bookmarks and bookmarks of posts have no time: the last change to arrive wins.
+/// Returns the key and whether it is bookmarked now.
 pub(crate) fn set_at(
     lib: &Library,
     r: &ItemRef,
     on: bool,
     at: Option<i64>,
 ) -> Result<(String, bool), ApiError> {
-    if let Some(at) = at {
+    let is_post = r.uri.as_deref().and_then(pm_pubky::schemas::post_uri).is_some();
+    if let Some(at) = at.filter(|_| !is_post) {
         if unidentified(lib, r)?.is_none() {
             let uri = canonical_for(lib, r)?;
             let url = uri.to_url();
@@ -260,6 +273,11 @@ pub(crate) fn add(lib: &Library, uri: MusicUri) -> Result<BookmarkRow, pm_librar
     lib.add_bookmark(&f.id, &f.uri.to_url(), f.created_at)
 }
 
+/// Bookmark a public post by its stored link ([`pm_pubky::schemas::post_uri`]).
+fn add_uri(lib: &Library, uri: &str) -> Result<BookmarkRow, pm_library::LibraryError> {
+    lib.add_bookmark(&Bookmark::id_of(uri), uri, pm_pubky::ids::now_micros())
+}
+
 /// Every bookmark, joined to the library where it is present.
 pub(crate) fn collect(lib: &Library) -> Result<Bookmarks, ApiError> {
     promote_local(lib)?;
@@ -285,7 +303,11 @@ pub(crate) fn collect(lib: &Library) -> Result<Bookmarks, ApiError> {
     for row in lib.list_bookmarks()? {
         out.uris.push(row.uri.clone());
         let Ok(uri) = MusicUri::parse(&row.uri) else {
-            out.other.push(row.uri);
+            if pm_pubky::schemas::post_uri(&row.uri).is_some() {
+                out.posts.push(row.uri);
+            } else {
+                out.other.push(row.uri);
+            }
             continue;
         };
         match &uri {

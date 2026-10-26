@@ -2,13 +2,15 @@
 //!
 //! Push: every row the library marks unsynced is written as its v1 object
 //! (`/{root}/social/v1/posts/`, `/{root}/music/v1/posts/`, `/priv/social/v1/bookmarks/`), an edit
-//! as a new version; tombstones delete every copy and are purged. Collections and listens live
-//! under one root, the one their switch picks: a move to the other root writes the newest version
-//! there (its edit id above every version in either root) and deletes every version under the old
-//! root. Reviews are written privately and a public one is also published. Pull: v1 objects under
-//! either root that the node does not have, or has older, are imported, so a fresh node recovers
-//! its collections, reviews and listen history. The first sync on a node also reads the old
-//! `/priv/pubky.app/` folders and moves what only they hold to v1, without deleting them.
+//! as a new version; tombstones delete every copy and are purged. Collections and reviews keep
+//! a private draft: every version is written under `/priv/`, and a public one is also published
+//! (the same version copied under `/pub/`, pubky-social-specs `plan_publish`); making it private
+//! removes the public copies. A listen lives under one root, the one the history setting picked:
+//! a move writes it under the other root (its edit id above every version in either root) and
+//! deletes the old copy. Pull: v1 objects under either root that the node does not have, or has
+//! older, are imported, so a fresh node recovers its collections, reviews and listen history. The
+//! first sync on a node also reads the old `/priv/pubky.app/` folders and moves what only they hold
+//! to v1, without deleting them.
 
 use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
@@ -123,6 +125,9 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
 
 /// Set once the node has moved its tags out of the old `pubky.app/tags/` folder.
 const TAGS_MOVED: &str = "pubky.tags_moved";
+/// Set once the node has queued its public collections to be written again with microsecond
+/// times (pubky-music-specs, 2026-10-26).
+const TIMES_IN_MICROS: &str = "pubky.times_in_micros";
 /// Set once the node has moved its tags out of `/pub/pubky.music/tags/` to social v1 tags.
 const TAGS_ON_V1: &str = "pubky.tags_social_v1";
 /// Ids of the person's social v1 tags that are not on music (other apps' tags): listed, never
@@ -366,7 +371,11 @@ impl PubkySync {
         .into_iter()
         .enumerate()
         {
-            moved_out[k] = library.lock().expect("library poisoned").get_setting(key)?.is_some();
+            moved_out[k] = library
+                .lock()
+                .expect("library poisoned")
+                .get_setting(key)?
+                .is_some();
             if moved_out[k] {
                 continue;
             }
@@ -414,14 +423,17 @@ impl PubkySync {
                 let (tag, id, path) = match v1::music_tag(&row.uri, &row.label, row.created_at) {
                     Ok(t) => t,
                     Err(e) => {
-                        report.errors.push(format!("tag {} on {}: {e}", row.label, row.uri));
+                        report
+                            .errors
+                            .push(format!("tag {} on {}: {e}", row.label, row.uri));
                         continue;
                     }
                 };
                 if id != row.id {
-                    report
-                        .errors
-                        .push(format!("tag {} on {}: id {} is not {id}", row.label, row.uri, row.id));
+                    report.errors.push(format!(
+                        "tag {} on {}: id {} is not {id}",
+                        row.label, row.uri, row.id
+                    ));
                     continue;
                 }
                 if let Err(e) = self.homeserver.write_object(&self.session, &path, &tag).await {
@@ -463,7 +475,10 @@ impl PubkySync {
                     let mut all: Vec<String> = not_music.into_iter().chain(remote.not_music).collect();
                     all.sort();
                     all.dedup();
-                    lib.set_setting(TAGS_NOT_MUSIC, &serde_json::to_string(&all).expect("ids serialize"))?;
+                    lib.set_setting(
+                        TAGS_NOT_MUSIC,
+                        &serde_json::to_string(&all).expect("ids serialize"),
+                    )?;
                 }
             }
             Err(e) => report.errors.push(format!("reading tags: {e}")),
@@ -490,15 +505,14 @@ impl PubkySync {
             }
         }
         // Bookmarks the node has are listed, not downloaded again
-        let known_favs: std::collections::HashMap<String, (pm_model::MusicUri, i64)> = library
+        let known_favs: std::collections::HashMap<String, (String, i64)> = library
             .lock()
             .expect("library poisoned")
             .list_bookmarks()?
             .into_iter()
             .filter_map(|f| {
-                let uri = pm_model::MusicUri::parse(&f.uri).ok()?;
-                let path = v1::bookmark_path(&uri).ok()?;
-                Some((path.rsplit('/').next()?.to_string(), (uri, f.created_at)))
+                let path = v1::bookmark_path(&f.uri).ok()?;
+                Some((path.rsplit('/').next()?.to_string(), (f.uri, f.created_at)))
             })
             .collect();
         let remote_favs = self
@@ -516,7 +530,7 @@ impl PubkySync {
                     queued += 1;
                 }
             }
-            let on_v1: HashSet<String> = remote_favs.iter().map(|(_, u, _)| u.to_url()).collect();
+            let on_v1: HashSet<String> = remote_favs.iter().map(|(_, u, _)| u.clone()).collect();
             for f in lib.list_bookmarks()? {
                 if !on_v1.contains(&f.uri) {
                     lib.mark_bookmark_unsynced(&f.id)?;
@@ -525,6 +539,22 @@ impl PubkySync {
             }
             if queued > 0 {
                 tracing::info!(queued, "moving music data to social/v1 and music/v1");
+            }
+        }
+
+        // Once per node: public collections written before music times were microseconds
+        // (`ext.music.added_at` in milliseconds) are written again, so what others read is in
+        // the spec's unit. Readers take the older values too; private ones follow on their next
+        // edit.
+        {
+            let lib = library.lock().expect("library poisoned");
+            if lib.get_setting(TIMES_IN_MICROS)?.is_none() {
+                for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
+                    if row.visibility == "public" && row.synced_at.is_some() {
+                        lib.mark_music_post_unsynced(&row.id)?;
+                    }
+                }
+                lib.set_setting(TIMES_IN_MICROS, &now_micros().to_string())?;
             }
         }
 
@@ -545,12 +575,11 @@ impl PubkySync {
         // Bookmarks the homeserver has and this node does not.
         {
             let lib = library.lock().expect("library poisoned");
-            for (_, uri, created_at) in remote_favs {
-                let url = uri.to_url();
+            for (_, url, created_at) in remote_favs {
                 if removed_favs.contains(&url) || lib.bookmark_by_uri(&url)?.is_some() {
                     continue;
                 }
-                let id = Bookmark::id_for(&uri);
+                let id = Bookmark::id_of(&url);
                 lib.add_bookmark(&id, &url, created_at)?;
                 lib.mark_bookmark_synced(&id, now_micros())?;
                 report.pulled += 1;
@@ -625,10 +654,10 @@ impl PubkySync {
                 break;
             }
             let public = row.visibility == "public";
-            // Collections and listens live under the root their switch picks, and nowhere else.
-            // A review is written privately (the draft); a public text review is also published:
-            // the same version copied under /pub/ (pubky-social-specs plan_publish)
-            let moves = row.kind == TYPE_PLAYLIST || row.kind == TYPE_ACTIVITY;
+            // A listen lives under the root the history setting picked, and nowhere else. A
+            // collection or a review is written privately (the draft); a public one is also
+            // published: the same version copied under /pub/ (pubky-social-specs plan_publish)
+            let moves = row.kind == TYPE_ACTIVITY;
             let root = if moves && public {
                 v1::Root::Pub
             } else {
@@ -746,10 +775,10 @@ impl PubkySync {
                 report.pending += total - done;
                 break;
             }
-            let Ok(uri) = pm_model::MusicUri::parse(&row.uri) else {
+            let Ok(uri) = pm_pubky::schemas::item_uri(&row.uri) else {
                 report
                     .errors
-                    .push(format!("{}: not a canonical music URL", row.uri));
+                    .push(format!("{}: not a music URL or a public post", row.uri));
                 continue;
             };
             if row.deleted {
@@ -803,10 +832,10 @@ impl PubkySync {
     }
 
     /// Bring in v1 collections, reviews and listens, under either root, that are new or newer
-    /// than the node's copy. A post under both roots (a public playlist from before collections
-    /// moved between roots kept its private draft) is read from its newest version, public when
-    /// that one is. At most [`READS_PER_PASS`] posts are fetched per pass; the rest count as
-    /// pending. Listens from before the history was deleted are deleted, not imported.
+    /// than the node's copy. A post under both roots (a public collection: its private draft and
+    /// the published copy) is read from its newest version, public when that one is. At most
+    /// [`READS_PER_PASS`] posts are fetched per pass; the rest count as pending. Listens from
+    /// before the history was deleted are deleted, not imported.
     async fn pull_v1(
         &self,
         library: &Arc<Mutex<Library>>,
@@ -840,23 +869,22 @@ impl PubkySync {
             reads += wanted.len();
             use futures_util::StreamExt;
             let this = self;
-            let fetched: Vec<Fetched> =
-                futures_util::stream::iter(wanted)
-                    .map(move |(id, head, public)| async move {
-                        let r = if public {
-                            this.homeserver
-                                .get_bytes(&this.z32, &head.path, Visibility::Public, None)
-                                .await
-                        } else {
-                            this.homeserver
-                                .get_bytes(&this.z32, &head.path, Visibility::Private, Some(&this.session))
-                                .await
-                        };
-                        (id, head, public, r)
-                    })
-                    .buffered(pm_pubky::homeserver::FETCH_AT_ONCE)
-                    .collect()
-                    .await;
+            let fetched: Vec<Fetched> = futures_util::stream::iter(wanted)
+                .map(move |(id, head, public)| async move {
+                    let r = if public {
+                        this.homeserver
+                            .get_bytes(&this.z32, &head.path, Visibility::Public, None)
+                            .await
+                    } else {
+                        this.homeserver
+                            .get_bytes(&this.z32, &head.path, Visibility::Private, Some(&this.session))
+                            .await
+                    };
+                    (id, head, public, r)
+                })
+                .buffered(pm_pubky::homeserver::FETCH_AT_ONCE)
+                .collect()
+                .await;
             for (id, head, public, bytes) in fetched {
                 let bytes = match bytes {
                     Ok(b) => b,
@@ -935,8 +963,8 @@ fn is_pub(root: v1::Root) -> bool {
 }
 
 impl PubkySync {
-    /// After a collection or a listen was written under `root`: delete every version of it under
-    /// the other root (it moved, or an older copy was left there).
+    /// After a listen was written under `root`: delete every version of it under the other root
+    /// (it moved).
     async fn leave_other_root(
         &self,
         root: v1::Root,
@@ -958,8 +986,8 @@ impl PubkySync {
     }
 
     /// Publish (`public`): copy the version just written privately to its public path.
-    /// Unpublish (not `public`): remove every public version. Only social posts (playlists)
-    /// are published; the others stay private.
+    /// Unpublish (not `public`): remove every public version. Only social posts (collections and
+    /// text reviews) are published; rated reviews stay private.
     #[allow(clippy::too_many_arguments)]
     async fn publish_or_unpublish(
         &self,

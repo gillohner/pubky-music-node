@@ -17,8 +17,11 @@ use pm_pubky::homeserver::NodeHomeserver;
 use pm_pubky::{v1, Playlist, Visibility};
 use std::sync::Arc;
 
-/// At most this many shared playlists are read per person.
+/// At most this many shared collections are listed per person.
 const LIST_MAX: usize = 50;
+/// At most this many of a person's public posts are read to find them: a person with many
+/// notes still shows their collections (the posts are filtered by kind before the cap).
+const READ_MAX: usize = 1000;
 
 /// A person (and maybe one post) from what someone pasted: `pubky://<key>/pub/social/v1/posts/<id>`,
 /// `pubky<key>` or the bare key.
@@ -61,7 +64,9 @@ fn user_of(raw: &str) -> Result<(String, v1::PubkyId), ApiError> {
     Ok((key, owner))
 }
 
-/// Someone's shared playlists, newest edit first.
+/// Someone's shared collections, newest edit first: their public posts are read newest first,
+/// [`pm_pubky::homeserver::FETCH_AT_ONCE`] at a time, until [`LIST_MAX`] collections are found
+/// or [`READ_MAX`] posts were read.
 async fn read_all(
     s: &NodeState,
     key: &str,
@@ -72,18 +77,37 @@ async fn read_all(
         .v1_heads(key, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("their homeserver: {e}")))?;
-    let mut newest: Vec<(&String, &v1::Head)> = heads.iter().collect();
+    let mut newest: Vec<(String, v1::Head)> = heads.into_iter().collect();
     newest.sort_by(|a, b| b.1.edit_id.cmp(&a.1.edit_id));
+    newest.truncate(READ_MAX);
     let mut out = Vec::new();
-    for (id, head) in newest.into_iter().take(LIST_MAX) {
-        let Ok(bytes) = hs.get_bytes(key, &head.path, Visibility::Public, None).await else {
-            continue;
-        };
-        if let Some(p) = v1::read_public_playlist(&bytes, id, &head.edit_id, owner) {
-            out.push((id.clone(), p));
+    for batch in newest.chunks(pm_pubky::homeserver::FETCH_AT_ONCE) {
+        let reads = batch
+            .iter()
+            .map(|(id, head)| read_post(&hs, key, owner, id, head));
+        let read = futures_util::future::join_all(reads).await;
+        out.extend(read.into_iter().flatten());
+        if out.len() >= LIST_MAX {
+            out.truncate(LIST_MAX);
+            break;
         }
     }
     Ok(out)
+}
+
+/// One public post, when it is a collection the node can read.
+async fn read_post(
+    hs: &NodeHomeserver,
+    key: &str,
+    owner: &v1::PubkyId,
+    id: &str,
+    head: &v1::Head,
+) -> Option<(String, Playlist)> {
+    let bytes = hs
+        .get_bytes(key, &head.path, Visibility::Public, None)
+        .await
+        .ok()?;
+    v1::read_public_playlist(&bytes, id, &head.edit_id, owner).map(|p| (id.to_string(), p))
 }
 
 async fn read_one(s: &NodeState, key: &str, owner: &v1::PubkyId, id: &str) -> Result<Playlist, ApiError> {
@@ -186,9 +210,11 @@ pub(crate) async fn get(
     }))
 }
 
-/// `POST /v1/shared/{user}/playlists/{id}/copy`: a private copy on this node (pins kept as the
-/// suggestions they are; the copy is yours to change).
-pub(crate) async fn copy(
+/// `POST /v1/shared/{user}/collections/{id}/duplicate` (and `/playlists/{id}/copy`, the older
+/// name): a private collection of your own with the same items, pins, order and layout, which
+/// records the original in `ext.music.original`. To keep the original itself (and its changes),
+/// bookmark its link instead: `PUT /v1/bookmarks {uri: "pubky://…/posts/<id>"}`.
+pub(crate) async fn duplicate(
     State(s): State<Arc<NodeState>>,
     Path((user, id)): Path<(String, String)>,
 ) -> ApiResult<PlaylistDetail> {
@@ -205,6 +231,7 @@ pub(crate) async fn copy(
             sources: p.items.iter().map(|i| i.source.clone()).collect(),
             layout: p.layout.clone(),
             public: None,
+            original: Some(format!("pubky://{key}/pub/social/v1/posts/{id}")),
         }),
     )
     .await?;

@@ -279,12 +279,12 @@ async fn playlists_round_trip_through_the_private_folder() {
         .unwrap_or(true));
 }
 
-/// Tags on external links move from `/pub/pubky.app/tags/` (Nexus never
-/// indexes those) to `/pub/pubky.music/tags/` with the same id and body;
-/// tags on `pubky://` objects stay; new tags go straight to the new path;
-/// the move is idempotent (steward fix, 2026-10-21).
+/// Tags move to social v1 (`/pub/social/v1/tags/<id>.json`, STEWARD-SOCIAL-V1-MUSIC.md A.4):
+/// a node's older tags, in `/pub/pubky.app/tags/` (before 2026-10-21) and `/pub/pubky.music/tags/`
+/// (until 2026-10-26), move there once with the same id; tags on `pubky://` objects stay; new tags
+/// go straight to v1; another app's v1 tag is read once and never again; the move is idempotent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tags_move_to_the_node_namespace() {
+async fn tags_move_to_social_v1() {
     if !enabled() {
         eprintln!("PM_TESTNET not set; skipping");
         return;
@@ -301,20 +301,34 @@ async fn tags_move_to_the_node_namespace() {
         .unwrap();
     let z32 = session.public_key().to_string();
     let homeserver = NodeHomeserver::from_pubky(pubky.clone());
-    // What an older node wrote: a tag on a TIDAL link and one on a pubky:// post.
-    let external =
-        pubky_app_specs::PubkyAppTag::new("https://tidal.com/album/199574241".into(), "lol".into());
+    // What older nodes wrote: a tag on a TIDAL link in each old folder, one on a pubky:// post
+    let oldest = pubky_app_specs::PubkyAppTag::new("https://tidal.com/album/199574241".into(), "lol".into());
+    let older = pubky_app_specs::PubkyAppTag::new(
+        "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862".into(),
+        "calm".into(),
+    );
     let internal = pubky_app_specs::PubkyAppTag::new(
         format!("pubky://{z32}/pub/pubky.app/posts/0034A0X7NJ52G"),
         "nice".into(),
     );
-    let (ext_id, int_id) = (external.create_id(), internal.create_id());
+    let (oldest_id, older_id, int_id) = (oldest.create_id(), older.create_id(), internal.create_id());
+    for (path, tag) in [
+        (format!("/pub/pubky.app/tags/{oldest_id}"), &oldest),
+        (format!("/pub/pubky.music/tags/{older_id}"), &older),
+        (format!("/pub/pubky.app/tags/{int_id}"), &internal),
+    ] {
+        homeserver.write_object(&session, &path, tag).await.unwrap();
+    }
+    // Another app's v1 tag on a post: not music
+    let raw = z32.strip_prefix("pubky").unwrap_or(&z32);
+    let (other, _, other_path) = v1::music_tag(
+        &format!("pubky://{raw}/pub/social/v1/posts/0034A0X7NJ52G"),
+        "wow",
+        1_792_540_800_000_000,
+    )
+    .unwrap();
     homeserver
-        .write_object(&session, &format!("/pub/pubky.app/tags/{ext_id}"), &external)
-        .await
-        .unwrap();
-    homeserver
-        .write_object(&session, &format!("/pub/pubky.app/tags/{int_id}"), &internal)
+        .write_object(&session, &other_path, &other)
         .await
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -324,46 +338,75 @@ async fn tags_move_to_the_node_namespace() {
         &app,
         "PUT",
         "/v1/tags",
-        Some(serde_json::json!({"uri": "https://tidal.com/album/199574241", "label": "music"})),
+        Some(serde_json::json!({"uri": "https://tidal.com/album/199574241", "label": "Music"})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["label"], "music");
     let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
     n.set_sync(Some(sync.clone()));
     let r = sync.sync(&n.library).await.unwrap();
     assert!(r.errors.is_empty(), "{:?}", r.errors);
-    let new: Vec<String> = homeserver
+    let mut on_v1: Vec<String> = homeserver
+        .public_paths(&z32, "/pub/social/v1/tags/")
+        .await
+        .unwrap();
+    on_v1.sort();
+    for id in [&oldest_id, &older_id] {
+        assert!(
+            on_v1.contains(&format!("/pub/social/v1/tags/{id}.json")),
+            "moved with its id: {on_v1:?}"
+        );
+    }
+    assert_eq!(
+        on_v1.len(),
+        4,
+        "two moved, the new one, the other app's: {on_v1:?}"
+    );
+    assert!(homeserver
         .public_paths(&z32, "/pub/pubky.music/tags/")
         .await
-        .unwrap();
-    let old: Vec<String> = homeserver
-        .public_paths(&z32, "/pub/pubky.app/tags/")
-        .await
-        .unwrap();
-    assert!(
-        new.contains(&format!("/pub/pubky.music/tags/{ext_id}")),
-        "moved with its id: {new:?}"
-    );
-    assert_eq!(new.len(), 2, "the moved tag and the new one: {new:?}");
+        .unwrap()
+        .is_empty());
     assert_eq!(
-        old,
+        homeserver
+            .public_paths(&z32, "/pub/pubky.app/tags/")
+            .await
+            .unwrap(),
         vec![format!("/pub/pubky.app/tags/{int_id}")],
         "a tag on a pubky:// post stays"
     );
-    // Read back: both tags on the TIDAL link, from the new path.
+    // The node has all three music tags, and remembers the other app's tag is not music
+    let (_, mine) = call(&app, "GET", "/v1/tags", None).await;
+    assert_eq!(mine["tags"].as_array().unwrap().len(), 3, "{mine}");
     let tags = homeserver.read_music_tags(&z32).await.unwrap();
-    assert_eq!(tags.len(), 2, "{tags:?}");
-    assert!(tags.iter().all(|(p, _)| p.starts_with("/pub/pubky.music/tags/")));
-    // Idempotent.
+    assert_eq!(tags.tags.len(), 3, "{tags:?}");
+    assert!(tags
+        .tags
+        .iter()
+        .all(|t| t.path.starts_with("/pub/social/v1/tags/")));
+    assert_eq!(tags.not_music.len(), 1);
+    // Idempotent, and the other app's tag is not fetched again
     let r2 = sync.sync(&n.library).await.unwrap();
     assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+    assert_eq!((r2.pulled, r2.pushed), (0, 0), "{r2:?}");
+    // Untagging deletes the v1 file
+    let (st, _) = call(
+        &app,
+        "DELETE",
+        "/v1/tags?uri=https://tidal.com/album/199574241&label=music",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    sync.sync(&n.library).await.unwrap();
     assert_eq!(
         homeserver
-            .public_paths(&z32, "/pub/pubky.music/tags/")
+            .public_paths(&z32, "/pub/social/v1/tags/")
             .await
             .unwrap()
             .len(),
-        2
+        3
     );
 }
 
@@ -451,7 +494,7 @@ async fn old_private_objects_move_to_v1_once() {
     assert_eq!(body["embed"], song);
     let favs = homeserver.read_v1_bookmarks(sync.session()).await.unwrap();
     assert_eq!(favs.len(), 1);
-    assert_eq!(favs[0].1, mb);
+    assert_eq!(favs[0].1, mb.to_url());
     // The old files are still there
     assert_eq!(
         homeserver
@@ -1595,4 +1638,370 @@ async fn the_settings_copy_never_carries_a_sign_in() {
         "{text}"
     );
     assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{text}");
+}
+
+// ---- social specs v1 for music (STEWARD-SOCIAL-V1-MUSIC.md Part A) ----
+
+/// A new identity on the testnet: its session, its `pubky…` form and its bare key.
+async fn identity(pubky: &Pubky, client: &str) -> (pubky::PubkySession, String, String) {
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new(client).unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let raw = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
+    (session, z32, raw)
+}
+
+/// A collection with songs, an album, an artist and a post, in a grid, made public: the private
+/// draft stays and the public copy is added (then removed when private again). Another person's
+/// node finds it among many newer notes, opens it, duplicates it (the original recorded) and
+/// bookmarks it, and a fresh node of the owner recovers it public, with its layout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_collection_is_shared_found_duplicated_and_bookmarked() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, raw) = identity(&pubky, "pm-api-collections").await;
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a");
+    let app_a = router(a.clone());
+    let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+    let album = "https://musicbrainz.org/release/1b021cc5-ab1f-4a96-8a4b-a1a9a5e4bd0a";
+    let artist = "https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56";
+    let post = format!("pubky://{raw}/pub/social/v1/posts/0033SCZXVEPNG");
+    let (st, c) = call(
+        &app_a,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({
+            "name": "Shelf", "uris": [song, album, artist, post], "layout": "grid", "public": true
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let id = c["summary"]["id"].as_str().unwrap().to_string();
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync_a.clone()));
+    let r = sync_a.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let heads = |root| {
+        let hs = homeserver.clone();
+        let (z32, session) = (z32.clone(), sync_a.session().clone());
+        async move {
+            let session = (root == v1::Root::Priv).then_some(session);
+            hs.v1_heads(&z32, root, v1::SOCIAL_NAMESPACE, session.as_ref())
+                .await
+                .unwrap()
+        }
+    };
+    let (private, public) = (heads(v1::Root::Priv).await, heads(v1::Root::Pub).await);
+    assert!(private.contains_key(&id), "the private draft");
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(&z32, &public[&id].path, Visibility::Public, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let content: serde_json::Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["layout"], "grid");
+    assert_eq!(content["items"].as_array().unwrap().len(), 4);
+    assert!(
+        content["items"][0]["ext"]["music"]["added_at"].as_i64().unwrap() > 946_684_800_000_000,
+        "microseconds"
+    );
+
+    // Sixty newer notes: the collection is still found (filtered by kind before the cap)
+    for k in 0..60 {
+        let note = pubky_social_specs::PubkySocialPost::new(
+            format!("note {k}"),
+            pubky_social_specs::PubkySocialPostKind::Note,
+            None,
+            None,
+            Vec::new(),
+        );
+        let nid = v1::id_of(pm_pubky::ids::now_micros() + k);
+        homeserver
+            .write_object(
+                sync_a.session(),
+                &pubky_social_specs::PubkySocialPost::create_path_in(v1::Root::Pub, &nid, &nid, None),
+                &note,
+            )
+            .await
+            .unwrap();
+    }
+    let (session_b, _, _) = identity(&pubky, "pm-api-collections-b").await;
+    let b = node(dir.path(), "b");
+    let app_b = router(b.clone());
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), session_b));
+    b.set_sync(Some(sync_b.clone()));
+    let (st, list) = call(&app_b, "GET", &format!("/v1/shared/{raw}/collections"), None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list[0]["layout"], "grid");
+    assert_eq!(list[0]["tracks_only"], false);
+    let (_, one) = call(&app_b, "GET", &format!("/v1/shared/{raw}/collections/{id}"), None).await;
+    let kinds: Vec<&str> = one["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["track", "album", "artist", "post"]);
+    // Duplicate: a collection of B's own that names the original
+    let (st, d) = call(
+        &app_b,
+        "POST",
+        &format!("/v1/shared/{raw}/collections/{id}/duplicate"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let link = format!("pubky://{raw}/pub/social/v1/posts/{id}");
+    assert_eq!(d["playlist"]["original"], link);
+    assert_eq!(d["summary"]["layout"], "grid");
+    assert_eq!(d["summary"]["visibility"], "private");
+    // Bookmark: the original itself, by its link, as a social v1 bookmark
+    let (st, _) = call(
+        &app_b,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": link})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let r = sync_b.sync(&b.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let marks = homeserver.read_v1_bookmarks(sync_b.session()).await.unwrap();
+    assert_eq!(
+        marks.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(),
+        [link.as_str()]
+    );
+
+    // A fresh node of the owner recovers it: public, in a grid, all four items
+    let fresh = node(dir.path(), "fresh");
+    let sync_f = Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        sync_a.session().clone(),
+    ));
+    let r = sync_f.sync(&fresh.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let (_, got) = call(
+        &router(fresh.clone()),
+        "GET",
+        &format!("/v1/collections/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(got["summary"]["visibility"], "public", "{got}");
+    assert_eq!(got["summary"]["layout"], "grid");
+    assert_eq!(got["entries"].as_array().unwrap().len(), 4);
+
+    // Private again: the public copy goes, the draft stays
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/collections/{id}/visibility"),
+        Some(serde_json::json!({"public": false})),
+    )
+    .await;
+    let r = sync_a.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(!heads(v1::Root::Pub).await.contains_key(&id));
+    assert!(heads(v1::Root::Priv).await.contains_key(&id));
+}
+
+/// Listens land where the history setting says: `/priv/music/v1/posts/` (the default), then
+/// `/pub/` once public; moving the history moves them; a fresh node pulls them; deleting the
+/// history deletes them, and a listen another node wrote before that is deleted when found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_listen_history_lands_where_the_setting_says() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, _) = identity(&pubky, "pm-api-listens").await;
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a");
+    let app = router(a.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync.clone()));
+    let play = serde_json::json!({"track": {"title": "x", "uri": "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862"}, "source": "tidal"});
+    let listens = |root| {
+        let hs = homeserver.clone();
+        let (z32, session) = (z32.clone(), sync.session().clone());
+        async move {
+            let session = (root == v1::Root::Priv).then_some(session);
+            hs.v1_heads(&z32, root, "music", session.as_ref()).await.unwrap()
+        }
+    };
+    let (_, r) = call(&app, "POST", "/v1/activity", Some(play.clone())).await;
+    let first = r["id"].as_str().unwrap().to_string();
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(listens(v1::Root::Priv).await.contains_key(&first));
+    // The listen's own content: played_at in microseconds, the source's spec spelling
+    let path = listens(v1::Root::Priv).await[&first].path.clone();
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(&z32, &path, Visibility::Private, Some(sync.session()))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let content: serde_json::Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+    assert_eq!(body["kind"], "listen");
+    assert_eq!(content["played_at"], v1::micros_of(&first).unwrap());
+    assert_eq!(content["source"]["service"], "tidal");
+
+    call(
+        &app,
+        "PUT",
+        "/v1/me/listens/settings",
+        Some(serde_json::json!({"history": "public"})),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let (_, r) = call(&app, "POST", "/v1/activity", Some(play.clone())).await;
+    let second = r["id"].as_str().unwrap().to_string();
+    sync.sync(&a.library).await.unwrap();
+    assert!(listens(v1::Root::Pub).await.contains_key(&second));
+    assert!(!listens(v1::Root::Priv).await.contains_key(&second));
+
+    // Move the whole history public: the private copy goes
+    call(
+        &app,
+        "POST",
+        "/v1/me/listens/visibility",
+        Some(serde_json::json!({"public": true})),
+    )
+    .await;
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let (public, private) = (listens(v1::Root::Pub).await, listens(v1::Root::Priv).await);
+    assert!(public.contains_key(&first) && public.contains_key(&second));
+    assert!(!private.contains_key(&first));
+
+    // A fresh node pulls the history
+    let fresh = node(dir.path(), "fresh");
+    let sync_f = Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        sync.session().clone(),
+    ));
+    let r = sync_f.sync(&fresh.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let (_, h) = call(&router(fresh.clone()), "GET", "/v1/me/listens", None).await;
+    assert_eq!(h["listens"].as_array().unwrap().len(), 2, "{h}");
+    assert!(h["listens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|l| l["visibility"] == "public"));
+
+    // Delete the history; then a listen the fresh node wrote earlier turns up: it goes too
+    let older = pm_pubky::MusicPost::new(pm_pubky::MusicContent::Activity(pm_pubky::Activity::new(
+        &pm_model::MusicUri::parse("https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862")
+            .unwrap(),
+        pm_pubky::ActivitySource::Local,
+        None,
+    )));
+    let older_id = older.create_id();
+    let (_, del) = call(&app, "DELETE", "/v1/me/listens", None).await;
+    assert_eq!(del["deleted"], 2);
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(listens(v1::Root::Pub).await.is_empty());
+    let v1_post = v1::to_v1(&older.content).unwrap();
+    let path = v1_post
+        .version_path(
+            &older_id,
+            None,
+            v1::Root::Priv,
+            &v1::PubkyId::try_from(z32.strip_prefix("pubky").unwrap()).unwrap(),
+        )
+        .unwrap();
+    homeserver
+        .write_object(sync.session(), &path, &v1_post.to_json())
+        .await
+        .unwrap();
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(listens(v1::Root::Priv).await.is_empty(), "deleted, not imported");
+    let (_, h) = call(&app, "GET", "/v1/me/listens", None).await;
+    assert!(h["listens"].as_array().unwrap().is_empty(), "{h}");
+}
+
+/// Profiles read the social v1 profile first, then the older pubky.app one; following writes
+/// both follows (v1 and, until Nexus indexes v1, pubky.app), and unfollowing removes both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profiles_and_follows_are_social_v1() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (me, my_z32, _) = identity(&pubky, "pm-api-follows").await;
+    let (them, _, their_key) = identity(&pubky, "pm-api-follows-them").await;
+    // Both profiles; v1 wins
+    homeserver
+        .write_object(
+            &them,
+            "/pub/social/v1/profile.json",
+            &serde_json::json!({"name": "Vee One", "bio": "v1"}),
+        )
+        .await
+        .unwrap();
+    homeserver
+        .write_object(
+            &them,
+            "/pub/pubky.app/profile.json",
+            &serde_json::json!({"name": "Old Name"}),
+        )
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "n");
+    let app = router(n.clone());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(homeserver.clone(), me))));
+    let (st, pg) = call(&app, "GET", &format!("/v1/profiles/{their_key}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{pg}");
+    assert_eq!(
+        (pg["name"].as_str(), pg["bio"].as_str()),
+        (Some("Vee One"), Some("v1"))
+    );
+
+    let (st, f) = call(&app, "PUT", &format!("/v1/profiles/{their_key}/follow"), None).await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    let v1_follows = homeserver
+        .public_paths(&my_z32, "/pub/social/v1/follows/")
+        .await
+        .unwrap();
+    assert_eq!(v1_follows, [format!("/pub/social/v1/follows/{their_key}.json")]);
+    let old_follows = homeserver
+        .public_paths(&my_z32, "/pub/pubky.app/follows/")
+        .await
+        .unwrap();
+    assert_eq!(old_follows, [format!("/pub/pubky.app/follows/{their_key}")]);
+    let (st, _) = call(&app, "DELETE", &format!("/v1/profiles/{their_key}/follow"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(homeserver
+        .public_paths(&my_z32, "/pub/social/v1/follows/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(homeserver
+        .public_paths(&my_z32, "/pub/pubky.app/follows/")
+        .await
+        .unwrap()
+        .is_empty());
 }

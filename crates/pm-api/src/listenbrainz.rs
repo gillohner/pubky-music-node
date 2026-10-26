@@ -360,14 +360,27 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Lis
 
 /// `POST /v1/listenbrainz/import`: the user's listens since the last import (at most 1000 per
 /// run) into the node's history, by MusicBrainz recording, private or public as the history
-/// setting says; 409 while it is off.
-pub(crate) async fn import_listens(State(s): State<Arc<NodeState>>) -> ApiResult<ListenImport> {
+/// setting says; 409 while it is off, and while it is public until `public=true` confirms.
+pub(crate) async fn import_listens(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Query(q): axum::extract::Query<ListenImportQuery>,
+) -> ApiResult<ListenImport> {
     let acct = need_account(&s)?;
-    if crate::listens::history(&s.library.lock().expect("library poisoned")) == ListenHistory::Off {
-        return Err(ApiError::new(
-            axum::http::StatusCode::CONFLICT,
-            "Your listen history is off (Settings › You), so there is nowhere to bring listens",
-        ));
+    match crate::listens::history(&s.library.lock().expect("library poisoned")) {
+        ListenHistory::Off => {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "Your listen history is off (Settings › You), so there is nowhere to bring listens",
+            ))
+        }
+        // A whole history going public is asked first
+        ListenHistory::Public if q.public != Some(true) => {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "Your listen history is public (Settings › You): the imported listens will be public too. Confirm to go on (public=true)",
+            ))
+        }
+        _ => {}
     }
     let since: i64 = s
         .library
@@ -420,13 +433,12 @@ pub(crate) async fn import_listens(State(s): State<Arc<NodeState>>) -> ApiResult
             if lib.get_music_post(&id)?.is_some() {
                 continue;
             }
-            // A listen where the history setting says (checked above: not off)
+            // A listen where the history setting says (checked above: not off). No source:
+            // a source is where it played, which ListenBrainz does not say
             match crate::listens::record(
                 &lib,
                 &uri,
-                pm_pubky::ActivitySource::Service {
-                    name: "ListenBrainz".into(),
-                },
+                pm_pubky::ActivitySource::Unknown,
                 meta["additional_info"]["duration_ms"].as_u64(),
                 Some(at * 1_000_000),
             ) {

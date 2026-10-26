@@ -1,5 +1,6 @@
 //! Collections (social v1 `collection` posts, ADR 0014): kept locally in the library and pushed to
-//! the homeserver by [`crate::sync`], under `/priv/` or `/pub/` as the collection's switch says.
+//! the homeserver by [`crate::sync`]: always under `/priv/` (the draft), and also published under
+//! `/pub/` while the collection's switch says public.
 //! Items are music URLs (songs, albums, artists) or public Pubky posts; each collection has a
 //! `layout` (`list`, `grid`, `visual`). A playlist is a collection of songs.
 //!
@@ -369,6 +370,13 @@ pub(crate) async fn create(
         Some(l) => checked_layout(l)?,
         None => None,
     };
+    playlist.original = match &body.original {
+        Some(o) => Some(
+            pm_pubky::schemas::post_uri(o)
+                .ok_or_else(|| ApiError::bad_request(format!("{o}: not a public Pubky post")))?,
+        ),
+        None => None,
+    };
     let post = MusicPost::new(MusicContent::Playlist(playlist));
     let id = post.create_id();
     post.validate(Some(&id))
@@ -620,10 +628,10 @@ pub(crate) async fn pin_source(
     Ok(Json(d))
 }
 
-/// `PUT /v1/collections/{id}/visibility {public}`: move the collection to `/pub/` (shared on
-/// Pubky) or back to `/priv/`. The next sync writes its newest version under the new root, with
-/// an edit id above every version in either root, then deletes every version under the old one:
-/// the post keeps its id, and the older versions go with the old root.
+/// `PUT /v1/collections/{id}/visibility {public}`: share the collection on Pubky (the next sync
+/// publishes its newest version under `/pub/social/v1/posts/`, pubky-social-specs
+/// `plan_publish`) or make it private again (the next sync removes every public version). The
+/// private draft and its versions always stay.
 pub(crate) async fn set_visibility(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,

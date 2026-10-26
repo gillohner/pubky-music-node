@@ -135,6 +135,10 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
     for owners in [
         "/v1/favourites",
         "/v1/bookmarks",
+        "/v1/collections",
+        "/v1/me/listens",
+        "/v1/me/listens/stats",
+        "/v1/me/listens/settings",
         "/v1/activity",
         "/v1/playlists",
         "/v1/tags",

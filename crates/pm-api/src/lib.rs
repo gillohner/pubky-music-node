@@ -355,10 +355,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/shared/resolve", get(shared::resolve))
         .route("/shared/{user}/playlists", get(shared::list))
         .route("/shared/{user}/playlists/{id}", get(shared::get))
-        .route("/shared/{user}/playlists/{id}/copy", post(shared::copy))
+        .route("/shared/{user}/playlists/{id}/copy", post(shared::duplicate))
         .route("/shared/{user}/collections", get(shared::list_collections))
         .route("/shared/{user}/collections/{id}", get(shared::get_collection))
-        .route("/shared/{user}/collections/{id}/copy", post(shared::copy))
+        .route(
+            "/shared/{user}/collections/{id}/duplicate",
+            post(shared::duplicate),
+        )
         .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))
         .route("/discover/charts", get(discover::charts))
