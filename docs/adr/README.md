@@ -19,7 +19,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0013](0013-remote-access-over-iroh.md) | Remote access over iroh: the node dialed by its own key (found through the private node record), a tunnel to its HTTP API, relay fallback |
 | [0014](0014-music-on-social-v1.md) | Music data on pubky-social-specs v1: social tags, bookmarks and collections, plus music `review` and `listen` kinds in a separate `pubky-music-specs` crate (supersedes 0006, and 0010 for paths) |
 | [0015](0015-where-playlist-songs-play-from.md) | Where playlist songs play from: per-item pins (`ext.music.source`), the playlist's and the node's play order, one resolution for chip, queue and browser |
-| [0016](0016-many-people-one-node.md) | Proposed: one node, many people. A library each (files on their homeserver, data and interface their own), shared with listen or listen+download permissions; node apps set by the admin, personal sign-ins in each person's vault |
+| [0016](0016-many-people-one-node.md) | One node, many people. A library each (files on their homeserver, data and interface their own), shared with listen or listen+download permissions; node apps set by the admin, personal sign-ins in each person's vault |
 
 Open (handoff §11), not yet decided: live Pubky transport / relay for M5; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

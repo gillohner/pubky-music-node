@@ -1,7 +1,8 @@
 # ADR 0016: One node, many people: a library each, shared with permissions; node apps and personal sign-ins apart
 
-Status: **proposed** (2026-10-26, STEWARD-MULTI-USER.md step 1; mn-infra with mn-app). Waiting for the
-owner's look (QUESTIONS.md) before anything is built.
+Status: **accepted** (2026-10-26, STEWARD-MULTI-USER.md step 1; mn-infra with mn-app). The owner answered
+the open questions (STEWARD-OWNER-ANSWERS-1026.md); the answers are written into the decision below and
+listed at the end.
 
 ## Context
 
@@ -31,7 +32,7 @@ directions, and the node's apps set once by the admin.
 | :-- | :-- | :-- |
 | **Person** | a Pubky key on this node; `admin` (the node's owner, one) or `member` | node DB `people` (today's roster, extended) |
 | **Library** | a set of files with one owner. `person:<z32>`: their files on their homeserver (`/priv/pubky.music/files/`). `local`: the admin library (folders, mounts, WebDAV, drives; the owner's NAS) | node DB `libraries` |
-| **Share** | `(library, person, level)`, level `listen` or `listen+download`; revocable, never implied | node DB `shares` (authoritative), copied to the sharer's homeserver `/priv/pubky.music/shares.json` so a reinstalled node gets them back |
+| **Share** | `(library, person, level)`, level `listen` or `listen+download`; revocable, never implied | node DB `shares`, the node's own record. **Also on the sharer's homeserver** (`/priv/pubky.music/shares.json`) **only when that is the node's own bundled homeserver**, so a reinstalled node gets them back. For a person on a remote homeserver the node keeps them locally and never writes them there |
 | **Grant** | the Ring session a person gives the node: read their files, write their own data | node data dir, one file per person, 0600; deleted when they leave |
 | **Person's data** | favourites, tags, plays, playlists, reviews, interface settings | on **their** homeserver (ADR 0014 paths); the node DB caches them per person |
 
@@ -50,6 +51,10 @@ directions, and the node's apps set once by the admin.
   - The node lists the files through that session, reads tags with ranged GETs (FLAC and ID3 metadata sit at
     the start; MP4 may need the end too), and fetches the audio when it plays or a device downloads (#97).
   - It keeps a capped cache, not a master copy.
+  - **The node never uploads or writes files to a remote homeserver.** Its session there is read only.
+    A person adding music to their own remote homeserver does it from their own client, with their own
+    session. On the node's bundled homeserver the node may write for them (uploads, "Copy to my
+    homeserver").
   - When the session is refused (revoked in Ring, or the person removed), the library shows "lost access".
     Nothing is deleted.
 - **Quota:**
@@ -99,7 +104,7 @@ directions, and the node's apps set once by the admin.
 - **Every existing row** gets its `library`, and the owner's favourites, tags, plays and playlists get
   `person = owner`.
 - **Each listener** in the roster becomes a member with an empty library, and the admin library shared
-  `listen+download`, which is what they can do today (play and, since #97, download). Their tokens keep
+  `listen+download`, so they keep download and offline rights (the owner's answer). Their tokens keep
   working. Their zones carry over.
 - **Interface settings** (Home rows, layout, quality) become the owner's, and are written to the owner's
   homeserver `/priv/pubky.music/settings.json`.
@@ -118,18 +123,19 @@ directions, and the node's apps set once by the admin.
   appear than local ones.
 - **The listener role goes away.** Code that checks `Role::Listener` becomes "a person, with these
   shares".
+- **When a person leaves, the node deletes their cached data at once:** their rows, tags, plays,
+  playlists, interface settings, shares and grant session. There is no grace period. Their homeserver
+  copy is theirs.
 - **The interface becomes per person,** stored on each person's homeserver, so it follows them to another
   node.
 
-## Open questions for the owner
-1. Should the admin library be shared with existing listeners as `listen+download` (what they have
-   today), or only `listen`?
-2. Should shares be copied to the sharer's homeserver (so they survive a reinstall, but are visible to
-   that homeserver's operator), or kept on the node only?
-3. When a member leaves, should their data cached on the node (tags, plays) go at once, or after 30 days
-   in case they come back? Their homeserver copy is theirs either way.
-4. Is a remote library's read session (`files/:r`) enough, or should a member be able to share without
-   giving the node any read access (the node would then stream only what the member's own app pushes)?
+## The owner's answers (2026-10-26)
+1. Existing listeners keep download and offline rights on the owner's library (`listen+download`).
+2. Shares live on the sharer's homeserver when it is the node's own bundled one. For a remote homeserver
+   the node keeps them locally, as a cache it owns, and doesn't write them there.
+3. When someone leaves, their cached data goes at once.
+4. A person on a remote homeserver gives the node a read-only session on their files folder. The node never
+   uploads or writes files there.
 
 ## Build order (STEWARD-MULTI-USER.md §4)
 1. This ADR.
