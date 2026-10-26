@@ -1495,6 +1495,59 @@ pub(crate) fn way_chosen(s: &NodeState, way: &str) {
     }
 }
 
+/// TIDAL's ways, for `crate::signin`.
+pub(crate) struct TidalSignIn;
+
+#[async_trait::async_trait]
+impl crate::signin::SignInSource for TidalSignIn {
+    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+        sign_in(s, headers)
+    }
+
+    fn way_chosen(&self, s: &Arc<NodeState>, way: &str) {
+        way_chosen(s, way);
+    }
+
+    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
+        sign_out_of(s, way)
+    }
+
+    async fn import(
+        &self,
+        s: &Arc<NodeState>,
+        body: crate::signin::ImportBody,
+    ) -> Result<&'static str, ApiError> {
+        let (imp, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
+            (Some(text), _) if !text.is_empty() => (
+                crate::imports::pasted_tidal(text)
+                    .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
+                WAY_PASTE,
+            ),
+            (_, Some(id)) => {
+                let imp = crate::imports::scan_tidal()
+                    .into_iter()
+                    .find(|i| i.found.id == id)
+                    .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
+                if !imp.found.usable {
+                    return Err(ApiError::bad_request(format!(
+                        "{}'s sign-in is not usable: {}",
+                        imp.found.app,
+                        imp.found.reason.clone().unwrap_or_default()
+                    )));
+                }
+                (imp, WAY_IMPORT)
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Say which sign-in (id) or paste one (text)",
+                ))
+            }
+        };
+        import_sign_in(s, imp.session);
+        Ok(way)
+    }
+}
+
 /// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
 pub(crate) fn sign_out_of(s: &NodeState, way: &str) -> Result<(), ApiError> {
     if way != WAY_APP {

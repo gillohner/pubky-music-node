@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// The owner's app: `{api_key, api_secret, from}` (a secret in backups).
+pub const SOURCE_ID: &str = "lastfm";
 pub const APP_KEY: &str = "lastfm.app";
 /// The signed-in user's session key and name, and whether plays go out (a secret in backups).
 pub const SESSION_KEY: &str = "lastfm.session";
@@ -65,6 +66,9 @@ pub struct Session {
     /// Send what plays here.
     #[serde(default = "yes")]
     pub submit: bool,
+    /// The app this sign-in was imported from (`rescrobbled`, `pasted`); none for one made here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     /// Why the session stopped working, when it did (`error 9`: Last.fm asks to sign in again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -586,7 +590,7 @@ pub struct LastfmView {
     pub problem: Option<String>,
 }
 
-fn view(s: &NodeState) -> LastfmView {
+pub(crate) fn view(s: &NodeState) -> LastfmView {
     let lib = s.library.lock().expect("library poisoned");
     let app = app_of(&lib);
     let sess = session_of(&lib);
@@ -743,9 +747,213 @@ async fn finish_login(s: &NodeState, token: &str) -> Result<String, String> {
             user: user.clone(),
             submit: true,
             problem: None,
+            from: None,
         }),
     );
     Ok(user)
+}
+
+// ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md step 3) ----
+
+pub(crate) const WAY_OWN: &str = "own";
+pub(crate) const WAY_IMPORT: &str = "import";
+pub(crate) const WAY_PASTE: &str = "paste";
+
+/// Last.fm's ways, for `crate::signin` (Settings › Accounts).
+pub(crate) struct LastfmSignIn;
+
+#[async_trait::async_trait]
+impl crate::signin::SignInSource for LastfmSignIn {
+    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+        use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
+        let (app, sess, chosen) = {
+            let lib = s.library.lock().expect("library poisoned");
+            (
+                app_of(&lib),
+                session_of(&lib),
+                crate::signin::chosen(&lib, SOURCE_ID),
+            )
+        };
+        let scanned = if headers.is_some() {
+            crate::imports::scan_lastfm()
+        } else {
+            Vec::new()
+        };
+        let note = if scanned.is_empty() {
+            "Nothing in the known places on this machine (rescrobbled). From another machine, paste its key, secret and session key below.".to_string()
+        } else {
+            format!(
+                "Found: {}. rescrobbled's files are only read; its API key, secret and session are kept here like the node's own.",
+                scanned.iter().map(|(f, _)| if f.usable { f.app.clone() } else { format!("{} (not usable)", f.app) }).collect::<Vec<_>>().join(" · ")
+            )
+        };
+        let ways = vec![
+            Way {
+                id: WAY_OWN.into(),
+                label: "Your own Last.fm API account".into(),
+                note: format!(
+                    "An API key and shared secret from last.fm/api/account/create{}, then Last.fm's permission page in the browser.",
+                    match app.as_ref().map(|a| a.from.as_str()) {
+                        Some("config") => " (set in the node config)",
+                        Some(_) => " (set)",
+                        None => "",
+                    }
+                ),
+                action: "browser".into(),
+                recommended: true,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_IMPORT.into(),
+                label: "A sign-in from another app on this machine".into(),
+                note,
+                action: "import".into(),
+                recommended: false,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_PASTE.into(),
+                label: "Paste a key, secret and session key".into(),
+                note: "Three lines: the API key, its shared secret, and a session key made with that key (rescrobbled keeps one in ~/.config/rescrobbled/session). Nothing is shown again once saved.".into(),
+                action: "paste".into(),
+                recommended: false,
+                available: true,
+                reason: None,
+            },
+        ];
+        let in_use = sess.as_ref().map(|x| {
+            let (way, label) = match x.from.as_deref() {
+                Some("pasted") => (WAY_PASTE, "Pasted sign-in".to_string()),
+                Some(app) => (WAY_IMPORT, format!("{app}'s sign-in")),
+                None => (WAY_OWN, "Your own Last.fm app".to_string()),
+            };
+            InUse {
+                way: way.into(),
+                label,
+                user: (!x.user.is_empty()).then(|| x.user.clone()),
+                expires_at: None,
+                gives: Some(
+                    if x.submit {
+                        "scrobbles and similar artists"
+                    } else {
+                        "similar artists; scrobbling off"
+                    }
+                    .into(),
+                ),
+            }
+        });
+        let line = match &in_use {
+            None => NOT_SIGNED_IN.to_string(),
+            Some(u) => format!(
+                "{}{}",
+                u.label,
+                u.user.as_ref().map(|n| format!(" · {n}")).unwrap_or_default()
+            ),
+        };
+        SignIn {
+            source: SOURCE_ID.into(),
+            ways,
+            chosen,
+            in_use,
+            line,
+            imports: scanned.into_iter().map(|(f, _)| f).collect(),
+            places: if headers.is_some() {
+                crate::imports::lastfm_places_text()
+            } else {
+                Vec::new()
+            },
+            details: if headers.is_some() {
+                serde_json::json!({ "lastfm": view(s) })
+            } else {
+                serde_json::Value::Null
+            },
+        }
+    }
+
+    fn sign_out_of(&self, s: &NodeState, _way: &str) -> Result<(), ApiError> {
+        let lib = s.library.lock().expect("library poisoned");
+        save_session(&lib, None);
+        set_pending(&lib, &[]);
+        Ok(())
+    }
+
+    async fn import(
+        &self,
+        s: &Arc<NodeState>,
+        body: crate::signin::ImportBody,
+    ) -> Result<&'static str, ApiError> {
+        let (imp, from, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
+            (Some(text), _) if !text.is_empty() => (
+                crate::imports::parse_lastfm(text)
+                    .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
+                "pasted".to_string(),
+                WAY_PASTE,
+            ),
+            (_, Some(id)) => {
+                let (f, imp) = crate::imports::scan_lastfm()
+                    .into_iter()
+                    .find(|(f, _)| f.id == id)
+                    .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
+                let Some(imp) = imp else {
+                    return Err(ApiError::bad_request(format!(
+                        "{}'s sign-in is not usable: {}",
+                        f.app,
+                        f.reason.unwrap_or_default()
+                    )));
+                };
+                (imp, f.id, WAY_IMPORT)
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Say which sign-in (id) or paste one (text)",
+                ))
+            }
+        };
+        let app = App {
+            api_key: imp.api_key.clone(),
+            api_secret: imp.api_secret.clone(),
+            from: "import".into(),
+        };
+        // Check the candidate before changing the working app or session. Service failures are
+        // not evidence that a sign-in works, and upstream errors may echo supplied secrets.
+        let user = match call(s, &app, "user.getInfo", Some(&imp.session_key), Vec::new()).await {
+            Ok(v) => v["user"]["name"]
+                .as_str()
+                .filter(|n| !n.is_empty())
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "Not usable: Last.fm did not return an account. Try again or try another way",
+                    )
+                })?
+                .to_string(),
+            Err(CallError::Other(_)) => {
+                return Err(ApiError::bad_request(
+                    "Could not check the sign-in with Last.fm. Try again when it is reachable",
+                ))
+            }
+            Err(_) => {
+                return Err(ApiError::bad_request(
+                    "Not usable: Last.fm did not accept it. Try another way",
+                ))
+            }
+        };
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
+        save_session(
+            &lib,
+            Some(&Session {
+                key: imp.session_key.clone(),
+                user,
+                submit: true,
+                problem: None,
+                from: Some(from),
+            }),
+        );
+        set_pending(&lib, &[]);
+        Ok(way)
+    }
 }
 
 #[cfg(test)]

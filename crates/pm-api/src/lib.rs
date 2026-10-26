@@ -8132,6 +8132,7 @@ mod tests {
     /// request for browsers and zones, and the mode switching itself off when Qobuz refuses the app.
     #[tokio::test]
     async fn qobuz_signs_in_searches_and_streams_from_a_mock() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
         use md5::Digest;
         let flac = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -8346,6 +8347,27 @@ mod tests {
             (q["enabled"].clone(), q["health"].clone()),
             (serde_json::json!(true), serde_json::Value::Null)
         );
+        // A qobuz-dl config pasted into the Sign in chooser: its app values and the email with the
+        // password's MD5 sign in the same way; the answer names the way, never the token
+        let (_, _) = call(&app, "DELETE", "/v1/sources/qobuz/signin", None).await;
+        let ini = format!(
+            "[DEFAULT]\nemail = me@example.org\npassword = {:x}\napp_id = 100000000\nsecrets = s3cret\n",
+            md5::Md5::digest(b"hunter2")
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/signin/import",
+            Some(serde_json::json!({"text": ini})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "paste");
+        assert_eq!(r["in_use"]["label"], "Pasted config");
+        assert_eq!(r["in_use"]["user"], "Listener");
+        assert_eq!(r["line"], "Pasted config · hi-res");
+        assert_eq!(r["details"]["unofficial"]["app_from"], "import");
+        assert!(!r.to_string().contains("t-1"), "{r}");
     }
 
     /// YouTube search with the owner's own Data API key: the key is checked before it is kept,
@@ -9409,6 +9431,17 @@ exec sleep 300
                                     assert_eq!(p.get("sk").map(String::as_str), Some("sess-key-xyz"));
                                     Json(serde_json::json!({"nowplaying": {"artist": {"#text": p.get("artist")}}}))
                                 }
+                                "user.getInfo" => {
+                                    if p.get("sk").map(String::as_str) == Some("offline") {
+                                        Json(serde_json::json!({"error": 11, "message": "temporarily offline"}))
+                                    } else if p.get("sk").map(String::as_str) == Some("malformed") {
+                                        Json(serde_json::json!({"user": {}}))
+                                    } else if p.get("sk").map(String::as_str) == Some("sess-key-xyz") {
+                                        Json(serde_json::json!({"user": {"name": "listener", "playcount": "1"}}))
+                                    } else {
+                                        Json(serde_json::json!({"error": 9, "message": "Invalid session key - Please re-authenticate"}))
+                                    }
+                                }
                                 "track.scrobble" => {
                                     assert_eq!(p.get("sk").map(String::as_str), Some("sess-key-xyz"));
                                     if refuse.load(std::sync::atomic::Ordering::SeqCst) {
@@ -9705,6 +9738,48 @@ exec sleep 300
                     .iter()
                     .any(|(k, _)| *k == lastfm::SESSION_KEY)
         );
+        // A sign-in pasted into the Sign in chooser (key, secret, session key): checked with
+        // user.getInfo, then kept like the node's own; a dead session key is refused
+        call(&app, "DELETE", "/v1/sources/lastfm/signin", None).await;
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/lastfm/signin/import",
+            Some(serde_json::json!({"text": format!("{KEY}\n{SECRET}\nsess-key-xyz\n")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "paste");
+        assert_eq!(r["in_use"]["user"], "listener");
+        assert_eq!(r["line"], "Pasted sign-in · listener");
+        assert!(
+            !r.to_string().contains("sess-key-xyz") && !r.to_string().contains(SECRET),
+            "{r}"
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/lastfm/signin/import",
+            Some(serde_json::json!({"text": format!("{KEY}\n{SECRET}\ndeadkey\n")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("did not accept"), "{r}");
+        for key in ["offline", "malformed"] {
+            let (st, _) = call(
+                &app,
+                "POST",
+                "/v1/sources/lastfm/signin/import",
+                Some(serde_json::json!({"text": format!("{KEY}\n{SECRET}\n{key}\n")})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            let (_, current) = call(&app, "GET", "/v1/sources/lastfm/signin", None).await;
+            assert_eq!(
+                current["in_use"]["user"], "listener",
+                "failed imports preserve the working sign-in"
+            );
+        }
     }
 
     /// Every source declares what it can do and a stage; the Sources list carries both.
@@ -11199,6 +11274,7 @@ exec sleep 300
     /// and a pasted token works too (STEWARD-CREDENTIALS-REUSE.md step 2).
     #[tokio::test]
     async fn tidal_sign_ins_from_other_apps_are_listed_imported_or_refused() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
         use base64::Engine;
         let jwt = |uid: i64, exp: i64| {
             let b = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
@@ -11325,6 +11401,218 @@ exec sleep 300
         assert_eq!(r["in_use"]["user"], "5");
         assert_eq!(r["chosen"], "paste");
         assert!(!r.to_string().contains("my-refresh"), "{r}");
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// Sources › Qobuz, YouTube, Spotify and Settings › Last.fm have the same Sign in chooser
+    /// (STEWARD-CREDENTIALS-REUSE.md step 3): other apps' own session files are listed from the
+    /// known places; a cookies file or a librespot credentials.json is only ever picked or pasted,
+    /// kept readable by the node only, and gone with Sign out; nothing answers with a token.
+    #[tokio::test]
+    async fn the_other_sources_have_sign_in_ways_and_picked_files_stay_private() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        qobuz::set_api_base(&format!("http://{}", listener.local_addr().unwrap()));
+        let mock = Router::new().route("/user/get", get(|h: axum::http::HeaderMap| async move {
+            assert_eq!(h.get("x-app-id").unwrap(), "100000000");
+            if h.get("x-user-auth-token").unwrap() != "qobuz-token-secret" {
+                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"message": "bad token"})));
+            }
+            (StatusCode::OK, Json(serde_json::json!({"id": 42, "display_name": "Listener", "credential": {"parameters": {"hires_streaming": true}}})))
+        }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".config/streamrip")).unwrap();
+        std::fs::write(
+            home.path().join(".config/streamrip/config.toml"),
+            "[qobuz]\nuse_auth_token = true\nemail_or_userid = \"42\"\npassword_or_token = \"qobuz-token-secret\"\napp_id = \"100000000\"\nsecrets = [\"s3cret\"]\n[tidal]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.path().join(".config/rescrobbled")).unwrap();
+        std::fs::write(
+            home.path().join(".config/rescrobbled/config.toml"),
+            "lastfm-key = \"0123456789abcdef0123456789abcdef\"\nlastfm-secret = \"fedcba9876543210fedcba9876543210\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join(".config/rescrobbled/session"),
+            "sessKeyRescrobbled\n",
+        )
+        .unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let ids = |si: &serde_json::Value| {
+            si["ways"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let row = |srcs: &serde_json::Value, id: &str| {
+            srcs.as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        // Qobuz: streamrip's token sign-in is listed and used on a click
+        let (st, q) = call(&app, "GET", "/v1/sources/qobuz/signin", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(ids(&q), ["own", "import", "paste"]);
+        assert_eq!(q["imports"][0]["id"], "streamrip");
+        assert_eq!(q["imports"][0]["user"], "42");
+        assert_eq!(q["imports"][0]["usable"], true, "{q}");
+        assert_eq!(q["ways"][1]["available"], true);
+        assert!(
+            !q.to_string().contains("qobuz-token-secret") && !q.to_string().contains("s3cret"),
+            "{q}"
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/signin/import",
+            Some(serde_json::json!({"id": "streamrip"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "import");
+        assert_eq!(r["in_use"]["label"], "streamrip's sign-in");
+        assert_eq!(r["line"], "streamrip's sign-in · hi-res");
+        assert_eq!(r["details"]["unofficial"]["signed_in"], true);
+        assert_eq!(r["details"]["unofficial"]["app_from"], "import");
+        assert!(!r.to_string().contains("qobuz-token-secret"), "{r}");
+        let original = std::fs::read_to_string(home.path().join(".config/streamrip/config.toml")).unwrap();
+        let (st, refused) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/signin/import",
+            Some(serde_json::json!({"text": original.replace("qobuz-token-secret", "expired-token")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(!refused.to_string().contains("expired-token"));
+        let (_, current) = call(&app, "GET", "/v1/sources/qobuz/signin", None).await;
+        assert_eq!(current["in_use"]["user"], "Listener");
+        assert_eq!(current["in_use"]["way"], "import");
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".config/streamrip/config.toml")).unwrap(),
+            original
+        );
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(row(&srcs, "qobuz")["sign_in"], "streamrip's sign-in · hi-res");
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/signin/import",
+            Some(serde_json::json!({"text": "garbage"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().starts_with("Not usable"), "{r}");
+        let (_, r) = call(&app, "DELETE", "/v1/sources/qobuz/signin", None).await;
+        assert!(r["in_use"].is_null(), "{r}");
+        assert_eq!(r["line"], "Not signed in");
+        // Last.fm: rescrobbled's files are listed (the import itself is in the Last.fm mock test)
+        let (st, l) = call(&app, "GET", "/v1/sources/lastfm/signin", None).await;
+        assert_eq!(st, StatusCode::OK, "{l}");
+        assert_eq!(ids(&l), ["own", "import", "paste"]);
+        assert_eq!(l["imports"][0]["id"], "rescrobbled");
+        assert_eq!(l["imports"][0]["usable"], true, "{l}");
+        assert!(
+            !l.to_string().contains("sessKeyRescrobbled") && !l.to_string().contains("fedcba98"),
+            "{l}"
+        );
+        // YouTube: a cookies file is picked, never looked for; the copy is the node's own, 0600
+        let (_, y) = call(&app, "GET", "/v1/sources/youtube/signin", None).await;
+        assert_eq!(ids(&y), ["key", "cookies"]);
+        assert!(y["imports"].as_array().is_none_or(|a| a.is_empty()), "{y}");
+        assert!(y["places"][0].as_str().unwrap().contains("not looked for"), "{y}");
+        assert_eq!(y["line"], "Not signed in");
+        let cookies =
+            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\tcookie-secret\n";
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/youtube/signin/import",
+            Some(serde_json::json!({"text": cookies})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "cookies");
+        assert_eq!(r["line"], "yt-dlp cookies · signed-in playback");
+        assert!(!r.to_string().contains("cookie-secret"), "{r}");
+        let file = s.data_dir().join("youtube").join("cookies.txt");
+        assert!(file.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(
+            row(&srcs, "youtube")["sign_in"],
+            "yt-dlp cookies · signed-in playback"
+        );
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/youtube/signin/import",
+            Some(serde_json::json!({"text": "junk"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (_, r) = call(&app, "DELETE", "/v1/sources/youtube/signin", None).await;
+        assert_eq!(r["line"], "Not signed in");
+        assert!(!file.exists(), "the copy goes with Sign out");
+        // Spotify: a librespot credentials.json is picked; librespot itself may be missing here
+        let (_, sp) = call(&app, "GET", "/v1/sources/spotify/signin", None).await;
+        assert_eq!(ids(&sp), ["app", "librespot", "librespot-file"]);
+        assert!(
+            sp["places"][0].as_str().unwrap().contains("not looked for"),
+            "{sp}"
+        );
+        let creds = r#"{"username": "alice", "auth_type": 1, "auth_data": "QUJD"}"#;
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/signin/import",
+            Some(serde_json::json!({"text": creds})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["in_use"]["way"], "librespot-file");
+        assert_eq!(r["in_use"]["user"], "alice");
+        assert_eq!(r["line"], "librespot, from a credentials file · alice");
+        assert!(!r.to_string().contains("auth_data"), "{r}");
+        let file = s.data_dir().join("librespot").join("credentials.json");
+        assert!(file.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/signin/import",
+            Some(serde_json::json!({"text": "{\"username\": \"x\"}"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        let (_, r) = call(&app, "DELETE", "/v1/sources/spotify/signin", None).await;
+        assert_eq!(r["line"], "Not signed in");
+        assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 }

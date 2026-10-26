@@ -66,6 +66,10 @@ pub struct ModeState {
     /// The zone librespot plays into when `output` is `zone`.
     #[serde(default)]
     pub zone_id: String,
+    /// Where `credentials.json` came from when the person put it there: `file` or `pasted`;
+    /// none when librespot wrote it after a Connect sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_from: Option<String>,
     #[serde(default)]
     pub health: Option<Health>,
 }
@@ -82,7 +86,7 @@ pub fn load(lib: &pm_library::Library) -> ModeState {
         .unwrap_or_default()
 }
 
-fn save(lib: &pm_library::Library, st: &ModeState) {
+pub(crate) fn save(lib: &pm_library::Library, st: &ModeState) {
     let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
 }
 
@@ -154,8 +158,48 @@ fn version_of(bin: &Path) -> Option<String> {
     })
 }
 
-fn dir_of(s: &NodeState) -> PathBuf {
+pub(crate) fn dir_of(s: &NodeState) -> PathBuf {
     s.data_dir().join("librespot")
+}
+
+/// librespot's `credentials.json` in its system cache: written by librespot after a Connect
+/// sign-in, or put there from a file the person picked (`crate::imports`).
+pub(crate) fn credentials_path(s: &NodeState) -> PathBuf {
+    dir_of(s).join("credentials.json")
+}
+
+/// The username in the credentials file, when there is one (never its auth data).
+pub(crate) fn credentials_user(s: &NodeState) -> Option<Option<String>> {
+    let text = std::fs::read_to_string(credentials_path(s)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(v["username"].as_str().map(str::to_string))
+}
+
+/// Switch the mode on or off from the Sign in chooser; librespot starts or stops in the
+/// background.
+pub(crate) fn set_enabled_bg(s: &Arc<NodeState>, enabled: bool) {
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut st = load(&lib);
+        st.enabled = enabled;
+        if enabled {
+            st.health = st.health.filter(|h| h.ok);
+        }
+        save(&lib, &st);
+    }
+    // Tests share one librespot runner between them: no restarts from here in a test build
+    #[cfg(not(test))]
+    {
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            stop();
+            if enabled {
+                if let Err(e) = start(&s2) {
+                    tracing::info!("librespot can't start yet: {e}");
+                }
+            }
+        });
+    }
 }
 
 // ---- what plays (from librespot's events) ------------------------------------------------------

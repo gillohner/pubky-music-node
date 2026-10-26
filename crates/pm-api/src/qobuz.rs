@@ -52,6 +52,9 @@ pub fn set_api_base(url: &str) {
     *base_override().write().expect("qobuz base") = Some(url.trim_end_matches('/').to_string());
 }
 
+#[cfg(test)]
+pub(crate) static API_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn api_base() -> String {
     if let Some(b) = base_override().read().expect("qobuz base").clone() {
         return b;
@@ -103,6 +106,9 @@ pub struct Session {
     /// The plan streams hi-res (else 16-bit/44.1 kHz at most).
     #[serde(default)]
     pub hires: bool,
+    /// The app this sign-in was imported from (`streamrip`, `pasted`, …); none for one made here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -576,7 +582,7 @@ pub struct QobuzStatus {
     pub warning: String,
 }
 
-fn view(s: &NodeState) -> QobuzStatus {
+pub(crate) fn view(s: &NodeState) -> QobuzStatus {
     let lib = s.library.lock().expect("library poisoned");
     let st = load(&lib);
     let app = app_of(&lib);
@@ -684,10 +690,28 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         return Err(ApiError::bad_request("Enter your Qobuz email and password"));
     }
     let hash = hex(&Md5::digest(l.password.as_bytes()));
+    let sess = sign_in_hashed(&s, &app, l.email.trim(), &hash).await?;
+    update(&s, |st| {
+        st.session = Some(sess);
+        st.health = None;
+    });
+    crate::search::forget_answers();
+    tracing::info!("Qobuz sign-in stored");
+    Ok(Json(view(&s)))
+}
+
+/// `user/login` with the password's MD5 (what Qobuz takes; also what other apps keep): the
+/// session Qobuz answers with. Accounts without a streaming plan are refused.
+pub(crate) async fn sign_in_hashed(
+    s: &NodeState,
+    app: &App,
+    email: &str,
+    hash: &str,
+) -> Result<Session, ApiError> {
     // Built before any await: the serializer is not Send
     let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("email", l.email.trim())
-        .append_pair("password", &hash)
+        .append_pair("email", email)
+        .append_pair("password", hash)
         .append_pair("app_id", &app.id)
         .finish();
     let resp = s
@@ -714,7 +738,43 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         .as_str()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| upstream("the sign-in answered without a session"))?;
-    let user = &v["user"];
+    session_from_user(token, &v["user"])
+}
+
+/// Validate a supplied token before replacing the working sign-in. This request uses only the
+/// candidate app and token; an unsuccessful import must not mark the current session down.
+async fn sign_in_token(
+    s: &NodeState,
+    app: &App,
+    token: &str,
+    user_id: Option<&str>,
+) -> Result<Session, ApiError> {
+    let mut req = s
+        .http_client()
+        .get(format!("{}/user/get", api_base()))
+        .header("X-App-Id", &app.id)
+        .header("X-User-Auth-Token", token);
+    if let Some(id) = user_id {
+        req = req.query(&[("user_id", id)]);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|_| upstream("Could not check the sign-in with Qobuz. Try again when it is reachable"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(ApiError::bad_request(format!(
+            "Qobuz did not accept the sign-in ({status}). Try another way"
+        )));
+    }
+    let user: Value = resp
+        .json()
+        .await
+        .map_err(|_| upstream("Qobuz did not return an account. Try again"))?;
+    session_from_user(token, &user)
+}
+
+fn session_from_user(token: &str, user: &Value) -> Result<Session, ApiError> {
     let params = &user["credential"]["parameters"];
     if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) {
         return Err(ApiError::new(
@@ -722,7 +782,7 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
             "This Qobuz account has no streaming plan: full tracks need a paid Qobuz plan",
         ));
     }
-    let sess = Session {
+    Ok(Session {
         token: token.to_string(),
         user_id: user["id"].as_u64().map(|n| n.to_string()),
         name: user["display_name"]
@@ -735,14 +795,190 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
             .map(str::to_string),
         country: user["country_code"].as_str().map(str::to_string),
         hires: params["hires_streaming"].as_bool().unwrap_or(false),
-    };
-    update(&s, |st| {
-        st.session = Some(sess);
-        st.health = None;
-    });
-    crate::search::forget_answers();
-    tracing::info!("Qobuz sign-in stored");
-    Ok(Json(view(&s)))
+        from: None,
+    })
+}
+
+// ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md step 3) ----
+
+pub(crate) const WAY_OWN: &str = "own";
+pub(crate) const WAY_IMPORT: &str = "import";
+pub(crate) const WAY_PASTE: &str = "paste";
+
+/// Qobuz's ways, for `crate::signin`.
+pub(crate) struct QobuzSignIn;
+
+impl QobuzSignIn {
+    fn in_use(st: &ModeState) -> Option<crate::signin::InUse> {
+        let sess = st.session.as_ref()?;
+        let (way, label) = match sess.from.as_deref() {
+            Some("pasted") => (WAY_PASTE, "Pasted config".to_string()),
+            Some(app) => (WAY_IMPORT, format!("{}'s sign-in", crate::imports::app_name(app))),
+            None => (WAY_OWN, "Your own Qobuz app".to_string()),
+        };
+        Some(crate::signin::InUse {
+            way: way.into(),
+            label,
+            user: sess.name.clone().or_else(|| sess.user_id.clone()),
+            expires_at: None,
+            gives: Some(if sess.hires { "hi-res" } else { "CD quality" }.into()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::signin::SignInSource for QobuzSignIn {
+    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+        use crate::signin::{SignIn, Way, NOT_SIGNED_IN};
+        let (st, app, chosen) = {
+            let lib = s.library.lock().expect("library poisoned");
+            (load(&lib), app_of(&lib), crate::signin::chosen(&lib, SOURCE_ID))
+        };
+        let scanned = if headers.is_some() {
+            crate::imports::scan_qobuz()
+        } else {
+            Vec::new()
+        };
+        let note = if scanned.is_empty() {
+            "Nothing in the known places on this machine (streamrip, qobuz-dl). From another machine, pick the config file or paste it below.".to_string()
+        } else {
+            format!(
+                "Found: {}. The other app's file is only read; its app values and the sign-in are kept here like the node's own.",
+                scanned
+                    .iter()
+                    .map(|(f, _)| match (&f.user, &f.reason) {
+                        (_, Some(_)) => format!("{} (not usable)", f.app),
+                        (Some(u), None) => format!("{} ({u})", f.app),
+                        (None, None) => f.app.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            )
+        };
+        let ways = vec![
+            Way {
+                id: WAY_OWN.into(),
+                label: "Your own Qobuz app and account".into(),
+                note: format!(
+                    "A Qobuz app id and secret you are allowed to use{}, then your Qobuz email and password; the node keeps the app and the session, never the password.",
+                    if app.is_some() { " (set)" } else { "" }
+                ),
+                action: "setup".into(),
+                recommended: true,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_IMPORT.into(),
+                label: "A sign-in from another app on this machine".into(),
+                note,
+                action: "import".into(),
+                recommended: false,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_PASTE.into(),
+                label: "Paste streamrip's or qobuz-dl's config".into(),
+                note: "The contents of streamrip's config.toml or qobuz-dl's config.ini: the app values and the sign-in (a token, or the email with the password's MD5). Nothing is shown again once saved.".into(),
+                action: "paste".into(),
+                recommended: false,
+                available: true,
+                reason: None,
+            },
+        ];
+        let in_use = Self::in_use(&st);
+        let line = match &in_use {
+            None => NOT_SIGNED_IN.to_string(),
+            Some(u) => format!("{} · {}", u.label, u.gives.clone().unwrap_or_default()),
+        };
+        SignIn {
+            source: SOURCE_ID.into(),
+            ways,
+            chosen,
+            in_use,
+            line,
+            imports: scanned.into_iter().map(|(f, _)| f).collect(),
+            places: if headers.is_some() {
+                crate::imports::qobuz_places_text()
+            } else {
+                Vec::new()
+            },
+            details: if headers.is_some() {
+                serde_json::json!({ "unofficial": view(s) })
+            } else {
+                serde_json::Value::Null
+            },
+        }
+    }
+
+    fn sign_out_of(&self, s: &NodeState, _way: &str) -> Result<(), ApiError> {
+        update(s, |st| st.session = None);
+        crate::search::forget_answers();
+        Ok(())
+    }
+
+    async fn import(
+        &self,
+        s: &Arc<NodeState>,
+        body: crate::signin::ImportBody,
+    ) -> Result<&'static str, ApiError> {
+        let (imp, from, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
+            (Some(text), _) if !text.is_empty() => (
+                crate::imports::parse_qobuz(text)
+                    .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
+                "pasted".to_string(),
+                WAY_PASTE,
+            ),
+            (_, Some(id)) => {
+                let (f, imp) = crate::imports::scan_qobuz()
+                    .into_iter()
+                    .find(|(f, _)| f.id == id)
+                    .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
+                let Some(imp) = imp else {
+                    return Err(ApiError::bad_request(format!(
+                        "{}'s config is not usable: {}",
+                        f.app,
+                        f.reason.unwrap_or_default()
+                    )));
+                };
+                (imp, f.id, WAY_IMPORT)
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Say which sign-in (id) or paste one (text)",
+                ))
+            }
+        };
+        let app = App {
+            id: imp.app_id.clone(),
+            secret: imp.secrets[0].clone(),
+            from: "import".into(),
+        };
+        let mut sess = match (&imp.token, &imp.email, &imp.password_md5) {
+            (Some(token), _, _) => sign_in_token(s, &app, token, imp.user_id.as_deref())
+                .await
+                .map_err(|e| ApiError::bad_request(format!("Not usable: {}", e.message)))?,
+            (None, Some(email), Some(hash)) => sign_in_hashed(s, &app, email, hash).await.map_err(|_| {
+                ApiError::bad_request(
+                    "Not usable: Qobuz could not verify the app and account. Check them or try another way",
+                )
+            })?,
+            _ => return Err(ApiError::bad_request("Not usable: no sign-in in it")),
+        };
+        sess.from = Some(from);
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
+        }
+        update(s, |st| {
+            st.session = Some(sess);
+            st.health = None;
+            st.enabled = true;
+        });
+        crate::search::forget_answers();
+        Ok(way)
+    }
 }
 
 /// `DELETE /v1/sources/qobuz/unofficial/login`: forget the session (the mode stays as set).
