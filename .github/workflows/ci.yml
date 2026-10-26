@@ -260,6 +260,8 @@ jobs:
           export PM_BUNDLED_HS_FILES=$PWD/deploy/bundle/hsdata/data/files
           PM_BUNDLED_HS_PASSWORD=$(sed -n 's/^ADMIN_PASSWORD=//p' deploy/bundle/.env) && export PM_BUNDLED_HS_PASSWORD
           cargo test -p pm-api --test bundled_homeserver
+          # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
+          cargo test -p pm-pubky --test vault_homeserver
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)

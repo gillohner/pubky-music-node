@@ -8,6 +8,11 @@ Newest first. Dates are when the change landed on `main`.
   - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
   - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
   - Sources and a playlist song's "Play this song from" menu use the same order.
+- **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
+  - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
+  - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
+  - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
+  - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
 - **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
   - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
   - Listeners may download what they may play. The homeserver's files come through the node.
