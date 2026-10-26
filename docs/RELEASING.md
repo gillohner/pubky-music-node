@@ -41,6 +41,21 @@ The app's Android project (`crates/pm-desktop/gen/android`) is generated on ever
 `tauri android init` and adjusted by `tools/release/android-patch.py` (cleartext HTTP to LAN
 nodes, the TLS verifier's Kotlin classes). Nothing in `gen/` is committed.
 
+## The Umbrel store
+
+umbrelOS reads a community app store from the root of a repository, so `deploy/umbrel/` is mirrored to
+[gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel).
+- **Automatically:** the `umbrel-mirror` workflow syncs it on every change to `deploy/umbrel/` on main.
+  It needs the deploy key `UMBREL_MIRROR_KEY`: an SSH key with write access, added as a deploy key to the
+  store repository and as a secret here. Without it the workflow warns and does nothing.
+- **By hand:** until the key exists, sync at each release that changes `deploy/umbrel/` (e.g. a new
+  image pin):
+  ```sh
+  git clone git@github.com:gillohner/pubky-music-umbrel.git /tmp/store
+  rsync -a --delete --exclude .git deploy/umbrel/ /tmp/store/
+  cd /tmp/store && git add -A && git commit -S -m "Sync from pubky-music-node@<sha> (deploy/umbrel)" && git push
+  ```
+
 ## Signing
 
 - **Android:** a release key made for this project (PKCS12, alias `pubky-music`, RSA 4096,
