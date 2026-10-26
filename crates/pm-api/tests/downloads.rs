@@ -301,3 +301,73 @@ async fn a_transcode_is_made_once_and_served_from_the_cache() {
         StatusCode::OK
     );
 }
+
+/// With the real ffmpeg (CI: `PM_REAL_FFMPEG=1` where ffmpeg is installed): a second of a sine wave
+/// becomes MP3, AAC in M4A and Opus in Ogg, each with its container's magic bytes.
+#[tokio::test]
+async fn real_ffmpeg_makes_each_format() {
+    if std::env::var("PM_REAL_FFMPEG").ok().as_deref() != Some("1") {
+        eprintln!("PM_REAL_FFMPEG not set: skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    // 1 s of 440 Hz, 16-bit stereo, 44.1 kHz
+    let wav = dir.path().join("03 Tone.wav");
+    let frames = 44_100u32;
+    let mut b = Vec::new();
+    let data_len = frames * 4;
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&44_100u32.to_le_bytes());
+    b.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..frames {
+        let v = ((i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 12_000.0) as i16;
+        b.extend_from_slice(&v.to_le_bytes());
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(&wav, &b).unwrap();
+    let id = add_track(&s, &wav, "wav");
+    let app = router(s.clone());
+    for (format, mime, magic_at, magic) in [
+        ("mp3", "audio/mpeg", None, &b""[..]),
+        ("aac", "audio/mp4", Some(4), &b"ftyp"[..]),
+        ("opus", "audio/ogg", Some(0), &b"OggS"[..]),
+    ] {
+        let g = get(
+            &app,
+            OWNER,
+            &format!("/v1/library/tracks/{id}/download?format={format}&bitrate=128"),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            g.status,
+            StatusCode::OK,
+            "{format}: {}",
+            String::from_utf8_lossy(&g.body)
+        );
+        assert_eq!(h(&g, "content-type"), mime, "{format}");
+        assert!(
+            g.body.len() > 1000 && g.body.len() < b.len(),
+            "{format}: {} bytes",
+            g.body.len()
+        );
+        match magic_at {
+            Some(at) => assert_eq!(&g.body[at..at + magic.len()], magic, "{format}"),
+            // MP3: an ID3 tag or a frame sync
+            None => assert!(
+                g.body.starts_with(b"ID3") || (g.body[0] == 0xFF && g.body[1] & 0xE0 == 0xE0),
+                "{format}"
+            ),
+        }
+    }
+}

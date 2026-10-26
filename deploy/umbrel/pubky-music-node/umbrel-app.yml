@@ -37,7 +37,8 @@ releaseNotes: >-
   Pubky homeserver on the box with a Cloudflare tunnel from Settings › Remote
   access; people on the node, each signing in with their own Pubky Ring key;
   party mode with a guest link; crossfade per zone; Library › Add music
-  (uploads and copies to your homeserver); downloads and transcodes for phones;
+  (uploads and copies to your homeserver); downloads for phones (the originals;
+  smaller copies need ffmpeg, which the next image brings);
   more ways to sign in to TIDAL, including imports from other apps on the box;
   and better song matches. Earlier: zones, queue tools, lyrics, backups,
   Subsonic jukebox control and an installable web UI.
