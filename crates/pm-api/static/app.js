@@ -4033,7 +4033,6 @@
     clearInterval(link.tick);
     const paint = () => {
       if (link.up) { clearInterval(link.tick); return; }
-      if (link.waiters.length) linkHint(); // a change is held: never let it wait out a long retry
       const secs = Math.max(0, Math.ceil((link.retryAt - Date.now()) / 1000));
       if (!navigator.onLine) setConn('bad', 'Offline: no network');
       else if (link.ever && Date.now() - link.downSince < 20000) setConn('wait', 'Reconnecting…');
@@ -4048,9 +4047,10 @@
     const urgent = link.waiters.length > 0 || (link.downSince && Date.now() - link.downSince < 20000);
     const d = Math.min(urgent ? 1500 : 30000, 500 * 2 ** Math.min(link.attempt, 10));
     const wait = Math.round(d / 2 + Math.random() * d / 2);
-    link.attempt++; link.retryAt = Date.now() + wait;
-    const conn = $('#conn'); if (conn) conn.dataset.retryAt = String(link.retryAt); // CI checks resync against this
-    link.retry = setTimeout(() => { link.retry = null; reconnect(); }, wait);
+    link.attempt = urgent ? Math.min(link.attempt + 1, 2) : link.attempt + 1; // after the fast phase: 1.5 → 3 → 6 … 30 s
+    link.retryAt = Date.now() + wait;
+    const conn = $('#conn'); if (conn) conn.dataset.retryAt = String(link.retryAt); // when the next retry is due (for tests)
+    link.retry = setTimeout(() => { link.retry = null; clearRetryAt(); reconnect(); }, wait);
   };
   const goneDown = () => {
     link.up = false; clearInterval(link.ping); link.awaiting = false;
@@ -4059,10 +4059,15 @@
   };
   // Drop the socket without waiting for its close handshake (a dead peer may never answer).
   const dropSocket = () => { const ws = link.ws; link.ws = null; if (ws) { ws.onclose = ws.onmessage = ws.onerror = null; try { ws.close(); } catch {} } };
-  const retryNow = () => { clearTimeout(link.retry); link.retry = null; link.attempt = 0; reconnect(); };
+  const clearRetryAt = () => { const c = $('#conn'); if (c) delete c.dataset.retryAt; };
+  const retryNow = () => { clearTimeout(link.retry); link.retry = null; clearRetryAt(); link.attempt = 0; reconnect(); };
+  let reconnectGen = 0; // only the latest attempt may report its result
   const reconnect = async () => {
     if (!link.loaded) return connect();
-    try { state.info = await api('GET', '/info'); } catch { goneDown(); return; }
+    const gen = ++reconnectGen;
+    let info = null; try { info = await api('GET', '/info'); } catch { if (gen === reconnectGen && !link.up) goneDown(); return; }
+    if (gen !== reconnectGen || link.up) return;
+    state.info = info;
     openEvents();
   };
   const sendPing = () => {
