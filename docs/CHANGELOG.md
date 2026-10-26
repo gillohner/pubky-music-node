@@ -4,6 +4,15 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-25
 
+- **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
+  - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
+  - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
+  - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
+  - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
+- **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
+  - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
+  - Listeners may download what they may play. The homeserver's files come through the node.
+  - Transcodes use ffmpeg where the node has it (501 otherwise; the original always works).
 - **The sources vault, spec v1** (STEWARD-VAULT.md item 1): `crates/pubky-music-specs/VAULT.md`. Streaming sign-ins go to `/priv/pubky.music/vault/<service>.json`, encrypted on the device to every client the person authorised. The building blocks:
   - a random data key per blob, wrapped to each client's X25519 key (pubky-noise's primitives: X25519, HKDF-SHA-256, XChaCha20-Poly1305);
   - a device list in `index.json`, whose entries prove themselves with the pubky SDK's grant proofs (Ring's grant plus a custom proof over the client key; no app holds the identity secret);

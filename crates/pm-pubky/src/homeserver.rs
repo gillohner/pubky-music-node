@@ -19,7 +19,7 @@ use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
 /// The homeserver answers 404 for a directory nobody has written to yet.
-fn is_not_found(e: &pubky::Error) -> bool {
+pub(crate) fn is_not_found(e: &pubky::Error) -> bool {
     matches!(
         e,
         pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
