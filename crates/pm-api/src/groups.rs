@@ -44,7 +44,7 @@ pub(crate) async fn index(State(s): State<Arc<NodeState>>) -> ApiResult<Value> {
             "id": "node", "title": "This node",
             "saved": "For everyone on this node",
             "sections": [
-                {"id": "apps", "title": "Service apps", "routes": ["/v1/sources"]},
+                {"id": "apps", "title": "Service apps", "routes": ["/v1/node/apps"]},
                 {"id": "people", "title": "People", "routes": ["/v1/people", "/v1/people/invites", "/v1/people/zones"]},
                 {"id": "folders", "title": "Library folders", "routes": ["/v1/library/folders"]},
                 {"id": "zones", "title": "Zones and outputs", "routes": ["/v1/zones", "/v1/outputs"]},

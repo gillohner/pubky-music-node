@@ -28,6 +28,7 @@ pub(crate) fn plural(n: u64, one: &str) -> String {
 pub mod accounts;
 pub mod add_music;
 pub mod announce;
+pub mod apps;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bandcamp;
@@ -192,6 +193,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/info", get(info))
         .route("/health", get(health::health))
         .route("/node", get(groups::index))
+        .route("/node/apps", get(apps::get))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))

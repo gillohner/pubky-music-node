@@ -159,6 +159,11 @@ pub(crate) fn connected(s: &NodeState) -> bool {
     creds(s).configured() && load_user(s).is_some()
 }
 
+/// The public client id the node's TIDAL sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(creds(s).client_id).filter(|c| !c.trim().is_empty())
+}
+
 fn creds(s: &NodeState) -> TidalCredentials {
     endpoints(s).creds
 }

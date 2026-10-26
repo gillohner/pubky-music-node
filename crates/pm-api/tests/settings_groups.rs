@@ -218,4 +218,71 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         call(&app, &listener, "GET", "/v1/node", None).await.0,
         StatusCode::FORBIDDEN
     );
+
+    // Service apps: one list, never a secret
+    let (st, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    assert_eq!(st, StatusCode::OK, "{apps}");
+    let ids: Vec<&str> = apps
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    for want in [
+        "spotify",
+        "tidal",
+        "tidal-full",
+        "qobuz",
+        "soundcloud",
+        "youtube",
+        "lastfm",
+        "jamendo",
+        "acoustid",
+        "google-drive",
+        "onedrive",
+    ] {
+        assert!(ids.contains(&want), "{want} missing from {ids:?}");
+    }
+    let find = |a: &Value, id: &str| {
+        a.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(find(&apps, "spotify")["configured"], false);
+    assert!(find(&apps, "spotify")["get_one"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://"));
+    let secret = "0123456789abcdef0123456789abcdef";
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/sources/spotify/app",
+        Some(json!({"client_id": "fedcba9876543210fedcba9876543210"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/lastfm",
+        Some(json!({"api_key": "aaaabbbbccccddddaaaabbbbccccdddd", "api_secret": secret})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    assert_eq!(find(&apps, "spotify")["configured"], true);
+    assert_eq!(find(&apps, "spotify")["from"], "settings");
+    assert_eq!(find(&apps, "lastfm")["configured"], true);
+    assert_eq!(find(&apps, "lastfm")["from"], "settings");
+    assert!(!apps.to_string().contains(secret), "a secret in {apps}");
+    assert_eq!(
+        call(&app, &listener, "GET", "/v1/node/apps", None).await.0,
+        StatusCode::FORBIDDEN
+    );
 }
