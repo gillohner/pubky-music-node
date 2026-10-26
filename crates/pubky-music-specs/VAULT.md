@@ -70,9 +70,15 @@ below). An edit made without the lock can drop a registration or a sign-out made
 **Revocation is remembered by each client.** The `revoked` list is not tamper-proof. Every client
 listed in `index.json` can write it, a signed-out one too (its homeserver grant still allows that),
 and the homeserver can serve an older copy. So:
-- each client keeps its own append-only record of every `revoked` entry it has seen;
+- each client keeps its own append-only record: the sign-outs it made itself, never dropped, and the
+  well-formed `revoked` entries it has seen (naming a key, or a grant id of the SDK's form), up to a bound
+  (4096 in the node) so a flood of made-up ones only fills what is left;
+- it doesn't remember records that name itself: it follows the list while the list says so, so a writer
+  can't sign it out for good;
 - it trusts nobody in the union of that record and the list as served;
-- when it writes `index.json`, it writes the union back, so a dropped record returns.
+- when it writes `index.json`, it writes back the remembered records that name a listed entry (the only
+  ones that change anyone's trust), so a dropped record returns; and when the list would pass 256 KiB, it
+  first drops records that name no listed entry.
 
 A list that drops a record therefore re-trusts nobody for a client that has seen the record. The same
 holds for epochs: clients remember the highest epoch they have seen.
