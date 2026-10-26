@@ -1167,11 +1167,16 @@ pub(crate) async fn put(
                 ));
             }
             let fan = fan_of(&s, c).await?;
-            s.library
-                .lock()
-                .expect("library poisoned")
-                .set_setting(COOKIE_KEY, c)?;
-            update(&s, |st| st.fan = Some(fan));
+            {
+                // The cookie, who it is and the "new sign-in" mark under one guard: no vault
+                // pass sees one without the others
+                let lib = s.library.lock().expect("library poisoned");
+                lib.set_setting(COOKIE_KEY, c)?;
+                let mut st = load(&lib);
+                st.fan = Some(fan);
+                save(&lib, &st);
+                crate::vault_cache::new_sign_in(&lib, "bandcamp");
+            }
         }
     }
     update(&s, |st| {
