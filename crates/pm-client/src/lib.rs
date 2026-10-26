@@ -412,6 +412,7 @@ impl NodeClient {
         let req = RecordPlay {
             track_id,
             zone: zone.map(str::to_string),
+            played_at: None,
         };
         self.send::<History, _>(reqwest::Method::POST, "library/history", Some(&req))
             .await?;

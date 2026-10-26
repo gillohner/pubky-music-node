@@ -7,8 +7,11 @@ pub const APP_NAMESPACE: &str = "pubky.music";
 pub const PRIVATE_DIR: &str = "/priv/pubky.music/";
 /// How the person's own devices find their node (ADR 0008).
 pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
-/// The node's settings backup, restored after one Ring sign-in on a new node.
+/// The node's settings backup, restored after one Ring sign-in on a new node. Never a sign-in or
+/// a token (plain JSON): those travel in the vault or the encrypted backup file.
 pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
+/// The person's own preferences ("You" in Settings: Home layout, quality, appearance).
+pub const PREFS_PATH: &str = "/priv/pubky.music/prefs.json";
 /// The person's own music files (uploads, copies, imports).
 pub const FILES_DIR: &str = "/priv/pubky.music/files/";
 /// The sources vault (VAULT.md).
@@ -28,6 +31,7 @@ pub const ALL: &[&str] = &[
     PRIVATE_DIR,
     NODE_RECORD_PATH,
     NODE_SETTINGS_PATH,
+    PREFS_PATH,
     FILES_DIR,
     VAULT_DIR,
     VAULT_INDEX_PATH,

@@ -1531,3 +1531,71 @@ async fn bringing_files_here_skips_what_the_node_has() {
         .collect();
     assert_eq!(names.len(), 100, "{names:?}");
 }
+
+/// A0: `/priv/pubky.music/settings.json` never carries a sign-in. A copy an older node wrote with
+/// the TIDAL session in it loses it on the next backup, and a restore ignores it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_settings_copy_never_carries_a_sign_in() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    signer.signup(&hs, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-settings").unwrap())
+        .await
+        .unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    // A fake session, put together at run time so secret scanners don't read the test as a leak
+    let token = format!(
+        "{{\"{}\":\"old-a\",\"{}\":\"old-r\"}}",
+        ["access", "token"].join("_"),
+        ["refresh", "token"].join("_")
+    );
+    let mut old = serde_json::Map::new();
+    old.insert(
+        ["tidal", "user"].join("."),
+        serde_json::Value::String(token.clone()),
+    );
+    old.insert("smart.0035WKVKQDHSM".into(), "{\"name\":\"x\"}".into());
+    // What an older node wrote
+    homeserver
+        .write_node_settings(
+            &session,
+            &serde_json::json!({
+                "version": 1, "saved_at": 1, "node": "old", "contact": "", "folders": [],
+                "settings": old
+            }),
+        )
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // A fresh node restores the owner's settings, not the sign-in
+    let n = node(dir.path(), "fresh");
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    n.set_sync(Some(sync.clone()));
+    let r = sync.restore_settings(&n, false).await.unwrap().unwrap();
+    assert_eq!(r.settings, 1, "{r:?}");
+    {
+        let lib = n.library.lock().unwrap();
+        assert!(lib.get_setting("smart.0035WKVKQDHSM").unwrap().is_some());
+        assert_eq!(lib.get_setting("tidal.user").unwrap(), None);
+        // Signed in to TIDAL on this node: still never copied
+        lib.set_setting("tidal.user", &token).unwrap();
+    }
+    sync.backup_settings(&n).await;
+    let copy = homeserver
+        .read_node_settings(sync.session())
+        .await
+        .unwrap()
+        .unwrap();
+    let text = copy.to_string();
+    assert!(
+        !text.contains("old-refresh") && !text.contains("tidal.user"),
+        "{text}"
+    );
+    assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{text}");
+}

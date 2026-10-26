@@ -28,6 +28,7 @@ if (!w.HTMLDialogElement.prototype.showModal) w.HTMLDialogElement.prototype.show
 w.addEventListener('error', (e) => errors.push('window.error: ' + e.message));
 w.addEventListener('unhandledrejection', (e) => errors.push('unhandled: ' + e.reason));
 process.on('unhandledRejection', (e) => errors.push('node unhandled: ' + (e && e.stack || e)));
+Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement (jsdom is 1024 wide: a tablet)
 w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
@@ -48,10 +49,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('bar:', w.document.querySelector('#np').textContent.replace(/\s+/g, ' ').trim(), '| quality:', w.document.querySelector('#quality .qtext').textContent, '| zone:', w.document.querySelector('#zonename').textContent);
   w.document.querySelector('#np').click(); await sleep(400);
   console.log('overlay hidden?', w.document.querySelector('#nowplaying').hidden, '| overlay h1:', w.document.querySelector('#nowplaying h1')?.textContent);
-  // Now Playing carries the sleep timer menu and the (hidden until loaded) lyrics panel.
-  if (!w.document.querySelector('#npsleep')) errors.push('no sleep timer button on Now Playing');
-  if (!w.document.querySelector('#nplyrics')) errors.push('no lyrics panel on Now Playing');
-  const sleepBtn = w.document.querySelector('#npsleep'); if (sleepBtn) { sleepBtn.click(); await sleep(200); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('sleep menu:', items.join(' | ')); if (!items.includes('Off')) errors.push('sleep menu incomplete'); w.document.body.click(); await sleep(100); }
+  // Now Playing: the sleep timer behind ⋯, and the Lyrics sheet (its panel hidden until loaded)
+  const npMore = w.document.querySelector('#npmore');
+  if (!npMore) errors.push('no ⋯ menu on Now Playing');
+  else {
+    npMore.click(); await sleep(200);
+    const top = [...w.document.querySelectorAll('.popover.menu .pop-item')].find((e) => /Sleep/.test(e.textContent));
+    if (!top) errors.push('no sleep timer in the ⋯ menu'); else { top.click(); await sleep(300); }
+    const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent);
+    console.log('sleep menu:', items.join(' | ')); if (!items.includes('Off')) errors.push('sleep menu incomplete');
+    w.document.body.click(); await sleep(100);
+  }
+  const lyr = w.document.querySelector('#nowplaying [data-npsheet="lyrics"]'); if (lyr) { lyr.click(); await sleep(300); }
+  if (!w.document.querySelector('#nplyrics')) errors.push('no lyrics sheet on Now Playing');
   w.document.querySelector('#npclose').click();
   // Albums: Focus chips filter the grid; "All" shows everything again.
   w.document.querySelector('.nav-item[data-view="albums"]').click(); await sleep(900);
@@ -177,17 +187,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   w2.HTMLMediaElement.prototype.pause = function () {};
   w2.matchMedia = (q) => ({ matches: /max-width: (720|1100)px/.test(q), media: q, addEventListener() {}, removeEventListener() {} });
   w2.eval(js); await sleep(6000);
-  // Phone: ☰ opens the sheet; back closes it and stays on the same page.
-  const path0 = w2.location.pathname;
-  w2.document.querySelector('#menu').click(); await sleep(100);
-  const opened = w2.document.querySelector('#sidebar').classList.contains('open');
-  w2.history.back(); await sleep(800);
-  const closed = !w2.document.querySelector('#sidebar').classList.contains('open');
-  console.log('phone sheet: opened', opened, '| closed on back', closed, '| same page', w2.location.pathname === path0);
-  if (!opened || !closed || w2.location.pathname !== path0) errors.push('the phone sidebar sheet does not open or close on back');
   const dh = w2.document.querySelector('#main h1');
   console.log('deep link /song/mb-…:', dh && dh.textContent, '|', (w2.document.querySelector('#main .notice') || {}).textContent || '');
   if (!dh) errors.push('deep link to a song page did not render');
+  // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
+  // with its sections as chips; the account button opens Settings; back returns.
+  w2.localStorage.setItem('pm.layout', 'compact'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
+  const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
+  w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
+  const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);
+  const chip = w2.document.querySelector('#main .libnav [data-libnav="artists"]'); if (chip) chip.click(); await sleep(1500);
+  const onArtists = w2.location.pathname === '/artists'; const libOn = w2.document.querySelector('[data-bnav="library"]').classList.contains('on');
+  w2.document.querySelector('#me').click(); await sleep(1500);
+  const onSettings = w2.location.pathname.startsWith('/settings');
+  w2.history.back(); await sleep(1500);
+  console.log('phone shell:', w2.document.documentElement.dataset.shell, '| tabs', tabs, '| chips', libChips.join(','), '| artists', onArtists, 'library tab on', libOn, '| settings', onSettings, '| back', w2.location.pathname);
+  if (w2.document.documentElement.dataset.shell !== 'phone') errors.push('Layout: Compact does not give the phone arrangement');
+  if (tabs !== 'home,search,library,zones') errors.push(`the phone tabs are ${tabs}`);
+  if (!libChips.includes("albums") || !onArtists || !libOn) errors.push('the Library tab and its section chips do not work');
+  if (!onSettings || w2.location.pathname !== '/artists') errors.push('the account button does not open Settings, or back does not return');
   // ☰ does something at every width: desktop collapses the sidebar to icons and back.
   const shellEl = w.document.querySelector('.shell'); const menuBtn = w.document.querySelector('#menu');
   const sideBefore = shellEl.classList.contains('collapsed');

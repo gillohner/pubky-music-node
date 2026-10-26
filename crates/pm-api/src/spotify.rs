@@ -168,12 +168,23 @@ fn creds(s: &NodeState) -> SpotifyCredentials {
     }
 }
 
+/// The public client id of the app the node's Spotify sign-ins are made with (`vault_cache`
+/// pulls only sign-ins made with it).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(creds(s).client_id).filter(|c| !c.trim().is_empty())
+}
+
 fn settings_app(s: &NodeState) -> Option<String> {
     let lib = s.library.lock().expect("library poisoned");
     lib.get_setting(APP_KEY)
         .ok()
         .flatten()
         .filter(|v| !v.trim().is_empty())
+}
+
+/// [`app_from`], for the node's list of apps.
+pub(crate) fn app_origin(s: &NodeState) -> Option<&'static str> {
+    app_from(s)
 }
 
 /// Where the app comes from: `config`, `settings` or nowhere yet.
@@ -316,6 +327,7 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         return Ok(None);
     };
     let v = token_request(s, &[("grant_type", "refresh_token"), ("refresh_token", &refresh)]).await?;
+    let was = u.access_token.clone();
     u.access_token = v["access_token"]
         .as_str()
         .ok_or_else(|| upstream("no access_token"))?
@@ -324,7 +336,16 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
     if let Some(r) = v["refresh_token"].as_str() {
         u.refresh_token = Some(r.to_string());
     }
-    store_user(s, Some(&u))?;
+    // Only over the session this refresh started from (the vault may have changed it meanwhile)
+    let lib = s.library.lock().expect("library poisoned");
+    let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
+    let raw = serde_json::to_string(&u).expect("serializes");
+    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+        return Ok(lib
+            .get_setting(USER_KEY)?
+            .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+            .map(|c| c.access_token));
+    }
     Ok(Some(u.access_token))
 }
 
@@ -850,7 +871,13 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         product: None,
         scope: v["scope"].as_str().unwrap_or("").to_string(),
     };
-    store_user(s, Some(&session))?;
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other (the
+        // account details below are a later change of the same sign-in)
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(USER_KEY, &serde_json::to_string(&session).expect("serializes"))?;
+        crate::vault_cache::new_sign_in(&lib, "spotify");
+    }
     if let Ok(me) = get_json(s, "/me", &[]).await {
         session.user_id = me["id"].as_str().map(str::to_string);
         session.display_name = me["display_name"].as_str().map(str::to_string);

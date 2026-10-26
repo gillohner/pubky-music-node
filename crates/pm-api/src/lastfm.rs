@@ -116,6 +116,11 @@ fn setting<T: serde::de::DeserializeOwned>(lib: &pm_library::Library, key: &str)
         .and_then(|v| serde_json::from_str(&v).ok())
 }
 
+/// The API key the node's Last.fm session is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    app_of(&s.library.lock().expect("library poisoned")).map(|a| a.api_key)
+}
+
 /// The app the owner set: in Settings, else node.toml, else `PM_LASTFM_API_KEY` / `_SECRET`.
 pub fn app_of(lib: &pm_library::Library) -> Option<App> {
     if let Some(a) = setting::<App>(lib, APP_KEY).filter(|a| !a.api_key.is_empty()) {
@@ -745,6 +750,7 @@ async fn finish_login(s: &NodeState, token: &str) -> Result<String, String> {
             problem: None,
         }),
     );
+    crate::vault_cache::new_sign_in(&lib, "lastfm");
     Ok(user)
 }
 

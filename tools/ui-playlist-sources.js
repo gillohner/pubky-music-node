@@ -7,6 +7,8 @@
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
 //   node tools/ui-playlist-sources.js <api token> [http://127.0.0.1:7788] [screenshot dir]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// A checkbox's state, waiting through a re-render that briefly replaces it
+const checkedOf = async (p, sel) => { for (let k = 0; k < 15; k++) { const v = await p.evaluate((x) => { const c = document.querySelector(x); return c ? c.checked : null; }, sel); if (v !== null) return v; await p.waitForTimeout(200); } return null; };
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788'; const OUT = process.argv[4] || null;
 const errors = []; const fails = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -59,13 +61,13 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       const o1 = await orderOf();
       await p.click('#plorder [data-odown="0"]'); await p.waitForFunction((first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() !== first; }, o1[0], { timeout: 30000 }).catch(() => {});
       const o2 = await orderOf();
-      check(o2[0] === o1[1] && o2[1] === o1[0] && !(await p.$eval('#plownorder', (c) => c.checked)), `arrow button moves it: ${o1.join('›')} → ${o2.join('›')}, own order`);
+      check(o2[0] === o1[1] && o2[1] === o1[0] && (await checkedOf(p, '#plownorder')) === false, `arrow button moves it: ${o1.join('›')} → ${o2.join('›')}, own order`);
       await p.focus('#plorder [data-ogrip="1"]'); await p.keyboard.press('Alt+ArrowUp');
       await p.waitForFunction((first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() === first; }, o1[0], { timeout: 30000 }).catch(() => {});
       check((await orderOf())[0] === o1[0], 'Alt+↑ on the grip moves it back');
       if (OUT) { await p.$eval('#plorder', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/playlist-play-from-1280-dark.png` }); }
       await p.click('#plownorder'); await p.waitForFunction(() => document.querySelector('#plownorder') && document.querySelector('#plownorder').checked, null, { timeout: 30000 }).catch(() => {});
-      check(await p.$eval('#plownorder', (c) => c.checked), '"Use my node’s order" goes back to the global order');
+      check((await checkedOf(p, '#plownorder')) === true, '"Use my node’s order" goes back to the global order');
       // global order in Settings
       await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);

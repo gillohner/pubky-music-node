@@ -25,6 +25,7 @@ members = [
     "crates/pm-renderer",
     "crates/pubky-music-specs",
     "crates/pm-appdata",
+    "crates/pm-offline",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
 exclude = ["crates/pm-desktop"]
@@ -42,6 +43,7 @@ pm-zones = { path = "crates/pm-zones" }
 pm-audio = { path = "crates/pm-audio" }
 pm-library = { path = "crates/pm-library" }
 pm-pubky = { path = "crates/pm-pubky" }
+pm-offline = { path = "crates/pm-offline" }
 pm-out-local = { path = "crates/pm-out-local" }
 pm-api = { path = "crates/pm-api" }
 pm-client = { path = "crates/pm-client" }

@@ -159,6 +159,11 @@ pub(crate) fn connected(s: &NodeState) -> bool {
     creds(s).configured() && load_user(s).is_some()
 }
 
+/// The public client id the node's TIDAL sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(creds(s).client_id).filter(|c| !c.trim().is_empty())
+}
+
 fn creds(s: &NodeState) -> TidalCredentials {
     endpoints(s).creds
 }
@@ -450,7 +455,18 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
         }
     };
     let fresh = session_from(&v, Some(&u))?;
-    store_user(s, Some(&fresh))?;
+    // Only over the session this refresh started from (the vault may have changed it meanwhile)
+    let lib = s.library.lock().expect("library poisoned");
+    let still =
+        |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == u.access_token);
+    let raw = serde_json::to_string(&fresh).expect("session serializes");
+    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+        // Use what is there now, if anything
+        return Ok(lib
+            .get_setting(USER_KEY)?
+            .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+            .map(|c| c.access_token));
+    }
     Ok(Some(fresh.access_token))
 }
 
@@ -1198,7 +1214,15 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             }
         }
     }
-    store_user(s, Some(&session))?;
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(
+            USER_KEY,
+            &serde_json::to_string(&session).expect("session serializes"),
+        )?;
+        crate::vault_cache::new_sign_in(&lib, "tidal");
+    }
     tracing::info!(user = ?session.user_id, "TIDAL sign-in stored");
     Ok(())
 }
@@ -1464,7 +1488,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
 /// kept like the node's own (`tidal.unofficial`, sealed in backups), renewed by the node where
 /// the refresh token came from the client this build carries.
 pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Session) {
-    crate::tidal_unofficial::update(s, |st| {
+    crate::tidal_unofficial::update_signed_in(s, "tidal-full", |st| {
         st.session = Some(session);
         st.login = None;
         st.enabled = true;

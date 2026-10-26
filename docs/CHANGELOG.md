@@ -10,8 +10,112 @@ Newest first. Dates are when the change landed on `main`.
   - `docs/APP-DATA.md` lists each path with who writes it, its format and its version, and why tags sit in the app's public namespace (ADR 0014).
   - Service names are defined in spec terms (`library`: the curator's own files).
   - The old playlist spec is archived. Homeserver paths are unchanged.
+- **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
+  - After every sign-in, at startup and every 15 minutes, the node's sign-ins for TIDAL, TIDAL full tracks, Spotify, Qobuz, Bandcamp, Last.fm, ListenBrainz and Jamendo are kept in step with the person's vault, one pass at a time. These are the person's own sign-ins only, not the node's apps or keys, which the admin sets once (ADR 0016).
+  - The two sides are compared by content. A sign-in only on the node moves in once; one only in the vault fills the node. After that, whichever side changed since the last sync wins.
+  - Signing out of a source on the node removes it from the vault. "Sign out everywhere" moves each node's copy aside (`vault.signed_out.*`, never in a backup).
+  - Each source marks its interactive sign-ins, so a new sign-in wins over a refresh of the old one, and a refresh never brings back what was signed out.
+  - Two copies for different accounts meeting for the first time (two nodes that each had their own) are reported as a conflict, and both stay until `POST /v1/vault/sync {service, take}` settles it. Copies of one account are one sign-in. A sign-in made with another app than the node's isn't taken, and a phone's copy isn't overwritten by a refresh.
+  - Every write or removal is checked again under the blob's lock, so a pass on another node meanwhile isn't undone. A sign-in lost to a change of the node's app isn't a sign-out.
+  - Sign out everywhere is never undone: the node that ran it moves every copy aside at once, a sign-in made a moment before included, and other nodes move aside any copy older than it, also in a conflict. A phone that rewrites a sign-in and keeps the node's member is seen as the phone's. A Last.fm session taken from the vault starts without the old one's error. A sign-in made after a sign-out everywhere on a node in conflict counts as new, and a pass that raced the sign-out can't write into the vault after it (the marker is checked under the lock). Sources store and mark a new sign-in under one library guard, so a slow homeserver never holds up a sign-in.
+  - The sync records belong to the machine and stay out of backups, so a node restored from a backup takes the vault's copies. TIDAL's sign-in is no longer mirrored in plain text to `/priv/pubky.music/settings.json` (the next pass rewrites the file), and an older file's copy isn't restored.
+  - Only the sign-in itself travels: the mode switch, health and download format stay on each node. Each blob keeps what other clients put in it.
+  - Media servers (usually a server in that house), drives, gPodder (per-node cursors) and SoundCloud (its token sits in the admin's client setting) stay on the node for now. So do librespot's, Soloist's and yt-dlp's machine state.
+  - `POST /v1/vault/sync` runs it now.
+  - Tested with two nodes of one person on a real homeserver: migrate, take, push and pull, a local sign-out, a first-contact conflict, and sign out everywhere. The rules are unit-tested one by one.
+- **Sign-ins are no longer copied to the settings backup** (STEWARD-SOCIAL-V1-MUSIC.md A0): `/priv/pubky.music/settings.json` is plain JSON the homeserver's operator can read, and it held the TIDAL session (access and refresh tokens). The node now leaves out every sign-in the encrypted backup seals, the node's own secrets and tokens, and any key named like a session or credential; a restore ignores them in an older copy. The file is replaced on each sync, so the next sync removes what an older node wrote.
+- **The API says when the homeserver is full** (the owner's upload request; the screens are mn-app's): a homeserver's 507 becomes "your homeserver is full: free some space there, or ask whoever runs it for a bigger quota" on the upload (`full: true`), in a failed save, and as a 507 for a single copy; folder copies stop at the first such file instead of sending the rest only to be refused. `GET /v1/storage` keeps when it happened (`full_at`, for that account) until an upload goes through or files are deleted. On another homeserver, whose quota nobody can read, it reports the music files that homeserver lists (`used_from: your music files there`); the bundled one still reports the exact quota and use.
+- **Service apps in one list** (ADR 0016 step 2, the admin side): `GET /v1/node/apps` names every app the node uses for everyone (Spotify, TIDAL, Qobuz, SoundCloud, YouTube, Last.fm, Jamendo, AcoustID, the drives, the artist-image services), whether each is set and from where, where to get one, and the route that sets it; never a secret. Settings › This node can show them on one screen.
+- **Music on the phone or laptop, without the node** (STEWARD-DOWNLOADS.md, the apps' part; new crate `pm-offline`):
+  - **Sync:** while the node is reachable, the app sends what was played and hearted offline, tells the node what it keeps and has (`/v1/devices/{id}/downloads`), downloads what the node still wants, and drops what nothing keeps any more. Downloads resume after a dropped connection, and a song is kept only once its file is whole. A song whose file was cleared is downloaded again. The node's own answers for those songs, playlists and favourites are kept, with covers and the web UI.
+  - **One node's music stays with that node:** each node gets its own folder on the device. A sync with another node (a friend's, or a reinstall) sends nothing from it.
+  - **Offline:** when the node is out of reach, the app serves the web UI from the device. It shows Downloads (albums, playlists, favourites, all songs), plays them in the app, and queues plays and hearts. Everything that needs the node is hidden. The local server answers only the app itself. The app goes back to the node as soon as it answers.
+  - **The desktop and Android app:** it syncs every 15 minutes while connected, always with the node's current address and token, and opens Downloads when the node can't be reached and music is kept.
+  - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once, also from a device whose clock runs up to an hour fast. `PUT` and `DELETE /v1/favourites` take `at`, the time of an offline change: a heart cleared offline stays if it was set again after the clear.
+  - What to keep is chosen from the Downloads screen and the Download buttons in the next PR. Until then, `cargo run -p pm-offline --example offline` keeps albums by hand.
+
+- **Colour from where it plays** (STEWARD-UX-RESPONSIVE.md §6):
+  - While a song streams from a service, the player bar and Now playing take its accent: the play button, the scrubber and the quality label.
+    - It covers TIDAL, Qobuz, Spotify, Deezer, YouTube, SoundCloud, Bandcamp, Plex, Jellyfin, Jamendo, Audius, the Internet Archive and Subsonic.
+    - Your own files keep ours.
+    - Each accent is checked in both themes: at least 4.5:1 as text on the page, and for the play button's ink on it.
+    - Lists keep the app's theme.
+  - Now playing's background takes a soft gradient from the cover.
+  - Settings › Appearance › Colour has both switches (on by default), kept on this device until settings live on your homeserver.
+
+- **Lists for thumbs** (build step 3 of docs/ux/responsive.md):
+  - **Song rows on touch screens:** swipe right to play next, left to add to a playlist (the owner's choice). A long press opens the row's menu, now on iPhones too. The swipes run the row's own menu items, so every kind of song row behaves the same.
+  - **Section chips:** on phones and tablets they stay at the top while a list scrolls under them.
+  - **Dense lists:** Settings › Appearance › Layout has a Dense lists switch for tablets and desktops (shorter rows, smaller covers), kept on this device.
+
+- **Now playing on one screen** (build step 2 of docs/ux/responsive.md):
+  - The cover, the title with the heart, the quality label, the scrubber and the transport fit a phone screen with nothing below the fold.
+  - Queue, Lyrics, Details, Sources and Tags are sheets.
+    - Phones: a row under the transport opens a sheet over the player, with a strip that keeps play/pause in reach. Drag the sheet down to close it.
+    - Tablets and desktops: the sheet is a panel beside the player (Queue by default).
+  - **Queue sheet:** tap a song to play it now. Reordering and clearing stay on the Queue page, a tap away.
+  - **Sources sheet:** where else the song plays, in the same order as the song page.
+  - **Quality label:** opens Details (the signal path).
+  - **Top bar:** the zone is a chip that opens the zone picker. Dashboard, the sleep timer, DSP and the song page sit behind ⋯.
+  - The open sheet stays open while songs change.
+
+- **One app shell for phone, tablet and desktop** (STEWARD-UX-RESPONSIVE.md; build step 1 of docs/ux/responsive.md):
+  - Phones (under 600 px) get tabs: Home, Search, Library, Zones. The mini player sits above them as a card with the cover, the title, the zone and play/pause.
+  - Swipe up on the mini player opens Now playing; swipe down from its top closes it.
+  - Tablets (600–1024 px) get a rail with the same four, plus Settings at the foot, and the full player bar. Desktops keep the sidebar.
+  - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
+  - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
+  - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
+- **Settings in four groups, the API side** (STEWARD-SETTINGS-GROUPS.md; mn-app does the screens). `GET/PUT /v1/me/prefs` is "You": the person's Home layout, quality per source and where the accent colour comes from, each answer saying whether it's theirs or the node's default. The owner's are saved on their homeserver (`/priv/pubky.music/prefs.json`), a listener's on the node. `GET /v1/node` lists the groups (You, This device, This node, This homeserver), where each is saved and the routes behind each. `GET /v1/homeserver/bundled` answers 404 without a bundled homeserver, and its tunnel is also at `/v1/homeserver/bundled/tunnel`.
+- **The node asks Pubky Ring for its private folder by its parts** (`node.json`, `settings.json`, `prefs.json`, `files/`, `vault/`), not as `/priv/pubky.music/` itself. pubky's canonical form drops a capability that a broader one covers, so a signer or homeserver that normalised the set would have lost the vault capability and kept asking for a new sign-in. Sessions approved before still cover every part: nobody is asked again.
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
+- **Faster reconnects after a short outage** (mn-infra's note on #114's review):
+  - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
+  - A held change re-checks every second, so it is never refused while the node is already back.
+  - The next retry time is on `#conn` as `data-retry-at`, for tests.
+
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
+- **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
+
 ## 2026-10-25
 
+- **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.
+  - CI checks the image's encoders and transcodes a real file to each format.
+- **Each device's downloads** (STEWARD-DOWNLOADS.md): `/v1/devices` registers a person's phones and laptops, and `/v1/devices/{id}/downloads` is what each keeps offline (songs, albums, playlists, favourites) and has.
+  - The node answers with what the device still wants: a kept playlist's or album's new songs, new favourites. It also shows each device's storage.
+  - Listeners have their own devices and keep songs and albums. The screens are mn-app's.
+- **Which sources may be kept offline** (STEWARD-DOWNLOADS.md): every source says `downloadable` in `GET /v1/sources`, and the app shows "keep offline" only there.
+  - Yes: the Internet Archive, podcasts, and the person's own Plex, Jellyfin, OpenSubsonic and Audiobookshelf.
+  - No: TIDAL, Qobuz, Deezer, Spotify and YouTube in either mode (their terms allow offline copies only in their own apps), radio, and Bandcamp streams. Not yet: Jamendo, SoundCloud and Audius, which allow it per track.
+  - The library, Bandcamp purchases included, is always downloadable. The policy is one list (`streaming::DOWNLOADABLE`); the owner can change it.
+- **Sign out a device from the vault, or everywhere** (STEWARD-VAULT.md item 5). Owner-only API routes: `GET /v1/vault` (the device list with last-used times and whether each proves itself, plus the sign-ins, never a token), `POST /v1/vault/register`, `POST /v1/vault/devices/{key}/sign-out` and `POST /v1/vault/sign-out-everywhere`.
+  - Signing a device out records it as revoked, in the device list and in the node's own `<data>/vault/revoked.json`, so the node never trusts it again even if the device writes the list back. Its Pubky session stays valid until it is revoked in Pubky Ring, and the answer says so.
+  - Every sign-in the node can read gets a new data key the device doesn't have. The answer lists those the node can't read, for another device to rotate, and those it couldn't rotate now (busy or unreadable), which don't stop the others. Every later write leaves a signed-out device out.
+  - A sign-out names the grant only when no other listed key holds it, so signing out an old key of a device (from any client) keeps its new one. `POST /v1/vault/new-key` gives a signed-out node a new key. Writes still go through when the device list is unreadable (the node's own record applies), and `GET /v1/vault` shows the problem. On homeservers without locks, sign out everywhere takes the lease and a refresh can't bring a deleted sign-in back.
+  - An old key of the node under the same grant signs out only that key, not the node. Sign out everywhere deletes each sign-in under its lock and lists any left. One unreadable sign-in no longer takes `GET /v1/vault` down, and "sign in again" answers 409.
+  - Revoking tokens at the services comes with each source's vault integration, and the answer says so.
+  - The screens are mn-app's.
+- **Vault refreshes don't race** (STEWARD-VAULT.md item 4). `Vault::refresh` takes the homeserver's WebDAV lock on the sign-in (30 s, renewed every 10 s while the service answers) and reads it again. If another client already refreshed it, it uses that; otherwise it refreshes the token it just read and writes it back with `last_refresh`.
+  - Where locks are refused it uses the lease file instead.
+  - A refused refresh is never written over the vault.
+  - New tokens are never dropped: a failed write is tried again, taking the lock again if it lapsed, and otherwise handed back to the caller. A write made meanwhile that changes no tokens (a new device) is kept. The lease is renewed like the lock, and the service gets at most 60 s.
+  - Tested on a real homeserver against a fake service that rotates refresh tokens: two clients refresh at once, under the lock and with the lease file, and the service is asked once. A 33-second refresh keeps its lock and its lease (another client at 31 s still waits). A refresh that can't be saved hands its tokens back.
+- **Vault devices prove themselves** (STEWARD-VAULT.md item 3). Only a grant that names the vault itself (`/priv/pubky.music/vault/:rw`) counts: an app approved for all storage is not trusted with the sign-ins. The node asks Ring for that capability, and an older sign-in is asked to sign in again. Each client registers in `/priv/pubky.music/vault/index.json` with the pubky SDK's custom grant proof: Ring's grant, plus a proof over its vault key signed with the grant's client key. Apps never hold the identity secret.
+  - Only entries the SDK's verifier accepts get keys: the owner's grant, covering the vault, for that key, and not signed out.
+  - A new device is added to existing sign-ins by one that can read them (same epoch). A signed-out device can't re-register, and the next write rotates past it.
+  - Each client remembers every sign-out it has seen in a local file, because the device list is writable by the devices it lists. A signed-out device that writes the list back without its record stays signed out, and the next registration writes the record back. The node's own sign-outs are never dropped from that file, records from the list are bounded and checked, and records about the node itself aren't kept, so a flooded or hostile list can't make it trust a signed-out device or grow the list past its limit. Who gets a key is read under each blob's lock.
+  - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
+  - Vault files are written under the homeserver's WebDAV lock.
+  - Tested on a real homeserver with forged, borrowed and garbage entries.
+- **Quieter source switching, working services first** (STEWARD-UX-PLAYER-SOURCES.md §1):
+  - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
+  - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
+  - Sources and a playlist song's "Play this song from" menu use the same order.
+- **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
+  - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
+  - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
+  - Rewriting keeps the data key unless a client is dropped; then the key rotates. A sign-in the node can't open is never overwritten.
+  - Tested against a real homeserver 0.16.2 in CI's bundle job: two clients share a sign-in, the homeserver holds only ciphertext, and a dropped client can't read the next write. Nothing in the UI uses it yet.
 - **Downloads for phones and laptops** (STEWARD-DOWNLOADS.md): `GET /v1/library/tracks/{id}/download` serves the original, or a transcode with `?format=aac|mp3|opus&bitrate=`, and lets an interrupted download resume (ranges, `If-Range`, `ETag`).
   - The original streams from disk. Files on a share or drive, and transcodes, are made once into a capped cache.
   - Listeners may download what they may play. The homeserver's files come through the node.
