@@ -23,6 +23,10 @@ Newest first. Dates are when the change landed on `main`.
   - Untrusted entries can't fill the device list: a full list drops them to make room, and a list with more than 64 entries is still read.
   - Vault files are written under the homeserver's WebDAV lock.
   - Tested on a real homeserver with forged, borrowed and garbage entries.
+- **Quieter source switching, working services first** (STEWARD-UX-PLAYER-SOURCES.md §1):
+  - On song, album and artist pages the source row is now one small line under the title, not a row of pills: "From Your library · also Jamendo, TIDAL, Deezer", then "2 more".
+  - The order: the page's own source first; then services that are switched on and working, in the owner's play order; then the rest behind "more". Services switched off don't appear.
+  - Sources and a playlist song's "Play this song from" menu use the same order.
 - **The node reads and writes the sources vault** (STEWARD-VAULT.md item 2, `pm_pubky::vault`).
   - The node gets its own X25519 vault key: a 0600 file, made once, equal to the Noise static key pubky-noise derives from the same secret.
   - `Vault` reads and writes a person's sign-ins over their session, encrypted to the node and to the clients the caller names.
