@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Lists for thumbs** (build step 3 of docs/ux/responsive.md):
+  - **Song rows on touch screens:** swipe right to play next, left to add to a playlist (the owner's choice). A long press opens the row's menu, now on iPhones too. The swipes run the row's own menu items, so every kind of song row behaves the same.
+  - **Section chips:** on phones and tablets they stay at the top while a list scrolls under them.
+  - **Dense lists:** Settings › Appearance › Layout has a Dense lists switch for tablets and desktops (shorter rows, smaller covers), kept on this device.
+
 - **Now playing on one screen** (build step 2 of docs/ux/responsive.md):
   - The cover, the title with the heart, the quality label, the scrubber and the transport fit a phone screen with nothing below the fold.
   - Queue, Lyrics, Details, Sources and Tags are sheets.
