@@ -4047,7 +4047,7 @@
     const urgent = link.waiters.length > 0 || (link.downSince && Date.now() - link.downSince < 20000);
     const d = Math.min(urgent ? 1500 : 30000, 500 * 2 ** Math.min(link.attempt, 10));
     const wait = Math.round(d / 2 + Math.random() * d / 2);
-    link.attempt = urgent ? Math.min(link.attempt + 1, 2) : link.attempt + 1; // after the fast phase: 1.5 → 3 → 6 … 30 s
+    link.attempt = urgent ? Math.min(link.attempt + 1, 2) : link.attempt + 1; // after the fast phase: 2 → 4 → 8 → 16 → 30 s
     link.retryAt = Date.now() + wait;
     const conn = $('#conn'); if (conn) conn.dataset.retryAt = String(link.retryAt); // when the next retry is due (for tests)
     link.retry = setTimeout(() => { link.retry = null; clearRetryAt(); reconnect(); }, wait);
@@ -4066,7 +4066,7 @@
     if (!link.loaded) return connect();
     const gen = ++reconnectGen;
     let info = null; try { info = await api('GET', '/info'); } catch { if (gen === reconnectGen && !link.up) goneDown(); return; }
-    if (gen !== reconnectGen || link.up) return;
+    if (link.up) return; // a success from an older attempt still counts
     state.info = info;
     openEvents();
   };
@@ -4167,7 +4167,7 @@
     }
   };
   const openEvents = () => {
-    clearTimeout(link.retry); link.retry = null;
+    clearTimeout(link.retry); link.retry = null; clearRetryAt();
     dropSocket();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/v1/events${tokenQ()}`);
