@@ -25,7 +25,7 @@ pub enum VaultStoreError {
     BadService(String),
     #[error("the sign-in for {0} was made on a device this node can't read for; sign out of it there, or delete it, first")]
     NotOurs(String),
-    #[error("this node was signed out of your streaming sign-ins on another device; its vault key is never trusted again, so it needs a new key before it can be approved in Pubky Ring")]
+    #[error("this node was signed out of your streaming sign-ins on another device; to add it back, approve it again in Pubky Ring and give it a new vault key")]
     Revoked,
     #[error("this sign-in can't prove itself to other devices; sign the node in again with Pubky Ring")]
     NoGrant,
@@ -109,6 +109,40 @@ pub fn load_or_create_client_secret(path: &Path) -> std::io::Result<ClientSecret
         Ok(()) => Ok(secret),
         // Another process made it first: use theirs
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(path),
+        // No hard links here (vfat, exFAT): create it in place, and let a process that loses
+        // the race wait for the winner's whole key
+        Err(_) => create_in_place(path, &secret, read),
+    }
+}
+
+fn create_in_place(
+    path: &Path,
+    secret: &ClientSecret,
+    read: impl Fn(&Path) -> std::io::Result<ClientSecret>,
+) -> std::io::Result<ClientSecret> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    match o.open(path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(&secret.to_bytes())?;
+            f.sync_all()?;
+            Ok(ClientSecret::from_bytes(secret.to_bytes()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            for _ in 0..40 {
+                if std::fs::metadata(path).is_ok_and(|m| m.len() == 32) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            read(path)
+        }
         Err(e) => Err(e),
     }
 }
@@ -137,53 +171,100 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
-/// The most signed-out clients a node remembers locally.
+/// The most signed-out clients a node remembers from device lists (its own sign-outs are kept
+/// apart and never dropped).
 const MAX_LOCAL_REVOKED: usize = 4096;
 
-/// The signed-out clients this node has seen, from its own file (none when there is no file).
-fn read_local_revoked(path: &Path) -> std::io::Result<Vec<Revoked>> {
+/// A node's own record of signed-out clients (`<data>/vault/revoked.json`).
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct LocalRevoked {
+    /// Sign-outs this node made: never dropped.
+    #[serde(default)]
+    made: Vec<Revoked>,
+    /// Sign-outs it saw in device lists, up to [`MAX_LOCAL_REVOKED`]: a flood of made-up ones
+    /// only fills what is left.
+    #[serde(default)]
+    seen: Vec<Revoked>,
+}
+
+impl LocalRevoked {
+    fn all(&self) -> impl Iterator<Item = &Revoked> {
+        self.made.iter().chain(&self.seen)
+    }
+}
+
+/// One read-modify-write of the file at a time in this process.
+fn revoked_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn read_local_revoked(path: &Path) -> std::io::Result<LocalRevoked> {
     match std::fs::read(path) {
-        Ok(b) => serde_json::from_slice(&b).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(b) => {
+            let bad = |e: serde_json::Error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}: {e}", path.display()),
+                )
+            };
+            // The first form of the file: a plain list of seen records
+            if b.trim_ascii_start().starts_with(b"[") {
+                return Ok(LocalRevoked {
+                    made: Vec::new(),
+                    seen: serde_json::from_slice(&b).map_err(bad)?,
+                });
+            }
+            serde_json::from_slice(&b).map_err(bad)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LocalRevoked::default()),
         Err(e) => Err(e),
     }
 }
 
-/// Add `revoked` to the file of signed-out clients at `path`, and return everything in either.
-/// The file only grows (up to 4096 records).
-pub fn remember_revoked(path: &Path, revoked: &[Revoked]) -> std::io::Result<Vec<Revoked>> {
-    let mut local = Index {
-        revoked: read_local_revoked(path)?,
-        ..Index::default()
-    };
-    let room = MAX_LOCAL_REVOKED.saturating_sub(local.revoked.len());
-    // The oldest records matter most: a flood of made-up ones only fills what is left
-    let mut new: Vec<&Revoked> = Vec::new();
+/// Add the well-formed records of `revoked` to the seen records in the file at `path`, except
+/// those naming this client (`me`, `my_grant`: a list that signs this node out is followed while
+/// it says so, never remembered). Returns every record the file holds.
+pub fn remember_revoked(
+    path: &Path,
+    revoked: &[Revoked],
+    me: &ClientKey,
+    my_grant: Option<&str>,
+) -> std::io::Result<Vec<Revoked>> {
+    let _l = revoked_file_lock();
+    let mut local = read_local_revoked(path)?;
+    let mut added = false;
     for r in revoked {
-        if new.len() < room
-            && !local
-                .revoked
-                .iter()
-                .chain(new.iter().copied())
-                .any(|x| x.same_client(r))
-        {
-            new.push(r);
+        if local.seen.len() >= MAX_LOCAL_REVOKED {
+            break;
+        }
+        if r.is_well_formed() && !r.names(me, my_grant) && !local.all().any(|x| x.same_client(r)) {
+            local.seen.push(r.clone());
+            added = true;
         }
     }
-    if local.add_revoked(new) > 0 {
-        write_local_revoked(path, &local.revoked)?;
+    if added {
+        write_local_revoked(path, &local)?;
     }
-    local.add_revoked(revoked);
-    Ok(local.revoked)
+    Ok(local.all().cloned().collect())
+}
+
+/// Record a sign-out this node made, for good. An error means it wasn't recorded.
+pub fn remember_made(path: &Path, r: &Revoked) -> std::io::Result<()> {
+    let _l = revoked_file_lock();
+    let mut local = read_local_revoked(path)?;
+    if local.made.iter().any(|x| x.same_client(r)) {
+        return Ok(());
+    }
+    if local.made.len() >= MAX_LOCAL_REVOKED {
+        return Err(std::io::Error::other("too many sign-outs recorded on this node"));
+    }
+    local.made.push(r.clone());
+    write_local_revoked(path, &local)
 }
 
 /// Replace the node's file of signed-out clients (written whole, then renamed into place).
-fn write_local_revoked(path: &Path, list: &[Revoked]) -> std::io::Result<()> {
+fn write_local_revoked(path: &Path, list: &LocalRevoked) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -191,6 +272,36 @@ fn write_local_revoked(path: &Path, list: &[Revoked]) -> std::io::Result<()> {
     let tmp = tmp_beside(path);
     write_private(&tmp, &body)?;
     std::fs::rename(&tmp, path)
+}
+
+/// `index.json` as bytes within [`spec::MAX_INDEX_BYTES`]: when too large, signed-out records
+/// that name no listed entry go first (they change nobody's trust).
+fn index_body(ix: &mut Index) -> Result<Vec<u8>> {
+    let enc =
+        |ix: &Index| serde_json::to_vec(ix).map_err(|_| VaultStoreError::from(VaultError::Format("index")));
+    let mut body = enc(ix)?;
+    if body.len() <= spec::MAX_INDEX_BYTES {
+        return Ok(body);
+    }
+    let named: Vec<(ClientKey, Option<String>)> = ix
+        .clients
+        .iter()
+        .map(|e| {
+            (
+                e.client_key,
+                pubky::GrantClaims::decode(&e.proof.grant)
+                    .ok()
+                    .map(|c| c.jti.to_string()),
+            )
+        })
+        .collect();
+    ix.revoked
+        .retain(|r| r.is_well_formed() && named.iter().any(|(k, g)| r.names(k, g.as_deref())));
+    body = enc(ix)?;
+    if body.len() > spec::MAX_INDEX_BYTES {
+        return Err(VaultError::TooLarge.into());
+    }
+    Ok(body)
 }
 
 /// A blob opened by this node.
@@ -238,12 +349,30 @@ impl<'a> Vault<'a> {
         self
     }
 
-    /// Record `revoked` in this client's own list (with whatever the list had), and return the
-    /// union of the two.
-    pub fn remember(&self, revoked: &[Revoked]) -> Result<Vec<Revoked>> {
+    /// This client's grant id, when its session is a grant.
+    async fn my_grant(&self) -> Option<String> {
+        match self.session.as_grant() {
+            Some(g) => Some(g.grant_id().await.to_string()),
+            None => None,
+        }
+    }
+
+    /// Record the well-formed records of `revoked` in this client's own list (not those naming
+    /// this client), and return every record that list holds.
+    pub async fn remember(&self, revoked: &[Revoked]) -> Result<Vec<Revoked>> {
+        let Some(path) = self.revocations else {
+            return Ok(Vec::new());
+        };
+        let me = self.client_key();
+        let mine = self.my_grant().await;
+        Ok(remember_revoked(path, revoked, &me, mine.as_deref())?)
+    }
+
+    /// Record a sign-out this client made, for good (nothing to do without a local record).
+    pub fn remember_made(&self, r: &Revoked) -> Result<()> {
         match self.revocations {
-            Some(path) => Ok(remember_revoked(path, revoked)?),
-            None => Ok(revoked.to_vec()),
+            Some(path) => Ok(remember_made(path, r)?),
+            None => Ok(()),
         }
     }
 
@@ -538,23 +667,35 @@ impl Vault<'_> {
         }
     }
 
-    /// The device list (an empty one when there is none yet), with every signed-out client this
-    /// node remembers added to `revoked`, so writing it back puts dropped records back.
+    /// The device list (an empty one when there is none yet), with the signed-out clients this
+    /// node remembers that name a listed entry added to `revoked`, so writing it back puts a
+    /// dropped record back.
     pub async fn index(&self) -> Result<Index> {
-        match self.read_bytes(spec::INDEX_PATH, spec::MAX_INDEX_BYTES).await? {
-            Some(b) => {
-                let mut ix = Index::parse(&b)?;
-                let all = self.remember(&ix.revoked)?;
-                ix.add_revoked(&all);
-                Ok(ix)
-            }
-            None => {
-                let mut ix = Index::default();
-                let all = self.remember(&[])?;
-                ix.add_revoked(&all);
-                Ok(ix)
-            }
-        }
+        let mut ix = match self.read_bytes(spec::INDEX_PATH, spec::MAX_INDEX_BYTES).await? {
+            Some(b) => Index::parse(&b)?,
+            None => Index::default(),
+        };
+        let local = self.remember(&ix.revoked).await?;
+        // Only the remembered records that name a listed entry change anyone's trust, so only
+        // those go back into the list (and it stays small)
+        let named: Vec<(ClientKey, Option<String>)> = ix
+            .clients
+            .iter()
+            .map(|e| {
+                (
+                    e.client_key,
+                    pubky::GrantClaims::decode(&e.proof.grant)
+                        .ok()
+                        .map(|c| c.jti.to_string()),
+                )
+            })
+            .collect();
+        let back: Vec<&Revoked> = local
+            .iter()
+            .filter(|r| named.iter().any(|(k, g)| r.names(k, g.as_deref())))
+            .collect();
+        ix.add_revoked(back);
+        Ok(ix)
     }
 
     /// Why an entry isn't trusted (`None` = trusted), with its grant id when the proof verified.
@@ -718,7 +859,7 @@ impl Vault<'_> {
                     })
                 }
             }
-            let body = serde_json::to_vec(&ix).map_err(|_| VaultError::Format("index"))?;
+            let body = index_body(&mut ix)?;
             self.put_locked(&held, spec::INDEX_PATH, body).await
         }
         .await;
@@ -1227,21 +1368,20 @@ mod tests {
         use pubky_music_specs::vault::{ClientKey, Revoked};
         let dir = std::env::temp_dir().join(format!("pm-vault-revoked-{}", rand_suffix()));
         let path = dir.join("vault-revoked.json");
+        let me = ClientKey([9; 32]);
         let r = |n: u8, g: &str| Revoked {
             client_key: Some(ClientKey([n; 32])),
             grant_id: Some(g.into()),
             at: 1,
         };
+        let remember = |list: &[Revoked]| remember_revoked(&path, list, &me, Some("mine")).unwrap();
         // Nothing yet
-        assert!(remember_revoked(&path, &[]).unwrap().is_empty());
+        assert!(remember(&[]).is_empty());
         // The list signs out D: remembered
-        assert_eq!(remember_revoked(&path, &[r(1, "d")]).unwrap(), [r(1, "d")]);
+        assert_eq!(remember(&[r(1, "d")]), [r(1, "d")]);
         // A later list without D (D rewrote it) still gives D back, and adds E
-        assert_eq!(
-            remember_revoked(&path, &[r(2, "e")]).unwrap(),
-            [r(1, "d"), r(2, "e")]
-        );
-        assert_eq!(remember_revoked(&path, &[]).unwrap().len(), 2);
+        assert_eq!(remember(&[r(2, "e")]), [r(1, "d"), r(2, "e")]);
+        assert_eq!(remember(&[]).len(), 2);
         // The file is private
         #[cfg(unix)]
         {
@@ -1249,16 +1389,80 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-        // A flood fills the room left and no more; the old records stay
+        // Records naming nobody, or with a grant id that isn't one, are ignored; so are records
+        // about this node (followed while the list says so, never remembered)
+        let junk = [
+            Revoked {
+                client_key: None,
+                grant_id: None,
+                at: 1,
+            },
+            Revoked {
+                client_key: None,
+                grant_id: Some("x".repeat(200_000)),
+                at: 1,
+            },
+            Revoked {
+                client_key: None,
+                grant_id: Some("not a grant id!".into()),
+                at: 1,
+            },
+            Revoked {
+                client_key: Some(me),
+                grant_id: None,
+                at: 1,
+            },
+            Revoked {
+                client_key: None,
+                grant_id: Some("mine".into()),
+                at: 1,
+            },
+        ];
+        assert_eq!(remember(&junk).len(), 2);
+        // A flood fills only what is left for seen records; a sign-out this node makes is still
+        // recorded, and kept
         let flood: Vec<Revoked> = (0..MAX_LOCAL_REVOKED + 10)
             .map(|i| r(3, &i.to_string()))
             .collect();
-        let all = remember_revoked(&path, &flood).unwrap();
-        assert_eq!(all.len(), MAX_LOCAL_REVOKED + 12, "this read sees them all");
-        let kept = remember_revoked(&path, &[]).unwrap();
-        assert_eq!(kept.len(), MAX_LOCAL_REVOKED);
-        assert_eq!(&kept[..2], [r(1, "d"), r(2, "e")]);
+        assert_eq!(remember(&flood).len(), MAX_LOCAL_REVOKED);
+        remember_made(&path, &r(4, "ours")).unwrap();
+        let all = remember(&flood);
+        assert_eq!(all.len(), MAX_LOCAL_REVOKED + 1);
+        assert_eq!(all[0], r(4, "ours"));
+        assert_eq!(&all[1..3], [r(1, "d"), r(2, "e")]);
+        // The first form of the file (a plain list) still reads
+        std::fs::write(&path, serde_json::to_vec(&[r(1, "d")]).unwrap()).unwrap();
+        assert_eq!(remember(&[]), [r(1, "d")]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_device_list_written_back_stays_within_its_limit() {
+        use pubky_music_specs::vault::{ClientKey, Revoked};
+        // Junk records that name no listed entry: dropped to make it fit
+        let revoked = (0..20_000u32)
+            .map(|i| Revoked {
+                client_key: Some(ClientKey([(i % 250) as u8; 32])),
+                grant_id: Some(format!("g{i}")),
+                at: 1,
+            })
+            .collect();
+        let mut ix = Index {
+            revoked,
+            ..Index::default()
+        };
+        assert!(serde_json::to_vec(&ix).unwrap().len() > spec::MAX_INDEX_BYTES);
+        let body = index_body(&mut ix).unwrap();
+        assert!(body.len() <= spec::MAX_INDEX_BYTES);
+        assert!(ix.revoked.is_empty());
+        // A small list is written as it is
+        ix.revoked.push(Revoked {
+            client_key: Some(ClientKey([1; 32])),
+            grant_id: None,
+            at: 1,
+        });
+        index_body(&mut ix).unwrap();
+        assert_eq!(ix.revoked.len(), 1);
     }
 
     fn rand_suffix() -> String {

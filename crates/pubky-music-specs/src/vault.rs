@@ -308,6 +308,27 @@ pub struct Revoked {
 }
 
 impl Revoked {
+    /// It names a client: a key, or a grant id of the SDK's form (base64url, at most 64
+    /// characters). Records that name nobody are ignored.
+    pub fn is_well_formed(&self) -> bool {
+        let grant_ok = |g: &str| {
+            !g.is_empty()
+                && g.len() <= 64
+                && g.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        match (&self.client_key, &self.grant_id) {
+            (_, Some(g)) if !grant_ok(g) => false,
+            (Some(_), _) | (None, Some(_)) => true,
+            (None, None) => false,
+        }
+    }
+
+    /// It names `key`, or the grant `grant_id`.
+    pub fn names(&self, key: &ClientKey, grant_id: Option<&str>) -> bool {
+        self.client_key.as_ref() == Some(key) || (grant_id.is_some() && self.grant_id.as_deref() == grant_id)
+    }
+
     /// The same signed-out client (same key and grant id), whenever it was recorded.
     pub fn same_client(&self, other: &Revoked) -> bool {
         self.client_key == other.client_key && self.grant_id == other.grant_id
