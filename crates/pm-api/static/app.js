@@ -287,6 +287,7 @@
   const layoutPref = () => { try { return localStorage.getItem('pm.layout') || 'auto'; } catch { return 'auto'; } };
   const shellFor = (w, pref) => (pref === 'compact' || w < 600 ? 'phone' : pref === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop');
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
+  const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
   // A button that needs text in a field: disabled (with the reason) until there is some.
   const needsText = (input, btn) => { if (!input || !btn) return; const sync = () => { const empty = !input.value.trim(); btn.disabled = empty; btn.title = empty ? `Type in “${input.placeholder || 'the field'}” first` : ''; }; input.addEventListener('input', sync); sync(); };
@@ -807,6 +808,7 @@
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
     document.documentElement.dataset.shell = now;
+    if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
   };
@@ -1711,11 +1713,55 @@
   const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
   // Long-press on a touch screen (and right-click) on a song row opens its ⋯ menu
   document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); more.click(); });
+  // Song rows on touch screens (docs/ux/responsive.md, build step 3): swipe right to play next, left to
+  // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
+  // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
+  {
+    let sw = null; let lastCtx = 0;
+    document.addEventListener('contextmenu', () => { lastCtx = Date.now(); }, true);
+    const ROWS = '.srow, .track, [data-srow]';
+    const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
+    const reset = (row) => { row.style.transform = ''; row.classList.remove('swiping', 'swipe-ready'); delete row.dataset.swipeLabel; };
+    document.addEventListener('touchstart', (e) => {
+      const row = e.target.closest && e.target.closest(ROWS);
+      if (!row || e.touches.length !== 1 || e.target.closest('input, textarea, [data-qgrip], [draggable="true"]') || row.closest('.selecting') || !moreOf(row)) { sw = null; return; }
+      const t = e.touches[0];
+      sw = { row, x: t.clientX, y: t.clientY, dx: 0, on: false, moved: false };
+      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; moreOf(row).click(); } }, 600);
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!sw) return; const t = e.touches[0]; const dx = t.clientX - sw.x; const dy = t.clientY - sw.y;
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) sw.moved = true;
+      if (!sw.on && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.5) { sw.on = true; sw.row.classList.add('swiping'); }
+      if (!sw.on) return;
+      sw.dx = Math.max(-140, Math.min(140, dx));
+      sw.row.style.transform = `translateX(${sw.dx}px)`;
+      sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to playlist';
+      sw.row.classList.toggle('swipe-ready', Math.abs(sw.dx) >= 80);
+    }, { passive: true });
+    const end = () => {
+      if (!sw) return; clearTimeout(sw.timer); const s2 = sw; sw = null;
+      if (!s2.on) return;
+      reset(s2.row);
+      if (Math.abs(s2.dx) >= 80) { menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now() }; moreOf(s2.row).click(); }
+    };
+    document.addEventListener('touchend', end, { passive: true });
+    document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
+  }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) return; }
+    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+    if (menuPick) {
+      const want = menuPick; menuPick = null;
+      if (Date.now() - want.at < 2000) {
+        const it = items.find((x) => !x.title && !x.disabled && String(x.label || '').replace(/…$/, '') === want.label);
+        if (it) Promise.resolve(it.run()); else toast(`${want.label} isn't available for this row`);
+        return;
+      }
+    }
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
     $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(items[Number(b.dataset.mi)].run()).finally(popTransient); });
@@ -2231,12 +2277,17 @@
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
-  const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`));
-  const bindLayoutPick = () => $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
-    try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
-    $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
-    applyShell();
-  });
+  const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
+    + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<label class="switch"><input type="checkbox" id="densepick" ${densePref() ? 'checked' : ''}><span class="sr-only">Dense lists</span></label>`));
+  const bindLayoutPick = () => {
+    $$('[data-layout-pick]', main).forEach((b) => b.onclick = () => {
+      try { if (b.dataset.layoutPick === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', b.dataset.layoutPick); } catch { /* no storage */ }
+      $$('[data-layout-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); });
+      applyShell();
+    });
+    const dp = $('#densepick', main);
+    if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
+  };
   // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
   const LIB_TOP = [['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {

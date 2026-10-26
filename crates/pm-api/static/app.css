@@ -1213,3 +1213,20 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .np2.compact .np-sheet-head { flex-wrap: wrap; }
 .np2.compact .np-sheet-head .grab { display: block; flex: 0 0 100%; height: 4px; margin-bottom: 6px; background: linear-gradient(var(--line-strong), var(--line-strong)) center / 40px 4px no-repeat; }
 .np2.compact .np-sheet-close { display: inline-flex; width: 44px; height: 44px; }
+
+/* Lists (docs/ux/responsive.md, build step 3) */
+/* Song rows follow a finger sideways (right: play next, left: add to a playlist); the label shows in
+   the gap the row leaves */
+.track, .srow, [data-srow] { touch-action: pan-y; }
+.swiping { position: relative; transition: none; z-index: 1; }
+.swiping::before { content: attr(data-swipe-label); position: absolute; top: 50%; transform: translateY(-50%); font-size: 11px; letter-spacing: -0.01em; font-weight: 600; color: var(--muted); white-space: nowrap; pointer-events: none; }
+.swiping[data-swipe-label="Play next"]::before { right: calc(100% + 8px); }
+.swiping[data-swipe-label="Add to playlist"]::before { left: calc(100% + 8px); }
+.swipe-ready::before { color: var(--accent-strong); }
+/* Phones and tablets: the section chips stay at the top while a list scrolls under them */
+html:not([data-shell="desktop"]) .main > .libnav { position: sticky; top: -24px; z-index: 6; margin-top: -8px; padding: 8px 0; background: var(--bg); }
+@media (max-width: 720px) { html:not([data-shell="desktop"]) .main > .libnav { top: -18px; } }
+/* Dense lists on tablets and desktops: shorter rows, smaller covers */
+html[data-dense]:not([data-shell="phone"]) .track { height: 42px; }
+html[data-dense]:not([data-shell="phone"]) .list-row { padding-top: 8px; padding-bottom: 8px; }
+html[data-dense]:not([data-shell="phone"]) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
