@@ -45,7 +45,14 @@ RUN set -eu; \
     fi
 
 FROM debian:bookworm-slim
+# ffmpeg makes the smaller copies phones download (/v1/library/tracks/{id}/download?format=…):
+# Debian's 5.1 series (AAC, MP3 through LAME, Opus), pinned to it; security fixes within 5.1 still
+# arrive. Bump it here when the base image moves on.
+ARG FFMPEG_VERSION=7:5.1.*
 RUN apt-get update && apt-get install -y --no-install-recommends libasound2 ca-certificates alsa-utils \
+        "ffmpeg=${FFMPEG_VERSION}" \
+    && ffmpeg -hide_banner -encoders | grep -qE ' aac ' && ffmpeg -hide_banner -encoders | grep -q libmp3lame \
+    && ffmpeg -hide_banner -encoders | grep -q libopus \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 1000 -g audio -d /data pm
 COPY --from=build /out/pm-node /usr/local/bin/pm-node
