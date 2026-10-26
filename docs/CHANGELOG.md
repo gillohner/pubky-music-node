@@ -11,6 +11,7 @@ Newest first. Dates are when the change landed on `main`.
   - On phones and tablets the library's sections (Albums, Artists, Songs, Playlists, Favourites, Genres, Radio, Sources) are a row of chips at the top of each library page. The Library tab returns to the last one you used.
   - On phones the button at the top right opens Settings. The services warning moves from the sidebar to the top bar.
   - Settings › Appearance › Layout: Automatic (by width), Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop). Kept on this device until settings can live on your homeserver.
+- **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
 - **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
 
 ## 2026-10-25
