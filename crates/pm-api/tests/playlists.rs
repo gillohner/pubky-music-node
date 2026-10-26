@@ -353,6 +353,33 @@ async fn playlist_lifecycle() {
     )
     .await;
     assert_eq!(f["favourite"], true);
+    // Hearted at T0 (2000), cleared at T1.5 and hearted again at T2 (both now): a clear made
+    // offline at T1 (3000) doesn't undo the T2 heart
+    let (_, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(f["favourite"], false);
+    let (_, f) = call(
+        &app,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": tagged_id})),
+    )
+    .await;
+    assert_eq!(f["favourite"], true);
+    let (st, f) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/favourites?track_id={tagged_id}&at=3000"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["favourite"], true, "the heart set again after the clear stays");
     if let Some(u) = untagged {
         let (st, e) = call(
             &app,

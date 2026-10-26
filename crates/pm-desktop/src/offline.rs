@@ -3,6 +3,7 @@
 //! own folder (`offline/<node id>/`), so one node's plays, hearts and keeps never reach another.
 
 use crate::settings::Settings;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,8 +22,10 @@ struct Server {
 pub struct Offline {
     /// `offline/` in the app's data folder; each node's store is in a folder under it.
     base: PathBuf,
-    /// The store opened last (most often the only one), by node id.
-    open: Mutex<Option<(String, Arc<pm_offline::Store>)>>,
+    /// Every store opened in this run, by node id: the sync loop and the local server share
+    /// them, so a node's folder is never open twice (each `Store` holds its own queue lock and
+    /// index).
+    open: Mutex<HashMap<String, Arc<pm_offline::Store>>>,
     server: tokio::sync::Mutex<Option<Server>>,
     /// `http://127.0.0.1:<port>` while the local server runs; the navigation guard reads it.
     origin: Arc<Mutex<Option<String>>>,
@@ -42,7 +45,7 @@ impl Offline {
         }
         Some(Arc::new(Self {
             base,
-            open: Mutex::new(None),
+            open: Mutex::default(),
             server: Default::default(),
             origin,
             generation: AtomicU64::new(0),
@@ -57,15 +60,13 @@ impl Offline {
             return None;
         }
         let mut open = self.open.lock().ok()?;
-        if let Some((id, s)) = open.as_ref() {
-            if id == node_id {
-                return Some(s.clone());
-            }
+        if let Some(s) = open.get(node_id) {
+            return Some(s.clone());
         }
         match pm_offline::Store::open(pm_offline::node_dir(&self.base, node_id)) {
             Ok(s) => {
                 let s = Arc::new(s);
-                *open = Some((node_id.to_string(), s.clone()));
+                open.insert(node_id.to_string(), s.clone());
                 Some(s)
             }
             Err(e) => {

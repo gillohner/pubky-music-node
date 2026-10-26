@@ -820,12 +820,14 @@ impl Library {
 
     // ----- favourites -------------------------------------------------------
 
-    /// Add (or revive) a favourite; returns the row. Idempotent.
+    /// Add (or revive) a favourite; returns the row. Idempotent: a live favourite keeps its time,
+    /// a revived one (cleared, not yet synced) takes the new time.
     pub fn add_favourite(&self, id: &str, uri: &str, created_at: i64) -> Result<FavouriteRow> {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO favourites(id, uri, created_at, synced_at, deleted) VALUES (?1, ?2, ?3, NULL, 0)
              ON CONFLICT(uri) DO UPDATE SET deleted = 0,
+                 created_at = CASE WHEN favourites.deleted = 1 THEN excluded.created_at ELSE favourites.created_at END,
                  synced_at = CASE WHEN favourites.deleted = 1 THEN NULL ELSE favourites.synced_at END",
             params![id, uri, created_at],
         )?;
@@ -3034,6 +3036,11 @@ mod play_history_tests {
         // Re-adding after a purge starts fresh.
         let fresh = lib.add_favourite("id1", uri, 9_000).unwrap();
         assert_eq!(fresh.created_at, 9_000);
+        // Hearted again while the clear waits to be pushed: the new time
+        assert!(lib.remove_favourite(uri).unwrap());
+        let revived = lib.add_favourite("id1", uri, 12_000).unwrap();
+        assert_eq!(revived.created_at, 12_000);
+        assert!(!revived.deleted);
         // Album / artist lookups by MBID.
         let album = track.album.as_ref().unwrap();
         let found = lib

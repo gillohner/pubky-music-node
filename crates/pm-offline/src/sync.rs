@@ -21,6 +21,10 @@ pub enum SyncError {
     Io(#[from] std::io::Error),
     #[error("unexpected answer from the node: {0}")]
     Format(String),
+    /// A song's download waited too long (a slow transcode, a stalled answer). Only that song
+    /// fails; the partial file is kept for the next sync.
+    #[error("the download timed out: {0}")]
+    TimedOut(String),
     /// The store belongs to another node: nothing was sent or changed.
     #[error("this device's downloads are from another node ({kept}), not this one ({node})")]
     OtherNode { kept: String, node: String },
@@ -38,8 +42,12 @@ type Result<T> = std::result::Result<T, SyncError>;
 /// How long a small JSON request, a cover or a web UI file may take.
 const JSON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the node may stay silent in the middle of an answer (a dropped Wi-Fi without a
-/// reset): the sync then stops, keeps what it has, and the next one goes on from there.
+/// reset): the sync then stops, keeps what it has, and the next one goes on from there. For a
+/// download, a stall this long fails only that song.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a download may wait for the node's first answer: the node makes a smaller copy
+/// before it answers, which takes minutes for a long song on a small machine.
+const DOWNLOAD_WAIT: Duration = Duration::from_secs(15 * 60);
 
 /// The web UI's files, kept for offline use: the node's path and the file name in `ui/`.
 pub(crate) const UI_FILES: [(&str, &str); 5] = [
@@ -55,6 +63,11 @@ pub struct Node {
     base: String,
     token: String,
     http: reqwest::Client,
+    /// For song files: no read timeout from reqwest (it would also cut the wait for the
+    /// answer); `download` bounds the wait and each read itself.
+    files: reqwest::Client,
+    download_wait: Duration,
+    read_timeout: Duration,
 }
 
 impl Node {
@@ -64,11 +77,25 @@ impl Node {
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(READ_TIMEOUT)
             .build()?;
+        let files = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
             token: token.to_string(),
             http,
+            files,
+            download_wait: DOWNLOAD_WAIT,
+            read_timeout: READ_TIMEOUT,
         })
+    }
+
+    /// Change how long a download waits for the node's answer and for each part of the file
+    /// (15 minutes and 60 seconds by default).
+    pub fn with_download_timeouts(mut self, wait: Duration, read: Duration) -> Self {
+        self.download_wait = wait;
+        self.read_timeout = read;
+        self
     }
 
     fn req(&self, m: Method, path: &str) -> reqwest::RequestBuilder {
@@ -304,13 +331,18 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
     let etag_file = files.join(format!("{name}.etag"));
     let have = tokio::fs::metadata(&part).await.map_or(0, |m| m.len());
     let etag = tokio::fs::read_to_string(&etag_file).await.ok();
-    let mut rb = node.req(Method::GET, &format!("/v1/library/tracks/{id}/download{query}"));
+    let mut rb = node
+        .files
+        .get(format!("{}/v1/library/tracks/{id}/download{query}", node.base))
+        .bearer_auth(&node.token);
     if let (true, Some(et)) = (have > 0, etag.as_deref()) {
         rb = rb
             .header(header::RANGE, format!("bytes={have}-"))
             .header(header::IF_RANGE, et.trim());
     }
-    let mut resp = rb.send().await?;
+    let mut resp = tokio::time::timeout(node.download_wait, rb.send())
+        .await
+        .map_err(|_| SyncError::TimedOut(format!("no answer for song {id}")))??;
     // Whether the answer continues the partial file, and the whole file's length if known
     let (append, total) = match resp.status() {
         StatusCode::ACCEPTED => return Ok(Got::Preparing),
@@ -349,7 +381,11 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
         .truncate(!append)
         .open(&part)
         .await?;
-    while let Some(chunk) = resp.chunk().await? {
+    loop {
+        let next = tokio::time::timeout(node.read_timeout, resp.chunk())
+            .await
+            .map_err(|_| SyncError::TimedOut(format!("song {id} stalled")))?;
+        let Some(chunk) = next? else { break };
         f.write_all(&chunk).await?;
     }
     f.flush().await?;

@@ -22,6 +22,8 @@ struct Seen {
     range_shift: usize,
     /// What `/v1/playlists/{id}` answers instead of the playlist.
     playlist_status: Option<u16>,
+    /// A song the node takes long to answer for (a slow transcode).
+    slow: Option<i64>,
 }
 
 type Fake = Arc<Mutex<Seen>>;
@@ -78,7 +80,14 @@ async fn download(State(f): State<Fake>, Path(id): Path<i64>, h: HeaderMap) -> R
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    f.lock().unwrap().ranges.push((id, range.clone()));
+    let slow = {
+        let mut s = f.lock().unwrap();
+        s.ranges.push((id, range.clone()));
+        s.slow == Some(id)
+    };
+    if slow {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
     let body = song(id);
     let etag = format!("\"e{id}\"");
     let if_range_ok = h.get(header::IF_RANGE).and_then(|v| v.to_str().ok()) == Some(etag.as_str());
@@ -563,4 +572,32 @@ async fn the_local_server_answers_only_itself_and_its_files() {
         .await
         .unwrap();
     assert_eq!(posted.status(), 403);
+}
+
+#[tokio::test]
+async fn a_slow_transcode_fails_only_its_song() {
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .set_keep(Keep {
+            tracks: vec![1, 2],
+            ..Default::default()
+        })
+        .unwrap();
+    seen.lock().unwrap().slow = Some(1);
+    let wait = std::time::Duration::from_millis(300);
+    let node = Node::new(&base, "tok")
+        .unwrap()
+        .with_download_timeouts(wait, wait);
+    let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(r.downloaded, [2], "the sync goes on");
+    assert_eq!(r.failed.len(), 1, "{:?}", r.failed);
+    assert_eq!(r.failed[0].0, 1);
+    assert!(r.failed[0].1.contains("timed out"), "{:?}", r.failed);
+    // Once the node is quicker, the song comes
+    seen.lock().unwrap().slow = None;
+    let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert_eq!(r.downloaded, [1]);
 }
