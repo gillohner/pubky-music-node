@@ -459,21 +459,26 @@ jobs:
         run: |
           title="Edge (main @ ${GITHUB_SHA::7})"
           ref="repos/$GITHUB_REPOSITORY/git/refs/tags/edge"
+          create="repos/$GITHUB_REPOSITORY/git/refs"
           if gh release view edge >/dev/null 2>&1; then
-            if ! gh api -X PATCH "$ref" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1; then
-              old=$(gh api "$ref" --jq .object.sha 2>/dev/null || true)
-              if gh api -X DELETE "$ref" >/dev/null 2>&1 \
-                && gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/edge -f sha="$GITHUB_SHA" >/dev/null 2>&1; then
-                echo "the edge tag was moved by deleting and creating it again at ${GITHUB_SHA::7}"
+            # GitHub's words on stderr stay in the log, so a refusal shows its real reason
+            if ! gh api -X PATCH "$ref" -f sha="$GITHUB_SHA" -F force=true >/dev/null; then
+              # The exact ref (git/refs/… would match edge* by prefix)
+              old=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" --jq .object.sha 2>/dev/null || true)
+              # A tag that is already gone needs no deleting: create it either way
+              [ -z "$old" ] || gh api -X DELETE "$ref" >/dev/null || true
+              if gh api -X POST "$create" -f ref=refs/tags/edge -f sha="$GITHUB_SHA" >/dev/null; then
+                echo "the edge tag was made again at ${GITHUB_SHA::7}"
               else
-                if [ -n "$old" ] && ! gh api "$ref" >/dev/null 2>&1; then
-                  gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/edge -f sha="$old" >/dev/null \
+                if [ -n "$old" ] && ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" >/dev/null 2>&1; then
+                  gh api -X POST "$create" -f ref=refs/tags/edge -f sha="$old" >/dev/null \
                     || echo "::warning::the edge tag is gone and could not be put back at ${old::7}"
                 fi
-                echo "::warning::the edge tag could not move to ${GITHUB_SHA::7} (workflow files changed since its commit, and this job's token may not move it there); the files below are still this build's"
+                echo "::warning::the edge tag could not move to ${GITHUB_SHA::7} (see GitHub's answer above); the files below are still this build's"
               fi
             fi
-            gh release edit edge --title "$title" --notes-file notes.md --prerelease --latest=false
+            # A release whose tag was gone for a moment is a draft again: publish it
+            gh release edit edge --title "$title" --notes-file notes.md --prerelease --latest=false --draft=false
           else
             gh release create edge --prerelease --latest=false --target "$GITHUB_SHA" --title "$title" \
               --notes-file notes.md
