@@ -12,6 +12,7 @@ Newest first. Dates are when the change landed on `main`.
   - **API:** `POST /v1/library/history` takes `played_at`, so offline plays keep their time and count once, also from a device whose clock runs up to an hour fast. `PUT` and `DELETE /v1/favourites` take `at`, the time of an offline change: a heart cleared offline stays if it was set again after the clear.
   - What to keep is chosen from the Downloads screen and the Download buttons in the next PR. Until then, `cargo run -p pm-offline --example offline` keeps albums by hand.
 
+- **The edge release moves its tag without a token** (owner's choice): when GitHub refuses to move `edge` across workflow changes, the release job deletes the tag and creates it again at the new commit. If that's refused too, it puts the tag back and only warns, and the files still publish. The `EDGE_TAG_TOKEN` secret is no longer used.
 - **Faster reconnects after a short outage** (mn-infra's note on #114's review):
   - For the first 20 s of an outage, and while a change is held, the web app retries at most every 1.5 s. A restarted node is picked up within about a second, not up to 8 s.
   - A held change re-checks every second, so it is never refused while the node is already back.
