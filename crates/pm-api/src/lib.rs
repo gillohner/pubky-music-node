@@ -34,6 +34,7 @@ pub mod bandcamp;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
+pub mod devices;
 pub mod discover;
 pub mod downloads;
 pub mod drives;
@@ -42,6 +43,7 @@ pub mod favourites;
 pub mod files;
 pub mod first_run;
 pub mod gpodder;
+pub mod groups;
 pub mod health;
 pub mod hls;
 pub mod home;
@@ -65,6 +67,7 @@ pub mod play_from;
 pub mod playlists;
 pub mod plex;
 pub mod podcasts;
+pub mod prefs;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
@@ -189,6 +192,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
         .route("/health", get(health::health))
+        .route("/node", get(groups::index))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
@@ -562,6 +566,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/radio/countries", get(radio_sources::countries))
         .route("/radio/tags", get(radio_sources::tags))
         .route("/homeserver/bundled", get(bundled::status))
+        // Everything about the bundled homeserver lives under it ("This homeserver" in Settings);
+        // `/v1/remote/tunnel` stays as an alias for one release
+        .route(
+            "/homeserver/bundled/tunnel",
+            get(tunnel::status).put(tunnel::setup).delete(tunnel::remove),
+        )
         .route("/homeserver/bundled/owner-signup", post(bundled::owner_signup))
         .route(
             "/remote/tunnel",
@@ -601,9 +611,21 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}", axum::routing::delete(webdav::remove))
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
+        .route("/me/prefs", get(prefs::get).put(prefs::put))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
+        .route("/devices", get(devices::list))
+        .route(
+            "/devices/{id}",
+            axum::routing::put(devices::register).delete(devices::forget),
+        )
+        .route(
+            "/devices/{id}/downloads",
+            get(devices::get_downloads).put(devices::put_downloads).layer(
+                axum::extract::DefaultBodyLimit::max(devices::DOWNLOADS_BODY_LIMIT),
+            ),
+        )
         .route("/vault", get(vault::get))
         .route("/vault/register", post(vault::register))
         .route("/vault/sync", post(vault::sync_now))

@@ -496,6 +496,10 @@ pub(crate) async fn change(
     }
     let out = p.clone();
     store(&s, &r)?;
+    // Music access gone: their phones and laptops go too (devices.rs)
+    if b.music == Some(false) {
+        crate::devices::forget_all_of(&s, &out.key);
+    }
     Ok(Json(out))
 }
 
