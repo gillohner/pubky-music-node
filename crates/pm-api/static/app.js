@@ -924,25 +924,48 @@
   $('#quality').onclick = () => toggleNowPlaying(true);
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
-  const fillNpPubky = async (it) => {
-    if (!$('#nppubky') && !$('#npheart')) return;
-    const box = $('#nppubky') || document.createElement('div');
+  // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
+  // from the known favourites; an answer that comes back after a newer render is dropped.
+  let npGen = 0;
+  const fillNpPubky = async (it, gen = npGen) => {
+    const live = () => gen === npGen;
     const tid = it.track_id ?? (/^track:(\d+)$/.exec(it.uri || '') || [])[1];
     const songPage = npPageId(it.uri);
-    let t = null; if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } }
     const pageUri = songPage && !/^lib-/.test(songPage) ? uriOf('song', songPage) : null;
+    let t = null;
+    let fav = tid != null ? state.favUris.has(`track:${tid}`) : pageUri ? state.favUris.has(pageUri) : false;
+    const ref = () => (tid != null ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null);
+    const drawHeart = () => {
+      const h = $('#npheart', overlay); if (!h || !live()) return;
+      if (!ref()) { h.innerHTML = ''; return; }
+      const word = fav ? 'In favourites' : 'Add to favourites';
+      h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
+      $('#npfav', overlay).onclick = async () => { try { await setFavourite(ref(), !fav); fav = !fav; drawHeart(); } catch (e) { toast(e.message, 'error'); } };
+    };
+    drawHeart();
+    if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } if (!live()) return; if (t) { fav = isFav(t); drawHeart(); } }
+    if (!$('#nppubky', overlay)) return;
     const target = t ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
-    let tags = []; if (target && isOwner() && $('#nppubky')) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
-    if (!$('#nppubky') && !$('#npheart')) return;
-    const fav = t ? isFav(t) : pageUri ? state.favUris.has(pageUri) : false;
-    const heart = $('#npheart'); if (heart) heart.innerHTML = target || t ? `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${fav ? 'In favourites' : 'Add to favourites'}" title="${fav ? 'In favourites' : 'Add to favourites'}">${icon(fav ? 'heart-fill' : 'heart')}</button>` : '';
-    box.innerHTML = `${songPage ? `<div class="np-pubky-row"><button class="btn ghost sm" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : ''}`
-      + (target ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>` : (t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>' : ''));
-    const fb = $('#npfav'); if (fb) fb.onclick = async () => { try { await setFavourite(t ? { track_id: t.id } : target, !fav); fillNpPubky(it); } catch (e) { toast(e.message, 'error'); } };
-    const pb = $('#nppage'); if (pb) pb.onclick = () => { toggleNowPlaying(); setView('item', { kind: 'song', id: songPage }); };
-    $$('[data-np-tag]', box).forEach((b) => b.onclick = () => { toggleNowPlaying(); setView('tag', b.dataset.npTag); });
-    const ta = $('#nptagadd'); if (ta) ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
+    const pageRow = songPage ? `<div class="np-pubky-row"><button class="btn ghost sm" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : '';
+    let tags = [];
+    if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
+    const box = $('#nppubky', overlay); if (!box || !live()) return;
+    box.innerHTML = pageRow + (target
+      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
+      : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
+        : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
+    const pb = $('#nppage', overlay); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
+    $$('[data-np-tag]', box).forEach((x) => x.onclick = () => setView('tag', x.dataset.npTag));
+    const ta = $('#nptagadd', overlay);
+    if (ta) {
+      // A half-typed tag survives re-renders while the song stays the same
+      if (state.npTagDraft && state.npTagDraft.id === it.id) ta.value = state.npTagDraft.value;
+      if (state.npRefocusTag) { state.npRefocusTag = false; ta.focus({ preventScroll: true }); ta.setSelectionRange(ta.value.length, ta.value.length); }
+      ta.oninput = () => { state.npTagDraft = { id: it.id, value: ta.value }; };
+      ta.onkeydown = async (e) => { if (e.key !== 'Enter' || !ta.value.trim()) return; try { await api('PUT', '/tags', { ...target, label: ta.value.trim() }); toast(`Tagged #${ta.value.trim().toLowerCase()}`); state.npTagDraft = null; fillNpPubky(it); } catch (er) { toast(er.message, 'error'); } };
+    }
   };
+  const np2Stream = (it) => !!(it && it.album === 'Internet radio');
   // ---- Now Playing overlay -------------------------------------------------
   const overlay = $('#nowplaying');
   // Back closes it like a menu; opening a page from it takes its history entry (setView)
@@ -954,6 +977,7 @@
     document.body.classList.toggle('np-open', open);
     if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
+    if (npCompact()) state.npSheet = null;
     if (was && fromBack !== true) popTransient();
   };
   // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it
@@ -962,15 +986,30 @@
     const player = $('.player');
     player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
     player.addEventListener('touchend', (e) => { if (y0 != null && y0 - e.changedTouches[0].clientY > 40 && overlay.hidden) toggleNowPlaying(true); y0 = null; });
-    overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
+    overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input, .np-sheet') ? e.touches[0].clientY : null; }, { passive: true });
     overlay.addEventListener('touchend', (e) => { if (d0 != null && e.changedTouches[0].clientY - d0 > 80 && !overlay.hidden) toggleNowPlaying(); d0 = null; });
   }
   // Now playing on one screen (docs/ux/responsive.md, build step 2): the player, and five sheets
   // (Queue, Lyrics, Details, Sources, Tags). Phones open a sheet over the player from the bottom row;
   // tablets and desktops keep one open beside it. The open sheet survives re-renders (state.npSheet).
-  const NP_SHEETS = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
-  const npSheetNow = () => (shellMode() === 'phone' ? state.npSheet || null : state.npSheet || 'queue');
+  const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
+  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
+  // Compact: the phone arrangement (sheets over the player), also on tablets narrower than two columns need
+  const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
+  const npSheetNow = () => { const k = npSheets().some(([x]) => x === state.npSheet) ? state.npSheet : null; return npCompact() ? k : k || 'queue'; };
+  // What a re-render keeps: the sheet's scroll and the focused control
+  const npKeep = () => {
+    const a = document.activeElement; const body = $('.np-sheet-body', overlay);
+    let focus = null;
+    if (a && overlay.contains(a)) {
+      const where = a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
+      if (a.id) focus = '#' + a.id;
+      else for (const k of ['npsheet', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
+    }
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, focus };
+  };
   const renderNowPlaying = () => {
+    const keep = npKeep(); npGen += 1; const gen = npGen;
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       overlay.innerHTML = `<div class="np-page np2"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
@@ -980,7 +1019,7 @@
     }
     const it = np.item;
     const q = (isBrowser() ? state.browserQueue : state.queue) || [];
-    const idx = q.findIndex((x) => x.id === it.id);
+    const idx = z.queue_index != null && q[z.queue_index] && q[z.queue_index].id === it.id ? z.queue_index : q.findIndex((x) => x.id === it.id);
     const rest = idx >= 0 ? q.slice(idx + 1) : [];
     const h = np.signal_path ? headline(np.signal_path) : null;
     const colour = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
@@ -994,7 +1033,7 @@
           + (rest.length ? `<div class="list np-queue">${rest.slice(0, 100).map((n, k2) => `<button class="list-row np-qitem" data-npqi="${idx + 1 + k2}" title="Play this now"><span class="grow"><span class="name">${esc(n.title || n.uri)}</span><span class="sub">${esc(n.artist || '')}</span></span><span class="muted small">${n.duration_ms ? fmt(n.duration_ms) : ''}</span></button>`).join('')}</div>` : '')
           + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npqfull">${icon('queue')} Reorder or clear the queue</button></div>`;
       }
-      if (k === 'lyrics') return '<div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
+      if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
         return `<div class="path">
               <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
@@ -1005,12 +1044,12 @@
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';
     };
-    const tab = ([k, l, ic], cls) => { const on = sheet === k ? ' on' : ''; return `<button class="${cls === 'chip' ? 'chip' : 'np-tab'}${on}" data-npsheet="${k}" ${cls === 'chip' ? `role="tab" aria-selected="${sheet === k}"` : `aria-pressed="${sheet === k}"`}>${cls === 'chip' ? '' : icon(ic)}<span>${l}</span></button>`; };
+    const tab = ([k, l, ic], cls) => { const on = sheet === k ? ' on' : ''; return `<button class="${cls === 'chip' ? 'chip' : 'np-tab'}${on}" data-npsheet="${k}" ${cls === 'chip' ? `role="tab" id="nptab-${k}" aria-controls="npsheetpanel" aria-selected="${sheet === k}" tabindex="${sheet === k ? 0 : -1}"` : `aria-pressed="${sheet === k}"`}>${cls === 'chip' ? '' : icon(ic)}<span>${l}</span></button>`; };
     const title = np.stream_title ? esc(np.stream_title) : links.title;
     const artist = np.stream_title ? esc(it.artist || '') : links.artistsHtml;
     overlay.innerHTML = `
-      <div class="np-page np2${sheet ? ' has-sheet' : ''}">
-        <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')} ${esc(z.name)}</button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+      <div class="np-page np2${sheet ? ' has-sheet' : ''}${npCompact() ? ' compact' : ''}">
+        <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
         <div class="np-body">
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it)}</div>
@@ -1018,12 +1057,12 @@
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
-            <nav class="np-tabs" aria-label="More about this song">${NP_SHEETS.map((t) => tab(t, 'np-tab')).join('')}</nav>
+            <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
-          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS.find(([k]) => k === sheet)[1]) : ''}">
+          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
             <div class="np-strip"><div class="np-strip-art">${itemArt(it)}</div><div class="np-strip-text"><div class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</div><div class="sub">${esc(it.artist || '')}</div></div><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button></div>
-            <div class="np-sheet-head"><span class="grab" aria-hidden="true"></span><div class="chips np-sheet-tabs" role="tablist" aria-label="More about this song">${NP_SHEETS.map((t) => tab(t, 'chip')).join('')}</div><button class="icon-btn np-sheet-close" id="npsheetclose" aria-label="Close the sheet" title="Close">${icon('close')}</button></div>
-            <div class="np-sheet-body" role="tabpanel">${sheet ? sheetBody(sheet) : ''}</div>
+            <div class="np-sheet-head"><span class="grab" aria-hidden="true"></span><div class="chips np-sheet-tabs" role="tablist" aria-label="More about this song">${npSheets().map((t) => tab(t, 'chip')).join('')}</div><button class="icon-btn np-sheet-close" id="npsheetclose" aria-label="Close the sheet" title="Close">${icon('close')}</button></div>
+            <div class="np-sheet-body" role="tabpanel" id="npsheetpanel" ${sheet ? `aria-labelledby="nptab-${sheet}"` : ''} tabindex="-1">${sheet ? sheetBody(sheet) : ''}</div>
           </section>
         </div>
       </div>`;
@@ -1034,15 +1073,21 @@
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npzone').onclick = () => $('#zonebtn').click();
-    const openSheet = (k) => { state.npSheet = k; renderNowPlaying(); const f = $(`.np-sheet [data-npsheet="${k}"]`, overlay); if (f) f.focus(); };
-    $$('[data-npsheet]', overlay).forEach((b) => b.onclick = () => openSheet(shellMode() === 'phone' && sheet === b.dataset.npsheet && b.classList.contains('np-tab') ? null : b.dataset.npsheet));
-    $('#npsheetclose').onclick = () => { state.npSheet = null; renderNowPlaying(); const t = $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
+    const openSheet = (k) => { state.npSheet = k; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${k}"]`, overlay); if (f) f.focus(); };
+    $$('[data-npsheet]', overlay).forEach((b) => b.onclick = () => openSheet(b.dataset.npsheet));
+    // Tabs: arrow keys move between them (WAI-ARIA tabs)
+    $('.np-sheet-tabs', overlay).onkeydown = (e) => {
+      const ks = npSheets().map(([k]) => k); const i = ks.indexOf(sheet); if (i < 0) return;
+      const j = e.key === 'ArrowRight' ? (i + 1) % ks.length : e.key === 'ArrowLeft' ? (i - 1 + ks.length) % ks.length : e.key === 'Home' ? 0 : e.key === 'End' ? ks.length - 1 : -1;
+      if (j >= 0) { e.preventDefault(); openSheet(ks[j]); }
+    };
+    $('#npsheetclose').onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
     $('#npquality').onclick = () => openSheet('details');
     {
       // Phones: drag the sheet's head down to close it
       let y0 = null; const head = $('.np-sheet-head', overlay);
       head.addEventListener('touchstart', (e) => { y0 = e.touches[0].clientY; }, { passive: true });
-      head.addEventListener('touchend', (e) => { if (y0 != null && e.changedTouches[0].clientY - y0 > 60 && shellMode() === 'phone') { state.npSheet = null; renderNowPlaying(); } y0 = null; });
+      head.addEventListener('touchend', (e) => { e.stopPropagation(); if (y0 != null && e.changedTouches[0].clientY - y0 > 60 && npCompact()) { state.npSheet = null; renderNowPlaying(); } y0 = null; });
     }
     $('#npmore').onclick = (e) => { const b = e.currentTarget; showMenu(b, [
       { label: 'Dashboard', note: 'Full screen, for a TV or tablet', icon: 'external', run: () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener') },
@@ -1053,19 +1098,31 @@
     bindNpLinks(overlay, it, () => toggleNowPlaying());
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
-    if (sheet === 'sources' && songPage) fillNpSources(songPage);
-    fillNpPubky(it);
+    overlay.dataset.sheet = sheet || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
+    if (sheet && keep.sheet === sheet) { const body = $('.np-sheet-body', overlay); if (body) body.scrollTop = keep.scroll; }
+    if (keep.focus) { const f = $(keep.focus, overlay); if (f) f.focus({ preventScroll: true }); else if (keep.focus === '#nptagadd') state.npRefocusTag = true; }
+    if (sheet === 'sources' && songPage) fillNpSources(songPage, gen);
+    fillNpPubky(it, gen);
     loadLyrics(it);
     refreshSleep();
   };
+  // A change of arrangement (rotating a phone, resizing a window) redraws an open Now playing
+  window.addEventListener('resize', () => { if (!overlay.hidden && overlay.dataset.layout && overlay.dataset.layout !== `${shellMode()}-${npCompact()}`) renderNowPlaying(); });
   // The Sources sheet: where else this song plays (the song page's "also on")
-  const fillNpSources = async (songPage) => {
-    let pg = null; try { pg = await api('GET', `/item/song/${encodeURIComponent(songPage)}`); } catch { pg = null; }
-    const box = $('#npsources'); if (!box) return;
+  const npSrcCache = new Map(); const npSrcPending = new Map();
+  const fillNpSources = async (songPage, gen = npGen) => {
+    let pg = npSrcCache.get(songPage);
+    if (!pg) {
+      let req = npSrcPending.get(songPage);
+      if (!req) { req = api('GET', `/item/song/${encodeURIComponent(songPage)}`).catch(() => null).finally(() => npSrcPending.delete(songPage)); npSrcPending.set(songPage, req); }
+      pg = await req;
+      if (pg) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
+    }
+    const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
     const also = (pg && pg.also_on) || [];
     box.innerHTML = (also.length ? `<div class="list">${rankSvc(also, (v) => srcSvc(v.source)).map((v) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${v.url ? `<a class="icon-btn" href="${esc(v.url)}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
-    $('#npsongpage').onclick = () => setView('item', { kind: 'song', id: songPage });
+    $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -1079,13 +1136,14 @@
   };
   const refreshSleep = async () => {
     if (isBrowser()) return;
-    try { const v = await api('GET', `/zones/${encodeURIComponent(state.zone)}/sleep`); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; const b = $('#npsleep'); if (b) b.innerHTML = `${icon('moon')} ${sleepLabel()}`; } catch { /* keep */ }
+    try { const v = await api('GET', `/zones/${encodeURIComponent(state.zone)}/sleep`); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; } catch { /* keep */ }
   };
   // Lyrics for the playing library track (tags or a sidecar .lrc); synced lines follow the position.
   const trackIdOf = (it) => { const m = /^track:(\d+)$/.exec(it && it.uri || ''); return m ? Number(m[1]) : null; };
   const renderLyrics = (l) => {
     const box = $('#nplyrics'); if (!box) return;
     const none = $('#nplyricsnone'); if (none) none.hidden = !!l;
+    const ld = $('#nplyricsload'); if (ld) ld.hidden = true;
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
