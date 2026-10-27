@@ -27,9 +27,13 @@ The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (se
 docker build -t pubky-music-node .
 docker run -d --name pm -p 7788:7788 --device /dev/snd \
   -v /srv/music:/music:ro -v pm-data:/data \
-  -e PM_TOKEN=change-me -e PM_CONTACT=you@example.org pubky-music-node
-curl -H 'Authorization: Bearer change-me' http://localhost:7788/v1/info
+  -e PM_CONTACT=you@example.org pubky-music-node
+curl -H "Authorization: Bearer $(docker exec pm cat /data/api-token)" http://localhost:7788/v1/info
 ```
+
+The API always needs a token when it listens beyond localhost. Without `PM_TOKEN` the node makes
+one on first start and keeps it in `/data/api-token` (0600); sign in to the web app with it, or set
+your own with `-e PM_TOKEN=…` (a long random string).
 
 ## With its own Pubky homeserver (bundled)
 

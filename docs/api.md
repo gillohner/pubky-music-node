@@ -299,7 +299,7 @@ Types live in `pm_api::types`; a Rust client reuses them.
 
 The same server also speaks the Subsonic API (XML by default, JSON with `f=json`) for existing clients: Symfonium,
 Feishin, Amperfy, play:Sub, Supersonic. Log in with `[api] subsonic_user` (default `pubky`) and the
-API token as the password (token auth `t`+`s` or plain `p`); without a token anyone can connect.
+API token as the password (token auth `t`+`s` or plain `p`). Only a node listening on localhost runs without a token; on any other address the node makes one (`<data_dir>/api-token`) when none is set.
 
 Implemented: `ping`, `getLicense`, `getOpenSubsonicExtensions`, `getMusicFolders`, `getArtists`,
 `getIndexes`, `getArtist`, `getAlbum`, `getMusicDirectory`, `getAlbumList(2)` (newest, random,

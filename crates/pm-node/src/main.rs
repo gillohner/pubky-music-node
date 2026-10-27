@@ -3,6 +3,7 @@
 //! For now a CLI over the core services; the long-running daemon (API,
 //! zones, homeserver embedding) arrives with M3.
 
+mod api_token;
 mod config;
 mod library;
 mod outputs;
@@ -178,9 +179,14 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         &env_or("PM_LASTFM_API_KEY", &cfg.lastfm.api_key),
         &env_or("PM_LASTFM_API_SECRET", &cfg.lastfm.api_secret),
     );
-    let token = (!cfg.api.token.is_empty()).then(|| cfg.api.token.clone());
-    if token.is_none() && !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
-        tracing::warn!(listen = %cfg.api.listen, "API has no token and is not bound to localhost");
+    let (token, source) = api_token::resolve(&cfg.api.token, &cfg.api.listen, &cfg.data_dir)
+        .map_err(|e| anyhow::anyhow!("API token: {e}"))?;
+    if let api_token::Source::File(path) = &source {
+        tracing::info!(
+            listen = %cfg.api.listen,
+            "no API token configured; clients sign in with the one in {}",
+            path.display()
+        );
     }
     let state = pm_api::NodeState::new(
         pm_api::NodeSettings {

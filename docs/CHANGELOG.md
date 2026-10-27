@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-27
 
+- **A node on the network never runs an open admin API** (security review 2026-10-27, high). Without `[api] token` (or `PM_TOKEN`) and listening beyond localhost, `pm-node` makes a token on first start and keeps it in `<data_dir>/api-token` (0600), the same one on every start; the log names the file, never the token. An emptied file stops the start. Only a loopback `listen` still runs without a token. The Docker entrypoint, the TrueNAS compose file (no more `change-me` token) and `docs/deploy.md` say where to find it; Umbrel and the bundle already set one.
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
 ## 2026-10-26
