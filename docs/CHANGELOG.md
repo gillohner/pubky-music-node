@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-27
+
+- **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart, but offline the controller retries every second, so on a slow runner the bar was already gone (#95, #125). The step now clicks while the bar shows, else counts the automatic retry; either way the reconnection must be under 2 s.
+
 ## 2026-10-26
 
 - **Settings in four groups, by where each setting is saved** (STEWARD-SETTINGS-GROUPS.md; build step 4 of docs/ux/responsive.md):
