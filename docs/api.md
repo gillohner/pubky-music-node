@@ -289,7 +289,7 @@ embedding the music URL, a play a private music `listen`, a favourite a v1 bookm
 music URLs only.
 
 Queues (items and repeat mode) are saved per zone on every change and restored, stopped, when the node restarts. Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`; ICY titles arrive as `now_playing.stream_title`). Subscription streaming services add schemes later.
-Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone.
+Every `ZoneState` carries `now_playing.signal_path`, so a controller can render the chain for any zone. It also carries `now_playing.format`, what is arriving for the track: `{codec, bitrate_kbps?, lossless, service, tier?, preview}` (`codec` like `FLAC`, `MP3`, `DSD`; `service` like `library`, `tidal`, `stream`; `tier` is the service's quality tier where it has one). The decoded rate and bit depth are `now_playing.source_format`, and what the zone plays is `output_format`.
 Types live in `pm_api::types`; a Rust client reuses them.
 
 ## OpenSubsonic (`/rest/*`)

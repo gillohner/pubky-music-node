@@ -10,6 +10,11 @@ Newest first. Dates are when the change landed on `main`.
   - `docs/APP-DATA.md` lists each path with who writes it, its format and its version, and why tags sit in the app's public namespace (ADR 0014).
   - Service names are defined in spec terms (`library`: the curator's own files).
   - The old playlist spec is archived. Homeserver paths are unchanged.
+- **The player says what it is streaming** (STEWARD-UX-PLAYER-SOURCES.md §2):
+  - **The label:** the player bar and Now playing show what is arriving: "FLAC 44.1/16 · local file", "FLAC 96/24 → 48 kHz · TIDAL Max", "MP3 128 kbps · preview", "AAC 320 kbps · Qobuz". It says "→ 48 kHz" when the node converts for the zone.
+  - **The quality sheet:** tapping the label opens it, with a jump straight to the service's own quality setting on its Sources tab. It shows what arrives, how the zone plays it and why (from the signal path), the service's quality choice (with when it applies), and links to the Play from order and the zone's output and DSP.
+  - **API:** `now_playing.format` `{codec, bitrate_kbps?, lossless, service, tier?, preview}`. Library files and streams report their codec (lossy files with their average bitrate). The per-service quality choice reads `GET/PUT /v1/sources/<id>/quality` where a service offers one.
+  - **Spotify Connect** reports Vorbis at the bitrate librespot is started with (the bitrate requested; librespot may fall back). The sheet says "as it arrives" only when the signal path is bit-perfect, and otherwise names what changes the sound.
 - **The node's sign-ins move into the vault, and the node becomes a cache of it** (STEWARD-VAULT.md item 6).
   - After every sign-in, at startup and every 15 minutes, the node's sign-ins for TIDAL, TIDAL full tracks, Spotify, Qobuz, Bandcamp, Last.fm, ListenBrainz and Jamendo are kept in step with the person's vault, one pass at a time. These are the person's own sign-ins only, not the node's apps or keys, which the admin sets once (ADR 0016).
   - The two sides are compared by content. A sign-in only on the node moves in once; one only in the vault fills the node. After that, whichever side changed since the last sync wins.
