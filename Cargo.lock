@@ -3702,6 +3702,7 @@ dependencies = [
  "libc",
  "md-5",
  "notify",
+ "pm-appdata",
  "pm-audio",
  "pm-discovery",
  "pm-endpoint",
@@ -3742,6 +3743,22 @@ dependencies = [
  "url",
  "uuid",
  "zip 2.6.1",
+]
+
+[[package]]
+name = "pm-appdata"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chacha20poly1305 0.11.0",
+ "curve25519-dalek 5.0.0",
+ "getrandom 0.3.4",
+ "hkdf",
+ "pubky 0.16.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -4028,6 +4045,7 @@ dependencies = [
  "blake3",
  "bytes",
  "futures-util",
+ "pm-appdata",
  "pm-model",
  "pubky 0.16.2",
  "pubky-app-specs",
@@ -4388,17 +4406,9 @@ dependencies = [
 name = "pubky-music-specs"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
- "chacha20poly1305 0.11.0",
- "curve25519-dalek 5.0.0",
- "getrandom 0.3.4",
- "hkdf",
- "pubky 0.16.2",
  "pubky-social-specs",
  "serde",
  "serde_json",
- "sha2 0.11.1",
- "zeroize",
 ]
 
 [[package]]
