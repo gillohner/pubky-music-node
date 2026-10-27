@@ -9,18 +9,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::content;
 
-/// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`, `"listening"`,
-/// `"session"`); a spelling this version does not know reads as [`MusicPostKind::Unknown`] and
-/// fails validation.
+/// What a music post is. The wire spelling is lowercase (`"listen"`, `"listening"`, `"session"`);
+/// a spelling this version does not know reads as [`MusicPostKind::Unknown`] and fails validation.
+/// That includes the retired `"review"`: a rating is the social `rating` kind (pubky-social-specs
+/// 1.1), and [`crate::retired::rating_from_review`] rewrites an old review as one.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(from = "String", into = "String")]
 #[non_exhaustive]
 pub enum MusicPostKind {
-    /// A rating of 1 to 10 with optional text; `embed` is the reviewed music URL.
-    #[default]
-    Review,
     /// One play of the music at `embed`. The path decides who sees it: `/priv/` for a private
     /// history, `/pub/` for a public one.
+    #[default]
     Listen,
     /// Now playing the music at `embed`, until `expires_at`.
     Listening,
@@ -34,7 +33,6 @@ impl MusicPostKind {
     /// The wire spelling.
     pub fn wire_name(&self) -> &str {
         match self {
-            MusicPostKind::Review => "review",
             MusicPostKind::Listen => "listen",
             MusicPostKind::Listening => "listening",
             MusicPostKind::Session => "session",
@@ -46,7 +44,6 @@ impl MusicPostKind {
 impl From<String> for MusicPostKind {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "review" => MusicPostKind::Review,
             "listen" => MusicPostKind::Listen,
             "listening" => MusicPostKind::Listening,
             "session" => MusicPostKind::Session,
@@ -74,8 +71,8 @@ impl PostKind for MusicPostKind {
 
     fn validate_content(&self, post: &PostEnvelope<Self>, _ctx: &ValidationCtx) -> Result<(), String> {
         // Every kind is about one piece of music, named by `embed` (for `listening` and `session`
-        // the music playing now; never a URI inside the content). A reply to a review is a social
-        // post with `parent` set to the review, not another review.
+        // the music playing now; never a URI inside the content). A rating or a comment on music
+        // is a social post whose `parent` is the music URL.
         if post.embed.is_none() {
             return Err(format!(
                 "Validation Error: a {self} must embed the music URL it is about"
@@ -85,7 +82,6 @@ impl PostKind for MusicPostKind {
             return Err(format!("Validation Error: a {self} cannot have a parent"));
         }
         match self {
-            MusicPostKind::Review => content::parse_review(&post.content).map(|_| ()),
             // Either root: the path decides who sees it. A public post's references pass the gate
             // under the public root, so they never point at a private object.
             MusicPostKind::Listen | MusicPostKind::Listening | MusicPostKind::Session => {

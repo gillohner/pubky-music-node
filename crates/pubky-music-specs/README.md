@@ -1,19 +1,22 @@
 # pubky-music-specs
 
-Music on Pubky, on top of the v1 social objects ([pubky-social-specs]). Tags, bookmarks, comments
-and playlists are the shared social objects on canonical music URLs; this crate adds only what is
-musical: its own post kinds under `/{pub,priv}/music/v1/posts/{id}/{editId}.json`, and the
-`ext.music` hints on a playlist's items. The path decides who sees a post: `/priv/` or `/pub/`.
+Music on Pubky, on top of the v1 social objects ([pubky-social-specs]). Tags, bookmarks, ratings,
+comments and playlists are the shared social objects on canonical music URLs (a rating is the
+social `rating` with `parent` the music URL); this crate adds only what is musical: its own post
+kinds under `/{pub,priv}/music/v1/posts/{id}/{editId}.json`, and the `ext.music` hints on a
+playlist's items. The path decides who sees a post: `/priv/` or `/pub/`.
 
 Every music post `embed`s the music it is about and has no `parent`. Times (`*_at`) are Unix
 microseconds; durations (`*_ms`) are milliseconds. Unknown members are kept on a rewrite.
 
 | Kind | Content |
 | --- | --- |
-| `review` | `{rating: 1–10, text?}` |
 | `listen` | one play: `{played_at, duration_ms?, source?}` |
 | `listening` | now playing: `{started_at, expires_at, name?, duration_ms?, source?}` |
 | `session` | a listening session others join: `{started_at, expires_at?, host: "pubky://<key>", name?, source?}` |
+
+The `review` kind of the 1.0 drafts is retired: an old one reads as an unknown kind, and
+`retired::rating_from_review` rewrites it as a social `rating`.
 
 `listening` and `session` are ordinary kinds: a reader stops showing one once its `expires_at` has
 passed, at most 24 hours after `started_at`.

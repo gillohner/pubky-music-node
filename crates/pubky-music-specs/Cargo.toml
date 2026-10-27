@@ -1,6 +1,6 @@
 [package]
 name = "pubky-music-specs"
-description = "Music kinds on the pubky-social-specs v1 post envelope: reviews, listens and the ext.music hints on playlists"
+description = "Music kinds on the pubky-social-specs v1 post envelope: listens, now playing, sessions and the ext.music hints on playlists"
 # Its own version: the crate has no node code in it and can move to its own repository. It holds
 # the generic music spec only (`/{pub,priv}/music/v1/`); Pubky Music's own app data is pm-appdata.
 version = "0.1.0"

@@ -14,12 +14,6 @@ use pubky_social_specs::{code_point_len, frozen_trim, validate_safe_json_int, VA
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// The lowest rating.
-pub const REVIEW_RATING_MIN: u8 = 1;
-/// The highest rating: ten half stars.
-pub const REVIEW_RATING_MAX: u8 = 10;
-/// A review's text, in code points: a social note's length.
-pub const REVIEW_TEXT_MAX_LENGTH: usize = 2000;
 /// A service name (`tidal`, `deezer`, `library` for the curator's own files), in bytes.
 pub const SERVICE_MAX_LENGTH: usize = 32;
 /// The earliest time a music post carries: 2000-01-01 in Unix microseconds.
@@ -58,19 +52,6 @@ pub const SERVICE_NAMES: &[&str] = &[
 pub const LISTEN_DURATION_MAX_MS: i64 = 24 * 60 * 60 * 1000;
 /// The whole `content` string, in code points.
 const CONTENT_MAX_LENGTH: usize = 8 * 1024;
-
-/// The content of a `review`: `{"rating": 1–10, "text"?: "…"}`.
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
-pub struct MusicReviewContent {
-    /// 1 to 10. A five-star UI shows half stars (7 is three and a half).
-    pub rating: u8,
-    /// What the reviewer wrote, at most [`REVIEW_TEXT_MAX_LENGTH`] code points, never blank.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Unknown members, preserved on rewrite.
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
 
 /// The content of a `listen`: `{"played_at": µs, "duration_ms"?: ms, "source"?: {service, uri}}`.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -270,7 +251,7 @@ pub(crate) fn check_source(source: &MusicSource) -> Result<(), String> {
     Ok(())
 }
 
-fn parse<T: serde::de::DeserializeOwned>(content: &str, what: &str) -> Result<T, String> {
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(content: &str, what: &str) -> Result<T, String> {
     if code_point_len(content) > CONTENT_MAX_LENGTH {
         return Err(format!(
             "Validation Error: {what} content must be at most {CONTENT_MAX_LENGTH} code points"
@@ -278,27 +259,6 @@ fn parse<T: serde::de::DeserializeOwned>(content: &str, what: &str) -> Result<T,
     }
     serde_json::from_str(content)
         .map_err(|e| format!("Validation Error: {what} content must be a valid JSON envelope: {e}"))
-}
-
-pub(crate) fn parse_review(content: &str) -> Result<MusicReviewContent, String> {
-    let review: MusicReviewContent = parse(content, "review")?;
-    check_extra(&review.extra, &["rating", "text"])?;
-    if !(REVIEW_RATING_MIN..=REVIEW_RATING_MAX).contains(&review.rating) {
-        return Err(format!(
-            "Validation Error: rating must be {REVIEW_RATING_MIN} to {REVIEW_RATING_MAX}"
-        ));
-    }
-    if let Some(text) = &review.text {
-        if frozen_trim(text).is_empty() {
-            return Err("Validation Error: review text must not be blank; leave it out".into());
-        }
-        if code_point_len(text) > REVIEW_TEXT_MAX_LENGTH {
-            return Err(format!(
-                "Validation Error: review text must be at most {REVIEW_TEXT_MAX_LENGTH} code points"
-            ));
-        }
-    }
-    Ok(review)
 }
 
 fn time(field: &str, t: i64) -> Result<i64, String> {
