@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Settings in four groups, by where each setting is saved** (STEWARD-SETTINGS-GROUPS.md; build step 4 of docs/ux/responsive.md):
+  - **You** (saved on your homeserver, so it follows you): My accounts, Home, and Playback quality. Each choice says whether yours or the node's default applies.
+  - **This device:** Display (theme, layout, Dense lists, colour), kept in this browser.
+  - **This node** (admin): Service apps (every app the admin sets once, with where to get one), People, Library folders, Zones and outputs, Discover, Backup, Import, and About and updates.
+  - **This homeserver** (admin, only when the node runs its own): its address, status, accounts, invites and storage, and the domain and tunnel.
+  - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
+  - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
+
 - **The music spec stays generic; Pubky Music's own data moved into the node** (STEWARD-SPEC-SPLIT.md, no change in behaviour).
   - `pubky-music-specs` holds only the music kinds, their rules and the `ext.music` playlist hints (`/pub|priv/music/v1/`). A test fails if it ever names a `pubky.music/` path or depends on a node crate.
   - The sources vault (module, VAULT.md, tests, vectors) moved to the new `pm-appdata` crate, with every app path in `pm_appdata::paths`.

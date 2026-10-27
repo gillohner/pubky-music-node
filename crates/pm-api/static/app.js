@@ -160,6 +160,7 @@
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
+    if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r;
     try {
@@ -169,6 +170,8 @@
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch { linkHint(); throw new Error("Can't reach the node."); }
+    // and again once the change has landed: a read that started meanwhile isn't kept either
+    if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (r.status === 401) { login(); throw new Error('The node wants an API token.'); }
     const text = await r.text();
     let json = null;
@@ -1567,14 +1570,16 @@
   // `<prefix>-<key>`. The view's address is `/<view>/<key>` (add the view to the router).
   //   const t = sideTabs({ view: 'sources', title: 'Sources', tabs, prefix: 'src' });
   //   main.innerHTML = t.page(t.panel('tidal', html) + …); t.wire(main);
-  const sideTabs = ({ view, title, tabs, prefix = view, ids = {}, remembered }) => {
-    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
+  const sideTabs = ({ view, title, tabs: entries, prefix = view, ids = {}, remembered }) => {
+    const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width
+    // Entries are tabs ([id, label, icon, extra]) and group headers ({group, title, saved}) between them
+    const tabs = entries.filter(Array.isArray);
     const known = (k) => tabs.some(([x]) => x === k);
     const asked = known(state.viewArg) ? state.viewArg : null;
     const active = asked || (phone ? null : (known(remembered) ? remembered : tabs[0][0]));
     const name = (k) => (tabs.find(([x]) => x === k) || [k, k])[1];
     const pid = (k) => ids[k] || `${prefix}-${k}`;
-    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${tabs.map(([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}">${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`).join('')}</nav>`;
+    const nav = () => `<nav class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${esc(title)}">${(() => { let grp = null; return entries.map((e) => (!Array.isArray(e) ? (grp = `${prefix}grp-${e.group}`, `<div class="set-group-h" role="presentation" id="${grp}"><span class="set-group-t">${esc(e.title)}</span>${e.saved ? `<span class="set-group-s">${esc(e.saved)}</span>` : ''}</div>`) : (([k, l, ic, extra]) => `<button class="set-tab ${active === k ? 'on' : ''}" role="tab" id="${prefix}tab-${k}" aria-selected="${active === k}" aria-controls="${pid(k)}" data-stab="${k}"${grp ? ` aria-describedby="${grp}"` : ''}>${icon(ic)}<span>${esc(l)}</span>${extra || ''}${icon('chevron', 'ic chev')}</button>`)(e))).join(''); })()}</nav>`;
     const panel = (k, html) => `<section class="set-panel" id="${pid(k)}" data-panel="${k}" role="tabpanel" aria-labelledby="${prefix}tab-${k}" ${active === k ? '' : 'hidden'}>${phone ? `<button class="btn ghost set-back" data-tabs-back>${icon('back')} ${esc(title)}</button>` : ''}<h2 class="set-title">${esc(name(k))}</h2>${html}</section>`;
     const page = (panels) => (phone && active ? '' : pageHead(title)) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav()}<div class="set-body-wrap">${panels}</div></div>`;
     // On a computer a tab switches in place (the address follows); on a phone it is its own page
@@ -1594,7 +1599,21 @@
     };
     return { phone, active, name, nav, panel, page, wire };
   };
-  const SETTINGS_TABS = [['library', 'Library', 'disc'], ['playback', 'Playback', 'zone'], ['accounts', 'Accounts', 'artist'], ['people', 'People', 'artist'], ['remote', 'Remote access', 'external'], ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['appearance', 'Appearance', 'sun'], ['about', 'About this node', 'info']];
+  // Settings in four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md, docs/ux/responsive.md):
+  // You (your homeserver), This device, This node (admin), This homeserver (admin, with a bundled one)
+  const SETTINGS_GROUPS = { you: 'Saved on your homeserver: follows you to every node and device', device: 'Only on this device', node: 'For everyone on this node', homeserver: 'The homeserver this node runs' };
+  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false }) => [
+    { group: 'you', title: 'You', saved: saved.you || SETTINGS_GROUPS.you },
+    ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'],
+    { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
+    ['appearance', 'Display', 'sun'],
+    { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
+    ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['library', 'Library folders', 'disc'], ['playback', 'Zones and outputs', 'zone'],
+    ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
+    ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['about', 'About and updates', 'info'],
+    ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
+  ];
+  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
   const VIEW_LABELS = { downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
@@ -1961,7 +1980,7 @@
     const line = $('[data-taggers]', box.closest('section') || box);
     if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
-  // Settings › Library › Cloud drives › Add a folder: browse the drive's folders, pick one.
+  // Settings › Library folders › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
     d.innerHTML = `<h2>A folder on ${esc(name)}</h2><p class="muted">Its songs join the library and play from the drive; nothing is copied.</p><div id="dfpath" class="muted small"></div><div id="dfbox" class="list"></div><p class="muted small" id="dfmsg"></p><div class="toolbar"><button class="btn primary" id="dfadd" disabled>Add this folder</button><button class="btn ghost" data-dfclose>Cancel</button></div>`;
@@ -1991,7 +2010,7 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
-  // Settings › Library › Add a WebDAV share: the folder's address, user and password; the node
+  // Settings › Library folders › Add a WebDAV share: the folder's address, user and password; the node
   // checks it, keeps it and scans it (POST /library/webdav).
   const webdavDialog = () => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -2857,9 +2876,14 @@
           const win = state.homeWindow || '7d';
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
-          // Rows the owner can hide and reorder (UX review #10); the layout is kept on the node
+          // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
           const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
-          if (!state.homeLayout) state.homeLayout = await api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] }));
+          // Your Home (Settings › You): your own layout where you set one, else the node's default
+          if (!state.homeLayout) {
+            const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
+            if (state.view !== 'home') return; // they went elsewhere while the homeserver answered
+            state.homeLayout = lay; state.homeSaved = lay;
+          }
           const lay = state.homeLayout; const known = HOME_ROWS.map(([k]) => k);
           const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
           const showRow = (k) => !(lay.hidden || []).includes(k);
@@ -2869,7 +2893,27 @@
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
-          const saveLayout = async (next) => { state.homeLayout = next; render(); try { state.homeLayout = await api('PUT', '/home/layout', next); } catch (e) { toast(e.message, 'error'); } };
+          // Saves go one at a time and the newest layout is the one that ends up saved: while one is
+          // on its way, a later change waits and is sent when it lands (each save takes seconds)
+          const saveLayout = (next) => {
+            if (!state.homeSaved) state.homeSaved = state.homeLayout;
+            state.homeLayout = next; render();
+            state.homePending = next;
+            if (state.homeSaving) return;
+            state.homeSaving = (async () => {
+              while (state.homePending) {
+                const send = state.homePending; state.homePending = null;
+                try {
+                  const p = await api('PUT', '/me/prefs', { home_layout: send });
+                  state.homeSaved = (p.home_layout && p.home_layout.value) || send;
+                } catch (e) {
+                  toast(e.message, 'error');
+                  if (!state.homePending) { state.homeLayout = state.homeSaved; if (state.view === 'home') render(); }
+                }
+              }
+              state.homeSaving = null;
+            })();
+          };
           $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
           const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
           $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
@@ -3364,7 +3408,7 @@
             const who = await pubkyUser();
             const go = await choiceDialog({ title: `Share “${d.summary.name}”?`, text: who
               ? 'A public copy goes to your homeserver with the next sync (in a few minutes): the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
-              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › Accounts); the playlist stays on this node until then.',
+              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the playlist stays on this node until then.',
               choices: who ? [{ label: 'Share', value: 'share', primary: true }] : [{ label: 'Open Accounts', value: 'accounts', primary: true }] });
             if (go === 'share') setVis(true); else if (go === 'accounts') setView('settings', 'accounts');
           };
@@ -3425,8 +3469,8 @@
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
           const body = !cur ? '' : cur.id === 'library'
-            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library</button>')
-              + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Playback</button>'))
+            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library folders</button>')
+              + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })()
                 + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
@@ -4026,7 +4070,7 @@
             + `<section class="section card addm" aria-labelledby="addfolder"><div class="section-head"><h3 id="addfolder">${icon('disc')} Use a folder in place</h3></div>`
             + `<p class="muted small">Play files where they are: a folder on the node’s machine, a mounted NAS share. Nothing is copied; the folder is watched for new music.</p>`
             + (flist.length ? `<ul class="uplist">${flist.map((p) => `<li><code class="path">${esc(p)}</code></li>`).join('')}</ul>` : '')
-            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library</button>.</p></section>`;
+            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library folders</button>.</p></section>`;
           $('[data-back]', main).onclick = () => goBack('albums');
           $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
           $$('[data-goto-library]', main).forEach((b) => b.onclick = () => setView('settings', 'library'));
@@ -4132,10 +4176,17 @@
           const hsHere = !!(bundled && bundled.configured && bundled.reachable);
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           const stor = await api('GET', '/storage').catch(() => null);
+          const fresh = (c) => c && Date.now() - c.at < 30000;
+          const [nodeMap, prefs, apps] = await Promise.all([
+            api('GET', '/node').catch(() => null),
+            fresh(state.prefsCache) ? state.prefsCache.v : (() => { const gen = state.prefsGen || 0; return api('GET', '/me/prefs').then((v) => { if (gen === (state.prefsGen || 0)) state.prefsCache = { at: Date.now(), v }; return v; }).catch(() => null); })(), // an answer older than a change isn't kept
+            api('GET', '/node/apps').catch(() => null),
+          ]);
           if (state.view !== 'settings') return;
+          const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: SETTINGS_TABS.filter(([k]) => k !== 'remote' || (tunnel && tunnel.available)), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available) }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -4207,9 +4258,30 @@
             + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
-          main.innerHTML = tabs.page(`${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          // You › Home: whose layout applies; edit it on Home itself
+          const applies = (a) => (a === 'yours' ? 'Yours' : 'The node’s default');
+          const homeL = prefs && prefs.home_layout;
+          const homeTab = group('Your Home', row('Rows on Home', `${homeL ? `${applies(homeL.applies)}. ` : ''}Which rows show and in what order; change them with Edit Home on Home.`, `<button class="btn ghost" id="sethomeedit">${icon('settings')} Edit Home</button>${homeL && homeL.applies === 'yours' ? ' <button class="btn ghost" id="sethomereset">Use the node’s default</button>' : ''}`)
+            + row('Saved on', prefs ? (prefs.saved_on === 'homeserver' ? 'Your homeserver, so it follows you to every node and device.' : 'This node for now; it goes to your homeserver once it can be reached.') : '', ''));
+          // You › Playback quality: your choice per service over the node's
+          const qEntries = Object.entries((prefs && prefs.quality) || {});
+          const qualityTab = group('Per service', qEntries.length
+            ? qEntries.map(([src, q]) => row(esc(SERVICE_NAMES[src] || srcName(src)), applies(q.applies), `<span class="pill">${esc(String(q.value == null ? '—' : q.value))}</span>${q.applies === 'yours' ? ` <button class="btn ghost sm" data-qreset="${esc(src)}">Use the node’s</button>` : ''}`)).join('')
+            : block('', 'Each service plays at the quality set on its page in Sources. Your own choice per service, over the node’s, comes here with the services’ quality choices.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
+          // This node › Service apps: the apps the admin sets once for everyone
+          const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map((a) => row(esc(a.name), [a.note ? esc(a.note) : '', a.from ? `Set in ${esc(a.from === 'config' ? 'node.toml' : a.from === 'builtin' ? 'this build' : 'Settings')}` : ''].filter(Boolean).join(' · '), `${a.configured ? '<span class="pill ok">Set</span>' : '<span class="pill">Not set</span>'}${a.get_one ? ` <a class="btn ghost sm" href="${esc(a.get_one)}" target="_blank" rel="noopener">${icon('external')} Get one</a>` : ''}`)).join('') : block('', 'No list from this node.', ''));
+          // This homeserver: the bundled one
+          const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
+            + row('Status', '', bundled.reachable ? `<span class="pill ok">Running${bundled.version ? ` · ${esc(bundled.version)}` : ''}</span>` : `<span class="pill bad">Not reachable</span>${bundled.error ? ` <span class="muted small">${esc(bundled.error)}</span>` : ''}`)
+            + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
+            + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
+            + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
+          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
+          const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
+          const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
+          $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
           // Fix my files' tags: the list first, then the write
           const loadFixes = async () => {
             const out = $('#fixout'); if (!out) return;
