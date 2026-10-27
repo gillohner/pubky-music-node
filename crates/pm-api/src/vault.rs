@@ -12,8 +12,8 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use pm_appdata::vault::{ClientKey, ClientSecret};
 use pm_pubky::vault::{Device, EverywhereReport, SignOutReport, Vault, VaultStoreError};
-use pubky_music_specs::vault::{ClientKey, ClientSecret};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ fn vault_error(e: VaultStoreError) -> ApiError {
         | VaultStoreError::NeedsVaultGrant
         | VaultStoreError::NotOurs(_) => StatusCode::CONFLICT,
         // The device list is full
-        VaultStoreError::Vault(pubky_music_specs::vault::VaultError::TooLarge) => StatusCode::CONFLICT,
+        VaultStoreError::Vault(pm_appdata::vault::VaultError::TooLarge) => StatusCode::CONFLICT,
         VaultStoreError::BadService(_) => StatusCode::BAD_REQUEST,
         VaultStoreError::Local(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_GATEWAY,
@@ -134,7 +134,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
                 problem: None,
             }),
             Ok(None) => {}
-            Err(VaultStoreError::Vault(pubky_music_specs::vault::VaultError::NotARecipient)) => {
+            Err(VaultStoreError::Vault(pm_appdata::vault::VaultError::NotARecipient)) => {
                 sign_ins.push(unread(service, epoch, None))
             }
             Err(e) => sign_ins.push(unread(service, epoch, Some(e.to_string()))),

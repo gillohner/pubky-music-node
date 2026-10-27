@@ -1,13 +1,12 @@
 //! The sources vault (VAULT.md): the v1 test vectors, the refusals, the device list, and a client
 //! proof checked by the pubky SDK's own verifier.
 //!
-//! `VAULT_WRITE_VECTORS=1 cargo test -p pubky-music-specs --features vault --test vault` rewrites
+//! `VAULT_WRITE_VECTORS=1 cargo test -p pm-appdata --test vault` rewrites
 //! `tests/vectors/vault-v1.json` from the fixed inputs below; without it the file is the reference.
-#![cfg(feature = "vault")]
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use pubky_music_specs::vault::*;
+use pm_appdata::vault::*;
 use serde_json::{json, Value};
 
 const OWNER: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
@@ -93,7 +92,7 @@ fn build() -> Value {
         })
         .collect();
     json!({
-        "about": "pubky-music-specs VAULT.md v1. Hex for raw inputs; the envelope as written to the homeserver.",
+        "about": "Pubky Music VAULT.md v1 (pm-appdata). Hex for raw inputs; the envelope as written to the homeserver.",
         "owner": OWNER,
         "path": path,
         // The X25519 scalars are public test inputs (byte ramps), never real keys

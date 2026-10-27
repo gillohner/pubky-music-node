@@ -5,10 +5,10 @@
 //! `bundle` job, against `docker compose up`); skipped otherwise. A test signer stands in for
 //! Pubky Ring: it creates the account and approves each client's sign-in.
 
+use pm_appdata::vault::{blob_path, ClientSecret, SignIn, VaultError};
 use pm_pubky::homeserver::NodeHomeserver;
 use pm_pubky::vault::{Vault, VaultStoreError};
 use pubky::{Keypair, Pubky, PublicKey};
-use pubky_music_specs::vault::{blob_path, ClientSecret, SignIn, VaultError};
 use serde_json::json;
 
 struct Admin {
@@ -180,7 +180,7 @@ async fn two_clients_share_a_sign_in_the_homeserver_only_sees_encrypted() {
 /// keys; a new device is added by one that can read; forged, borrowed and signed-out entries don't.
 #[tokio::test]
 async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
-    use pubky_music_specs::vault::{ClientEntry, Index, Proof, Revoked, INDEX_PATH};
+    use pm_appdata::vault::{ClientEntry, Index, Proof, Revoked, INDEX_PATH};
     let Some(a) = admin() else {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;
@@ -271,7 +271,7 @@ async fn devices_prove_their_keys_and_only_trusted_ones_get_sign_ins() {
     let trusted: Vec<_> = v[0].trusted(&ix).into_iter().map(|t| t.client_key).collect();
     assert_eq!(trusted, [v[0].client_key(), v[1].client_key(), v[2].client_key()]);
     let devices = v[0].devices().await.unwrap();
-    let problem = |k: &pubky_music_specs::vault::ClientKey| {
+    let problem = |k: &pm_appdata::vault::ClientKey| {
         devices
             .iter()
             .find(|d| d.client_key == k.to_hex())
@@ -472,7 +472,7 @@ async fn two_clients_refresh_at_once(lease_only: bool, takes: std::time::Duratio
     // No lease is left behind
     let lease = sessions[0]
         .storage()
-        .get(pubky_music_specs::vault::lease_path("tidal").unwrap().as_str())
+        .get(pm_appdata::vault::lease_path("tidal").unwrap().as_str())
         .await;
     assert!(lease.is_err(), "a lease was left behind");
 }
@@ -763,7 +763,7 @@ async fn signing_out_an_old_key_of_this_node_keeps_the_node() {
 /// trusted, so `share_with_trusted` gives it nothing.
 #[tokio::test]
 async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
-    use pubky_music_specs::vault::{ClientEntry, ClientProofData, Proof, INDEX_PATH};
+    use pm_appdata::vault::{ClientEntry, ClientProofData, Proof, INDEX_PATH};
     let Some(a) = admin() else {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;
@@ -824,7 +824,7 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
 /// record back in the list.
 #[tokio::test]
 async fn a_signed_out_device_that_rewrites_the_list_stays_signed_out() {
-    use pubky_music_specs::vault::{Index, Revoked, INDEX_PATH};
+    use pm_appdata::vault::{Index, Revoked, INDEX_PATH};
     let Some(a) = admin() else {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;

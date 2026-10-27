@@ -50,7 +50,7 @@ Music uses the shared social objects and only adds what is musical.
 - Social readers classify `/music/v1/` as foreign data and skip it; a music-aware indexer reads it.
 - The node's sign-in asks for `/pub|priv/social/v1/` and `/pub|priv/music/v1/` as well, so one Pubky
   Ring approval covers it.
-- `docs/specs/pubky-music-playlist.md` describes the retired envelope and stays only for reading old
+- `docs/archive/specs/pubky-music-playlist.md` describes the retired envelope and stays only for reading old
   data during migration.
 
 ## Amendment (2026-10-21): playlists have no size cap

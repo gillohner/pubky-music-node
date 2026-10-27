@@ -1,16 +1,16 @@
-//! The node's side of the sources vault (`crates/pubky-music-specs/VAULT.md`): its own client key,
+//! The node's side of the sources vault (`crates/pm-appdata/VAULT.md`): its own client key,
 //! and reading and writing sign-ins on the person's homeserver through their session.
 //!
-//! Everything is encrypted here before it leaves the node ([`pubky_music_specs::vault::seal`]);
+//! Everything is encrypted here before it leaves the node ([`pm_appdata::vault::seal`]);
 //! the homeserver only ever sees envelopes. Which clients a blob is wrapped to is the caller's
 //! choice: the trusted entries of the device list.
 
 use crate::homeserver::{is_not_found, HomeserverError};
-use pubky::PubkySession;
-use pubky_music_specs::vault::{
+use pm_appdata::vault::{
     self as spec, ClientEntry, ClientKey, ClientProofData, ClientSecret, DataKey, Envelope, Index, Proof,
     Revoked, SignIn, VaultError,
 };
+use pubky::PubkySession;
 use std::path::Path;
 use std::time::Duration;
 
@@ -1789,7 +1789,7 @@ mod tests {
 
     #[test]
     fn signed_out_clients_are_remembered_even_when_the_list_drops_them() {
-        use pubky_music_specs::vault::{ClientKey, Revoked};
+        use pm_appdata::vault::{ClientKey, Revoked};
         let dir = std::env::temp_dir().join(format!("pm-vault-revoked-{}", rand_suffix()));
         let path = dir.join("vault-revoked.json");
         let me = ClientKey([9; 32]);
@@ -1862,7 +1862,7 @@ mod tests {
 
     #[test]
     fn a_device_list_written_back_stays_within_its_limit() {
-        use pubky_music_specs::vault::{ClientKey, Revoked};
+        use pm_appdata::vault::{ClientKey, Revoked};
         // Junk records that name no listed entry: dropped to make it fit
         let revoked = (0..20_000u32)
             .map(|i| Revoked {

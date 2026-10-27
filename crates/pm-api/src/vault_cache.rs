@@ -46,9 +46,9 @@
 //! admin's client setting). Librespot's credentials file and yt-dlp's state stay on the machine.
 
 use crate::state::NodeState;
+use pm_appdata::vault::{ServiceUser, SignIn, VaultError};
 use pm_library::Library;
 use pm_pubky::vault::{Opened, Vault, VaultStoreError};
-use pubky_music_specs::vault::{ServiceUser, SignIn, VaultError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -1889,11 +1889,7 @@ mod tests {
     fn bridges_are_valid_vault_ids_and_unique() {
         let mut seen = std::collections::HashSet::new();
         for b in BRIDGES {
-            assert!(
-                pubky_music_specs::vault::is_service_id(b.service),
-                "{}",
-                b.service
-            );
+            assert!(pm_appdata::vault::is_service_id(b.service), "{}", b.service);
             assert!(seen.insert(b.service), "{} twice", b.service);
             assert!(!b.carry.is_empty());
         }

@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **The music spec stays generic; Pubky Music's own data moved into the node** (STEWARD-SPEC-SPLIT.md, no change in behaviour).
+  - `pubky-music-specs` holds only the music kinds, their rules and the `ext.music` playlist hints (`/pub|priv/music/v1/`). A test fails if it ever names a `pubky.music/` path or depends on a node crate.
+  - The sources vault (module, VAULT.md, tests, vectors) moved to the new `pm-appdata` crate, with every app path in `pm_appdata::paths`.
+  - `docs/APP-DATA.md` lists each path with who writes it, its format and its version, and why tags sit in the app's public namespace (ADR 0014).
+  - Service names are defined in spec terms (`library`: the curator's own files).
+  - The old playlist spec is archived. Homeserver paths are unchanged.
 - **The player says what it is streaming** (STEWARD-UX-PLAYER-SOURCES.md §2):
   - **The label:** the player bar and Now playing show what is arriving: "FLAC 44.1/16 · local file", "FLAC 96/24 → 48 kHz · TIDAL Max", "MP3 128 kbps · preview", "AAC 320 kbps · Qobuz". It says "→ 48 kHz" when the node converts for the zone.
   - **The quality sheet:** tapping the label opens it, with a jump straight to the service's own quality setting on its Sources tab. It shows what arrives, how the zone plays it and why (from the signal path), the service's quality choice (with when it applies), and links to the Play from order and the zone's output and DSP.

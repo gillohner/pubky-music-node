@@ -1,5 +1,5 @@
 {
-  "about": "pubky-music-specs VAULT.md v1. Hex for raw inputs; the envelope as written to the homeserver.",
+  "about": "Pubky Music VAULT.md v1 (pm-appdata). Hex for raw inputs; the envelope as written to the homeserver.",
   "cases": [
     {
       "data_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",

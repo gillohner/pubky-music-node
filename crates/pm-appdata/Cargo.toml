@@ -1,0 +1,24 @@
+[package]
+name = "pm-appdata"
+description = "Pubky Music's own data on a person's homeserver (/priv/pubky.music/): the paths, and the sources vault (VAULT.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The sources vault's encryption, with the primitives pubky-noise uses (X25519 from
+# curve25519-dalek, HKDF-SHA-256, XChaCha20-Poly1305)
+base64 = "0.23"
+curve25519-dalek = "5"
+chacha20poly1305 = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
+getrandom = "0.3"
+zeroize = "1"
+
+[dev-dependencies]
+# The client-proof test checks a proof with the SDK's own verifier.
+pubky = { workspace = true }

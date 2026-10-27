@@ -9,13 +9,13 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use pm_api::sync::PubkySync;
 use pm_api::{router, NodeSettings, NodeState};
+use pm_appdata::vault::{ClientSecret, SignIn};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_pubky::homeserver::NodeHomeserver;
 use pm_pubky::vault::Vault;
 use pm_zones::OutputRegistry;
 use pubky::{Keypair, Pubky, PublicKey};
-use pubky_music_specs::vault::{ClientSecret, SignIn};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -223,7 +223,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     phone_session
         .storage()
         .put(
-            pubky_music_specs::vault::INDEX_PATH,
+            pm_appdata::vault::INDEX_PATH,
             serde_json::to_vec(&before_sign_out).unwrap(),
         )
         .await
@@ -241,7 +241,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     phone_session
         .storage()
         .put(
-            pubky_music_specs::vault::blob_path("junk").unwrap().as_str(),
+            pm_appdata::vault::blob_path("junk").unwrap().as_str(),
             b"junk".to_vec(),
         )
         .await
