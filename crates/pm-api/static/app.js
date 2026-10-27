@@ -1609,6 +1609,7 @@
     ['appearance', 'Display', 'sun'],
     { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
     ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['library', 'Library folders', 'disc'], ['playback', 'Zones and outputs', 'zone'],
+    ['nodehome', 'Home for everyone', 'home'],
     ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
     ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['about', 'About and updates', 'info'],
     ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
@@ -4177,10 +4178,11 @@
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
           const stor = await api('GET', '/storage').catch(() => null);
           const fresh = (c) => c && Date.now() - c.at < 30000;
-          const [nodeMap, prefs, apps] = await Promise.all([
+          const [nodeMap, prefs, apps, nodeHome] = await Promise.all([
             api('GET', '/node').catch(() => null),
             fresh(state.prefsCache) ? state.prefsCache.v : (() => { const gen = state.prefsGen || 0; return api('GET', '/me/prefs').then((v) => { if (gen === (state.prefsGen || 0)) state.prefsCache = { at: Date.now(), v }; return v; }).catch(() => null); })(), // an answer older than a change isn't kept
             api('GET', '/node/apps').catch(() => null),
+            api('GET', '/home/layout').catch(() => null),
           ]);
           if (state.view !== 'settings') return;
           const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
@@ -4263,6 +4265,16 @@
           const homeL = prefs && prefs.home_layout;
           const homeTab = group('Your Home', row('Rows on Home', `${homeL ? `${applies(homeL.applies)}. ` : ''}Which rows show and in what order; change them with Edit Home on Home.`, `<button class="btn ghost" id="sethomeedit">${icon('settings')} Edit Home</button>${homeL && homeL.applies === 'yours' ? ' <button class="btn ghost" id="sethomereset">Use the node’s default</button>' : ''}`)
             + row('Saved on', prefs ? (prefs.saved_on === 'homeserver' ? 'Your homeserver, so it follows you to every node and device.' : 'This node for now; it goes to your homeserver once it can be reached.') : '', ''));
+          // This node › Home for everyone: the default, which Edit Home no longer writes (#123 follow-up).
+          // Yours is what Home holds right now when it has loaded (a save may still be on its way), else the prefs answer.
+          const mine = state.homeLayout || (homeL && homeL.value) || null;
+          const shape = (l) => JSON.stringify([l.order || [], [...(l.hidden || [])].sort()]);
+          const same = (x, y) => !!x && !!y && shape(x) === shape(y);
+          const rowsOf = (l) => { if (!l) return 'Couldn’t read the node’s default'; const o = (l.order || []).length; const h = (l.hidden || []).length; if (!o && !h) return 'The built-in rows, in the built-in order'; return `${o ? `${countOf(o, 'rows')} arranged` : 'The built-in order'}${h ? `, ${countOf(h, 'rows')} hidden` : ''}`; };
+          const canSetDefault = !!mine && (!homeL || homeL.applies === 'yours') && !same(mine, nodeHome); // only a layout of your own; a copy of the default may be old
+          const whyDefault = !mine ? 'Your Home couldn’t be read.' : canSetDefault ? 'Copies your Home’s rows and order to the node; your own stays yours.' : homeL && homeL.applies !== 'yours' ? 'You haven’t arranged your own Home yet; use Edit Home on Home first.' : 'Your Home already is the default.';
+          const nodeHomeTab = group('The default Home', row('Rows on Home for everyone', `${rowsOf(nodeHome)}. What Home shows to everyone who hasn’t arranged their own.`, '')
+            + row('Make yours the default', `<span id="sethomedefault-why">${whyDefault}</span>`, `<button class="btn ghost" id="sethomedefault" aria-describedby="sethomedefault-why" ${canSetDefault ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`));
           // You › Playback quality: your choice per service over the node's
           const qEntries = Object.entries((prefs && prefs.quality) || {});
           const qualityTab = group('Per service', qEntries.length
@@ -4276,10 +4288,11 @@
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
+          const hd = $('#sethomedefault'); if (hd) hd.onclick = async () => { hd.disabled = true; try { await api('PUT', '/home/layout', { order: mine.order || [], hidden: mine.hidden || [] }); toast('Your Home is the default for everyone now'); render(); } catch (e) { hd.disabled = false; toast(e.message, 'error'); } };
           const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
           // Fix my files' tags: the list first, then the write
