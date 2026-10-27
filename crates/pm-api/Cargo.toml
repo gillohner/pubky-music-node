@@ -29,7 +29,8 @@ pm-out-mpd = { workspace = true }
 pm-out-net = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
-pubky-music-specs = { workspace = true, features = ["vault"] }
+pubky-music-specs = { workspace = true }
+pm-appdata = { workspace = true }
 pubky-social-specs = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

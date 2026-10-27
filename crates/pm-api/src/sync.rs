@@ -78,6 +78,8 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
             Ok(None) => {}
             Err(e) => tracing::warn!("settings restore failed: {e}"),
         }
+        // The sign-ins in the person's vault, then every 15 minutes (vault_cache)
+        crate::vault_cache::start(&s, sync.clone());
         step(&s, "Syncing your playlists, favourites and tags");
         let result = sync.sync(&s.library).await;
         let ms = started.elapsed().as_millis() as u64;
@@ -993,12 +995,13 @@ impl std::fmt::Debug for PubkySync {
     }
 }
 
-/// Settings keys that belong to the owner, not to a machine: streaming
-/// sessions, renderers added by hand, the Subsonic jukebox zone, DSP per
-/// output. Caches (`tidal.collection`, `tidal.version.*`, `artist.info.*`,
-/// `mb.rg.*`, `pinakes.version.*`) are not backed up.
-const BACKED_UP_SETTING_PREFIXES: [&str; 9] = [
-    "tidal.user",
+/// Settings keys that belong to the owner, not to a machine: renderers added by hand, the
+/// Subsonic jukebox zone, DSP per output, library and Home choices, smart playlists. Caches
+/// (`tidal.collection`, `tidal.version.*`, `artist.info.*`, `mb.rg.*`, `pinakes.version.*`) are
+/// not backed up. Neither is any sign-in ([`is_credential`]): `settings.json` is plain JSON in the
+/// private folder, which the homeserver's operator can read. Sign-ins travel in the encrypted
+/// backup file (`backup.rs`) or the sources vault.
+const BACKED_UP_SETTING_PREFIXES: [&str; 8] = [
     "tidal.playback_limit",
     "outputs.upnp_addresses",
     "outputs.endpoint_addresses",
@@ -1008,6 +1011,54 @@ const BACKED_UP_SETTING_PREFIXES: [&str; 9] = [
     "home.layout",
     "smart.",
 ];
+
+/// Settings that are never in the settings copy whatever their prefix: the sign-ins the
+/// encrypted backup seals ([`crate::backup::SECRET_SETTINGS`]), the node's own secrets, the
+/// listeners' and the homeserver's tokens, and any key named like a session or credential
+/// (`*.user`, `*session*`, `*token*`, `*secret*`, `*password*`, `*passphrase*`, `*api_key*`,
+/// `*credential*`).
+pub(crate) fn is_credential(key: &str) -> bool {
+    const OTHERS: [&str; 4] = [
+        "stream.secret",
+        "accounts.tokens",
+        "homeserver.owner_signup_token",
+        "backup.schedule",
+    ];
+    let k = key.to_ascii_lowercase();
+    crate::backup::SECRET_SETTINGS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(OTHERS)
+        .any(|name| k == name || k.starts_with(&format!("{name}.")) || k.starts_with(&format!("{name}/")))
+        || k.ends_with(".user")
+        || [
+            "session",
+            "token",
+            "secret",
+            "password",
+            "passphrase",
+            "api_key",
+            "credential",
+        ]
+        .iter()
+        .any(|w| k.contains(w))
+}
+
+/// Whether a setting goes into `/priv/pubky.music/settings.json`.
+pub(crate) fn is_backed_up(key: &str) -> bool {
+    BACKED_UP_SETTING_PREFIXES.iter().any(|p| key.starts_with(p)) && !is_credential(key)
+}
+
+/// The settings the copy holds, as they are on this node now.
+pub(crate) fn backed_up_settings(lib: &Library) -> std::collections::BTreeMap<String, String> {
+    let mut settings = std::collections::BTreeMap::new();
+    for prefix in BACKED_UP_SETTING_PREFIXES {
+        if let Ok(rows) = lib.settings_with_prefix(prefix) {
+            settings.extend(rows.into_iter().filter(|(k, _)| is_backed_up(k)));
+        }
+    }
+    settings
+}
 
 /// What `/priv/pubky.music/settings.json` holds.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -1055,12 +1106,9 @@ impl PubkySync {
     pub async fn backup_settings(&self, s: &crate::state::NodeState) {
         let backup = {
             let lib = s.library.lock().expect("library poisoned");
-            let mut settings = std::collections::BTreeMap::new();
-            for prefix in BACKED_UP_SETTING_PREFIXES {
-                if let Ok(rows) = lib.settings_with_prefix(prefix) {
-                    settings.extend(rows);
-                }
-            }
+            // The whole file is replaced, so a copy an older node wrote with sign-ins in it
+            // loses them on the next sync
+            let settings = backed_up_settings(&lib);
             SettingsBackup {
                 version: 1,
                 saved_at: pm_library::db::now_unix(),
@@ -1134,7 +1182,8 @@ impl PubkySync {
                     out.folders_missing.push(f.clone());
                 }
             }
-            for (k, val) in &backup.settings {
+            // Only what the node backs up now: a sign-in an older node put in the copy stays out
+            for (k, val) in backup.settings.iter().filter(|(k, _)| is_backed_up(k)) {
                 let keep = lib
                     .get_setting(k)
                     .ok()
@@ -1180,5 +1229,85 @@ fn tag_write_hint(msg: String) -> String {
         format!("{msg} (sign the node in with Pubky Ring again: tags now go to /pub/pubky.music/, which this session may not write)")
     } else {
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No setting that can hold a token, a password or a session is ever copied to
+    /// `/priv/pubky.music/settings.json` (plain JSON the homeserver operator can read).
+    #[test]
+    fn no_backed_up_setting_can_hold_a_sign_in() {
+        for (key, _) in crate::backup::SECRET_SETTINGS {
+            assert!(!is_backed_up(key), "{key} holds a sign-in");
+            assert!(!is_backed_up(&format!("{key}.extra")), "{key}.extra");
+        }
+        for key in [
+            "tidal.user",
+            "spotify.user",
+            "lastfm.session",
+            "accounts.tokens",
+            "stream.secret",
+            "homeserver.owner_signup_token",
+            "backup.schedule",
+            // Named like a credential under a backed-up prefix
+            "library.webdav_password",
+            "library.session",
+            "smart.api_key",
+            "dsp/token",
+            "outputs.upnp_addresses.user",
+        ] {
+            assert!(is_credential(key), "{key}");
+            assert!(!is_backed_up(key), "{key}");
+        }
+        for key in [
+            "tidal.playback_limit",
+            "outputs.upnp_addresses",
+            "subsonic.jukebox_zone",
+            "dsp/upnp-kitchen",
+            "library.write_ids",
+            "home.layout",
+            "smart.0035WKVKQDHSM",
+        ] {
+            assert!(is_backed_up(key), "{key} is the owner's setting");
+        }
+        assert!(!is_backed_up("tidal.collection"), "a cache");
+    }
+
+    #[test]
+    fn the_settings_copy_leaves_sign_ins_out() {
+        let lib = Library::open_in_memory().unwrap();
+        // Fake values, put together at run time so secret scanners don't read the test as a leak
+        let (access, refresh, pass) = (
+            ["eyJ", "fake", "access"].join("."),
+            ["fake", "refresh"].join("-"),
+            ["fake", "pass"].join("-"),
+        );
+        let session = format!(
+            "{{\"{}\":\"{access}\",\"{}\":\"{refresh}\",\"user_id\":5}}",
+            ["access", "token"].join("_"),
+            ["refresh", "token"].join("_")
+        );
+        for (k, v) in [
+            ("tidal.user", session.as_str()),
+            ("spotify.user", session.as_str()),
+            ("tidal.playback_limit", "5"),
+            ("library.write_ids", "true"),
+            ("library.webdav_password", pass.as_str()),
+            ("smart.0035WKVKQDHSM", "{}"),
+        ] {
+            lib.set_setting(k, v).unwrap();
+        }
+        let copy = backed_up_settings(&lib);
+        assert_eq!(
+            copy.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["library.write_ids", "smart.0035WKVKQDHSM", "tidal.playback_limit"]
+        );
+        let json = serde_json::to_string(&copy).unwrap();
+        for secret in [refresh.as_str(), access.as_str(), pass.as_str()] {
+            assert!(!json.contains(secret), "{json}");
+        }
     }
 }

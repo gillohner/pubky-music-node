@@ -68,6 +68,9 @@ pub struct NowPlaying {
     /// The latest in-stream title (internet radio), when the stream sends one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_title: Option<String>,
+    /// What is arriving: codec, bitrate, service and tier (the player's quality label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::source::StreamInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

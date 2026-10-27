@@ -704,14 +704,15 @@ impl NodeHomeserver {
 }
 
 /// Where the user's own audio files live on the homeserver: private, never `/pub/`.
-pub const PRIVATE_FILES_DIR: &str = "/priv/pubky.music/files/";
+pub const PRIVATE_FILES_DIR: &str = pm_appdata::paths::FILES_DIR;
 /// Where a node publishes how to reach it, readable only by the owner (ADR 0008).
-pub const NODE_RECORD_PATH: &str = "/priv/pubky.music/node.json";
-/// The node's settings (contact, folders, streaming sessions, renderers, DSP)
-/// so a reinstalled or replaced node restores them after one Ring sign-in.
-pub const NODE_SETTINGS_PATH: &str = "/priv/pubky.music/settings.json";
+pub const NODE_RECORD_PATH: &str = pm_appdata::paths::NODE_RECORD_PATH;
+/// The node's settings (contact, folders, renderers, DSP, library and Home choices), so a
+/// reinstalled or replaced node restores them after one Ring sign-in. Never a sign-in or a token:
+/// the file is plain JSON the homeserver's operator can read.
+pub const NODE_SETTINGS_PATH: &str = pm_appdata::paths::NODE_SETTINGS_PATH;
 /// The person's own preferences ("You" in Settings), read and written by every node they use.
-pub const PREFS_PATH: &str = "/priv/pubky.music/prefs.json";
+pub const PREFS_PATH: &str = pm_appdata::paths::PREFS_PATH;
 
 /// How the user's own devices find their node (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -844,7 +845,7 @@ pub fn missing_capabilities<S: AsRef<str>>(granted: &[S], wanted: &str) -> Vec<S
             };
             // The sources vault counts only when named itself (VAULT.md): a wider grant doesn't
             // give a client the person's streaming sign-ins
-            let exact_only = scope == pubky_music_specs::vault::VAULT_DIR;
+            let exact_only = scope == pm_appdata::vault::VAULT_DIR;
             !have.iter().any(|(hs, ha)| {
                 let parent =
                     !exact_only && (hs == "/" || (hs.ends_with('/') && scope.starts_with(hs.as_str())));

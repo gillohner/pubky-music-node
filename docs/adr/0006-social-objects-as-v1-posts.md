@@ -14,7 +14,7 @@ primitives are defined with the Pinakes owner.
 - Playlists, reviews and activity records are `PubkyAppPost`s (`kind: long`) whose `content` is a
   JSON envelope `{"type":"pubky.music/<kind>","v":1,...}`. Reviews and activity carry an
   `embed` link to their canonical music URL. Validation is both layers: the spec crate's post
-  rules and the envelope's rules (`docs/specs/pubky-music-playlist.md`).
+  rules and the envelope's rules (`docs/archive/specs/pubky-music-playlist.md`).
 - They are written to `/priv/pubky.app/posts/<timestamp id>` by default. Anything outside
   `/pub/` is private on a homeserver; `/priv/` mirrors the public layout so publishing an object
   is a path prefix change, never a format change.

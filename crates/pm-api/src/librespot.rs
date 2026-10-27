@@ -25,6 +25,9 @@ use std::sync::{Arc, Condvar, Mutex};
 pub const STATE_KEY: &str = "spotify.librespot";
 /// The live item a zone plays while librespot pipes into it.
 pub const LIVE_URI: &str = "librespot:connect";
+
+/// The `--bitrate` librespot was last started with (kbps; 0 until it starts).
+static REQUESTED_KBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub const WARNING: &str = "librespot is a community-made Spotify client, not approved by Spotify. It can stop working at any time, and Spotify could act on the account that picks it. It needs Spotify Premium.";
 const FORMAT: AudioFormat = AudioFormat::pcm(44_100, 16, 2);
 /// Frames per block handed to the zone.
@@ -70,8 +73,42 @@ pub struct ModeState {
     /// none when librespot wrote it after a Connect sign-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_from: Option<String>,
+    /// `320`, `160` or `96` kbps (Ogg Vorbis); empty = 320.
+    #[serde(default)]
+    pub bitrate: String,
     #[serde(default)]
     pub health: Option<Health>,
+}
+
+/// The bitrate librespot is asked for, as a `--bitrate` value.
+pub fn bitrate_of(st: &ModeState) -> &'static str {
+    match st.bitrate.as_str() {
+        "160" => "160",
+        "96" => "96",
+        _ => "320",
+    }
+}
+
+/// Pick the bitrate (`crate::quality`); librespot restarts when it runs.
+pub(crate) async fn set_bitrate(s: &Arc<NodeState>, bitrate: &str) {
+    let enabled = {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut st = load(&lib);
+        st.bitrate = bitrate.into();
+        save(&lib, &st);
+        st.enabled
+    };
+    if enabled && running() {
+        let s2 = s.clone();
+        tokio::task::spawn_blocking(move || {
+            stop();
+            if let Err(e) = start(&s2) {
+                tracing::info!("librespot can't start yet: {e}");
+            }
+        })
+        .await
+        .ok();
+    }
 }
 
 fn now() -> i64 {
@@ -412,6 +449,20 @@ impl pm_zones::FrameSource for LiveSource {
         FORMAT
     }
 
+    /// Ogg Vorbis from Spotify, at the bitrate librespot was started with. That is the bitrate
+    /// *requested*: librespot falls back to a lower one when a track has no file at it.
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        let kbps = REQUESTED_KBPS.load(std::sync::atomic::Ordering::Relaxed);
+        Some(pm_zones::StreamInfo {
+            codec: "Vorbis".into(),
+            bitrate_kbps: (kbps > 0).then_some(kbps),
+            lossless: false,
+            service: "spotify".into(),
+            tier: None,
+            preview: false,
+        })
+    }
+
     fn duration_ms(&self) -> Option<u64> {
         None
     }
@@ -625,7 +676,16 @@ fn watch(
             .arg("--device-type")
             .arg("speaker")
             .arg("--bitrate")
-            .arg("320")
+            .arg({
+                // Use the same selection for the process and the player's label. Keep the
+                // bitrate from this spawn rather than reading settings on every publish.
+                let bitrate = bitrate_of(&load(&lib.lock().expect("library poisoned")));
+                REQUESTED_KBPS.store(
+                    bitrate.parse().expect("known librespot bitrate"),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                bitrate
+            })
             .arg("--cache")
             .arg(dir.join("cache"))
             .arg("--system-cache")
@@ -818,6 +878,8 @@ pub struct LibrespotStatus {
     /// `local` or `zone`.
     pub output: String,
     pub zone_id: String,
+    /// `320`, `160` or `96` kbps.
+    pub bitrate: String,
     pub zones: Vec<ZoneChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub librespot: Option<Binary>,
@@ -901,6 +963,7 @@ async fn view(s: &NodeState) -> LibrespotStatus {
         },
         output,
         zone_id: st.zone_id.clone(),
+        bitrate: bitrate_of(&st).into(),
         zones,
         librespot,
         running,

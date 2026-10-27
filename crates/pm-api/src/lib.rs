@@ -72,6 +72,7 @@ pub mod prefs;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
+pub mod quality;
 pub mod radio;
 pub mod radio_sources;
 pub mod remote;
@@ -97,6 +98,7 @@ pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
 pub mod vault;
+pub mod vault_cache;
 pub mod watch;
 pub mod webdav;
 pub mod youtube;
@@ -360,6 +362,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/{source}/signin",
             get(signin::get).put(signin::put).delete(signin::sign_out),
         )
+        .route("/sources/{source}/quality", get(quality::get).put(quality::put))
         .route("/sources/{source}/signin/import", post(signin::import))
         .route("/sources/{source}/items/{id}", get(streaming::item))
         .route("/sources/{source}/artists/{id}", get(streaming::artist))
@@ -629,6 +632,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/vault", get(vault::get))
         .route("/vault/register", post(vault::register))
+        .route("/vault/sync", post(vault::sync_now))
         .route("/vault/devices/{key}/sign-out", post(vault::sign_out_device))
         .route("/vault/sign-out-everywhere", post(vault::sign_out_everywhere))
         .route("/vault/new-key", post(vault::new_key))
@@ -8142,8 +8146,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let secret_ok = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let expected_format = Arc::new(std::sync::atomic::AtomicU32::new(27));
         let file_base = base.clone();
         let ok2 = secret_ok.clone();
+        let format2 = expected_format.clone();
+        let mp3 = b"synthetic MP3 stream";
         let album = serde_json::json!({"id": "0060253780968", "title": "Random Access Memories", "artist": {"name": "Daft Punk"}, "upc": "0886443927087",
             "release_date_original": "2013-05-17", "image": {"large": "https://img/600.jpg"}, "maximum_bit_depth": 24, "maximum_sampling_rate": 88.2,
             "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "track_number": 8, "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108"}]}});
@@ -8171,7 +8178,7 @@ mod tests {
             .route(
                 "/track/getFileUrl",
                 get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                    let (base, ok) = (file_base.clone(), ok2.clone());
+                    let (base, ok, format) = (file_base.clone(), ok2.clone(), format2.clone());
                     async move {
                         let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
                         if !ok.load(std::sync::atomic::Ordering::SeqCst) || q["request_sig"] != want {
@@ -8180,12 +8187,15 @@ mod tests {
                         if q["track_id"] == "2" {
                             return (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "sample": true})));
                         }
-                        assert_eq!(q["format_id"], "27", "hi-res plan, max quality");
-                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27, "mime_type": "audio/flac"})))
+                        let format = format.load(std::sync::atomic::Ordering::SeqCst);
+                        assert_eq!(q["format_id"], format.to_string(), "the selected quality reaches Qobuz");
+                        let (file, mime) = if format == 5 { ("file.mp3", "audio/mpeg") } else { ("file.flac", "audio/flac") };
+                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/{file}"), "format_id": format, "mime_type": mime})))
                     }
                 }),
             )
-            .route("/file.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }));
+            .route("/file.flac", get({ let f = flac.clone(); move || { let f = f.clone(); async move { f } } }))
+            .route("/file.mp3", get(move || async move { mp3.as_slice() }));
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         qobuz::set_api_base(&base);
 
@@ -8315,6 +8325,36 @@ mod tests {
             app.clone().oneshot(req).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+        // The browser relay labels the format requested from Qobuz, including MP3 (format 5).
+        // Changing quality affects the next request, including switching back to either FLAC mode.
+        for (quality, format, mime, bytes) in [
+            ("mp3", 5, "audio/mpeg", mp3.as_slice()),
+            ("cd", 6, "audio/flac", flac.as_slice()),
+            ("max", 27, "audio/flac", flac.as_slice()),
+        ] {
+            let (st, q) = call(
+                &app,
+                "PUT",
+                "/v1/sources/qobuz/quality",
+                Some(serde_json::json!({"id": quality})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{q}");
+            expected_format.store(format, std::sync::atomic::Ordering::SeqCst);
+            let req = Request::builder()
+                .uri("/v1/sources/qobuz/stream/5966783")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.headers()["content-type"], mime, "{quality}");
+            assert_eq!(resp.headers()["content-length"], bytes.len().to_string());
+            assert_eq!(
+                resp.into_body().collect().await.unwrap().to_bytes().as_ref(),
+                bytes,
+                "{quality}"
+            );
+        }
         // Qobuz refusing the app switches the source off, says why, and Retry switches it on
         secret_ok.store(false, std::sync::atomic::Ordering::SeqCst);
         let req = Request::builder()
@@ -9293,9 +9333,10 @@ exec sleep 300
         // play (2 s of a 440 Hz-ish square wave on stdout), pause, and wait
         std::fs::write(&bin, r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "librespot 0.8.0 test"; exit 0; fi
-ev=""; pipe=0
-while [ $# -gt 0 ]; do case "$1" in --onevent) ev="$2"; shift 2;; --backend) [ "$2" = pipe ] && pipe=1; shift 2;; *) shift;; esac; done
+ev=""; pipe=0; bitrate=""
+while [ $# -gt 0 ]; do case "$1" in --onevent) ev="$2"; shift 2;; --backend) [ "$2" = pipe ] && pipe=1; shift 2;; --bitrate) bitrate="$2"; shift 2;; *) shift;; esac; done
 [ -n "$ev" ] || { echo "no onevent" >&2; exit 3; }
+[ "$bitrate" = 160 ] || { echo "wrong bitrate: $bitrate" >&2; exit 3; }
 PLAYER_EVENT=session_connected USER_NAME=listener "$ev"
 PLAYER_EVENT=track_changed NAME="Get Lucky" ARTISTS="Daft Punk
 Pharrell Williams" ALBUM=RAM DURATION_MS=369000 URI=spotify:track:69kOkLUCkxIZYexIgSG8rq "$ev"
@@ -9325,6 +9366,15 @@ exec sleep 300
         );
         assert_eq!(u["librespot"]["version"], "librespot 0.8.0 test");
         assert!(u["warning"].as_str().unwrap().contains("not approved by Spotify"));
+        // The selected quality must reach both the process and the player's stream metadata.
+        let (st, q) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/quality",
+            Some(serde_json::json!({"id": "160"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
         // Zone output without a zone is refused; with one it runs
         let (st, _) = call(
             &app,
@@ -9352,6 +9402,7 @@ exec sleep 300
         }
         assert_eq!(z["now_playing"]["item"]["uri"], librespot::LIVE_URI, "{z}");
         assert_eq!(z["transport"], "playing", "{z}");
+        assert_eq!(z["now_playing"]["format"]["bitrate_kbps"], 160, "{z}");
         let (_, u) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
         assert_eq!(u["user"], "listener");
         assert_eq!(u["now"]["title"], "Get Lucky");
@@ -11266,6 +11317,112 @@ exec sleep 300
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&app, "GET", "/v1/sources/nope/signin", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    /// One front for the quality choice (STEWARD-UX-PLAYER-SOURCES.md §2): the options, the pick
+    /// kept in the source's own state, no choice where the service sends one format; and
+    /// `healthy` on the Sources list.
+    #[tokio::test]
+    async fn quality_is_one_front_per_source_and_sources_say_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let ids = |q: &serde_json::Value| {
+            q["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let (st, q) = call(&app, "GET", "/v1/sources/tidal/quality", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(ids(&q), ["max", "high"]);
+        assert_eq!(q["current"], "max");
+        assert_eq!(q["applies"], "next_track");
+        assert!(q["note"].as_str().unwrap().contains("device sign-in"), "{q}");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/quality",
+            Some(serde_json::json!({"id": "high"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["current"], "high");
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["quality"], "high", "the source's own state follows");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/quality",
+            Some(serde_json::json!({"id": "lossy"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("max, high"), "{r}");
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/quality", None).await;
+        assert_eq!(ids(&q), ["max", "cd", "mp3"]);
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/qobuz/quality",
+            Some(serde_json::json!({"id": "mp3"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, u) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert_eq!(u["quality"], "mp3");
+        let (_, q) = call(&app, "GET", "/v1/sources/spotify/quality", None).await;
+        assert_eq!(ids(&q), ["320", "160", "96"]);
+        assert_eq!(q["current"], "320");
+        assert_eq!(q["applies"], "now");
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/quality",
+            Some(serde_json::json!({"id": "160"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["current"], "160");
+        let (_, l) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
+        assert_eq!(l["bitrate"], "160");
+        let (st, q) = call(&app, "GET", "/v1/sources/deezer/quality", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert!(q["options"].as_array().unwrap().is_empty());
+        assert!(q["note"].as_str().unwrap().contains("previews"), "{q}");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/deezer/quality",
+            Some(serde_json::json!({"id": "x"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&app, "GET", "/v1/sources/nope/quality", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // healthy: on and working
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        let row = |srcs: &serde_json::Value, id: &str| {
+            srcs.as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row(&srcs, "deezer")["healthy"], true, "{srcs}");
+        assert_eq!(row(&srcs, "tidal")["healthy"], false, "not signed in: {srcs}");
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/deezer/enabled",
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await;
+        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
+        assert_eq!(row(&srcs, "deezer")["healthy"], false, "off: {srcs}");
     }
 
     /// Sources › TIDAL › Sign in › from another app on this machine: the known places are read,

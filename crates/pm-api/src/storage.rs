@@ -28,7 +28,7 @@ const QUIET: Duration = Duration::from_secs(20);
 const AT_MOST: Duration = Duration::from_secs(120);
 /// Written once and deleted at once; inside the files folder because the node only ever writes
 /// there, and not audio, so no scan picks it up.
-const PROBE: &str = "/priv/pubky.music/files/.pubky-music-layout-check";
+const PROBE: &str = pm_appdata::paths::FILES_LAYOUT_PROBE;
 
 /// What auto-save last did.
 #[derive(Debug, Clone, Default)]

@@ -3,7 +3,7 @@
 A person's streaming sign-ins (TIDAL, Qobuz, Spotify, …) live on their own homeserver, encrypted on the
 device, so every client they authorise plays from the same sign-ins. The homeserver only stores ciphertext:
 `/priv/` is access-controlled, not encrypted, and its operator can read it. Reference code:
-`pubky_music_specs::vault` (feature `vault`); vectors: `tests/vectors/vault-v1.json`, with an independent
+`pm_appdata::vault`; vectors: `tests/vectors/vault-v1.json`, with an independent
 Python check of them (`tests/vectors/check_vault_v1.py`) for implementers in other languages.
 
 ## Paths
@@ -135,6 +135,10 @@ wrapped to.
   client with a device-client sign-in), uses the tokens until `expires_at` and leaves the refresh to another
   client.
 - `revision` goes up by one at every write.
+- `node` is what a Pubky Music node keeps for itself: its own settings for the sign-in, an id that a
+  refresh keeps and a new sign-in changes, and `std`, a hash of the standard members as the node wrote them.
+  Clients keep it like any unknown member; when they write their own tokens, `std` no longer matches, and
+  nodes then treat the copy as another client's.
 - `settings` holds what should follow the person across clients: `quality` takes the ids of
   `GET/PUT /v1/sources/<id>/quality` (TIDAL `max|high`, Qobuz `max|cd|mp3`, …).
 - `label` can be an e-mail address. It stays in the blob: the device list's `name` is a device's name, never
@@ -159,7 +163,10 @@ wrapped to.
     holds that grant (an old key of a device that has a new one keeps the device in): the last key on a grant
     takes the grant with it, so a thief can't register again under it. A client never signs itself out
     through its own grant id.
-- **Sign out everywhere:** delete the blobs, each under its lock, and revoke each token at its service.
+- **Sign out everywhere:** first set `signed_out_everywhere_at` (Unix seconds) in `index.json`, under its lock,
+  then delete the blobs, each under its lock, and revoke each token at its service. A client whose own copy
+  of a sign-in was never in the vault reads that member to tell "signed out everywhere" from "that other
+  sign-in was removed".
 
 Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer
 blob, and they treat an older one as stale and read it again (a homeserver can serve an old copy).
@@ -201,6 +208,10 @@ Several clients hold one sign-in, and many services rotate the refresh token, so
 
 Leases compare `until` with the local clock, so a client whose clock is more than 30 s off can take a live
 lease. That costs a failed refresh at the service. Locks don't depend on clocks.
+
+Until every source refreshes through this protocol, a client other than the node uses the tokens it reads
+and leaves refreshing to the node (the node pushes its own refreshes within 15 minutes); otherwise two
+clients holding one rotating refresh token would invalidate each other.
 
 The lease is its own file, not a member of the blob: writing a lease into the blob would race with another
 client's token write and could undo a rotated refresh token.

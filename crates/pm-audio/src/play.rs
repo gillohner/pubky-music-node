@@ -62,6 +62,29 @@ impl Source {
         }
     }
 
+    /// The codec as people know it (`FLAC`, `MP3`, `DSD`…), for the player's quality label.
+    pub fn codec_name(&self) -> String {
+        match self {
+            Source::Dsd(_) => "DSD".into(),
+            Source::Pcm(d) => match d.container() {
+                "flac" | "alac" | "mp3" | "aac" | "wav" => d.container().to_uppercase(),
+                "aiff" => "AIFF".into(),
+                "vorbis" => "Vorbis".into(),
+                "opus" => "Opus".into(),
+                other => other.to_uppercase(),
+            },
+        }
+    }
+
+    /// What this decoder knows of its stream (no service: the opener or engine adds it).
+    pub fn stream_info(&self) -> pm_zones::StreamInfo {
+        pm_zones::StreamInfo {
+            codec: self.codec_name(),
+            lossless: !self.is_lossy(),
+            ..Default::default()
+        }
+    }
+
     pub fn next_block(&mut self) -> Result<Option<AudioBlock>, AudioError> {
         match self {
             Source::Pcm(d) => d.next_block(),

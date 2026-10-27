@@ -61,9 +61,6 @@ jobs:
       # The cross-platform output compiles on Linux too (cpal uses ALSA there).
       - run: cargo clippy -p pm-out-local -p pm-endpoint --all-targets --features cpal -- -D warnings
       - run: cargo test -p pm-out-local --features alsa
-      # The sources vault (crates/pubky-music-specs/VAULT.md) is behind a feature: its vectors and refusals
-      - run: cargo clippy -p pubky-music-specs --all-targets --features vault -- -D warnings
-      - run: cargo test -p pubky-music-specs --features vault
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

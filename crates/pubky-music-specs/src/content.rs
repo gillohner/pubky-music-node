@@ -14,7 +14,7 @@ pub const REVIEW_RATING_MIN: u8 = 1;
 pub const REVIEW_RATING_MAX: u8 = 10;
 /// A review's text, in code points: a social note's length.
 pub const REVIEW_TEXT_MAX_LENGTH: usize = 2000;
-/// A service name (`tidal`, `deezer`, `library`), in bytes.
+/// A service name (`tidal`, `deezer`, `library` for the curator's own files), in bytes.
 pub const SERVICE_MAX_LENGTH: usize = 32;
 /// The earliest `played_at`, 2000-01-01 in Unix milliseconds. It catches a seconds value.
 pub const LISTEN_PLAYED_AT_MIN_MS: i64 = 946_684_800_000;
@@ -77,7 +77,7 @@ impl MusicSource {
         }
     }
 
-    /// A source known only by its service (`library`, `roon`).
+    /// A source known only by its service (`library`: the curator's own files).
     pub fn service(service: impl Into<String>) -> Self {
         Self {
             service: service.into(),

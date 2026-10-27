@@ -36,6 +36,56 @@ impl FrameSource for Source {
     fn lossy_source(&self) -> bool {
         Source::is_lossy(self)
     }
+
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(Source::stream_info(self))
+    }
+}
+
+/// A library file: the decoder plus the file's average bitrate for lossy codecs (size over
+/// length), for the player's quality label.
+pub struct FileSource {
+    src: Source,
+    bitrate_kbps: Option<u32>,
+}
+
+impl FileSource {
+    pub fn open(path: &Path) -> Result<Self, AudioError> {
+        let src = Source::open(path)?;
+        let bitrate_kbps = match (src.is_lossy(), src.duration_ms(), std::fs::metadata(path)) {
+            (true, Some(ms), Ok(m)) if ms > 0 => Some((m.len() * 8 / ms) as u32),
+            _ => None,
+        };
+        Ok(Self { src, bitrate_kbps })
+    }
+}
+
+impl FrameSource for FileSource {
+    fn format(&self) -> AudioFormat {
+        self.src.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.src.duration_ms()
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        FrameSource::next_block(&mut self.src)
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        FrameSource::seek_ms(&mut self.src, ms)
+    }
+    fn finalize(&mut self) -> Option<bool> {
+        FrameSource::finalize(&mut self.src)
+    }
+    fn lossy_source(&self) -> bool {
+        self.src.is_lossy()
+    }
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(pm_zones::StreamInfo {
+            bitrate_kbps: self.bitrate_kbps,
+            service: "library".into(),
+            ..self.src.stream_info()
+        })
+    }
 }
 
 impl Processor for Plan {
@@ -112,7 +162,7 @@ fn open_err(path: &Path, e: AudioError) -> SourceError {
 impl SourceFactory for LocalFiles {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
         let path = Self::path_of(&item.uri);
-        let src = Source::open(&path).map_err(|e| open_err(&path, e))?;
+        let src = FileSource::open(&path).map_err(|e| open_err(&path, e))?;
         Ok(Box::new(src))
     }
 
@@ -136,6 +186,26 @@ impl SourceFactory for LocalFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library file reports its codec from the decoder, is lossless with no bitrate, and
+    /// says it comes from the library.
+    #[test]
+    fn a_file_says_what_it_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        write_wav(&wav, 44_100, 4410, 1);
+        let f = FileSource::open(&wav).unwrap();
+        let info = FrameSource::stream_info(&f).unwrap();
+        assert_eq!(info.codec, "WAV");
+        assert!(info.lossless);
+        assert_eq!(info.bitrate_kbps, None, "no bitrate for a lossless file");
+        assert_eq!(info.service, "library");
+        assert!(!info.preview);
+
+        let flac = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/14_wasted_bits.flac");
+        let info = FrameSource::stream_info(&FileSource::open(&flac).unwrap()).unwrap();
+        assert_eq!((info.codec.as_str(), info.lossless), ("FLAC", true));
+    }
     use pm_zones::outputs::{read_wav, WavFileOutput};
     use pm_zones::{Insert, Zone, ZoneEvent, ZoneId};
     use std::sync::Arc;

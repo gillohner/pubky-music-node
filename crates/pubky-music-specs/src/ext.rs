@@ -58,7 +58,7 @@ fn tidy(extra: &mut Map<String, Value>) {
 
 /// The item's `ext.music.source`, when it is well formed: a service name and, when present, an
 /// http(s) or pubky URI that passes the reference gate (returned canonical). A source without a
-/// URI names a service only (`library`: "play my own file"). `owner` is the playlist's author,
+/// URI names a service only (`library`: the curator's own files). `owner` is the playlist's author,
 /// for private references.
 pub fn item_source(
     item: &PubkySocialCollectionItem,
