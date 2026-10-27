@@ -143,6 +143,16 @@ pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) -> ModeState
     st
 }
 
+/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark are
+/// written under one library guard, so no vault pass sees one without the other.
+pub(crate) fn update_signed_in(s: &NodeState, service: &str, f: impl FnOnce(&mut ModeState)) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut st = load(&lib);
+    f(&mut st);
+    save(&lib, &st);
+    crate::vault_cache::new_sign_in(&lib, service);
+}
+
 fn config_client() -> &'static std::sync::OnceLock<Client> {
     static C: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
     &C
@@ -158,6 +168,11 @@ pub fn set_config_client(id: &str, secret: &str) {
             from: "config".into(),
         });
     }
+}
+
+/// The device client id the full-tracks sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    client_of(&s.library.lock().expect("library poisoned")).map(|c| c.id)
 }
 
 /// The device client the owner set: in Settings, else from node.toml, else the
@@ -443,7 +458,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
         if ok {
             if let Some(sess) = session_from(&v, None) {
                 let sess = fill_session(s, sess).await;
-                update(s, |st| {
+                update_signed_in(s, "tidal-full", |st| {
                     st.session = Some(sess);
                     st.login = None;
                     st.enabled = true;
@@ -552,8 +567,19 @@ fn token_blocking(
         session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib);
-        st.session = Some(fresh.clone());
-        save(&lib, &st);
+        // Only over the session this renewal started from (the vault may have changed it
+        // meanwhile); otherwise the session there now is the one to use
+        if st
+            .session
+            .as_ref()
+            .is_some_and(|c| c.access_token == sess.access_token)
+        {
+            st.session = Some(fresh.clone());
+            save(&lib, &st);
+        } else {
+            tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
+            return Ok(st.session.map(|c| (c, quality)));
+        }
     }
     Ok(Some((fresh, quality)))
 }

@@ -231,6 +231,12 @@ async fn a_backup_rebuilds_the_node() {
             .unwrap();
         lib.set_setting("listenbrainz.account", &format!("{{\"token\":\"{LB_TOKEN}\"}}"))
             .unwrap();
+        // A sign-in moved aside after "Sign out everywhere" (vault_cache): still a token
+        lib.set_setting(
+            "vault.signed_out.spotify.user",
+            "{\"access_token\":\"ASIDE-SECRET-31\"}",
+        )
+        .unwrap();
     }
     let (st, _) = json(
         &app_a,
@@ -274,7 +280,13 @@ async fn a_backup_rebuilds_the_node() {
     assert_eq!(st, StatusCode::OK);
     let parsed = pm_api::backup::parse(&locked).unwrap();
     assert!(parsed.manifest.secrets.is_some());
-    for secret in [TIDAL_TOKEN, LB_TOKEN, "app-secret", "not-a-real-session"] {
+    for secret in [
+        TIDAL_TOKEN,
+        LB_TOKEN,
+        "app-secret",
+        "not-a-real-session",
+        "ASIDE-SECRET-31",
+    ] {
         assert!(
             !contains(&parsed.database, secret),
             "{secret} in the plain database"

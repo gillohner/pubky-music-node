@@ -331,6 +331,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
                         Ok(None) => {}
                         Err(e) => tracing::warn!("settings restore failed: {e}"),
                     }
+                    // The sign-ins in the person's vault, then every 15 minutes
+                    pm_api::vault_cache::start(&state, sync.clone());
                     match sync.sync(&state.library).await {
                         Ok(r) => {
                             tracing::info!(

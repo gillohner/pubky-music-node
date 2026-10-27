@@ -86,6 +86,11 @@ fn numeric(id: &str) -> Result<&str, ApiError> {
     Ok(id)
 }
 
+/// The client id the node's Jamendo sign-in is made with (`vault_cache`).
+pub(crate) fn app_id(s: &NodeState) -> Option<String> {
+    Some(s.jamendo.read().expect("jamendo").creds.client_id.clone()).filter(|c| !c.trim().is_empty())
+}
+
 fn endpoints(s: &NodeState) -> Result<JamendoEndpoints, ApiError> {
     let e = s.jamendo.read().expect("jamendo").clone();
     if !e.creds.configured() {
@@ -519,6 +524,7 @@ async fn user_token(s: &NodeState) -> Result<String, ApiError> {
     if u.expires_at - now_unix() > 60 {
         return Ok(u.access_token);
     }
+    let was = u.access_token.clone();
     let mut fresh = grant(
         s,
         &[
@@ -528,8 +534,30 @@ async fn user_token(s: &NodeState) -> Result<String, ApiError> {
     )
     .await?;
     fresh.name = u.name;
-    store_user(s, Some(&fresh))?;
-    Ok(fresh.access_token)
+    let lib = s.library.lock().expect("library poisoned");
+    keep_refreshed(&lib, &was, &fresh).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "sign in to Jamendo first (Sources › Jamendo)",
+        )
+    })
+}
+
+/// Store a refreshed session only over the one the refresh started from (`was`, its access
+/// token): a sign-in the vault pulled or moved aside meanwhile wins, as in spotify.rs. Returns
+/// the access token to use: the fresh one when stored, else whatever is stored now (none when
+/// the sign-in is gone).
+fn keep_refreshed(lib: &pm_library::Library, was: &str, fresh: &UserSession) -> Option<String> {
+    let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
+    let raw = serde_json::to_string(fresh).expect("serializes");
+    if crate::vault_cache::store_refreshed(lib, USER_KEY, still, &raw) {
+        return Some(fresh.access_token.clone());
+    }
+    lib.get_setting(USER_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+        .map(|c| c.access_token)
 }
 
 /// `POST /v1/sources/jamendo/login`: the Jamendo page where the user approves the node.
@@ -617,7 +645,12 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
             .or(v["results"][0]["name"].as_str())
             .map(str::to_string);
     }
-    store_user(s, Some(&session))?;
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other
+        let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(USER_KEY, &serde_json::to_string(&session).expect("serializes"))?;
+        crate::vault_cache::new_sign_in(&lib, "jamendo");
+    }
     tracing::info!("Jamendo sign-in stored");
     Ok(())
 }
@@ -709,6 +742,42 @@ pub(crate) async fn import_collection(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_refresh_is_kept_only_over_the_session_it_came_from() {
+        let lib = pm_library::Library::open_in_memory().unwrap();
+        let session = |at: &str| UserSession {
+            access_token: at.into(),
+            refresh_token: "r".into(),
+            expires_at: 0,
+            name: None,
+        };
+        let put = |u: &UserSession| {
+            lib.set_setting(USER_KEY, &serde_json::to_string(u).unwrap())
+                .unwrap()
+        };
+        let stored = || {
+            lib.get_setting(USER_KEY)
+                .unwrap()
+                .map(|v| serde_json::from_str::<UserSession>(&v).unwrap().access_token)
+        };
+        // Unchanged: the fresh session is stored and used
+        put(&session("a1"));
+        assert_eq!(keep_refreshed(&lib, "a1", &session("a2")).as_deref(), Some("a2"));
+        assert_eq!(stored().as_deref(), Some("a2"));
+        // The vault pulled another sign-in meanwhile: it stays, and is what is used
+        put(&session("other"));
+        assert_eq!(
+            keep_refreshed(&lib, "a2", &session("a3")).as_deref(),
+            Some("other")
+        );
+        assert_eq!(stored().as_deref(), Some("other"));
+        // Moved aside (signed out) meanwhile: not brought back
+        lib.delete_setting(USER_KEY).unwrap();
+        assert_eq!(keep_refreshed(&lib, "other", &session("o2")), None);
+        assert_eq!(stored(), None);
+    }
+
     use super::*;
 
     #[test]

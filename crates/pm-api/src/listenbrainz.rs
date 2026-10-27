@@ -324,10 +324,24 @@ pub(crate) async fn connect(
     if let Some(on) = body.submit {
         acct.submit = on;
     }
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
+    {
+        // One guard from reading to writing: a token a vault pass just put in isn't written
+        // over with the one read before it, and a new one is stored and marked new together
+        let lib = s.library.lock().expect("library poisoned");
+        if body.token.as_deref().is_none_or(|t| t.trim().is_empty()) {
+            if let Some(cur) = lib
+                .get_setting(ACCOUNT_KEY)?
+                .and_then(|v| serde_json::from_str::<Account>(&v).ok())
+            {
+                acct.token = cur.token;
+                acct.user = cur.user;
+            }
+        }
+        lib.set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
+        if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            crate::vault_cache::new_sign_in(&lib, "listenbrainz");
+        }
+    }
     if acct.submit && !pending(&s).is_empty() {
         send_listens(&s, &acct.token, Vec::new()).await;
     }

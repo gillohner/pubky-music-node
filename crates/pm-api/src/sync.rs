@@ -78,6 +78,8 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
             Ok(None) => {}
             Err(e) => tracing::warn!("settings restore failed: {e}"),
         }
+        // The sign-ins in the person's vault, then every 15 minutes (vault_cache)
+        crate::vault_cache::start(&s, sync.clone());
         step(&s, "Syncing your playlists, favourites and tags");
         let result = sync.sync(&s.library).await;
         let ms = started.elapsed().as_millis() as u64;

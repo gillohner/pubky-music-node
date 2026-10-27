@@ -89,6 +89,10 @@ pub struct VaultView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub devices_problem: Option<String>,
     pub sign_ins: Vec<VaultSignIn>,
+    /// The node's last sync with the vault: `{at, report: {migrated, pushed, pulled, signed_out,
+    /// not_readable}}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<serde_json::Value>,
 }
 
 async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
@@ -142,6 +146,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
         devices,
         devices_problem,
         sign_ins,
+        last_sync: None,
     })
 }
 
@@ -153,7 +158,16 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView>
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
         .remember_revocations(&revoked);
-    Ok(Json(view(&vault).await.map_err(vault_error)?))
+    let mut v = view(&vault).await.map_err(vault_error)?;
+    v.last_sync = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(crate::vault_cache::LAST_SYNC_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok());
+    Ok(Json(v))
 }
 
 /// `POST /v1/vault/register`: put the node in the device list (under its name) and give the
@@ -224,15 +238,31 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
         .remember_revocations(&revoked);
+    // No sync may run between the wipe and the node's own copies going aside (one running is
+    // waited for briefly, then this answers 409: try again)
+    let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
     let report = vault
         .sign_out_everywhere(|service, _| async move {
             tracing::info!(service, "vault: sign-in removed");
         })
         .await
         .map_err(vault_error)?;
+    // The node's own copies go aside now, not at the next sync. The vault is already wiped
+    // here, so a sync that fails is reported, not an error
+    let (signed_out_here, cache_error) =
+        match crate::vault_cache::within(crate::vault_cache::sync_held(&s, &vault, None, true)).await {
+            Ok(c) => {
+                // Settings shows this pass, not the one from before the wipe
+                crate::vault_cache::record_last_sync(&s, &c);
+                (c.signed_out, None)
+            }
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
     Ok(Json(Everywhere {
         report,
         revoked_at_service: Vec::new(),
+        signed_out_here,
+        cache_error,
     }))
 }
 
@@ -243,6 +273,63 @@ pub struct Everywhere {
     pub report: EverywhereReport,
     /// Tokens also revoked at their service: none yet.
     pub revoked_at_service: Vec<String>,
+    /// The node's own copies, moved aside now.
+    pub signed_out_here: Vec<String>,
+    /// Why the node couldn't move its copies aside now (its next sync does).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_error: Option<String>,
+}
+
+/// `POST /v1/vault/sync`: register, share, and sync the node's sign-ins with the vault now (it
+/// also runs after every sign-in and every 15 minutes). Answers what moved, by service.
+pub(crate) async fn sync_now(
+    State(s): State<Arc<NodeState>>,
+    body: axum::body::Bytes,
+) -> ApiResult<crate::vault_cache::CacheReport> {
+    /// `{service, take: "node"|"vault"}`: settle that service's conflict, or take a copy that
+    /// isn't usable as it is, that way.
+    #[derive(serde::Deserialize)]
+    struct Settle {
+        service: String,
+        take: crate::vault_cache::Take,
+    }
+    let settle: Option<Settle> = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Some(
+            serde_json::from_slice(&body)
+                .map_err(|e| ApiError::bad_request(format!("{{service, take}}: {e}")))?,
+        )
+    };
+    if let Some(x) = &settle {
+        if !crate::vault_cache::BRIDGES.iter().any(|b| b.service == x.service) {
+            return Err(ApiError::bad_request(format!(
+                "{} isn't one of the sign-ins the node keeps in the vault",
+                x.service
+            )));
+        }
+    }
+    let sync = signed_in(&s)?;
+    let secret = client_secret(&s)?;
+    let revoked = revoked_file(&s);
+    let vault = Vault::new(sync.session(), &secret)
+        .device("node")
+        .remember_revocations(&revoked);
+    let r = crate::vault_cache::pass(&s, &vault, settle.as_ref().map(|x| (x.service.as_str(), x.take)))
+        .await
+        .map_err(vault_error)?;
+    // A take that couldn't be applied says why, as an error (the pass itself still ran)
+    if let Some(st) = r.settled.as_ref().filter(|st| st.did == "not_applied") {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} wasn't settled: {}",
+                st.service,
+                st.why.clone().unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(Json(r))
 }
 
 /// `POST /v1/vault/new-key {"confirm": true}`: give the node a new vault key, for a node that was
