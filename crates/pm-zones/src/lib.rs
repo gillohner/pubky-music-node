@@ -30,5 +30,7 @@ pub use sink::{
     AudioSink, BufferLevel, ClockSource, Describe, MemberStatus, Output, OutputId, OutputInfo, SinkError,
     SyncClass, TrackMeta,
 };
-pub use source::{FrameSource, Processor, ReplayGain, SourceError, SourceFactory, WithReplayGain};
+pub use source::{
+    FrameSource, Processor, ReplayGain, SourceError, SourceFactory, StreamInfo, WithReplayGain,
+};
 pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

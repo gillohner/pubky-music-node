@@ -30,6 +30,29 @@ pub struct ReplayGain {
     pub album_db: Option<f32>,
 }
 
+/// What is actually arriving for the playing track, for the player's quality label
+/// (STEWARD-UX-PLAYER-SOURCES.md §2): the codec as people know it, and what the source knows
+/// about its stream. The decoded rate and bit depth are `NowPlaying::source_format`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StreamInfo {
+    /// `FLAC`, `ALAC`, `MP3`, `AAC`, `Vorbis`, `Opus`, `WAV`, `DSD`…
+    pub codec: String,
+    /// The stream's bitrate, for lossy codecs (average for a file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    pub lossless: bool,
+    /// Where it comes from: `library`, `tidal`, `qobuz`, `deezer`, `radio`… (the engine fills
+    /// it from the queue item when the source leaves it empty).
+    #[serde(default)]
+    pub service: String,
+    /// The service's quality tier, when it has tiers (`max`, `high`, `hires`, `cd`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// A short preview, not the whole track (Deezer without a partner agreement).
+    #[serde(default)]
+    pub preview: bool,
+}
+
 /// A source with ReplayGain attached (the opener knows the tags, the
 /// decoder does not).
 pub struct WithReplayGain {
@@ -55,6 +78,9 @@ impl FrameSource for WithReplayGain {
     }
     fn replay_gain(&self) -> Option<ReplayGain> {
         Some(self.gain)
+    }
+    fn stream_info(&self) -> Option<StreamInfo> {
+        self.inner.stream_info()
     }
     fn lossy_source(&self) -> bool {
         self.inner.lossy_source()
@@ -92,6 +118,10 @@ pub trait FrameSource: Send {
     fn stream_title(&mut self) -> Option<String> {
         None
     }
+    /// What is arriving (codec, bitrate, service tier); `None` when the source can't say.
+    fn stream_info(&self) -> Option<StreamInfo> {
+        None
+    }
 }
 
 /// The negotiated chain from a source format to the output format the sink
@@ -118,4 +148,32 @@ pub trait SourceFactory: Send + Sync {
         caps: &OutputCaps,
         output: &crate::sink::OutputId,
     ) -> Result<Box<dyn Processor>, SourceError>;
+}
+
+#[cfg(test)]
+mod stream_info_tests {
+    use super::StreamInfo;
+
+    /// Older nodes and sources leave members out: they read as empty, and what is unknown is
+    /// left out of the JSON again.
+    #[test]
+    fn stream_info_defaults() {
+        let f: StreamInfo = serde_json::from_str(r#"{"codec":"FLAC","lossless":true}"#).unwrap();
+        assert_eq!(
+            f,
+            StreamInfo {
+                codec: "FLAC".into(),
+                bitrate_kbps: None,
+                lossless: true,
+                service: String::new(),
+                tier: None,
+                preview: false,
+            }
+        );
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"codec": "FLAC", "lossless": true, "service": "", "preview": false})
+        );
+    }
 }
