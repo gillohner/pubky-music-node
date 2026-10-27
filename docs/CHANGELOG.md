@@ -4,7 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-27
 
-- **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart, but offline the controller retries every second, so on a slow runner the bar was already gone (#95, #125). The step now clicks while the bar shows, else counts the automatic retry; either way the reconnection must be under 2 s.
+- **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
 ## 2026-10-26
 

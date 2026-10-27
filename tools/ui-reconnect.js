@@ -84,7 +84,8 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   const follow = await until('A follows B', async () => (await toggleLabel(A)) === 'Play', 5000);
   check(follow < 1000, `a change on one controller shows on the other (${follow} ms)`);
 
-  // 3. Long outage: a change is refused with a message after the hold time; Retry now reconnects at once.
+  // 3. Long outage: a change is refused with a message after the hold time; after the restart, Retry now (or a
+  //    retry already due) reconnects at once.
   await killNode();
   await until('A notices', async () => (await connState(A)) !== 'connected', 30000);
   await sleep(21000);
@@ -95,13 +96,15 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   check(refused > 7000, `a change during a long outage is refused after the hold time (${refused} ms)`);
   check((await api('GET', `/zones/${ZONE}`).catch(() => null)) === null, 'the node is still down (nothing was sent)');
   await startNode();
-  // Offline, the controller retries by itself every second, so by the time the node answers it may already be
-  // back and the bar gone: Retry now is clicked while the bar still shows, else the automatic retry counts.
+  // Offline past the fast phase, the controller retries by itself at growing gaps (1-2 s, then 2-4 s, ...), and
+  // startNode() returns only once the node answers, so a retry may already have landed and hidden the bar. The bound
+  // is measured from the node answering: Retry now is clicked through the DOM (no visibility wait, since the bar can
+  // hide the moment the controller is back; a click on an up link is a no-op), unless the controller is already back.
   t0 = Date.now();
-  let clicked = false;
-  if ((await connState(A)) !== 'connected') { try { await A.click('#connretry', { timeout: 1000 }); clicked = true; } catch { /* the automatic retry got there first */ } }
+  const alreadyBack = (await connState(A)) === 'connected';
+  if (!alreadyBack) await A.$eval('#connretry', (b) => b.click());
   const retry = await until('reconnect after the restart', async () => (await connState(A)) === 'connected', 5000);
-  check(retry < 2000, `${clicked ? 'Retry now' : 'the automatic retry'} reconnects at once after the restart (${retry} ms)`);
+  check(retry < 2000, `${alreadyBack ? 'the controller was back by itself when the node answered' : 'Retry now reconnects at once'} (${retry} ms)`);
   const zb = await api('GET', `/zones/${ZONE}`);
   check(zb.transport !== 'playing', `the refused change was not applied later (node: ${zb.transport})`);
   await B.waitForTimeout(100);
