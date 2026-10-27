@@ -4157,7 +4157,7 @@
           const shape = (l) => JSON.stringify([l.order || [], [...(l.hidden || [])].sort()]);
           const same = (x, y) => !!x && !!y && shape(x) === shape(y);
           const rowsOf = (l) => { if (!l) return 'Couldn’t read the node’s default'; const o = (l.order || []).length; const h = (l.hidden || []).length; if (!o && !h) return 'The built-in rows, in the built-in order'; return `${o ? `${countOf(o, 'rows')} arranged` : 'The built-in order'}${h ? `, ${countOf(h, 'rows')} hidden` : ''}`; };
-          const canSetDefault = !!mine && !same(mine, nodeHome);
+          const canSetDefault = !!mine && (!homeL || homeL.applies === 'yours') && !same(mine, nodeHome); // only a layout of your own; a copy of the default may be old
           const whyDefault = !mine ? 'Your Home couldn’t be read.' : canSetDefault ? 'Copies your Home’s rows and order to the node; your own stays yours.' : homeL && homeL.applies !== 'yours' ? 'You haven’t arranged your own Home yet; use Edit Home on Home first.' : 'Your Home already is the default.';
           const nodeHomeTab = group('The default Home', row('Rows on Home for everyone', `${rowsOf(nodeHome)}. What Home shows to everyone who hasn’t arranged their own.`, '')
             + row('Make yours the default', `<span id="sethomedefault-why">${whyDefault}</span>`, `<button class="btn ghost" id="sethomedefault" aria-describedby="sethomedefault-why" ${canSetDefault ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`));
