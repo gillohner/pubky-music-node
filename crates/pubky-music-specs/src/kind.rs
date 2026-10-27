@@ -9,10 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::content;
 
-/// Kinds that are feed only: a live announcement an indexer shows in feeds and lets expire,
-/// never a graph node or a lasting record. The Nexus fork mirrors this list.
-pub const FEED_ONLY_KINDS: &[&str] = &["listening"];
-
 /// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`, `"listening"`,
 /// `"session"`); a spelling this version does not know reads as [`MusicPostKind::Unknown`] and
 /// fails validation.
@@ -26,7 +22,7 @@ pub enum MusicPostKind {
     /// One play of the music at `embed`. The path decides who sees it: `/priv/` for a private
     /// history, `/pub/` for a public one.
     Listen,
-    /// Now playing the music at `embed`, until `expires_at`. Feed only ([`FEED_ONLY_KINDS`]).
+    /// Now playing the music at `embed`, until `expires_at`.
     Listening,
     /// A listening session others can join, hosted by `host`, playing the music at `embed` now.
     Session,
@@ -44,11 +40,6 @@ impl MusicPostKind {
             MusicPostKind::Session => "session",
             MusicPostKind::Unknown(name) => name,
         }
-    }
-
-    /// Whether this kind is feed only ([`FEED_ONLY_KINDS`]).
-    pub fn is_feed_only(&self) -> bool {
-        FEED_ONLY_KINDS.contains(&self.wire_name())
     }
 }
 

@@ -121,7 +121,7 @@ impl MusicSource {
     }
 }
 
-/// The content of a `listening` (now playing, feed only):
+/// The content of a `listening` (now playing):
 /// `{"started_at": µs, "expires_at": µs, "duration_ms"?: ms, "source"?: {service, uri?}}`.
 /// `embed` is the music playing now.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]

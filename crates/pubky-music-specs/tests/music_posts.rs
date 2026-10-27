@@ -315,8 +315,8 @@ fn times_are_microseconds_and_older_milliseconds_still_read() {
 }
 
 #[test]
-fn listening_is_live_and_feed_only() {
-    use pubky_music_specs::{listening, read_listening, FEED_ONLY_KINDS};
+fn listening_is_live() {
+    use pubky_music_specs::{listening, read_listening};
     let src = MusicSource::new("tidal", "https://tidal.com/track/50850120");
     let post = listening(
         PLAYED,
@@ -327,9 +327,6 @@ fn listening_is_live_and_feed_only() {
     );
     let back = written(&post, Root::Pub).unwrap();
     assert_eq!(back.kind, MusicPostKind::Listening);
-    assert!(back.kind.is_feed_only());
-    assert!(!MusicPostKind::Listen.is_feed_only());
-    assert_eq!(FEED_ONLY_KINDS, ["listening"]);
     let c = read_listening(&back).unwrap();
     assert_eq!((c.started_at, c.expires_at), (PLAYED, PLAYED + 213_000_000));
     assert_eq!(serde_json::to_value(&back).unwrap()["embed"], SONG);
@@ -359,7 +356,6 @@ fn a_session_has_a_pubky_host() {
     );
     let back = written(&post, Root::Pub).unwrap();
     assert_eq!(read_session(&back).unwrap().host, host);
-    assert!(!back.kind.is_feed_only());
     for bad in [
         "https://example.com/me".to_string(),
         format!("pubky://{OWNER}/pub/social/v1/profile.json"),

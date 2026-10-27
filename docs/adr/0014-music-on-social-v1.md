@@ -23,7 +23,7 @@ Music uses the shared social objects and only adds what is musical.
 | Collections (a playlist is one of songs) | social `collection` post with its `layout`; items `{uri, note?, ext.music.source?, ext.music.added_at}` (songs, albums, artists, public posts); the collection's `ext.music.source_order` and, on a duplicate, `ext.music.original` | `/priv/social/v1/posts/`, also `/pub/` while public |
 | Ratings and reviews | music kind `review`: `{rating: 1–10, text?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` |
 | Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` (amended 2026-10-26, below) |
-| Now playing, sessions | music kinds `listening` (feed only) and `session`, `embed` = the music playing now | `/{pub,priv}/music/v1/posts/` |
+| Now playing, sessions | music kinds `listening` and `session`, `embed` = the music playing now | `/{pub,priv}/music/v1/posts/` |
 
 - **`crates/pubky-music-specs`** owns the two music kinds (`MusicPostKind { Review, Listen }` on
   `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
@@ -86,8 +86,8 @@ reference gate under the public root, so it cannot point at a private object.
   deleting the history is its own request (`docs/api.md`, Listen history).
 - Why not tags? A tag's id is a hash of `uri:label`, so a song can carry the tag "listened" once:
   no play time, no repeat plays, and public only. A history needs one listen post per play.
-- Other people's public listens are read through Pinakes (not built yet). In our Nexus fork a
-  `listen` gets a graph node; the live `listening` kind is feed-only and expires.
+- Other people's public listens are read through Pinakes (not built yet). Nexus has no per-app
+  code: it reads music posts like any other post, in every namespace alike.
 
 ## Amendment (2026-10-26): collections, tags, times, new kinds (STEWARD-SOCIAL-V1-MUSIC.md Part A)
 
@@ -117,8 +117,9 @@ then. ADR 0011 is amended.
 - The node writes its public collections again once, with microseconds.
 
 **New kinds:**
-- `listening` (now playing): `{started_at, expires_at, duration_ms?, source?}`. It is feed only:
-  `FEED_ONLY_KINDS`, which the Nexus fork mirrors, so it is shown and lets expire, with no graph node.
+- `listening` (now playing): `{started_at, expires_at, duration_ms?, source?}`. A reader stops
+  showing it once `expires_at` has passed. It is an ordinary kind: there is no feed-only tier, and
+  Nexus has no per-app code (owner decision, 2026-10-27).
 - `session`: `{started_at, expires_at?, host: pubky://<key>, source?}`.
 - Both `embed` the music playing now, never a content `uri`.
 

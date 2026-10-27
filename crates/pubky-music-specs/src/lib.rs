@@ -8,8 +8,8 @@
 //! - post kinds of its own on the shared [`PostEnvelope`] under the `music` namespace
 //!   (`/{pub,priv}/music/v1/posts/{id}/{editId}.json`), with their content rules:
 //!   [`MusicPostKind::Review`], [`MusicPostKind::Listen`] (one play), [`MusicPostKind::Listening`]
-//!   (now playing, feed only: [`FEED_ONLY_KINDS`]) and [`MusicPostKind::Session`] (a listening
-//!   session others join). The path decides who sees a post: `/priv/` or `/pub/`;
+//!   (now playing, until it expires) and [`MusicPostKind::Session`] (a listening session others
+//!   join). The path decides who sees a post: `/priv/` or `/pub/`;
 //! - the `ext.music` hints a playlist carries on its items and on the collection ([`ext`]), and the
 //!   readers that treat them as hostile input. `music`, the spec's namespace, is also its key in
 //!   `ext`.
@@ -45,7 +45,7 @@ pub use content::{
     REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH, SERVICE_MAX_LENGTH, SERVICE_NAMES,
     TIME_MIN_MICROS,
 };
-pub use kind::{MusicPostKind, FEED_ONLY_KINDS};
+pub use kind::MusicPostKind;
 
 pub use pubky_social_specs::{MintedVersion, PostEnvelope, PubkyId, Root, ValidationCtx};
 
@@ -89,7 +89,7 @@ pub fn listen(
 }
 
 /// Now playing the music at `embed`, from `started_at` until `expires_at` (Unix microseconds).
-/// Feed only. Infallible; validate before writing.
+/// Infallible; validate before writing.
 pub fn listening(
     started_at: i64,
     expires_at: i64,
