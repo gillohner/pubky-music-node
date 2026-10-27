@@ -9311,9 +9311,10 @@ exec sleep 300
         // play (2 s of a 440 Hz-ish square wave on stdout), pause, and wait
         std::fs::write(&bin, r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "librespot 0.8.0 test"; exit 0; fi
-ev=""; pipe=0
-while [ $# -gt 0 ]; do case "$1" in --onevent) ev="$2"; shift 2;; --backend) [ "$2" = pipe ] && pipe=1; shift 2;; *) shift;; esac; done
+ev=""; pipe=0; bitrate=""
+while [ $# -gt 0 ]; do case "$1" in --onevent) ev="$2"; shift 2;; --backend) [ "$2" = pipe ] && pipe=1; shift 2;; --bitrate) bitrate="$2"; shift 2;; *) shift;; esac; done
 [ -n "$ev" ] || { echo "no onevent" >&2; exit 3; }
+[ "$bitrate" = 160 ] || { echo "wrong bitrate: $bitrate" >&2; exit 3; }
 PLAYER_EVENT=session_connected USER_NAME=listener "$ev"
 PLAYER_EVENT=track_changed NAME="Get Lucky" ARTISTS="Daft Punk
 Pharrell Williams" ALBUM=RAM DURATION_MS=369000 URI=spotify:track:69kOkLUCkxIZYexIgSG8rq "$ev"
@@ -9343,6 +9344,15 @@ exec sleep 300
         );
         assert_eq!(u["librespot"]["version"], "librespot 0.8.0 test");
         assert!(u["warning"].as_str().unwrap().contains("not approved by Spotify"));
+        // The selected quality must reach both the process and the player's stream metadata.
+        let (st, q) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/quality",
+            Some(serde_json::json!({"id": "160"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
         // Zone output without a zone is refused; with one it runs
         let (st, _) = call(
             &app,
@@ -9370,6 +9380,7 @@ exec sleep 300
         }
         assert_eq!(z["now_playing"]["item"]["uri"], librespot::LIVE_URI, "{z}");
         assert_eq!(z["transport"], "playing", "{z}");
+        assert_eq!(z["now_playing"]["format"]["bitrate_kbps"], 160, "{z}");
         let (_, u) = call(&app, "GET", "/v1/sources/spotify/librespot", None).await;
         assert_eq!(u["user"], "listener");
         assert_eq!(u["now"]["title"], "Get Lucky");

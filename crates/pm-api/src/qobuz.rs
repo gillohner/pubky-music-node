@@ -810,6 +810,14 @@ fn format_id(st: &ModeState) -> u32 {
     }
 }
 
+fn content_type_for(format: u32) -> &'static str {
+    if format == 5 {
+        "audio/mpeg"
+    } else {
+        "audio/flac"
+    }
+}
+
 /// What `track/getFileUrl` answered, judged: the stream URL, or why not.
 fn judge_file_url(status: u16, v: &Value) -> Result<String, StreamError> {
     match status {
@@ -966,9 +974,8 @@ pub(crate) async fn stream(
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
     let len = resp.content_length();
-    let content_type = if format == 5 { "audio/mpeg" } else { "audio/flac" };
     let mut out = axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(axum::http::header::CONTENT_TYPE, content_type_for(format))
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     if let Some(n) = len {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);
@@ -980,6 +987,13 @@ pub(crate) async fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_content_type_matches_the_requested_format() {
+        assert_eq!(content_type_for(5), "audio/mpeg");
+        assert_eq!(content_type_for(6), "audio/flac");
+        assert_eq!(content_type_for(27), "audio/flac");
+    }
 
     #[test]
     fn the_file_url_request_is_signed_with_the_app_secret() {
