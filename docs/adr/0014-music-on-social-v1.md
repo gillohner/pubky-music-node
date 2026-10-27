@@ -117,10 +117,14 @@ then. ADR 0011 is amended.
 - The node writes its public collections again once, with microseconds.
 
 **New kinds:**
-- `listening` (now playing): `{started_at, expires_at, duration_ms?, source?}`. A reader stops
-  showing it once `expires_at` has passed. It is an ordinary kind: there is no feed-only tier, and
-  Nexus has no per-app code (owner decision, 2026-10-27).
-- `session`: `{started_at, expires_at?, host: pubky://<key>, source?}`.
+- `listening` (now playing): `{started_at, expires_at, name?, duration_ms?, source?}`. A reader
+  stops showing it once `expires_at` has passed. It is an ordinary kind: there is no feed-only
+  tier, and Nexus has no per-app code (owner decision, 2026-10-27).
+- `session`: `{started_at, expires_at?, host: pubky://<key>, name?, source?}`.
+- `name` (both, owner decision 2026-10-27): optional, trimmed, 1 to 100 code points. A client that
+  publishes one without a name from the person writes the generic one (`"<display name>'s
+  listening session"`, `"<display name> is listening"`), and a reader shows the same when it is
+  absent. Vectors: `crates/pubky-music-specs/tests/vectors/live-v1.json`.
 - Both `embed` the music playing now, never a content `uri`.
 
 **Service names** are hyphenated (`apple-music`, `youtube-music`; `SERVICE_NAMES` lists the shared

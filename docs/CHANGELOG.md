@@ -60,7 +60,7 @@ Newest first. Dates are when the change landed on `main`.
   - a `listen` may be public;
   - times (`*_at`) are microseconds, and readers take older millisecond values (anything below 3000-01-01 in ms); the node writes its public collections again once;
   - durations keep `_ms`;
-  - new kinds `listening` (now playing, until it expires; an ordinary kind, no feed-only tier) and `session` (`host` a pubky user);
+  - new kinds `listening` (now playing, until it expires; an ordinary kind, no feed-only tier) and `session` (`host` a pubky user), each with an optional `name` (trimmed, 1–100 code points; absent, clients write and readers show the generic "<display name>'s listening session" / "<display name> is listening"; vectors in `tests/vectors/live-v1.json`, documented in the crate README);
   - a hyphenated service vocabulary (`SERVICE_NAMES`, `service_name`);
   - `ext.music.original` on a duplicate.
 - **Bookmarks, by name** (STEWARD-SOCIAL-V1-MUSIC.md Part A.1): favourites are called bookmarks, as in social specs v1.

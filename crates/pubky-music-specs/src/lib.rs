@@ -40,10 +40,10 @@ pub mod ext;
 mod kind;
 
 pub use content::{
-    is_service_name, micros_of, service_name, MusicListenContent, MusicListeningContent, MusicReviewContent,
-    MusicSessionContent, MusicSource, LISTEN_DURATION_MAX_MS, LIVE_WINDOW_MAX_MICROS, MILLIS_BEFORE,
-    REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH, SERVICE_MAX_LENGTH, SERVICE_NAMES,
-    TIME_MIN_MICROS,
+    generic_listening_name, generic_session_name, is_service_name, micros_of, service_name,
+    MusicListenContent, MusicListeningContent, MusicReviewContent, MusicSessionContent, MusicSource,
+    LISTEN_DURATION_MAX_MS, LIVE_NAME_MAX_LENGTH, LIVE_WINDOW_MAX_MICROS, MILLIS_BEFORE, REVIEW_RATING_MAX,
+    REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH, SERVICE_MAX_LENGTH, SERVICE_NAMES, TIME_MIN_MICROS,
 };
 pub use kind::MusicPostKind;
 
@@ -88,11 +88,13 @@ pub fn listen(
     PostEnvelope::new(content, MusicPostKind::Listen, None, Some(embed), Vec::new())
 }
 
-/// Now playing the music at `embed`, from `started_at` until `expires_at` (Unix microseconds).
-/// Infallible; validate before writing.
+/// Now playing the music at `embed`, from `started_at` until `expires_at` (Unix microseconds),
+/// called `name`. Trims the name; a blank one becomes absent. With no name from the person, pass
+/// [`generic_listening_name`]. Infallible; validate before writing.
 pub fn listening(
     started_at: i64,
     expires_at: i64,
+    name: Option<String>,
     duration_ms: Option<i64>,
     source: Option<MusicSource>,
     embed: String,
@@ -100,6 +102,7 @@ pub fn listening(
     let content = MusicListeningContent {
         started_at,
         expires_at,
+        name: content::trimmed_name(name),
         duration_ms,
         source,
         extra: Default::default(),
@@ -108,12 +111,14 @@ pub fn listening(
     PostEnvelope::new(content, MusicPostKind::Listening, None, Some(embed), Vec::new())
 }
 
-/// A listening session hosted by `host` (`pubky://<key>`), playing the music at `embed` now.
-/// Infallible; validate before writing.
+/// A listening session hosted by `host` (`pubky://<key>`), playing the music at `embed` now,
+/// called `name`. Trims the name; a blank one becomes absent. With no name from the person, pass
+/// [`generic_session_name`]. Infallible; validate before writing.
 pub fn session(
     started_at: i64,
     expires_at: Option<i64>,
     host: String,
+    name: Option<String>,
     source: Option<MusicSource>,
     embed: String,
 ) -> MusicPost {
@@ -121,6 +126,7 @@ pub fn session(
         started_at,
         expires_at,
         host,
+        name: content::trimmed_name(name),
         source,
         extra: Default::default(),
     };

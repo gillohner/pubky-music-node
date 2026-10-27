@@ -30,6 +30,8 @@ pub const MILLIS_BEFORE: i64 = 32_503_680_000_000;
 const TIME_MIN_MILLIS: i64 = 946_684_800_000;
 /// The longest a `listening` or a `session` announces itself for: 24 hours.
 pub const LIVE_WINDOW_MAX_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+/// A `listening`'s or a `session`'s `name`, in code points (a social collection name's length).
+pub const LIVE_NAME_MAX_LENGTH: usize = 100;
 /// The services everyone spells the same way (an open vocabulary: other well-formed names are
 /// fine, and a reader that does not know one treats the source as unknown). Hyphenated, never
 /// underscored: Pinakes maps its `apple_music` to `apple-music`.
@@ -122,7 +124,7 @@ impl MusicSource {
 }
 
 /// The content of a `listening` (now playing):
-/// `{"started_at": µs, "expires_at": µs, "duration_ms"?: ms, "source"?: {service, uri?}}`.
+/// `{"started_at": µs, "expires_at": µs, "name"?: "…", "duration_ms"?: ms, "source"?: {service, uri?}}`.
 /// `embed` is the music playing now.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MusicListeningContent {
@@ -130,6 +132,11 @@ pub struct MusicListeningContent {
     pub started_at: i64,
     /// When the announcement lapses (at most [`LIVE_WINDOW_MAX_MICROS`] after `started_at`).
     pub expires_at: i64,
+    /// What it is called: trimmed, 1 to [`LIVE_NAME_MAX_LENGTH`] code points. A client with no
+    /// name from the person writes [`generic_listening_name`]; a reader shows that when it is
+    /// absent ([`MusicListeningContent::name_or_generic`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The music's length, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
@@ -142,7 +149,7 @@ pub struct MusicListeningContent {
 }
 
 /// The content of a `session` (a listening session others can join):
-/// `{"started_at": µs, "expires_at"?: µs, "host": "pubky://<key>", "source"?: {service, uri?}}`.
+/// `{"started_at": µs, "expires_at"?: µs, "host": "pubky://<key>", "name"?: "…", "source"?: {service, uri?}}`.
 /// `embed` is the music playing now.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MusicSessionContent {
@@ -153,12 +160,67 @@ pub struct MusicSessionContent {
     pub expires_at: Option<i64>,
     /// Who hosts it: a Pubky user, `pubky://<key>`.
     pub host: String,
+    /// What it is called: trimmed, 1 to [`LIVE_NAME_MAX_LENGTH`] code points. A client with no
+    /// name from the person writes [`generic_session_name`]; a reader shows that when it is absent
+    /// ([`MusicSessionContent::name_or_generic`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Where it plays from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<MusicSource>,
     /// Unknown members, preserved on rewrite.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl MusicListeningContent {
+    /// The name to show: `name`, or [`generic_listening_name`] of the person's display name.
+    pub fn name_or_generic(&self, display_name: &str) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| generic_listening_name(display_name))
+    }
+}
+
+impl MusicSessionContent {
+    /// The name to show: `name`, or [`generic_session_name`] of the host's display name.
+    pub fn name_or_generic(&self, display_name: &str) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| generic_session_name(display_name))
+    }
+}
+
+/// The generic name of a `session` hosted by `display_name`: `"<display name>'s listening
+/// session"`. A client that publishes a session the person did not name writes it, and a reader
+/// shows it for a session without a `name`, so both say the same.
+pub fn generic_session_name(display_name: &str) -> String {
+    generic_name(display_name, "'s listening session")
+}
+
+/// The generic name of a `listening` by `display_name`: `"<display name> is listening"`, written
+/// and read like [`generic_session_name`].
+pub fn generic_listening_name(display_name: &str) -> String {
+    generic_name(display_name, " is listening")
+}
+
+/// `display_name` trimmed (`Someone` when blank) and shortened so the name is a valid one.
+fn generic_name(display_name: &str, suffix: &str) -> String {
+    let who = match frozen_trim(display_name) {
+        "" => "Someone",
+        who => who,
+    };
+    let who: String = who
+        .chars()
+        .take(LIVE_NAME_MAX_LENGTH - code_point_len(suffix))
+        .collect();
+    format!("{}{suffix}", frozen_trim(&who))
+}
+
+/// A name as a constructor writes it: trimmed, and absent when blank.
+pub(crate) fn trimmed_name(name: Option<String>) -> Option<String> {
+    name.map(|n| frozen_trim(&n).to_string())
+        .filter(|n| !n.is_empty())
 }
 
 /// A time field by the rule in the module docs: microseconds as they are, an older millisecond
@@ -273,6 +335,17 @@ pub(crate) fn parse_listen(content: &str) -> Result<MusicListenContent, String> 
     Ok(listen)
 }
 
+fn name(name: Option<&str>) -> Result<(), String> {
+    if let Some(name) = name {
+        if frozen_trim(name) != name || !(1..=LIVE_NAME_MAX_LENGTH).contains(&code_point_len(name)) {
+            return Err(format!(
+                "Validation Error: name must be trimmed and 1 to {LIVE_NAME_MAX_LENGTH} code points; leave it out instead"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn window(started_at: i64, expires_at: i64) -> Result<(), String> {
     if expires_at <= started_at || expires_at - started_at > LIVE_WINDOW_MAX_MICROS {
         return Err("Validation Error: expires_at must be after started_at, within 24 hours".into());
@@ -282,11 +355,15 @@ fn window(started_at: i64, expires_at: i64) -> Result<(), String> {
 
 pub(crate) fn parse_listening(content: &str) -> Result<MusicListeningContent, String> {
     let l: MusicListeningContent = parse(content, "listening")?;
-    check_extra(&l.extra, &["started_at", "expires_at", "duration_ms", "source"])?;
+    check_extra(
+        &l.extra,
+        &["started_at", "expires_at", "name", "duration_ms", "source"],
+    )?;
     window(
         time("started_at", l.started_at)?,
         time("expires_at", l.expires_at)?,
     )?;
+    name(l.name.as_deref())?;
     duration(l.duration_ms)?;
     source(l.source.as_ref())?;
     Ok(l)
@@ -294,7 +371,8 @@ pub(crate) fn parse_listening(content: &str) -> Result<MusicListeningContent, St
 
 pub(crate) fn parse_session(content: &str) -> Result<MusicSessionContent, String> {
     let s: MusicSessionContent = parse(content, "session")?;
-    check_extra(&s.extra, &["started_at", "expires_at", "host", "source"])?;
+    check_extra(&s.extra, &["started_at", "expires_at", "host", "name", "source"])?;
+    name(s.name.as_deref())?;
     let started = time("started_at", s.started_at)?;
     if let Some(e) = s.expires_at {
         window(started, time("expires_at", e)?)?;

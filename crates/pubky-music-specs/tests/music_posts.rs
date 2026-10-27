@@ -321,6 +321,7 @@ fn listening_is_live() {
     let post = listening(
         PLAYED,
         PLAYED + 213_000_000,
+        None,
         Some(213_000),
         Some(src),
         SONG.into(),
@@ -331,14 +332,18 @@ fn listening_is_live() {
     assert_eq!((c.started_at, c.expires_at), (PLAYED, PLAYED + 213_000_000));
     assert_eq!(serde_json::to_value(&back).unwrap()["embed"], SONG);
     // Expires after it starts, within a day; embed names the music
-    assert!(written(&listening(PLAYED, PLAYED, None, None, SONG.into()), Root::Pub).is_err());
-    let day = pubky_music_specs::LIVE_WINDOW_MAX_MICROS;
     assert!(written(
-        &listening(PLAYED, PLAYED + day + 1, None, None, SONG.into()),
+        &listening(PLAYED, PLAYED, None, None, None, SONG.into()),
         Root::Pub
     )
     .is_err());
-    let mut no_embed = listening(PLAYED, PLAYED + 1, None, None, SONG.into());
+    let day = pubky_music_specs::LIVE_WINDOW_MAX_MICROS;
+    assert!(written(
+        &listening(PLAYED, PLAYED + day + 1, None, None, None, SONG.into()),
+        Root::Pub
+    )
+    .is_err());
+    let mut no_embed = listening(PLAYED, PLAYED + 1, None, None, None, SONG.into());
     no_embed.embed = None;
     assert!(written(&no_embed, Root::Pub).is_err());
 }
@@ -352,6 +357,7 @@ fn a_session_has_a_pubky_host() {
         Some(PLAYED + 3_600_000_000),
         host.clone(),
         None,
+        None,
         SONG.into(),
     );
     let back = written(&post, Root::Pub).unwrap();
@@ -361,8 +367,135 @@ fn a_session_has_a_pubky_host() {
         format!("pubky://{OWNER}/pub/social/v1/profile.json"),
         "pubky://not-a-key".to_string(),
     ] {
-        let post = session(PLAYED, None, bad.clone(), None, SONG.into());
+        let post = session(PLAYED, None, bad.clone(), None, None, SONG.into());
         assert!(written(&post, Root::Pub).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_session_or_a_listening_may_have_a_name() {
+    use pubky_music_specs::{
+        generic_listening_name, generic_session_name, listening, read_listening, read_session, session,
+        LIVE_NAME_MAX_LENGTH,
+    };
+    let host = format!("pubky://{OWNER}");
+    let named = session(
+        PLAYED,
+        None,
+        host.clone(),
+        Some("  Friday night  ".into()),
+        None,
+        SONG.into(),
+    );
+    let back = read_session(&written(&named, Root::Pub).unwrap()).unwrap();
+    assert_eq!(back.name.as_deref(), Some("Friday night"));
+    assert_eq!(back.name_or_generic("Alice"), "Friday night");
+
+    // Absent: the constructor drops a blank one, and a reader shows the generic name
+    let unnamed = session(PLAYED, None, host.clone(), Some(" ".into()), None, SONG.into());
+    let back = read_session(&written(&unnamed, Root::Pub).unwrap()).unwrap();
+    assert_eq!(back.name, None);
+    assert!(!unnamed.content.contains("name"), "{}", unnamed.content);
+    assert_eq!(back.name_or_generic("Alice"), "Alice's listening session");
+    assert_eq!(back.name_or_generic("Alice"), generic_session_name("Alice"));
+
+    // A client with no name from the person writes the generic one, which is a valid name
+    let generic = session(
+        PLAYED,
+        None,
+        host.clone(),
+        Some(generic_session_name("Alice")),
+        None,
+        SONG.into(),
+    );
+    written(&generic, Root::Pub).unwrap();
+    let live = listening(
+        PLAYED,
+        PLAYED + 1,
+        Some(generic_listening_name("Alice")),
+        None,
+        None,
+        SONG.into(),
+    );
+    let back = read_listening(&written(&live, Root::Pub).unwrap()).unwrap();
+    assert_eq!(back.name.as_deref(), Some("Alice is listening"));
+
+    // The generic name is always a valid one: a blank display name, a long one
+    assert_eq!(generic_session_name("  "), "Someone's listening session");
+    let long = generic_session_name(&"é".repeat(300));
+    assert_eq!(long.chars().count(), LIVE_NAME_MAX_LENGTH);
+    assert!(long.ends_with("'s listening session"));
+    let fits = session(PLAYED, None, host.clone(), Some(long), None, SONG.into());
+    written(&fits, Root::Pub).unwrap();
+
+    // Written by hand: untrimmed, blank or too long is refused
+    for bad in [
+        " x".to_string(),
+        "x ".into(),
+        "".into(),
+        "  ".into(),
+        "a".repeat(101),
+    ] {
+        let mut post = session(PLAYED, None, host.clone(), None, None, SONG.into());
+        let mut content: serde_json::Value = serde_json::from_str(&post.content).unwrap();
+        content["name"] = json!(bad);
+        post.content = content.to_string();
+        let err = written(&post, Root::Pub).unwrap_err();
+        assert!(err.contains("name"), "{bad:?}: {err}");
+    }
+    let max = session(
+        PLAYED,
+        None,
+        host,
+        Some("a".repeat(LIVE_NAME_MAX_LENGTH)),
+        None,
+        SONG.into(),
+    );
+    written(&max, Root::Pub).unwrap();
+}
+
+/// `tests/vectors/live-v1.json`: `listening` and `session` contents with what each is shown as,
+/// the ones refused, and the generic names, for other implementations to check against.
+#[test]
+fn live_vectors() {
+    use pubky_music_specs::{generic_listening_name, generic_session_name, read_listening, read_session};
+    let raw =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/live-v1.json")).unwrap();
+    let vectors: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let post = |case: &serde_json::Value| {
+        let kind = MusicPostKind::from(case["kind"].as_str().unwrap().to_string());
+        let content = serde_json::to_string(&case["content"]).unwrap();
+        MusicPost::new(content, kind, None, Some(SONG.into()), Vec::new())
+    };
+    let valid = vectors["valid"].as_array().unwrap();
+    assert!(!valid.is_empty());
+    for case in valid {
+        let back = written(&post(case), Root::Pub).unwrap_or_else(|e| panic!("{case}: {e}"));
+        let who = case["display_name"].as_str().unwrap();
+        let shown = match back.kind {
+            MusicPostKind::Listening => read_listening(&back).unwrap().name_or_generic(who),
+            _ => read_session(&back).unwrap().name_or_generic(who),
+        };
+        assert_eq!(shown, case["shown_as"].as_str().unwrap(), "{case}");
+    }
+    let invalid = vectors["invalid"].as_array().unwrap();
+    assert!(!invalid.is_empty());
+    for case in invalid {
+        let err = written(&post(case), Root::Pub).unwrap_err();
+        assert!(err.contains(case["error"].as_str().unwrap()), "{case}: {err}");
+    }
+    for case in vectors["generic_names"].as_array().unwrap() {
+        let who = case["display_name"].as_str().unwrap();
+        assert_eq!(
+            generic_session_name(who),
+            case["session"].as_str().unwrap(),
+            "{case}"
+        );
+        assert_eq!(
+            generic_listening_name(who),
+            case["listening"].as_str().unwrap(),
+            "{case}"
+        );
     }
 }
 
