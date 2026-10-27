@@ -6,7 +6,7 @@
 //! and `/v1/sources` carries one line per source for the Sources overview. Tokens never appear
 //! here: a sign-in shows its user and expiry only.
 //!
-//! Each source implements [`SignInSource`]; [`source`] is the list.
+//! Each source implements `SignInSource`; `source` is the list.
 
 use std::sync::Arc;
 

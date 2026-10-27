@@ -9440,6 +9440,7 @@ exec sleep 300
     /// and the session key never come back.
     #[tokio::test]
     async fn lastfm_scrobbles_and_finds_similar_artists_from_a_mock() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
         const KEY: &str = "0123456789abcdef0123456789abcdef";
         const SECRET: &str = "fedcba9876543210fedcba9876543210";
         let flac = std::fs::read(concat!(
@@ -11562,6 +11563,93 @@ exec sleep 300
     }
 
     /// Sources › Qobuz, YouTube, Spotify and Settings › Last.fm have the same Sign in chooser
+    #[tokio::test]
+    async fn imported_sign_ins_win_over_a_synced_sessions_refresh() {
+        use vault_cache::{account, carried, decide, hash, Do, Side, Synced, VaultSide, Wipe, BRIDGES};
+
+        let _qobuz_guard = qobuz::API_TEST_LOCK.lock().await;
+        let _lastfm_guard = lastfm::API_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        qobuz::set_api_base(&base);
+        lastfm::set_api_base(&format!("{base}/lastfm"));
+        let mock = Router::new()
+            .route("/user/get", get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers["x-app-id"], "100000000");
+                assert_eq!(headers["x-user-auth-token"], "imported-session");
+                Json(serde_json::json!({"id": 42, "credential": {"parameters": {"hires_streaming": true}}}))
+            }))
+            .route("/lastfm", post(|body: String| async move {
+                let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes()).collect();
+                assert_eq!(form["method"], "user.getInfo");
+                assert_eq!(form["sk"], "imported-session");
+                Json(serde_json::json!({"user": {"name": "listener"}}))
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let mut decisions = Vec::new();
+        for (service, app_key, session_key, app, session, text) in [
+            (
+                "qobuz", qobuz::APP_KEY, qobuz::STATE_KEY,
+                serde_json::json!({"id": "100000000", "secret": "s3cret", "from": "settings"}),
+                serde_json::json!({"session": {"token": "old-session", "user_id": "42", "hires": true}}),
+                "[qobuz]\nuse_auth_token = true\nemail_or_userid = \"42\"\npassword_or_token = \"imported-session\"\napp_id = \"100000000\"\nsecrets = [\"s3cret\"]\n",
+            ),
+            (
+                "lastfm", lastfm::APP_KEY, lastfm::SESSION_KEY,
+                serde_json::json!({"api_key": "0123456789abcdef0123456789abcdef", "api_secret": "fedcba9876543210fedcba9876543210", "from": "settings"}),
+                serde_json::json!({"key": "old-session", "user": "listener", "submit": true}),
+                "0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\nimported-session\n",
+            ),
+        ] {
+            let bridge = BRIDGES.iter().find(|b| b.service == service).unwrap();
+            let lineage_key = format!("vault.lineage.{service}");
+            let seen = {
+                let lib = s.library.lock().unwrap();
+                lib.set_setting(app_key, &app.to_string()).unwrap();
+                lib.set_setting(session_key, &session.to_string()).unwrap();
+                vault_cache::new_sign_in(&lib, service);
+                let travels = carried(&lib, bridge).unwrap().unwrap();
+                Synced {
+                    revision: 1,
+                    hash: hash(&travels),
+                    account: account(&travels),
+                    lineage: lib.get_setting(&lineage_key).unwrap(),
+                    ..Default::default()
+                }
+            };
+            // Another node refreshed the sign-in we last synced. Importing even the same
+            // account must start a new sign-in, not lose to that refresh on the next pass.
+            let vault = VaultSide {
+                side: Side {
+                    hash: "refreshed-in-the-vault".into(),
+                    account: seen.account.clone(),
+                    lineage: seen.lineage.clone(),
+                    ..Default::default()
+                },
+                from_a_node: true,
+                our_app: true,
+            };
+            signin::source(service).unwrap().import(&s, signin::ImportBody {
+                text: Some(text.into()),
+                ..Default::default()
+            }).await.unwrap();
+            let lib = s.library.lock().unwrap();
+            let travels = carried(&lib, bridge).unwrap().unwrap();
+            let imported = Side {
+                hash: hash(&travels),
+                account: account(&travels),
+                lineage: lib.get_setting(&lineage_key).unwrap(),
+                ..Default::default()
+            };
+            assert_ne!(imported.hash, seen.hash, "{service}: the new session was saved");
+            decisions.push((service, decide(Some(&seen), Some(&imported), Some(&vault), &Wipe::default())));
+        }
+        server.abort();
+        assert_eq!(decisions, [("qobuz", Do::Push), ("lastfm", Do::Push)]);
+    }
+
     /// (STEWARD-CREDENTIALS-REUSE.md step 3): other apps' own session files are listed from the
     /// known places; a cookies file or a librespot credentials.json is only ever picked or pasted,
     /// kept readable by the node only, and gone with Sign out; nothing answers with a token.

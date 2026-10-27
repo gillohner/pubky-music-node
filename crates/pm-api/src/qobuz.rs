@@ -870,6 +870,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
                     .join(" · ")
             )
         };
+        let app_note = "Uses streamrip's or qobuz-dl's app values for this node, replacing its current Qobuz app. Other users signed in with the old app may need to sign in again.";
         let ways = vec![
             Way {
                 id: WAY_OWN.into(),
@@ -886,7 +887,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
             Way {
                 id: WAY_IMPORT.into(),
                 label: "A sign-in from another app on this machine".into(),
-                note,
+                note: format!("{note} {app_note}"),
                 action: "import".into(),
                 recommended: false,
                 available: true,
@@ -895,7 +896,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
             Way {
                 id: WAY_PASTE.into(),
                 label: "Paste streamrip's or qobuz-dl's config".into(),
-                note: "The contents of streamrip's config.toml or qobuz-dl's config.ini: the app values and the sign-in (a token, or the email with the password's MD5). Nothing is shown again once saved.".into(),
+                note: format!("The contents of streamrip's config.toml or qobuz-dl's config.ini: the app values and the sign-in (a token, or the email with the password's MD5). Nothing is shown again once saved. {app_note}"),
                 action: "paste".into(),
                 recommended: false,
                 available: true,
@@ -986,7 +987,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
             let lib = s.library.lock().expect("library poisoned");
             lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
         }
-        update(s, |st| {
+        update_signed_in(s, "qobuz", |st| {
             st.session = Some(sess);
             st.health = None;
             st.enabled = true;

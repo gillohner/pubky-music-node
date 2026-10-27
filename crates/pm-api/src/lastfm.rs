@@ -105,6 +105,9 @@ pub fn set_api_base(url: &str) {
     *base_override().write().expect("lastfm base") = Some(url.to_string());
 }
 
+#[cfg(test)]
+pub(crate) static API_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn api_base() -> String {
     base_override()
         .read()
@@ -793,6 +796,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
                 scanned.iter().map(|(f, _)| if f.usable { f.app.clone() } else { format!("{} (not usable)", f.app) }).collect::<Vec<_>>().join(" · ")
             )
         };
+        let app_note = "Uses the imported API key and secret for this node, replacing its current Last.fm app. Other users signed in with the old app may need to sign in again.";
         let ways = vec![
             Way {
                 id: WAY_OWN.into(),
@@ -813,7 +817,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
             Way {
                 id: WAY_IMPORT.into(),
                 label: "A sign-in from another app on this machine".into(),
-                note,
+                note: format!("{note} {app_note}"),
                 action: "import".into(),
                 recommended: false,
                 available: true,
@@ -822,7 +826,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
             Way {
                 id: WAY_PASTE.into(),
                 label: "Paste a key, secret and session key".into(),
-                note: "Three lines: the API key, its shared secret, and a session key made with that key (rescrobbled keeps one in ~/.config/rescrobbled/session). Nothing is shown again once saved.".into(),
+                note: format!("Three lines: the API key, its shared secret, and a session key made with that key (rescrobbled keeps one in ~/.config/rescrobbled/session). Nothing is shown again once saved. {app_note}"),
                 action: "paste".into(),
                 recommended: false,
                 available: true,
@@ -957,6 +961,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
                 from: Some(from),
             }),
         );
+        crate::vault_cache::new_sign_in(&lib, "lastfm");
         set_pending(&lib, &[]);
         Ok(way)
     }
