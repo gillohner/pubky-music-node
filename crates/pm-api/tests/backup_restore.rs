@@ -256,6 +256,7 @@ async fn a_backup_rebuilds_the_node() {
     assert!(st.is_success(), "{st}");
     std::fs::write(dir.path().join("a/pubky-session.secret"), b"not-a-real-session").unwrap();
     std::fs::write(dir.path().join("a/remote.key"), [7u8; 32]).unwrap();
+    std::fs::write(dir.path().join("a/api-token"), b"made-by-the-node").unwrap();
     let cfg = dir.path().join("a/node.toml");
     std::fs::write(
         &cfg,
@@ -345,6 +346,10 @@ async fn a_backup_rebuilds_the_node() {
         b"not-a-real-session"
     );
     assert_eq!(std::fs::read(dir.path().join("b/remote.key")).unwrap(), [7u8; 32]);
+    assert_eq!(
+        std::fs::read(dir.path().join("b/api-token")).unwrap(),
+        b"made-by-the-node"
+    );
     assert!(std::fs::read_to_string(dir.path().join("b/node.restored.toml"))
         .unwrap()
         .contains("app-secret"));

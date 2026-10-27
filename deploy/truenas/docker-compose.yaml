@@ -1,6 +1,7 @@
 # Pubky Music Node on TrueNAS SCALE: Apps → Discover Apps → ⋮ → Install via YAML.
 # Edit the three paths before installing. Without PM_TOKEN the node makes a token on first start
-# and keeps it in the data dataset (api-token, readable only by uid 1000): sign in with that. The image runs as uid 1000,
+# and keeps it in the data dataset (api-token, readable only by the container's user): sign in
+# with that. PM_TOKEN added after the first start also needs PM_REWRITE_CONFIG: "1" once. The image runs as uid 1000,
 # so the data dataset must be writable by that user (chown -R 1000:1000 or set
 # `user:` below to the dataset's owner). The music dataset is mounted read-only.
 services:

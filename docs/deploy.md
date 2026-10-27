@@ -33,7 +33,9 @@ curl -H "Authorization: Bearer $(docker exec pm cat /data/api-token)" http://loc
 
 The API always needs a token when it listens beyond localhost. Without `PM_TOKEN` the node makes
 one on first start and keeps it in `/data/api-token` (0600); sign in to the web app with it, or set
-your own with `-e PM_TOKEN=…` (a long random string).
+your own with `-e PM_TOKEN=…` (a long random string). The entrypoint writes `/data/node.toml` only on
+the first start, so a `PM_TOKEN` added later needs `-e PM_REWRITE_CONFIG=1` once. An install that kept
+the old `change-me` placeholder gets a made token instead (the log says so).
 
 ## With its own Pubky homeserver (bundled)
 
@@ -213,7 +215,8 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 ## TrueNAS SCALE
 
 `deploy/truenas/docker-compose.yaml` is a ready custom app: Apps → Discover Apps → ⋮ → *Install
-via YAML*, paste it, set the token, contact and the two dataset paths. The web UI is the node
+via YAML*, paste it, set the contact and the two dataset paths. The node makes its token on first start
+(`api-token` in the data dataset; or set `PM_TOKEN`). The web UI is the node
 itself on port 7788 (`http://<nas>:7788/`, it asks for the token once); the same address and token
 go into the native app and into Subsonic clients. The image is published on GHCR; the package
 must be public (or the NAS needs registry credentials) for the pull to succeed. The container runs

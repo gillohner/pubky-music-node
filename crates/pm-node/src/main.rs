@@ -181,12 +181,18 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     );
     let (token, source) = api_token::resolve(&cfg.api.token, &cfg.api.listen, &cfg.data_dir)
         .map_err(|e| anyhow::anyhow!("API token: {e}"))?;
-    if let api_token::Source::File(path) = &source {
-        tracing::info!(
+    match &source {
+        api_token::Source::File(path) => tracing::info!(
             listen = %cfg.api.listen,
             "no API token configured; clients sign in with the one in {}",
             path.display()
-        );
+        ),
+        api_token::Source::ReplacedPlaceholder(path) => tracing::warn!(
+            "[api] token is a placeholder from the docs that anyone can know; clients sign in with the one in {} \
+             instead (or set a long random token of your own)",
+            path.display()
+        ),
+        api_token::Source::Configured | api_token::Source::None => {}
     }
     let state = pm_api::NodeState::new(
         pm_api::NodeSettings {

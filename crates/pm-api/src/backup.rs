@@ -282,6 +282,10 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
     if let Ok(v) = std::fs::read(data_dir(s).join("remote.key")) {
         secrets.files.insert("remote.key".into(), b64().encode(v));
     }
+    // The API token the node made for itself (no `[api] token`), which controllers keep
+    if let Ok(v) = std::fs::read(data_dir(s).join("api-token")) {
+        secrets.files.insert("api-token".into(), b64().encode(v));
+    }
     if let Some(cfg) = s.config_file() {
         secrets.config = std::fs::read_to_string(cfg).ok();
     }
@@ -300,6 +304,9 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             }
             if secrets.files.contains_key("remote.key") {
                 left_out.push("the remote-access address".into());
+            }
+            if secrets.files.contains_key("api-token") {
+                left_out.push("the node's API token".into());
             }
             if secrets.config.is_some() {
                 left_out.push("the node's config file".into());
@@ -541,12 +548,19 @@ async fn restore_locked(
             let path = match name.as_str() {
                 "pubky-session.secret" => session_file(s),
                 "remote.key" => dir.join("remote.key"),
+                "api-token" => dir.join("api-token"),
                 _ => continue,
             };
-            if write_private(&path, &bytes).is_ok() && name == "remote.key" {
+            let written = write_private(&path, &bytes).is_ok();
+            if written && name == "remote.key" {
                 report
                     .notes
                     .push("Remote access keeps its old address after the node restarts.".into());
+            }
+            if written && name == "api-token" {
+                report.notes.push(
+                    "The node's own API token comes back after the node restarts (unless its config sets one).".into(),
+                );
             }
         }
         if let Some(cfg) = &sec.config {
