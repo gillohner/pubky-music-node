@@ -591,6 +591,215 @@
     const ca = $('#spotappcancel'); if (ca) ca.onclick = () => { f.hidden = true; };
     const fg = $('#spotappforget'); if (fg) fg.onclick = () => save('', 'Spotify app forgotten');
   };
+  // One Sign in per source, the ways side by side (STEWARD-CREDENTIALS-REUSE.md): the radio list of
+  // ways, one status line with Change way and Sign out, and the import (found sign-ins, a picked
+  // file) and paste areas every source shares. A source's config gives `actions(pick, si, h)` for
+  // its own ways' areas (null = the shared import/paste area), `wire(pick, si, h, act)` for their
+  // handlers, `extra(si, pick)` for rows under the status line, `after(si, h, el)` once rendered.
+  const sgHelp = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+  const sgRow = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${sgHelp(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+  const sgBlock = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${sgHelp(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
+  const sgGroup = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
+  const signinChooser = async (cfg, si) => {
+    const el = typeof cfg.el === 'string' ? $(cfg.el) : cfg.el; if (!el || !el.isConnected) return;
+    if (!si) { try { si = await api('GET', `/sources/${cfg.source}/signin`); } catch (e) { if (el.isConnected) { el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" data-sg="retry">Try again</button></div>`; el.querySelector('[data-sg="retry"]').onclick = () => signinChooser(cfg); } return; } }
+    if (!el.isConnected) return;
+    const mem = state.signin = state.signin || {}; const m = mem[cfg.source] = mem[cfg.source] || {};
+    const wayOf = (id) => si.ways.find((w) => w.id === id) || {};
+    const usable = si.ways.filter((w) => w.available);
+    // The way picked here, else the remembered one, else the recommended one
+    let pick = [m.way, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || si.ways[0] || {}).id;
+    const choosing = !si.in_use || !!m.change;
+    const rows = [];
+    if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user ? ' · ' + (/^\d+$/.test(si.in_use.user) ? 'user ' : '') + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
+    if (choosing) {
+      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
+      rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
+    }
+    if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
+    if (cfg.extra) rows.push(...[].concat(cfg.extra(si, pick) || []));
+    el.innerHTML = sgGroup(cfg.title === undefined ? 'Sign in' : cfg.title, rows.join(''));
+    const h = {
+      si, el, m, wayOf,
+      pick: () => pick,
+      choose: async (way) => { m.way = way; try { await api('PUT', `/sources/${cfg.source}/signin`, { way }); return true; } catch (e) { toast(e.message, 'error'); return false; } },
+      refill: (now) => signinChooser(cfg, now),
+      done: () => { m.change = false; state.sources = null; render(); },
+      useImport: async (body, what) => { try { const r = await api('POST', `/sources/${cfg.source}/signin/import`, body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); m.change = false; state.sources = null; render(); } catch (e) { const notice = el.querySelector('[data-sg="error"]'); if (notice) { notice.querySelector('[data-sg="error-text"]').textContent = e.message; notice.hidden = false; } else toast(e.message, 'error'); } },
+      useButton: (w, who) => `<div class="toolbar"><button class="btn primary" data-sg="use">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${who || ''}.</span></div>`,
+      // What other apps on this machine hold (read-only), the file itself, where the node looked
+      importArea: (o = {}) => {
+        const found = si.imports || []; const places = si.places || [];
+        const when = (f) => f.usable ? (f.renews ? 'the node renews it' : f.expires_at ? 'until ' + new Date(f.expires_at * 1000).toLocaleDateString() : '') : f.reason;
+        const list = found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', when(f), f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-import="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : '';
+        const intro = o.intro || `${found.length ? 'Or the file itself' : 'The file itself'} (${esc(places.filter((p) => !/not read|not looked for/.test(p)).map((p) => p.split(':')[0]).join(', ') || o.what || 'the file')}); it is only read.`;
+        const file = `<form class="stack" data-sg="file"><p class="muted small">${intro}</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="${esc(o.fileLabel || 'The file')}" accept="${esc(o.accept || '')}"><button class="btn primary sm" type="submit">Use this file</button></div></form>`;
+        const paste = o.withPaste ? h.pasteArea(o) : '';
+        return `${list}${file}${paste}${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}`;
+      },
+      pasteArea: (o = {}) => `<form class="stack" data-sg="paste"><textarea class="input" name="text" rows="${o.rows || 3}" aria-label="${esc(o.label || 'What to paste')}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">${esc(o.note || 'Kept like the node’s own sign-in; never shown again.')}</span></div></form>`,
+    };
+    const act = el.querySelector('[data-sg="action"]');
+    const renderAction = () => {
+      if (!act) return;
+      el.querySelectorAll('.way').forEach((l) => l.classList.toggle('on', l.querySelector('input').value === pick));
+      const w = wayOf(pick);
+      let html = null;
+      if (si.in_use && si.in_use.way === pick) html = '<p class="muted small">This is the way in use.</p>';
+      else if (cfg.actions) html = cfg.actions(pick, si, h);
+      if (html == null) html = w.action === 'import' ? h.importArea() : w.action === 'paste' ? h.pasteArea() : '';
+      act.innerHTML = html;
+      const useIt = act.querySelector('[data-sg="use"]'); if (useIt) useIt.onclick = async () => { if (await h.choose(pick)) { toast(`Using ${w.label || 'this way'}`); h.done(); } };
+      act.querySelectorAll('[data-import]').forEach((b) => b.onclick = async () => { b.disabled = true; await h.useImport({ id: b.dataset.import }, b.dataset.import); b.disabled = false; });
+      const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } h.useImport({ text: await file.text() }, 'the file'); };
+      const pf = act.querySelector('[data-sg="paste"]'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); h.useImport({ text: pf.querySelector('textarea').value }, 'the pasted sign-in'); };
+      if (cfg.wire) cfg.wire(pick, si, h, act);
+    };
+    el.querySelectorAll(`input[name="way-${cfg.source}"]`).forEach((r) => r.onchange = () => { pick = r.value; m.way = r.value; renderAction(); });
+    renderAction();
+    const another = el.querySelector('[data-sg="another"]'); if (another) another.onclick = () => { el.querySelector('input[type=radio]:not(:disabled)')?.focus(); };
+    const ch = el.querySelector('[data-sg="change"]'); if (ch) ch.onclick = () => { m.change = !m.change; signinChooser(cfg, si); };
+    const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+    if (cfg.after) cfg.after(si, h, el);
+  };
+  // TIDAL: the official app in the browser, tidal-dl-ng's device code, your own client; quality and
+  // health under the device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
+  const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
+  const tidalSigninCfg = (el) => ({
+    source: 'tidal', name: 'TIDAL', el,
+    actions: (pick, si, h) => {
+      const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
+      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Pubky Music/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
+      if (pick === 'device') {
+        const client = u.client_from && u.client_from !== 'builtin' ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? `<button class="btn ghost sm" id="tfclientforget">${u.builtin ? 'Use tidal-dl-ng’s instead' : 'Forget it'}</button>` : ''}</p>` : '';
+        if (u.pending) return `<p class="muted small">On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.</p><div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(u.pending.uri)}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`;
+        if (u.signed_in) return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') + client;
+        return `<div class="toolbar"><button class="btn primary" id="tfin">Sign in with a code</button><span class="muted small">A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
+      }
+      if (pick === 'own') return `<form class="stack" id="tfclient"><p class="muted small">A TIDAL <b>device client</b> id and secret you are allowed to use; the node keeps them like a sign-in and signs you in with a code. An app from TIDAL’s developer portal is not a device client: put that one’s id and secret in the node config (<code>[tidal] client_id</code>, <code>client_secret</code>) and it appears above as your own TIDAL app.</p><div class="toolbar"><input class="input" name="id" placeholder="Device client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Device client secret" autocomplete="off" aria-label="Device client secret"><button class="btn primary" type="submit">Save and sign in with a code</button></div></form>`;
+      if (pick === 'import') return h.importArea({ fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json' });
+      if (pick === 'paste') return h.pasteArea({ label: 'Token file contents or access token', placeholder: 'Token file contents, or an access token (a refresh token on the next line)' });
+      return null;
+    },
+    wire: (pick, si, h, act) => {
+      const u = si.details.unofficial || {};
+      const a = $('#tidalin'); if (a) a.onclick = async () => { if (await h.choose('app')) tidalBrowserSignIn(a); };
+      wirePasteBack('tidal', 'TIDAL signed in');
+      const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; if (await h.choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } h.refill(); };
+      const cf = $('#tfclient'); if (cf) cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
+      const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast(u.builtin ? 'Using tidal-dl-ng’s device client' : 'Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
+    },
+    extra: (si) => {
+      const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];
+      const deviceOn = !!(si.in_use && si.in_use.way !== 'app');
+      if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.${u.from ? ' That sign-in came from ' + esc(u.from === 'pasted' ? 'a pasted token' : u.from) + '; pick another way below, or a newer file.' : ''}<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
+      if (deviceOn) {
+        rows.push(sgRow('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
+        if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+        if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
+      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to the device sign-in.`, '<span class="pill warn">previews</span>'));
+      return rows;
+    },
+    after: (si, h) => {
+      const u = si.details.unofficial || {};
+      const putU = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } h.refill(); };
+      const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
+      const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
+      const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
+      clearTimeout(state.tidalFullPoll);
+      if (u.pending) state.tidalFullPoll = setTimeout(async () => { let now; try { now = await api('GET', '/sources/tidal/signin'); } catch { return; } if (now.in_use && now.in_use.way === 'device' && !(si.in_use && si.in_use.way === 'device')) { toast('TIDAL signed in: full tracks'); h.done(); } else h.refill(now); }, 3000);
+    },
+  });
+  // Qobuz: your own app and account, or streamrip's / qobuz-dl's config (found, picked or pasted).
+  const qobuzSigninCfg = (el) => ({
+    source: 'qobuz', name: 'Qobuz', el,
+    actions: (pick, si, h) => {
+      const u = si.details.unofficial || {};
+      if (pick === 'own') {
+        const appRow = u.app_from ? `<p class="muted small">App: ${u.app_from === 'config' ? 'set in the node config' : u.app_from === 'import' ? 'from the imported config' : 'entered here'}${u.app_id ? ' · <code class="path">' + esc(u.app_id) + '</code>' : ''}. ${u.app_from !== 'config' ? '<button class="btn ghost sm" data-qb="appchange">Change</button> <button class="btn ghost sm" data-qb="appforget">Forget</button>' : ''}</p>` : '';
+        const appForm = `<form class="stack" data-qb="app" ${u.app_from && !h.m.changeApp ? 'hidden' : ''}><p class="muted small">The node has no built-in Qobuz app: a Qobuz app id and secret you are allowed to use. The node keeps them like a sign-in.</p><div class="toolbar"><input class="input" name="id" placeholder="App ID" inputmode="numeric" autocomplete="off" aria-label="Qobuz app ID" required><input class="input" name="secret" type="password" placeholder="App secret" autocomplete="off" aria-label="Qobuz app secret" required><button class="btn" type="submit">Save</button></div></form>`;
+        const signin = u.app_from ? `<form class="stack" data-qb="in"><p class="muted small">Your password goes to Qobuz once, to sign in; the node keeps only the session Qobuz answers with.</p><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required><input class="input" name="password" type="password" placeholder="Password" autocomplete="current-password" aria-label="Qobuz password" required><button class="btn primary" type="submit">Sign in</button></div></form>` : '';
+        return appRow + appForm + signin;
+      }
+      if (pick === 'import') return h.importArea({ fileLabel: 'Config file', accept: '.toml,.ini,.txt' });
+      if (pick === 'paste') return h.pasteArea({ label: 'streamrip or qobuz-dl config', placeholder: '[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini', rows: 5 });
+      return null;
+    },
+    wire: (pick, si, h, act) => {
+      const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } h.refill(); };
+      const af = act.querySelector('[data-qb="app"]'); if (af) af.onsubmit = (e) => { e.preventDefault(); const f = new FormData(af); h.m.changeApp = false; put({ app_id: String(f.get('id') || '').trim(), app_secret: String(f.get('secret') || '').trim() }, 'Qobuz app saved'); };
+      const ac = act.querySelector('[data-qb="appchange"]'); if (ac) ac.onclick = () => { h.m.changeApp = true; af.hidden = false; af.querySelector('input').focus(); };
+      const ag = act.querySelector('[data-qb="appforget"]'); if (ag) ag.onclick = () => put({ app_id: '' }, 'Qobuz app forgotten');
+      const qi = act.querySelector('[data-qb="in"]'); if (qi) qi.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(qi); qi.querySelector('button').disabled = true; try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); if (await h.choose('own')) h.done(); } catch (er) { toast(er.message, 'error'); h.refill(); } };
+    },
+  });
+  // Spotify: your own app (Connect control, library), librespot picked in a Spotify app, or
+  // librespot with a credentials.json you pick; Soloist and librespot's own settings keep their rows.
+  const spotifySigninCfg = (el) => ({
+    source: 'spotify', name: 'Spotify', el,
+    actions: (pick, si, h) => {
+      const st = si.details.status || {}; const ls = si.details.librespot || {}; const w = h.wayOf(pick);
+      if (pick === 'app') {
+        if (!st.configured) return spotSetup(st, false);
+        if (st.signed_in) return h.useButton(w, st.display_name ? ' as ' + esc(st.display_name) : '');
+        return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${spotAppRow(st)}${st.app_from === 'settings' ? spotSetup(st, true) : ''}`;
+      }
+      if (pick === 'librespot') return ls.enabled ? `<p class="muted small">librespot is on: pick it in a Spotify app on this network; its device name and output are below.</p>` : `<div class="toolbar"><button class="btn primary" data-sg="use">Switch librespot on</button><span class="muted small">Then pick it in a Spotify app on this network. Its device name and output are set below.</span></div>`;
+      if (pick === 'librespot-file') return h.importArea({ fileLabel: 'credentials.json', accept: '.json,application/json', what: 'credentials.json', intro: 'The credentials.json another librespot saved; it is kept readable by the node only.', withPaste: true, label: 'credentials.json contents', placeholder: '{"username": …, "auth_type": …, "auth_data": …}' });
+      return null;
+    },
+    wire: (pick, si, h) => {
+      const sp = $('#spotin'); if (sp) sp.onclick = async () => { if (await h.choose('app')) { try { const r = await api('GET', '/sources/spotify/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } } };
+      wireSpotSetup();
+      wirePasteBack('spotify', 'Spotify signed in');
+    },
+  });
+  // YouTube: your Data API key for search, or a cookies file you pick for yt-dlp.
+  const youtubeSigninCfg = (el) => ({
+    source: 'youtube', name: 'YouTube', el,
+    actions: (pick, si, h) => {
+      const key = (si.details.key || {}).set;
+      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it here. It is checked once, then never shown again.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
+      if (pick === 'cookies') return h.importArea({ fileLabel: 'Cookies file', accept: '.txt,text/plain', what: 'the cookies file', intro: 'The Netscape cookies file you export for yt-dlp; the copy is kept readable by the node only, and yt-dlp on your speakers plays as your account.', withPaste: true, label: 'Cookies file contents', placeholder: '# Netscape HTTP Cookie File …', rows: 4 });
+      return null;
+    },
+    wire: (pick, si, h, act) => {
+      const kf = act.querySelector('[data-yt="key"]'); if (kf) kf.onsubmit = async (e) => { e.preventDefault(); const b = kf.querySelector('button'); b.disabled = true; try { await api('PUT', '/sources/youtube/key', { key: String(new FormData(kf).get('key') || '').trim() }); toast('YouTube key saved'); if (await h.choose('key')) h.done(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
+      const kg = act.querySelector('[data-yt="forget"]'); if (kg) kg.onclick = async () => { try { await api('PUT', '/sources/youtube/key', { key: '' }); toast('YouTube key forgotten'); h.done(); } catch (e) { toast(e.message, 'error'); } };
+    },
+  });
+  // Last.fm (Settings › Accounts): your own API account, rescrobbled's sign-in, or a pasted one;
+  // scrobbling on/off and the waiting plays stay as rows.
+  const lastfmSigninCfg = (el) => ({
+    source: 'lastfm', name: 'Last.fm', el, title: '',
+    actions: (pick, si, h) => {
+      const lf = si.details.lastfm || {};
+      if (pick === 'own') {
+        if (!lf.configured) return `<form class="stack" data-lf="app"><p class="muted small">Last.fm gives each app its own key: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">create one</a> (any name; no callback needed), then paste its API key and shared secret. Both stay on this node; the secret only signs requests here.</p><div class="toolbar"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" aria-label="Last.fm API key" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" aria-label="Last.fm shared secret" required><button class="btn" type="submit">Save</button></div></form>`;
+        const appRow = lf.app_from === 'config' ? '<p class="muted small">This node’s Last.fm app is set in its config.</p>' : `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" data-lf="appforget">Forget</button></p>`;
+        return `<div class="toolbar"><button class="btn primary" data-lf="in">Connect Last.fm</button><span class="muted small">Opens Last.fm’s permission page; it comes back here.</span></div>${appRow}`;
+      }
+      if (pick === 'import') return h.importArea({ fileLabel: 'Last.fm key, secret and session key', accept: '.toml,.txt', intro: 'From another machine, use a text file with three lines: the API key, shared secret and session key. rescrobbled’s config alone does not contain the session.', withPaste: true, label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key' });
+      if (pick === 'paste') return h.pasteArea({ label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key', rows: 3 });
+      return null;
+    },
+    wire: (pick, si, h, act) => {
+      const af = act.querySelector('[data-lf="app"]'); if (af) af.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(af); try { await api('PUT', '/lastfm', { api_key: String(f.get('key') || '').trim(), api_secret: String(f.get('secret') || '').trim() }); toast('Last.fm app saved'); h.refill(); } catch (er) { toast(er.message, 'error'); } };
+      const ag = act.querySelector('[data-lf="appforget"]'); if (ag) ag.onclick = async () => { try { await api('PUT', '/lastfm', { api_key: '' }); toast('Last.fm app forgotten'); h.refill(); } catch (er) { toast(er.message, 'error'); } };
+      const li = act.querySelector('[data-lf="in"]'); if (li) li.onclick = async () => { if (await h.choose('own')) { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } } };
+    },
+    extra: (si) => {
+      const lf = si.details.lastfm || {}; if (!lf.connected) return [];
+      return [
+        lf.problem ? `<div class="notice warn" role="status">${esc(lf.problem)}<div class="actions"><button class="btn sm" data-lf="again">Sign in again</button></div></div>` : '',
+        sgRow('Send what I play', lf.pending ? `${lf.pending} plays wait for Last.fm; they go with the next play.` : 'Plays count after half the track or four minutes; now-playing at the start.', `<input type="checkbox" class="switch" role="switch" data-lf="submit" ${lf.submit ? 'checked' : ''} aria-label="Send what I play to Last.fm">`),
+      ];
+    },
+    after: (si, h, el) => {
+      const sw = el.querySelector('[data-lf="submit"]'); if (sw) sw.onchange = async (e) => { try { await api('PUT', '/lastfm', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to Last.fm' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); } };
+      const ag = el.querySelector('[data-lf="again"]'); if (ag) ag.onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
+    },
+  });
   const spotifyPlay = async (uris, anchor) => {
     try {
       const devs = await api('GET', '/sources/spotify/devices');
@@ -3258,15 +3467,7 @@
             : !jam.can_sign_in ? `<p class="muted small">Search and full-length playback need no account. Signing in to bring your Jamendo likes over needs your own Jamendo app with its secret in the node config (<code>[jamendo]</code>).</p>`
             : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>`;
           let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
-          const spotAccount = active !== 'spotify' ? '' : !spot ? `<div class="notice">Spotify's status didn't load. Try again in a moment.</div>` : !spot.configured ? spotSetup(spot, false)
-            : spot.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${spot.display_name ? ' · ' + esc(spot.display_name) : spot.user_id ? ' · ' + esc(spot.user_id) : ''}${spot.country ? ' · ' + esc(spot.country) : ''}${spot.product ? ' · ' + esc(spot.product) : ''}</span><button class="btn ghost" id="spotout">Sign out</button></div><p class="muted small">Spotify hands out no audio (DRM): tracks play on your Spotify devices (Premium), chosen under “Play on Spotify”. Your library and playlists import by ISRC.</p>${spotAppRow(spot)}${spot.app_from === 'settings' ? spotSetup(spot, true) : ''}`
-            : `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify's sign-in; the app must list <code>${esc(spot.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${spotAppRow(spot)}${spot.app_from === 'settings' ? spotSetup(spot, true) : ''}`;
-          let ytk = null; if (active === 'youtube') { try { ytk = await api('GET', '/sources/youtube/key'); } catch { ytk = null; } if (state.view !== 'sources') return; }
-          const ytAccount = active !== 'youtube' || !ytk ? '' : ytk.set
-            ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost" id="ytkeyforget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key's 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>`
-            : `<form class="subform" id="ytkey"><p class="muted small">Optional: to search YouTube here, use your own free YouTube Data API key. In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it below. Song pages play YouTube links without it.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn" type="submit">Save</button></div></form>`;
-          // TIDAL's account lives in its Sign in group (fillTidalSignin below)
-          const account = active === 'youtube' ? ytAccount : active === 'spotify' ? spotAccount : active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
+          const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
           const body = !cur ? '' : cur.id === 'library'
             ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library folders</button>')
@@ -3276,6 +3477,9 @@
                 + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
               + (account ? group('Account', block('', '', account)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalsignin"></div>' : '')
+              + (cur.id === 'qobuz' ? '<div id="signin-qobuz"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="signin-spotify"></div>' : '')
+              + (cur.id === 'youtube' ? '<div id="signin-youtube"></div>' : '')
               + (cur.enabled && (!cur.features || cur.features.includes('search')) && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="qobuzmode"></div>' : '')
@@ -3286,86 +3490,11 @@
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
           $$('[data-src-back]', main).forEach((b) => b.onclick = () => goBack('sources'));
-          // TIDAL › Sign in: one chooser with the ways side by side; signed in, one status line with
-          // Change way and Sign out (STEWARD-CREDENTIALS-REUSE.md). Quality and health stay under the
-          // device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
-          const tsi = $('#tidalsignin');
-          const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
-          const fillTidalSignin = async (si) => {
-            if (!tsi || !tsi.isConnected) return;
-            if (!si) { try { si = await api('GET', '/sources/tidal/signin'); } catch (e) { tsi.innerHTML = ''; return; } }
-            if (!tsi.isConnected) return;
-            clearTimeout(state.tidalFullPoll);
-            const u = si.details.unofficial || {}; const st = si.details.status || {};
-            const wayOf = (id) => si.ways.find((w) => w.id === id) || {};
-            const usable = si.ways.filter((w) => w.available);
-            // The way picked here, else the remembered one, else the recommended one
-            let pick = [state.tidalWay, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || si.ways[0]).id;
-            const choosing = !si.in_use || !!state.tidalChangeWay;
-            const deviceOn = !!(si.in_use && si.in_use.way === 'device');
-            const rows = [];
-            if (si.in_use) rows.push(row('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user ? ' · user ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" id="tsichange">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" id="tsiout">Sign out</button>`));
-            if (choosing) {
-              const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="tidalway" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="tway-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="tway-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
-              rows.push(block(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to TIDAL">${ways}</div><div class="way-action" id="tsiaction"></div>`));
-            }
-            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.${u.from ? ' That sign-in came from ' + esc(u.from === 'pasted' ? 'a pasted token' : u.from) + '; pick another way below, or a newer file.' : ''}<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
-            if (deviceOn) {
-              rows.push(row('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
-              if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
-              if (!st.signed_in) rows.push(row('Your collection', `Collection and playlist imports go through ${esc(wayOf('app').label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
-            } else if (si.in_use && st.playback_limit) rows.push(row('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to the device sign-in.`, '<span class="pill warn">previews</span>'));
-            tsi.innerHTML = group('Sign in', rows.join(''));
-            const choose = async (way) => { state.tidalWay = way; try { await api('PUT', '/sources/tidal/signin', { way }); return true; } catch (e) { toast(e.message, 'error'); return false; } };
-            const putU = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } };
-            const act = $('#tsiaction');
-            const wireAction = () => {
-              const a = $('#tidalin'); if (a) a.onclick = async () => { if (await choose('app')) tidalBrowserSignIn(a); };
-              wirePasteBack('tidal', 'TIDAL signed in');
-              const useIt = $('#tsiuse'); if (useIt) useIt.onclick = async () => { if (await choose(pick)) { toast(`Using ${wayOf(pick).label || 'this way'}`); state.tidalChangeWay = false; render(); } };
-              const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; if (await choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } fillTidalSignin(); };
-              const cf = $('#tfclient'); if (cf) cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } fillTidalSignin(); };
-              const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { await putU({ client_id: '' }, u.builtin ? 'Using tidal-dl-ng’s device client' : 'Device client forgotten'); fillTidalSignin(); };
-              const useImport = async (body, what) => { try { const r = await api('POST', '/sources/tidal/signin/import', body); toast(`Signed in with ${r.in_use ? r.in_use.label : what}`); state.tidalChangeWay = false; render(); } catch (e) { toast(e.message, 'error'); } };
-              $$('[data-import]', tsi).forEach((b) => b.onclick = async () => { b.disabled = true; await useImport({ id: b.dataset.import }, b.dataset.import); b.disabled = false; });
-              const ff = $('#tsifile'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the token file first', 'error'); return; } useImport({ text: await file.text() }, 'the file'); };
-              const pf = $('#tsipaste'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); useImport({ text: pf.querySelector('textarea').value }, 'the pasted token'); };
-            };
-            const renderAction = () => {
-              if (!act) return;
-              const w = wayOf(pick);
-              $$('.way', tsi).forEach((l) => l.classList.toggle('on', l.querySelector('input').value === pick));
-              if (si.in_use && si.in_use.way === pick) act.innerHTML = '<p class="muted small">This is the way in use.</p>';
-              else if (pick === 'app') {
-                if (st.signed_in) act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tsiuse">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${st.user_id ? ' as user ' + esc(st.user_id) : ''}.</span></div>`;
-                else act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Pubky Music/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
-              } else if (pick === 'device') {
-                const client = u.client_from && u.client_from !== 'builtin' ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? `<button class="btn ghost sm" id="tfclientforget">${u.builtin ? 'Use tidal-dl-ng’s instead' : 'Forget it'}</button>` : ''}</p>` : '';
-                if (u.pending) act.innerHTML = `<p class="muted small">On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.</p><div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(u.pending.uri)}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`;
-                else if (u.signed_in) act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tsiuse">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${u.user ? ' as user ' + esc(u.user) : ''}.</span></div>${client}`;
-                else act.innerHTML = `<div class="toolbar"><button class="btn primary" id="tfin">Sign in with a code</button><span class="muted small">A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
-              } else if (pick === 'import') {
-                // What other apps on this machine hold, read-only; or the file itself (STEWARD-CREDENTIALS-REUSE.md step 2)
-                const found = si.imports || []; const places = si.places || [];
-                const when = (f) => f.usable ? (f.renews ? 'the node renews it' : f.expires_at ? 'until ' + new Date(f.expires_at * 1000).toLocaleDateString() : '') : f.reason;
-                act.innerHTML = `${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', when(f), f.place].filter(Boolean).join(' \u00b7 '))}</div></div>${f.usable ? `<button class="btn primary sm" data-import="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="tsifile"><p class="muted small">${found.length ? 'Or the token file itself' : 'The token file itself'} (${esc(places.filter((p) => !/not read/.test(p)).map((p) => p.split(':')[0]).join(', '))}); it is only read.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Token file" accept=".json,.toml,.txt,application/json"><button class="btn primary sm" type="submit">Use this file</button></div></form><details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>`;
-              } else if (pick === 'paste') {
-                act.innerHTML = `<form class="stack" id="tsipaste"><textarea class="input" name="text" rows="3" aria-label="Token file contents or access token" placeholder="Token file contents, or an access token (a refresh token on the next line)" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">Kept like the node\u2019s own sign-in; never shown again.</span></div></form>`;
-              } else {
-                act.innerHTML = `<form class="stack" id="tfclient"><p class="muted small">A TIDAL <b>device client</b> id and secret you are allowed to use; the node keeps them like a sign-in and signs you in with a code. An app from TIDAL’s developer portal is not a device client: put that one’s id and secret in the node config (<code>[tidal] client_id</code>, <code>client_secret</code>) and it appears above as your own TIDAL app.</p><div class="toolbar"><input class="input" name="id" placeholder="Device client id" autocomplete="off" aria-label="Device client id" required><input class="input" name="secret" type="password" placeholder="Device client secret" autocomplete="off" aria-label="Device client secret"><button class="btn primary" type="submit">Save and sign in with a code</button></div></form>`;
-              }
-              wireAction();
-            };
-            $$('input[name="tidalway"]', tsi).forEach((r) => r.onchange = () => { pick = r.value; state.tidalWay = r.value; renderAction(); });
-            renderAction();
-            const ch = $('#tsichange'); if (ch) ch.onclick = () => { state.tidalChangeWay = !state.tidalChangeWay; fillTidalSignin(si); };
-            const out = $('#tsiout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/signin'); toast('Signed out of TIDAL'); state.tidalChangeWay = false; render(); } catch (e) { toast(e.message, 'error'); } };
-            const tr = $('#tfretry'); if (tr) tr.onclick = async () => { await putU({ enabled: true }, 'Trying full tracks again'); fillTidalSignin(); };
-            const tq = $('#tfq'); if (tq) tq.onchange = async () => { await putU({ quality: tq.value }, 'Quality saved'); fillTidalSignin(); };
-            const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
-            if (u.pending) state.tidalFullPoll = setTimeout(async () => { let now; try { now = await api('GET', '/sources/tidal/signin'); } catch { return; } if (now.in_use && now.in_use.way === 'device' && !deviceOn) { toast('TIDAL signed in: full tracks'); state.tidalChangeWay = false; render(); } else fillTidalSignin(now); }, 3000);
-          };
-          fillTidalSignin(tidalSi);
+          // The Sign in chooser of each source that has one (STEWARD-CREDENTIALS-REUSE.md)
+          signinChooser(tidalSigninCfg($('#tidalsignin')), tidalSi);
+          signinChooser(qobuzSigninCfg($('#signin-qobuz')));
+          signinChooser(spotifySigninCfg($('#signin-spotify')));
+          signinChooser(youtubeSigninCfg($('#signin-youtube')));
           // YouTube › On your speakers (unofficial): yt-dlp as an external program (STEWARD-DUAL-MODE.md)
           const yz = $('#ytzones');
           const fillYtZones = async () => {
@@ -3388,8 +3517,6 @@
             const yr = $('#yzremove'); if (yr) yr.onclick = async () => { try { await api('DELETE', '/sources/youtube/unofficial/ytdlp'); toast('yt-dlp removed'); } catch (er) { toast(er.message, 'error'); } render(); };
           };
           fillYtZones();
-          const ytf = $('#ytkey'); if (ytf) ytf.onsubmit = async (e) => { e.preventDefault(); const b = ytf.querySelector('button'); b.disabled = true; try { await api('PUT', '/sources/youtube/key', { key: String(new FormData(ytf).get('key') || '').trim() }); toast('YouTube search is on'); state.sources = null; } catch (er) { toast(er.message, 'error'); } render(); };
-          const ytg = $('#ytkeyforget'); if (ytg) ytg.onclick = async () => { try { await api('PUT', '/sources/youtube/key', { key: '' }); toast('YouTube key forgotten'); state.sources = null; } catch (er) { toast(er.message, 'error'); } render(); };
           // Qobuz (unofficial-only): opt-in, warned, the owner's own app and sign-in (STEWARD-DUAL-MODE.md)
           const qm = $('#qobuzmode');
           const fillQobuz = async () => {
@@ -3400,10 +3527,6 @@
             const rows = [row('Qobuz (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz (unofficial)">`)];
             if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>`);
             if (u.enabled || u.signed_in || u.app_from) {
-              if (u.app_from) rows.push(row('App', u.app_from === 'config' ? 'Set in the node config.' : 'Set here. Qobuz can stop accepting an app at any time; then enter another one.', `<button class="btn ghost sm" id="qbappchange">Change</button>${u.app_from === 'settings' ? '<button class="btn ghost sm" id="qbappforget">Forget</button>' : ''}`));
-              rows.push(`<form class="set-row set-block" id="qbapp" ${u.app_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">App</div>${help('The node has no built-in Qobuz app: enter a Qobuz app ID and secret you are allowed to use. Until you do, Qobuz stays off. The node keeps them like a sign-in.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="App ID" inputmode="numeric" autocomplete="off" aria-label="Qobuz app ID" required><input class="input" name="secret" type="password" placeholder="App secret" autocomplete="off" aria-label="Qobuz app secret" required><button class="btn" type="submit">Save</button></div></div></form>`);
-              if (u.signed_in) rows.push(row('Signed in', `Qobuz account${u.user ? ' ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''}${u.hires ? ' · hi-res' : ''}.`, '<button class="btn ghost sm" id="qbout">Sign out</button>'));
-              else if (u.app_from) rows.push(`<form class="set-row set-block" id="qbin"><div class="set-label"><div class="set-name">Sign in</div>${help('Your password goes to Qobuz once, to sign in. The node keeps only the session Qobuz answers with, never the password.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required><input class="input" name="password" type="password" placeholder="Password" autocomplete="current-password" aria-label="Qobuz password" required><button class="btn primary" type="submit">Sign in</button></div></div></form>`);
               rows.push(row('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`));
               if (u.health && u.health.ok && u.signed_in) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
             }
@@ -3412,11 +3535,6 @@
             $('#qbon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz is on' : 'Qobuz is off');
             const qr = $('#qbretry'); if (qr) qr.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
             const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
-            const af = $('#qbapp'); if (af) af.onsubmit = (e) => { e.preventDefault(); const f = new FormData(af); put({ app_id: String(f.get('id') || '').trim(), app_secret: String(f.get('secret') || '').trim() }, 'Qobuz app saved'); };
-            const ac = $('#qbappchange'); if (ac) ac.onclick = () => { af.hidden = false; af.querySelector('input').focus(); };
-            const ag = $('#qbappforget'); if (ag) ag.onclick = () => put({ app_id: '' }, 'Qobuz app forgotten');
-            const qi = $('#qbin'); if (qi) qi.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(qi); const b = qi.querySelector('button'); b.disabled = true; try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
-            const qo = $('#qbout'); if (qo) qo.onclick = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (er) { toast(er.message, 'error'); } render(); };
           };
           fillQobuz();
           const bcm = $('#bcmode');
@@ -3583,10 +3701,6 @@
           const ji = $('#jamin'); if (ji) ji.onclick = async () => { try { const r = await api('POST', '/sources/jamendo/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } };
           const jo = $('#jamout'); if (jo) jo.onclick = async () => { try { await api('POST', '/sources/jamendo/logout'); toast('Jamendo signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           const jm = $('#jamimport'); if (jm) jm.onclick = async () => { jm.disabled = true; try { const r = await api('POST', '/sources/jamendo/collection/import'); toast(`${r.imported} Jamendo song${r.imported === 1 ? '' : 's'} added to Favourites`); } catch (e) { toast(e.message, 'error'); } jm.disabled = false; };
-          const si = $('#spotin'); if (si) si.onclick = async () => { try { const r = await api('GET', '/sources/spotify/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } };
-          wireSpotSetup();
-          wirePasteBack('spotify', 'Spotify signed in');
-          const so = $('#spotout'); if (so) so.onclick = async () => { try { await api('DELETE', '/sources/spotify/session'); toast('Spotify signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           if (spot && spot.signed_in && cur.enabled) {
             const box = document.createElement('div'); box.innerHTML = '<p class="muted small">Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
@@ -4289,29 +4403,7 @@
           $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
           $('#rooncheck').onclick = () => roonRun(true);
           $('#roongo').onclick = () => roonRun(false);
-          const loadLf = async () => {
-            const box = $('#lfbody'); if (!box) return;
-            let lf; try { lf = await api('GET', '/lastfm'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
-            const appRow = lf.app_from === 'config' ? '<p class="muted small">This node’s Last.fm app is set in its config.</p>' : lf.configured ? `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" id="lfappforget">Forget</button></p>` : '';
-            if (!lf.configured) {
-              box.innerHTML = `<p class="muted small">Send what you play to Last.fm and see similar artists on artist pages. Last.fm gives each app its own key: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">create one</a> (any name; no callback needed), then paste its API key and shared secret. Both stay on this node; the secret only signs requests here.</p><form class="row" id="lfapp"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" style="flex:1;min-width:160px" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" style="flex:1;min-width:160px" required><button class="btn" type="submit">Save</button></form>`;
-              $('#lfapp').onsubmit = async (e) => { e.preventDefault(); const f = new FormData($('#lfapp')); try { await api('PUT', '/lastfm', { api_key: String(f.get('key') || '').trim(), api_secret: String(f.get('secret') || '').trim() }); toast('Last.fm app saved'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
-              return;
-            }
-            if (!lf.connected) {
-              box.innerHTML = appRow + `<div class="toolbar"><button class="btn primary" id="lfin">Connect Last.fm</button><span class="muted small">Opens Last.fm’s permission page; it comes back here.</span></div>`;
-              $('#lfin').onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
-            } else {
-              box.innerHTML = `<div class="toolbar"><span class="pill ok account">Connected · ${esc(lf.user || '')}</span>${lf.pending ? `<span class="pill warn" title="Last.fm did not take them yet; they go with the next play">${lf.pending} waiting</span>` : ''}</div>`
-                + (lf.problem ? `<div class="notice warn" role="status">${esc(lf.problem)}<div class="actions"><button class="btn sm" id="lfin">Sign in again</button></div></div>` : '')
-                + `<label class="check small"><input type="checkbox" id="lfsubmit" ${lf.submit ? 'checked' : ''}> Send what I play here</label>`
-                + `<div class="toolbar" style="margin-top:8px"><button class="btn sm ghost" id="lfout">Disconnect</button></div>` + appRow;
-              $('#lfsubmit').onchange = async (e) => { try { await api('PUT', '/lastfm', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to Last.fm' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); } };
-              $('#lfout').onclick = async () => { try { await api('DELETE', '/lastfm'); toast('Last.fm disconnected'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
-              const li = $('#lfin'); if (li) li.onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
-            }
-            const lg = $('#lfappforget'); if (lg) lg.onclick = async () => { try { await api('PUT', '/lastfm', { api_key: '' }); toast('Last.fm app forgotten'); loadLf(); } catch (er) { toast(er.message, 'error'); } };
-          };
+          const loadLf = () => signinChooser(lastfmSigninCfg($('#lfbody')));
           loadLf();
           const loadLb = async () => {
             const box = $('#lbbody'); if (!box) return;

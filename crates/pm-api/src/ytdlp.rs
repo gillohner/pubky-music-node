@@ -64,6 +64,13 @@ struct Paths {
     bin_dir: Option<PathBuf>,
     /// Tests: GitHub's release downloads stood in.
     releases: Option<String>,
+    /// `<data_dir>/youtube/cookies.txt`: the cookies file the person picked (`crate::imports`).
+    cookies: Option<PathBuf>,
+}
+
+/// The cookies file yt-dlp runs with, when the person put one there.
+pub(crate) fn cookies_path() -> Option<PathBuf> {
+    paths().read().expect("ytdlp paths").cookies.clone()
 }
 
 fn paths() -> &'static std::sync::RwLock<Paths> {
@@ -76,6 +83,7 @@ fn paths() -> &'static std::sync::RwLock<Paths> {
                 .map(PathBuf::from),
             bin_dir: None,
             releases: None,
+            cookies: None,
         })
     })
 }
@@ -89,7 +97,9 @@ pub fn set_config_path(p: &str) {
 
 /// Where a downloaded yt-dlp lives: `<data_dir>/bin`.
 pub fn set_data_dir(d: &Path) {
-    paths().write().expect("ytdlp paths").bin_dir = Some(d.join("bin"));
+    let mut p = paths().write().expect("ytdlp paths");
+    p.bin_dir = Some(d.join("bin"));
+    p.cookies = Some(d.join("youtube").join("cookies.txt"));
 }
 
 /// Tests: download from here instead of GitHub.
@@ -145,8 +155,20 @@ fn version_of(bin: &Path) -> Option<String> {
 
 // ---- playback -------------------------------------------------------------------------------------
 
+struct CookieCopy(PathBuf);
+
+impl Drop for CookieCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Ask yt-dlp for the audio URL of a video. Blocking (the audio thread).
 pub fn resolve_blocking(bin: &Path, id: &str) -> Result<String, String> {
+    resolve_with_cookies(bin, id, cookies_path().as_deref())
+}
+
+fn resolve_with_cookies(bin: &Path, id: &str, cookies: Option<&Path>) -> Result<String, String> {
     if id.len() != 11
         || !id
             .bytes()
@@ -154,16 +176,37 @@ pub fn resolve_blocking(bin: &Path, id: &str) -> Result<String, String> {
     {
         return Err("bad YouTube video id".into());
     }
-    let mut child = std::process::Command::new(bin)
-        .args([
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            "-f",
-            FORMAT,
-            "-g",
-            "--",
-        ])
+    // yt-dlp writes its jar back on exit. Give each lookup a disposable private copy so a
+    // lookup finishing after Sign out cannot recreate the saved cookies.
+    let copy = match cookies {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let copy = CookieCopy(path.with_file_name(format!(".cookies-{}.txt", uuid::Uuid::new_v4())));
+                crate::imports::write_private(&copy.0, &bytes)
+                    .map_err(|_| "Could not prepare the cookies for yt-dlp")?;
+                Some(copy)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("Could not read the saved cookies for yt-dlp".into()),
+        },
+        None => None,
+    };
+    let mut cmd = std::process::Command::new(bin);
+    // Do not load another application's config (which may name a browser or a cookie jar).
+    cmd.args([
+        "--ignore-config",
+        "--no-playlist",
+        "--no-warnings",
+        "--quiet",
+        "-f",
+        FORMAT,
+        "-g",
+    ]);
+    if let Some(c) = &copy {
+        cmd.arg("--cookies").arg(&c.0);
+    }
+    let mut child = cmd
+        .arg("--")
         .arg(format!("https://www.youtube.com/watch?v={id}"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -191,6 +234,9 @@ pub fn resolve_blocking(bin: &Path, id: &str) -> Result<String, String> {
         .find(|l| l.starts_with("https://") || l.starts_with("http://"));
     match (out.status.success(), url) {
         (true, Some(u)) => Ok(u.to_string()),
+        _ if copy.is_some() => {
+            Err("yt-dlp could not play with the saved cookies. Export a new file or try another way".into())
+        }
         _ => {
             let err = String::from_utf8_lossy(&out.stderr);
             let last = err
@@ -408,4 +454,46 @@ pub(crate) async fn uninstall(State(s): State<Arc<NodeState>>) -> ApiResult<Zone
             .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Removing yt-dlp: {e}")))?;
     }
     Ok(Json(view(&s).await))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn lookup_uses_a_private_copy_and_cannot_restore_signed_out_cookies() {
+        let dir = tempfile::tempdir().unwrap();
+        let cookies = dir.path().join("cookies.txt");
+        let bin = dir.path().join("yt-dlp");
+        std::fs::write(&cookies, "synthetic cookie data").unwrap();
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+[ "$1" = "--ignore-config" ] || exit 1
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--cookies" ]; then shift; cookie="$1"; fi
+  shift
+done
+[ -n "$cookie" ] || exit 2
+[ "$(stat -c %a "$cookie" 2>/dev/null || stat -f %Lp "$cookie")" = 600 ] || exit 3
+[ "$(cat "$cookie")" = 'synthetic cookie data' ] || exit 4
+rm "${cookie%/*}/cookies.txt"
+printf 'refreshed cookies' > "$cookie"
+printf 'https://example.org/audio\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            resolve_with_cookies(&bin, "5NV6Rdv1a3I", Some(&cookies)).unwrap(),
+            "https://example.org/audio"
+        );
+        assert!(!cookies.exists(), "an in-flight lookup must not undo Sign out");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "the working copy is removed"
+        );
+    }
 }

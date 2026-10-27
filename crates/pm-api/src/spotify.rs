@@ -1275,3 +1275,217 @@ pub(crate) async fn play(
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+// ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md step 3) ----
+
+pub(crate) const WAY_APP: &str = "app";
+pub(crate) const WAY_LIBRESPOT: &str = "librespot";
+pub(crate) const WAY_LIBRESPOT_FILE: &str = "librespot-file";
+
+/// Spotify's ways, for `crate::signin`: the official app (Connect control, library), and
+/// librespot (playback into a zone), signed in from a Spotify app on the network or with a
+/// credentials.json the person picks. Both can be in use at once.
+pub(crate) struct SpotifySignIn;
+
+#[async_trait::async_trait]
+impl crate::signin::SignInSource for SpotifySignIn {
+    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+        use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
+        let u = load_user(s);
+        let (ls, chosen) = {
+            let lib = s.library.lock().expect("library poisoned");
+            (
+                crate::librespot::load(&lib),
+                crate::signin::chosen(&lib, SOURCE_ID),
+            )
+        };
+        let configured = creds(s).configured();
+        let supported = cfg!(unix) && crate::librespot::binary().is_some();
+        let ls_reason = (!supported).then(|| {
+            if cfg!(unix) {
+                "Install librespot first (the Spotify tab says how).".to_string()
+            } else {
+                "The node runs librespot on Linux and macOS only.".to_string()
+            }
+        });
+        let ways = vec![
+            Way {
+                id: WAY_APP.into(),
+                label: "Your own Spotify app".into(),
+                note: format!(
+                    "Official API: Connect control of your Spotify devices, your library and playlists{}. Spotify hands out no audio to other apps.",
+                    if configured { "" } else { ". Set up a free developer app first (two minutes, below)" }
+                ),
+                action: if configured { "browser" } else { "setup" }.into(),
+                recommended: true,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_LIBRESPOT.into(),
+                label: "librespot, picked in a Spotify app on this network".into(),
+                note: "Unofficial: librespot appears as a speaker in your Spotify apps; playing to it signs it in, and it plays into one of the node's zones. Spotify has not approved this and can stop it at any time.".into(),
+                action: "setup".into(),
+                recommended: false,
+                available: supported,
+                reason: ls_reason.clone(),
+            },
+            Way {
+                id: WAY_LIBRESPOT_FILE.into(),
+                label: "librespot with a credentials.json you pick".into(),
+                note: "The credentials.json another librespot (spotifyd, raspotify, go-librespot) saved after its sign-in; the node never looks for it, you pick the file or paste it. Kept readable by the node only.".into(),
+                action: "import".into(),
+                recommended: false,
+                available: supported,
+                reason: ls_reason,
+            },
+        ];
+        let creds_user = crate::librespot::credentials_user(s);
+        let app_in_use = || {
+            u.as_ref().map(|u| InUse {
+                way: WAY_APP.into(),
+                label: "Your own Spotify app".into(),
+                user: u.display_name.clone().or_else(|| u.user_id.clone()),
+                expires_at: Some(u.expires_at),
+                gives: Some(
+                    match u.product.as_deref() {
+                        Some("premium") => "Connect playback on your devices, your library",
+                        Some(_) => "your library; Connect playback needs Premium",
+                        None => "Connect control and your library",
+                    }
+                    .into(),
+                ),
+            })
+        };
+        let librespot_in_use = || {
+            let user = creds_user.clone()?;
+            let (way, label) = match ls.credentials_from.as_deref() {
+                Some(_) => (WAY_LIBRESPOT_FILE, "librespot, from a credentials file"),
+                None => (WAY_LIBRESPOT, "librespot, picked in a Spotify app"),
+            };
+            Some(InUse {
+                way: way.into(),
+                label: label.into(),
+                user,
+                expires_at: None,
+                gives: Some(
+                    if ls.enabled {
+                        "playback into a zone"
+                    } else {
+                        "playback into a zone (librespot is off)"
+                    }
+                    .into(),
+                ),
+            })
+        };
+        let in_use = match chosen.as_deref() {
+            Some(WAY_LIBRESPOT) | Some(WAY_LIBRESPOT_FILE) => librespot_in_use().or_else(app_in_use),
+            _ => app_in_use().or_else(librespot_in_use),
+        };
+        let line = match &in_use {
+            None => NOT_SIGNED_IN.to_string(),
+            Some(x) => {
+                let both = u.is_some() && creds_user.is_some();
+                format!(
+                    "{}{}{}",
+                    x.label,
+                    x.user.as_ref().map(|n| format!(" · {n}")).unwrap_or_default(),
+                    if !both {
+                        ""
+                    } else if x.way == WAY_APP {
+                        "; librespot signed in too"
+                    } else {
+                        "; the app signed in too"
+                    }
+                )
+            }
+        };
+        SignIn {
+            source: SOURCE_ID.into(),
+            ways,
+            chosen,
+            in_use,
+            line,
+            imports: Vec::new(),
+            places: if headers.is_some() {
+                crate::imports::librespot_places_text()
+            } else {
+                Vec::new()
+            },
+            details: match headers {
+                Some(h) => {
+                    serde_json::json!({ "status": status_view(s, h), "librespot": { "enabled": ls.enabled, "supported": supported, "credentials_from": ls.credentials_from } })
+                }
+                None => serde_json::Value::Null,
+            },
+        }
+    }
+
+    fn way_chosen(&self, s: &Arc<NodeState>, way: &str) {
+        if way == WAY_LIBRESPOT {
+            crate::librespot::set_enabled_bg(s, true);
+        }
+    }
+
+    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
+        match way {
+            WAY_APP => store_user(s, None),
+            _ => {
+                let lib = s.library.lock().expect("library poisoned");
+                let mut st = crate::librespot::load(&lib);
+                st.credentials_from = None;
+                st.enabled = false;
+                crate::librespot::save(&lib, &st);
+                drop(lib);
+                #[cfg(not(test))]
+                crate::librespot::stop();
+                crate::imports::remove_private(&crate::librespot::credentials_path(s)).map_err(|_| {
+                    ApiError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Could not remove the copied librespot credentials. Try signing out again",
+                    )
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn import(
+        &self,
+        s: &Arc<NodeState>,
+        body: crate::signin::ImportBody,
+    ) -> Result<&'static str, ApiError> {
+        let Some(text) = body.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+            return Err(ApiError::bad_request(
+                "Pick the credentials.json or paste it; the node does not look for it",
+            ));
+        };
+        let c = crate::imports::parse_librespot_credentials(text)
+            .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?;
+        #[cfg(not(test))]
+        tokio::task::spawn_blocking(crate::librespot::stop)
+            .await
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not stop librespot to replace its sign-in",
+                )
+            })?;
+        crate::imports::write_private(&crate::librespot::credentials_path(s), c.json.as_bytes()).map_err(
+            |e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("keeping the credentials: {e}"),
+                )
+            },
+        )?;
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            let mut st = crate::librespot::load(&lib);
+            st.credentials_from = Some("file".into());
+            crate::librespot::save(&lib, &st);
+        }
+        crate::librespot::set_enabled_bg(s, true);
+        Ok(WAY_LIBRESPOT_FILE)
+    }
+}

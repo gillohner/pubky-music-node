@@ -9,6 +9,7 @@
 //! Music Assistant's `settings.json` holds its sign-ins encrypted with MA's own key: it is on
 //! the list of places so the person knows it was considered, and never read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -77,11 +78,17 @@ pub fn app_name(id: &str) -> &str {
 
 /// The home directory the scan starts from; tests point it at a folder of their own.
 pub static HOME_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
+/// Tests that set [`HOME_OVERRIDE`] hold this meanwhile, so two of them never race on it.
+pub static HOME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn home() -> Option<PathBuf> {
     if let Some(h) = HOME_OVERRIDE.read().ok().and_then(|h| h.clone()) {
         return Some(h);
     }
+    // Tests must never inspect the developer's real sign-ins.
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
@@ -413,9 +420,521 @@ fn iso_to_unix(s: &str) -> Option<i64> {
     Some(unix)
 }
 
+// ---- shared: where to look, how to write what was picked ----
+
+/// `(id, app, candidate paths with how each is shown)`.
+type Candidates = (&'static str, &'static str, Vec<(PathBuf, String)>);
+
+/// Each place's candidates under the home directory: `XDG_CONFIG_HOME` first for `.config/`
+/// paths, then the fixed path; the first that exists is read.
+fn candidates(places: &[(&'static str, &'static str, &'static str)], home: &Path) -> Vec<Candidates> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    places
+        .iter()
+        .map(|(id, app, rel)| {
+            let mut c = Vec::new();
+            if let (Some(x), Some(under)) = (&xdg, rel.strip_prefix(".config/")) {
+                c.push((x.join(under), format!("$XDG_CONFIG_HOME/{under}")));
+            }
+            c.push((home.join(rel), format!("~/{rel}")));
+            // The leaked strs live for the program: a handful of fixed place names
+            (*id, *app, c)
+        })
+        .collect()
+}
+
+fn places_text(places: &[(&str, &str, &str)], not_read: &[(&str, &str)]) -> Vec<String> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").is_some();
+    places
+        .iter()
+        .map(|(_, app, rel)| {
+            let shown = match (xdg, rel.strip_prefix(".config/")) {
+                (true, Some(under)) => format!("$XDG_CONFIG_HOME/{under}"),
+                _ => format!("~/{rel}"),
+            };
+            format!("{app}: {shown}")
+        })
+        .chain(
+            not_read
+                .iter()
+                .map(|(app, why)| format!("{app}: not read, {why}")),
+        )
+        .collect()
+}
+
+/// The first readable candidate's text and shown path.
+fn first_readable(c: Vec<(PathBuf, String)>) -> Option<(String, String, PathBuf)> {
+    c.into_iter()
+        .find_map(|(path, shown)| Some((std::fs::read_to_string(&path).ok()?, shown, path)))
+}
+
+/// Write what the person picked, readable by the node's user only (0600), replacing what was
+/// there.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    use std::io::Write;
+    // Rename a completed private file so a failed write preserves the existing sign-in, and
+    // an old symlink never makes us change the file that belongs to the other app.
+    let temp = path.with_file_name(format!(".signin-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut f = o.open(&temp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Forget a copied sign-in; a missing file is already signed out, other failures must be shown.
+pub(crate) fn remove_private(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// `key = value` lines by section (`[name]`; lines before any section are in `""`), TOML and
+/// INI alike: quotes stripped, `# …` comments dropped, arrays kept as their raw text.
+fn sections(text: &str) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut cur = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            cur = line.trim_matches(['[', ']']).trim().to_string();
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim();
+            let v = if v.starts_with('[') {
+                v.to_string()
+            } else {
+                v.split(" #")
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_string()
+            };
+            out.entry(cur.clone())
+                .or_default()
+                .insert(k.trim().to_string(), v);
+        }
+    }
+    out
+}
+
+/// A TOML array `["a", "b"]` or an INI list `a,b` as its items.
+fn list(v: Option<&String>) -> Vec<String> {
+    v.map(|v| {
+        v.trim_matches(['[', ']'])
+            .split(',')
+            .map(|x| x.trim().trim_matches(['"', '\'']).to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn found(id: &str, app: &str, place: &str, user: Option<String>, reason: Option<String>) -> Found {
+    Found {
+        id: id.into(),
+        app: app.into(),
+        place: place.into(),
+        user,
+        country: None,
+        expires_at: None,
+        renews: false,
+        usable: reason.is_none(),
+        reason,
+    }
+}
+
+// ---- Qobuz: streamrip's config.toml, qobuz-dl's config.ini ----
+
+const QOBUZ_PLACES: &[(&str, &str, &str)] = &[
+    ("streamrip", "streamrip", ".config/streamrip/config.toml"),
+    ("qobuz-dl", "qobuz-dl", ".config/qobuz-dl/config.ini"),
+];
+
+/// A Qobuz sign-in from another app's config: the app values it uses, and a session token or
+/// the email with the password's MD5 (what Qobuz's login takes; these files never hold the
+/// password itself).
+#[derive(Clone, Default)]
+pub(crate) struct QobuzImport {
+    pub app_id: String,
+    /// What the app keeps; the first is used (Qobuz's web player publishes several).
+    pub secrets: Vec<String>,
+    pub email: Option<String>,
+    pub password_md5: Option<String>,
+    pub token: Option<String>,
+    pub user_id: Option<String>,
+}
+
+impl std::fmt::Debug for QobuzImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QobuzImport")
+            .field("app_id", &self.app_id)
+            .field("secrets", &self.secrets.len())
+            .field("email", &self.email)
+            .field("token", &self.token.as_ref().map(|_| "<set>"))
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn parse_qobuz(text: &str) -> Result<QobuzImport, String> {
+    let secs = sections(text);
+    let (sec, streamrip) = if let Some(q) = secs.get("qobuz") {
+        (q, true)
+    } else if let Some(d) = secs.get("DEFAULT").filter(|d| d.contains_key("app_id")) {
+        (d, false)
+    } else {
+        return Err(
+            "not streamrip's config.toml ([qobuz]) nor qobuz-dl's config.ini ([DEFAULT] with app_id)".into(),
+        );
+    };
+    let app_id = sec.get("app_id").cloned().unwrap_or_default();
+    if app_id.is_empty() || app_id.len() > 20 || !app_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("no Qobuz app id in it".into());
+    }
+    let secrets: Vec<String> = list(sec.get("secrets"))
+        .into_iter()
+        .filter(|s| s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .collect();
+    if secrets.is_empty() {
+        return Err("no Qobuz app secret in it".into());
+    }
+    let non_empty = |k: &str| sec.get(k).cloned().filter(|v| !v.is_empty());
+    let mut imp = QobuzImport {
+        app_id,
+        secrets,
+        ..Default::default()
+    };
+    if streamrip {
+        let who = non_empty("email_or_userid");
+        let what = non_empty("password_or_token");
+        if sec.get("use_auth_token").is_some_and(|v| v == "true") {
+            imp.token = what;
+            imp.user_id = who;
+        } else {
+            imp.email = who;
+            imp.password_md5 = what;
+        }
+    } else {
+        imp.email = non_empty("email");
+        imp.password_md5 = non_empty("password");
+    }
+    if imp.token.is_none() && (imp.email.is_none() || imp.password_md5.is_none()) {
+        return Err("no sign-in in it: neither a token nor an email with the password's MD5".into());
+    }
+    if let Some(h) = &imp.password_md5 {
+        if h.len() != 32 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(
+                "the password field is not an MD5 (these apps keep the MD5, never the password)".into(),
+            );
+        }
+    }
+    Ok(imp)
+}
+
+pub(crate) fn qobuz_places_text() -> Vec<String> {
+    places_text(QOBUZ_PLACES, &[])
+}
+
+/// Every Qobuz sign-in in the known places, usable or not.
+pub(crate) fn scan_qobuz() -> Vec<(Found, Option<QobuzImport>)> {
+    let Some(home) = home() else {
+        return Vec::new();
+    };
+    candidates(QOBUZ_PLACES, &home)
+        .into_iter()
+        .filter_map(|(id, app, c)| {
+            let (text, shown, _) = first_readable(c)?;
+            Some(match parse_qobuz(&text) {
+                Ok(imp) => (
+                    found(
+                        id,
+                        app,
+                        &shown,
+                        imp.email.clone().or_else(|| imp.user_id.clone()),
+                        None,
+                    ),
+                    Some(imp),
+                ),
+                Err(e) => (found(id, app, &shown, None, Some(e)), None),
+            })
+        })
+        .collect()
+}
+
+// ---- Last.fm: rescrobbled ----
+
+const LASTFM_PLACES: &[(&str, &str, &str)] =
+    &[("rescrobbled", "rescrobbled", ".config/rescrobbled/config.toml")];
+
+/// A Last.fm sign-in from another app: its API key and shared secret (a session key only works
+/// with the key that made it) and the session key.
+#[derive(Clone)]
+pub(crate) struct LastfmImport {
+    pub api_key: String,
+    pub api_secret: String,
+    pub session_key: String,
+}
+
+impl std::fmt::Debug for LastfmImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastfmImport")
+            .field("api_key", &self.api_key)
+            .finish_non_exhaustive()
+    }
+}
+
+fn hex32(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Three lines: API key, shared secret, session key; or rescrobbled's `lastfm-key = …` /
+/// `lastfm-secret = …` lines with the session key on a line of its own.
+pub(crate) fn parse_lastfm(text: &str) -> Result<LastfmImport, String> {
+    let secs = sections(text);
+    let top = secs.get("").cloned().unwrap_or_default();
+    let bare: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.contains('='))
+        .collect();
+    let (key, secret, session) = match (top.get("lastfm-key"), top.get("lastfm-secret")) {
+        (Some(k), Some(s)) => (k.clone(), s.clone(), bare.first().map(|x| x.to_string())),
+        _ => match bare.as_slice() {
+            [k, s, sk, ..] => (k.to_string(), s.to_string(), Some(sk.to_string())),
+            _ => {
+                return Err(
+                    "three lines are needed: the API key, the shared secret and the session key".into(),
+                )
+            }
+        },
+    };
+    if !hex32(&key) || !hex32(&secret) {
+        return Err("the API key and shared secret are 32 hexadecimal characters each".into());
+    }
+    let session = session.filter(|s| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    let Some(session_key) = session else {
+        return Err("no session key in it (rescrobbled keeps it in ~/.config/rescrobbled/session)".into());
+    };
+    Ok(LastfmImport {
+        api_key: key,
+        api_secret: secret,
+        session_key,
+    })
+}
+
+pub(crate) fn lastfm_places_text() -> Vec<String> {
+    let mut v = places_text(LASTFM_PLACES, &[]);
+    v.push("rescrobbled: the session key in ~/.config/rescrobbled/session beside it".into());
+    v.push("mpdscribble: not read, it keeps a password, not a session".into());
+    v
+}
+
+/// rescrobbled's sign-in: key and secret from config.toml (or the files it names), the session
+/// key from `session` beside it.
+pub(crate) fn scan_lastfm() -> Vec<(Found, Option<LastfmImport>)> {
+    let Some(home) = home() else {
+        return Vec::new();
+    };
+    candidates(LASTFM_PLACES, &home)
+        .into_iter()
+        .filter_map(|(id, app, c)| {
+            let (text, shown, path) = first_readable(c)?;
+            let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let top = sections(&text).get("").cloned().unwrap_or_default();
+            let read_named = |k: &str| -> Option<String> {
+                let v = top.get(k)?;
+                let p = if let Some(rest) = v.strip_prefix("~/") {
+                    home.join(rest)
+                } else {
+                    dir.join(v)
+                };
+                std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+            };
+            let key = top
+                .get("lastfm-key")
+                .cloned()
+                .or_else(|| read_named("lastfm-key-file"));
+            let secret = top
+                .get("lastfm-secret")
+                .cloned()
+                .or_else(|| read_named("lastfm-secret-file"));
+            let session = std::fs::read_to_string(dir.join("session"))
+                .ok()
+                .map(|s| s.trim().to_string());
+            let joined = format!(
+                "{}\n{}\n{}\n",
+                key.unwrap_or_default(),
+                secret.unwrap_or_default(),
+                session.unwrap_or_default()
+            );
+            Some(match parse_lastfm(&joined) {
+                Ok(imp) => (found(id, app, &shown, None, None), Some(imp)),
+                Err(e) => (found(id, app, &shown, None, Some(e)), None),
+            })
+        })
+        .collect()
+}
+
+// ---- librespot's credentials.json, yt-dlp's cookies: picked, never looked for ----
+
+/// Where these would be, said in the chooser; the node does not look there.
+pub(crate) fn librespot_places_text() -> Vec<String> {
+    vec![
+        "librespot credentials.json: not looked for; pick the file yourself (spotifyd: ~/.cache/spotifyd/credentials.json, raspotify: /var/cache/raspotify/credentials.json, go-librespot: its config folder)".into(),
+    ]
+}
+
+pub(crate) fn cookies_places_text() -> Vec<String> {
+    vec![
+        "yt-dlp cookies: not looked for; pick the Netscape cookies file you export for yt-dlp (--cookies)"
+            .into(),
+    ]
+}
+
+/// A librespot `credentials.json`: `{username?, auth_type: <int>, auth_data: <base64>}`.
+pub(crate) struct LibrespotCredentials {
+    /// The file as given, trimmed.
+    pub json: String,
+}
+
+pub(crate) fn parse_librespot_credentials(text: &str) -> Result<LibrespotCredentials, String> {
+    use base64::Engine;
+    if text.len() > 16 * 1024 {
+        return Err("too large for a credentials.json".into());
+    }
+    let v: Value = serde_json::from_str(text.trim()).map_err(|_| "not a JSON file".to_string())?;
+    let o = v.as_object().ok_or("not a JSON object")?;
+    if !matches!(o.get("auth_type").and_then(Value::as_i64), Some(0..=4)) {
+        return Err("unknown auth_type: not librespot's credentials.json".into());
+    }
+    let data = o
+        .get("auth_data")
+        .and_then(Value::as_str)
+        .ok_or("no auth_data in it: not librespot's credentials.json")?;
+    if !base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .is_ok_and(|d| !d.is_empty())
+    {
+        return Err("auth_data must be non-empty base64".into());
+    }
+    if o.get("username").is_some_and(|u| !u.is_null() && !u.is_string()) {
+        return Err("username is not a string".into());
+    }
+    Ok(LibrespotCredentials {
+        json: text.trim().to_string(),
+    })
+}
+
+/// A Netscape cookies file with YouTube cookies in it: how many.
+pub(crate) fn check_cookies(text: &str) -> Result<usize, String> {
+    if text.len() > 1024 * 1024 {
+        return Err("too large for a cookies file".into());
+    }
+    if !text
+        .lines()
+        .next()
+        .is_some_and(|l| l.starts_with("# Netscape HTTP Cookie File") || l.starts_with("# HTTP Cookie File"))
+    {
+        return Err("not a Netscape cookies file (missing the HTTP Cookie File header)".into());
+    }
+    let mut rows = 0;
+    let mut youtube = 0;
+    let mut live = 0;
+    for line in text.lines() {
+        // HttpOnly is part of a cookie row, not a comment. Preserve empty final values.
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 7 {
+            return Err("not a Netscape cookies file (seven tab-separated columns per cookie)".into());
+        }
+        if !matches!(fields[1], "TRUE" | "FALSE")
+            || !matches!(fields[3], "TRUE" | "FALSE")
+            || !fields[2].starts_with('/')
+        {
+            return Err("invalid Netscape cookie flags or path".into());
+        }
+        let expiry = if fields[4].is_empty() {
+            0
+        } else {
+            fields[4].parse::<i64>().map_err(|_| "invalid cookie expiry")?
+        };
+        rows += 1;
+        let domain = fields[0].trim_start_matches('.').to_ascii_lowercase();
+        if ["youtube.com", "google.com"]
+            .iter()
+            .any(|d| domain == *d || domain.ends_with(&format!(".{d}")))
+        {
+            youtube += 1;
+            if expiry == 0 || expiry > now() {
+                live += 1;
+            }
+        }
+    }
+    if rows == 0 {
+        return Err("no cookies in it".into());
+    }
+    if youtube == 0 {
+        return Err("no youtube.com or google.com cookies in it".into());
+    }
+    if live == 0 {
+        return Err("the YouTube/Google cookies have expired; export a new file or try another way".into());
+    }
+    Ok(youtube)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_private_copy_preserves_an_original_behind_a_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("other-app.json");
+        let copy = dir.path().join("credentials.json");
+        std::fs::write(&original, b"original fixture").unwrap();
+        symlink(&original, &copy).unwrap();
+        write_private(&copy, b"replacement fixture").unwrap();
+        assert_eq!(std::fs::read(&original).unwrap(), b"original fixture");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"replacement fixture");
+        assert_eq!(
+            std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        remove_private(&copy).unwrap();
+        assert!(original.exists());
+    }
 
     /// A JWT with `uid`, `cc` and `exp` claims (the signature is not checked here).
     pub(crate) fn jwt(uid: i64, cc: &str, exp: i64) -> String {
@@ -498,5 +1017,83 @@ mod tests {
         assert_eq!(iso_to_unix("1970-01-02T01:00:00+01:00"), Some(86400));
         assert_eq!(iso_to_unix("1970-01-01 23:00:00-01:00"), Some(86400));
         assert_eq!(iso_to_unix("garbage"), None);
+    }
+
+    #[test]
+    fn qobuz_configs_from_streamrip_and_qobuz_dl_are_read() {
+        let sr = "[qobuz]\nuse_auth_token = false\nemail_or_userid = \"me@example.org\"\npassword_or_token = \"00000000000000000000000000000000\"\napp_id = \"100000000\"\nsecrets = [\"s3cret\", \"other1\"]\n[tidal]\nuser_id = \"1\"\n";
+        let q = parse_qobuz(sr).unwrap();
+        assert_eq!(
+            (
+                q.app_id.as_str(),
+                q.secrets.len(),
+                q.email.as_deref(),
+                q.token.is_none()
+            ),
+            ("100000000", 2, Some("me@example.org"), true)
+        );
+        let srt = sr
+            .replace("use_auth_token = false", "use_auth_token = true")
+            .replace("me@example.org", "42")
+            .replace("00000000000000000000000000000000", "tok-abc");
+        let q = parse_qobuz(&srt).unwrap();
+        assert_eq!(
+            (q.token.as_deref(), q.user_id.as_deref(), q.email.is_none()),
+            (Some("tok-abc"), Some("42"), true)
+        );
+        let ini = "[DEFAULT]\nemail = me@example.org\npassword = 00000000000000000000000000000000\napp_id = 100000000\nsecrets = s3cret,other1\ndefault_folder = Qobuz Downloads\n";
+        let q = parse_qobuz(ini).unwrap();
+        assert_eq!(
+            (q.secrets[0].as_str(), q.password_md5.is_some()),
+            ("s3cret", true)
+        );
+        for bad in [
+            "",
+            "[qobuz]\napp_id = \"1\"\n",
+            "[DEFAULT]\napp_id = 1\nsecrets = a\nemail = x\npassword = plain\n",
+        ] {
+            assert!(parse_qobuz(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn lastfm_sign_ins_and_the_picked_files_are_checked() {
+        let three = "0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\nsessKey12345\n";
+        let l = parse_lastfm(three).unwrap();
+        assert_eq!(l.session_key, "sessKey12345");
+        let cfg = "lastfm-key = \"0123456789abcdef0123456789abcdef\"\nlastfm-secret = \"fedcba9876543210fedcba9876543210\"\nmin-play-time = 0\nsessKey12345\n";
+        assert_eq!(
+            parse_lastfm(cfg).unwrap().api_key,
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert!(parse_lastfm("a\nb\nc\n").is_err());
+        assert!(
+            parse_lastfm("0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\n").is_err()
+        );
+        let creds = r#"{"username": "alice", "auth_type": 1, "auth_data": "QUJD"}"#;
+        assert!(parse_librespot_credentials(creds).unwrap().json.contains("alice"));
+        assert!(parse_librespot_credentials(r#"{"username": "alice"}"#).is_err());
+        assert!(parse_librespot_credentials("nope").is_err());
+        assert!(parse_librespot_credentials(&creds.replace("\"QUJD\"", "\"\"")).is_err());
+        assert!(
+            parse_librespot_credentials(&creds.replace("\"auth_type\": 1", "\"auth_type\": 99")).is_err()
+        );
+        assert!(parse_librespot_credentials(&creds.replace("\"alice\"", "null")).is_ok());
+        let cookies = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\tabc\n.example.com\tTRUE\t/\tFALSE\t0\tx\ty\n";
+        assert_eq!(check_cookies(cookies).unwrap(), 1);
+        assert_eq!(
+            check_cookies(&cookies.replace(".youtube.com", "#HttpOnly_.youtube.com")).unwrap(),
+            1
+        );
+        assert!(check_cookies(&cookies.replace(".youtube.com", ".notyoutube.com")).is_err());
+        assert!(check_cookies(&cookies.replace("2000000000", "1"))
+            .unwrap_err()
+            .contains("expired"));
+        assert!(check_cookies(&cookies.replace("2000000000", "soon")).is_err());
+        assert!(check_cookies(&cookies.replace("2000000000", "")).is_ok());
+        assert!(check_cookies(&cookies.replace("TRUE", "yes")).is_err());
+        assert!(check_cookies(".example.com\tTRUE\t/\tFALSE\t0\tx\ty\n").is_err());
+        assert!(check_cookies("not\tenough\tcolumns\n").is_err());
+        assert!(check_cookies("").is_err());
     }
 }

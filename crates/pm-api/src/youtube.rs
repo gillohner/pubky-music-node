@@ -377,6 +377,133 @@ pub(crate) async fn put_key(
     Ok(Json(KeyStatus { set: true }))
 }
 
+// ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md step 3) ----
+
+pub(crate) const WAY_KEY: &str = "key";
+pub(crate) const WAY_COOKIES: &str = "cookies";
+
+/// YouTube's ways, for `crate::signin`: the person's Data API key (search) and a cookies file
+/// for yt-dlp (signed-in playback on the speakers). Both can be in use at once.
+pub(crate) struct YouTubeSignIn;
+
+fn cookies_file(s: &NodeState) -> std::path::PathBuf {
+    s.data_dir().join("youtube").join("cookies.txt")
+}
+
+#[async_trait::async_trait]
+impl crate::signin::SignInSource for YouTubeSignIn {
+    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+        use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
+        let key = api_key(s).is_some();
+        let cookies = cookies_file(s).is_file();
+        let chosen = crate::signin::chosen(&s.library.lock().expect("library poisoned"), SOURCE_ID);
+        let ways = vec![
+            Way {
+                id: WAY_KEY.into(),
+                label: "Your YouTube Data API key".into(),
+                note: "Optional, for searching YouTube here: a free key from the Google Cloud console with the YouTube Data API v3 turned on. Song pages play YouTube links without it.".into(),
+                action: "setup".into(),
+                recommended: true,
+                available: true,
+                reason: None,
+            },
+            Way {
+                id: WAY_COOKIES.into(),
+                label: "yt-dlp with a cookies file you pick".into(),
+                note: "For playback on your speakers through yt-dlp (unofficial) as your YouTube account: the Netscape cookies file you export for yt-dlp. The node never looks for it; you pick the file or paste it, and the copy is readable by the node only.".into(),
+                action: "import".into(),
+                recommended: false,
+                available: true,
+                reason: None,
+            },
+        ];
+        let key_in_use = || {
+            key.then(|| InUse {
+                way: WAY_KEY.into(),
+                label: "Your API key".into(),
+                user: None,
+                expires_at: None,
+                gives: Some("search".into()),
+            })
+        };
+        let cookies_in_use = || {
+            cookies.then(|| InUse {
+                way: WAY_COOKIES.into(),
+                label: "yt-dlp cookies".into(),
+                user: None,
+                expires_at: None,
+                gives: Some("signed-in playback on your speakers".into()),
+            })
+        };
+        let in_use = match chosen.as_deref() {
+            Some(WAY_COOKIES) => cookies_in_use().or_else(key_in_use),
+            _ => key_in_use().or_else(cookies_in_use),
+        };
+        let line = match (key, cookies) {
+            (false, false) => NOT_SIGNED_IN.to_string(),
+            (true, false) => "Your API key · search".to_string(),
+            (false, true) => "yt-dlp cookies · signed-in playback".to_string(),
+            (true, true) => "Your API key · search; cookies for yt-dlp".to_string(),
+        };
+        SignIn {
+            source: SOURCE_ID.into(),
+            ways,
+            chosen,
+            in_use,
+            line,
+            imports: Vec::new(),
+            places: if headers.is_some() {
+                crate::imports::cookies_places_text()
+            } else {
+                Vec::new()
+            },
+            details: if headers.is_some() {
+                serde_json::json!({ "key": { "set": key }, "cookies": { "set": cookies } })
+            } else {
+                serde_json::Value::Null
+            },
+        }
+    }
+
+    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
+        if way == WAY_COOKIES {
+            crate::imports::remove_private(&cookies_file(s)).map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not remove the copied cookies. Try signing out again",
+                )
+            })?;
+        } else {
+            s.library
+                .lock()
+                .expect("library poisoned")
+                .delete_setting(KEY_SETTING)?;
+        }
+        crate::search::forget_answers();
+        Ok(())
+    }
+
+    async fn import(
+        &self,
+        s: &Arc<NodeState>,
+        body: crate::signin::ImportBody,
+    ) -> Result<&'static str, ApiError> {
+        let Some(text) = body.text.as_deref().filter(|t| !t.trim().is_empty()) else {
+            return Err(ApiError::bad_request(
+                "Pick the cookies file or paste it; the node does not look for it",
+            ));
+        };
+        crate::imports::check_cookies(text).map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?;
+        crate::imports::write_private(&cookies_file(s), text.as_bytes()).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("keeping the cookies: {e}"),
+            )
+        })?;
+        Ok(WAY_COOKIES)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
