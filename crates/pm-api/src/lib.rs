@@ -77,8 +77,8 @@ pub mod qobuz;
 pub mod quality;
 pub mod radio;
 pub mod radio_sources;
+pub mod ratings;
 pub mod remote;
-pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod shared;
@@ -194,14 +194,24 @@ async fn plain_errors(resp: Response) -> Response {
 }
 
 /// Marks a response from a deprecated path (RFC 9745 `Deprecation`, and the path to use).
-async fn deprecated(mut resp: Response) -> Response {
+fn deprecated_for(mut resp: Response, successor: &'static str) -> Response {
     let h = resp.headers_mut();
     h.insert("deprecation", axum::http::HeaderValue::from_static("true"));
     h.insert(
         axum::http::header::LINK,
-        axum::http::HeaderValue::from_static("</v1/bookmarks>; rel=\"successor-version\""),
+        axum::http::HeaderValue::from_static(successor),
     );
     resp
+}
+
+/// `/v1/favourites`, now `/v1/bookmarks`.
+async fn deprecated(resp: Response) -> Response {
+    deprecated_for(resp, "</v1/bookmarks>; rel=\"successor-version\"")
+}
+
+/// `/v1/reviews`, now `/v1/ratings`.
+async fn deprecated_reviews(resp: Response) -> Response {
+    deprecated_for(resp, "</v1/ratings>; rel=\"successor-version\"")
 }
 
 pub fn router(state: Arc<NodeState>) -> Router {
@@ -329,8 +339,16 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/tags", get(tags::list).put(tags::put).delete(tags::delete))
         .route("/tags/bulk", post(tags::bulk))
         .route(
+            "/ratings",
+            get(ratings::list).put(ratings::put).delete(ratings::delete),
+        )
+        // The name before social v1.1 ratings, for one release (docs/api.md, Deprecated)
+        .route(
             "/reviews",
-            get(reviews::list).put(reviews::put).delete(reviews::delete),
+            get(ratings::list)
+                .put(ratings::put)
+                .delete(ratings::delete)
+                .layer(middleware::map_response(deprecated_reviews)),
         )
         .route(
             "/playlists/{id}",
@@ -11988,5 +12006,40 @@ exec sleep 300
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// Ratings (social v1.1, 2026-10-27): `/v1/reviews` answers the same as `/v1/ratings` for one
+    /// release, marked deprecated, and lists them under `reviews` too.
+    #[tokio::test]
+    async fn reviews_is_a_deprecated_name_for_ratings() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/reviews",
+            Some(serde_json::json!({"uri": uri, "rating": 7})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            (r["rating"].as_u64(), r["public"].as_bool()),
+            (Some(7), Some(false))
+        );
+        let (_, new) = call(&app, "GET", "/v1/ratings", None).await;
+        let (_, old) = call(&app, "GET", "/v1/reviews", None).await;
+        assert_eq!(new, old);
+        assert_eq!(new["ratings"][0]["uri"], uri);
+        assert_eq!(new["reviews"], new["ratings"]);
+        let get = |path: &'static str| Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(get("/v1/reviews")).await.unwrap();
+        assert_eq!(resp.headers()["deprecation"], "true");
+        assert!(resp.headers()["link"].to_str().unwrap().contains("/v1/ratings"));
+        let resp = app.clone().oneshot(get("/v1/ratings")).await.unwrap();
+        assert!(resp.headers().get("deprecation").is_none());
+        let (st, r) = call(&app, "DELETE", &format!("/v1/ratings?uri={uri}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r["ratings"].as_array().unwrap().is_empty());
     }
 }

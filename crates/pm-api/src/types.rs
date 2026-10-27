@@ -386,9 +386,10 @@ pub struct TagChanged {
     pub tagged: bool,
 }
 
-/// A review target (one of the id fields) with the rating and/or text to store.
+/// A rating's target (one of the id fields) with the rating and/or text to store, and whether
+/// it is public.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ReviewRef {
+pub struct RatingRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,25 +402,36 @@ pub struct ReviewRef {
     pub rating: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Publish (`true`) or unpublish (`false`); left out, a new rating is private and an edit
+    /// keeps its visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
 }
 
+/// A rating (`rating` set: 1–10, half stars) or a comment (text alone) on one target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReviewEntry {
+pub struct RatingEntry {
     /// The post id (timestamp id).
     pub id: String,
     pub uri: String,
     pub rating: Option<u8>,
     pub text: String,
+    /// Published on the owner's homeserver (`/pub/social/v1/posts/`).
+    #[serde(default)]
+    pub public: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub synced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Reviews {
+pub struct Ratings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-    pub reviews: Vec<ReviewEntry>,
+    pub ratings: Vec<RatingEntry>,
+    /// Deprecated: the same list under its name before ratings (docs/api.md, Deprecated).
+    #[serde(default)]
+    pub reviews: Vec<RatingEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

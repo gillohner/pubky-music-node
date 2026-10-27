@@ -130,6 +130,9 @@ const TAGS_MOVED: &str = "pubky.tags_moved";
 const TIMES_IN_MICROS: &str = "pubky.times_in_micros";
 /// Set once the node has moved its tags out of `/pub/pubky.music/tags/` to social v1 tags.
 const TAGS_ON_V1: &str = "pubky.tags_social_v1";
+/// Set once the node has queued its ratings and comments to be written again as social v1.1
+/// `rating`s and replies (they were music `review`s and notes embedding the music URL).
+const RATINGS_ON_V1: &str = "pubky.ratings_social_v1";
 /// Ids of the person's social v1 tags that are not on music (other apps' tags): listed, never
 /// downloaded again.
 const TAGS_NOT_MUSIC: &str = "pubky.tags_not_music";
@@ -556,6 +559,19 @@ impl PubkySync {
                 }
                 lib.set_setting(TIMES_IN_MICROS, &now_micros().to_string())?;
             }
+            // Once per node: every rating and comment is written again in its 1.1 form, with the
+            // same id. A rating was a music `review` under /priv/music/v1/ (that copy is deleted
+            // once the social one is written); a comment was a note embedding the music URL (it
+            // gets a new version that replies to it). Old forms another node writes later are
+            // rewritten as the pull meets them.
+            if lib.get_setting(RATINGS_ON_V1)?.is_none() {
+                for row in lib.list_music_posts(Some(TYPE_REVIEW))? {
+                    if !row.deleted {
+                        lib.mark_music_post_unsynced(&row.id)?;
+                    }
+                }
+                lib.set_setting(RATINGS_ON_V1, &now_micros().to_string())?;
+            }
         }
 
         // Playlists the homeserver has only in the old format (the long ones, kept back before
@@ -724,8 +740,8 @@ impl PubkySync {
                             }
                             continue;
                         }
-                        // The same id in the other namespace (a review that gained or lost
-                        // its rating) would read back twice
+                        // The same id in the other namespace (a rating that was a music
+                        // `review`) would read back twice
                         for stale in heads.take_other(root, ns, &row.id) {
                             let _ = self.delete_quietly(&stale).await;
                         }
@@ -831,9 +847,10 @@ impl PubkySync {
         Ok(removed)
     }
 
-    /// Bring in v1 collections, reviews and listens, under either root, that are new or newer
-    /// than the node's copy. A post under both roots (a public collection: its private draft and
-    /// the published copy) is read from its newest version, public when that one is. At most
+    /// Bring in v1 collections, ratings, comments and listens, under either root, that are new or
+    /// newer than the node's copy. A post under both roots (a public collection or rating: its
+    /// private draft and the published copy) is read from its newest version, public when that one
+    /// is. At most
     /// [`READS_PER_PASS`] posts are fetched per pass; the rest count as pending. Listens written
     /// before the history was deleted are deleted, not imported.
     async fn pull_v1(
@@ -900,14 +917,32 @@ impl PubkySync {
                         continue;
                     }
                 };
+                // An old form (a music `review`, or a note of the node's that embeds the music
+                // URL) is kept and left unsynced: the next push writes it as a rating or a reply
+                let mut old_form = false;
                 let content = if ns == v1::SOCIAL_NAMESPACE {
                     serde_json::from_slice::<pubky_social_specs::PubkySocialPost>(&bytes)
                         .ok()
-                        .and_then(|p| v1::from_social(&p, &id, &head.edit_id))
+                        .and_then(|p| {
+                            v1::from_social(&p, &id, &head.edit_id).or_else(|| {
+                                // Only a review the node holds: any app can write such a note
+                                let lib = library.lock().expect("library poisoned");
+                                let ours = lib
+                                    .get_music_post(&id)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|r| r.kind == TYPE_REVIEW);
+                                old_form = ours;
+                                ours.then(|| v1::from_embed_note(&p, &id)).flatten()
+                            })
+                        })
                 } else {
                     serde_json::from_slice::<pubky_music_specs::MusicPost>(&bytes)
                         .ok()
-                        .and_then(|p| v1::from_music(&p, &id))
+                        .and_then(|p| {
+                            old_form = pubky_music_specs::retired::is_review(&p);
+                            v1::from_music(&p, &id)
+                        })
                 };
                 let Some(content) = content else {
                     continue;
@@ -937,7 +972,9 @@ impl PubkySync {
                 };
                 let lib = library.lock().expect("library poisoned");
                 store(&lib, &post, &id, visibility).map_err(|e| SyncError::Store(e.message))?;
-                lib.mark_music_post_synced(&id, now_micros())?;
+                if !old_form {
+                    lib.mark_music_post_synced(&id, now_micros())?;
+                }
                 report.pulled += 1;
             }
         }
@@ -995,8 +1032,8 @@ impl PubkySync {
     }
 
     /// Publish (`public`): copy the version just written privately to its public path.
-    /// Unpublish (not `public`): remove every public version. Only social posts (collections and
-    /// text reviews) are published; rated reviews stay private.
+    /// Unpublish (not `public`): remove every public version. Only social posts (collections,
+    /// ratings and comments) are published.
     #[allow(clippy::too_many_arguments)]
     async fn publish_or_unpublish(
         &self,

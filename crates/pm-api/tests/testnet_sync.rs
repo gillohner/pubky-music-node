@@ -474,15 +474,12 @@ async fn old_private_objects_move_to_v1_once() {
         social[&pl_id].path,
         format!("/priv/social/v1/posts/{pl_id}/{pl_id}.json")
     );
-    let music = homeserver
-        .v1_heads(&z32, v1::Root::Priv, "music", Some(sync.session()))
-        .await
-        .unwrap();
+    // The review is a social `rating` of the song, private like every review was
     let body: serde_json::Value = serde_json::from_slice(
         &homeserver
             .get_bytes(
                 &z32,
-                &music[&rv_id].path,
+                &social[&rv_id].path,
                 Visibility::Private,
                 Some(sync.session()),
             )
@@ -490,8 +487,9 @@ async fn old_private_objects_move_to_v1_once() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(body["kind"], "review");
-    assert_eq!(body["embed"], song);
+    assert_eq!(body["kind"], "rating");
+    assert_eq!(body["parent"], song);
+    assert_eq!(body["content"], r#"{"rating":4,"text":"Good"}"#);
     let favs = homeserver.read_v1_bookmarks(sync.session()).await.unwrap();
     assert_eq!(favs.len(), 1);
     assert_eq!(favs[0].1, mb.to_url());
@@ -2211,4 +2209,212 @@ async fn the_spec_migrator_and_the_node_converge() {
         .get_music_post(&post_id)
         .unwrap()
         .is_none());
+}
+
+/// Ratings are social v1.1 posts (STEWARD-SOCIAL-V1-MUSIC.md, Part A2). The node's own old forms
+/// move once with their ids: a rated review (a music `review`) becomes a `rating` and its music
+/// copy goes; a comment (a note embedding the song) gets a version that replies to it. Another
+/// app's note embedding a song is neither read nor touched; another app's rating of a song is the
+/// owner's rating. Public is a switch, as for a collection. A fresh node reads them all, and
+/// rewrites an old form an older node wrote meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ratings_are_social_and_the_old_forms_move() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::schemas::{MusicContent, MusicPost, Review};
+    use pubky_social_specs::{PubkySocialPost, PubkySocialPostKind};
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, _) = identity(&pubky, "pm-api-ratings").await;
+    let songs = [
+        "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862",
+        "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+        "https://musicbrainz.org/recording/0c1f0a3f-3c21-4f0d-9c33-2a8d8e36a3b1",
+        "https://musicbrainz.org/recording/f2b5ad8a-6e3e-4c3c-9c3e-0d7a0b0c1d2e",
+        "https://musicbrainz.org/recording/5a9e0c4e-1d4b-4a8e-9a3b-6f0e2a1c7d3b",
+    ];
+    let mb = |u: &str| pm_model::MusicUri::parse(u).unwrap();
+    let tick = || tokio::time::sleep(std::time::Duration::from_millis(2));
+    let old_review = |rating: u8, text: &str, song: &str| {
+        serde_json::json!({"content": serde_json::json!({"rating": rating, "text": text}).to_string(),
+            "kind": "review", "parent": null, "embed": song, "attachments": []})
+    };
+    let at = |root: &str, ns: &str, id: &str| format!("/{root}/{ns}/v1/posts/{id}/{id}.json");
+
+    // What this node wrote before 1.1, and what other apps wrote
+    let rated = Review::new(&mb(songs[0]), Some(8), "Old favourite");
+    tick().await;
+    let comment = Review::new(&mb(songs[1]), None, "Nice bass");
+    tick().await;
+    let (rated_id, comment_id) = (rated.create_id(), comment.create_id());
+    let others_note = v1::id_of(pm_pubky::ids::now_micros());
+    tick().await;
+    let others_rating = v1::id_of(pm_pubky::ids::now_micros());
+    let embedding = |text: &str, song: &str| {
+        PubkySocialPost::new(
+            text.into(),
+            PubkySocialPostKind::Note,
+            None,
+            Some(song.into()),
+            Vec::new(),
+        )
+    };
+    for (path, body) in [
+        (
+            at("priv", "music", &rated_id),
+            old_review(8, "Old favourite", songs[0]),
+        ),
+        (
+            at("priv", "social", &comment_id),
+            serde_json::to_value(embedding("Nice bass", songs[1])).unwrap(),
+        ),
+        (
+            at("priv", "social", &others_note),
+            serde_json::to_value(embedding("Not the node's", songs[4])).unwrap(),
+        ),
+        (
+            at("priv", "social", &others_rating),
+            serde_json::to_value(PubkySocialPost::new_rating(songs[2].into(), 6, None, Vec::new())).unwrap(),
+        ),
+    ] {
+        homeserver.write_object(&session, &path, &body).await.unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a");
+    {
+        let lib = a.library.lock().unwrap();
+        for r in [&rated, &comment] {
+            let post = MusicPost::new(MusicContent::Review(r.clone()));
+            let id = post.create_id();
+            lib.upsert_music_post(&pm_library::MusicPostRow {
+                id: id.clone(),
+                kind: pm_pubky::schemas::post::TYPE_REVIEW.into(),
+                visibility: "private".into(),
+                json: serde_json::to_string(&post.post).unwrap(),
+                created_at: r.created_at,
+                updated_at: r.created_at,
+                synced_at: None,
+                deleted: false,
+            })
+            .unwrap();
+            lib.mark_music_post_synced(&id, pm_pubky::ids::now_micros())
+                .unwrap();
+        }
+    }
+    let app = router(a.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+    a.set_sync(Some(sync.clone()));
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let heads = |root: v1::Root, ns: &'static str| {
+        let (hs, z32, session) = (homeserver.clone(), z32.clone(), sync.session().clone());
+        async move {
+            let session = (root == v1::Root::Priv).then_some(session);
+            hs.v1_heads(&z32, root, ns, session.as_ref()).await.unwrap()
+        }
+    };
+    let read = |path: String, root: v1::Root| {
+        let (hs, z32, session) = (homeserver.clone(), z32.clone(), sync.session().clone());
+        async move {
+            let bytes = if root == v1::Root::Priv {
+                hs.get_bytes(&z32, &path, Visibility::Private, Some(&session))
+                    .await
+            } else {
+                hs.get_bytes(&z32, &path, Visibility::Public, None).await
+            };
+            serde_json::from_slice::<serde_json::Value>(&bytes.unwrap()).unwrap()
+        }
+    };
+
+    // The rated review: a rating with the same id, its music copy gone
+    let (social, music) = (
+        heads(v1::Root::Priv, "social").await,
+        heads(v1::Root::Priv, "music").await,
+    );
+    assert!(!music.contains_key(&rated_id), "{music:?}");
+    assert_eq!(social[&rated_id].path, at("priv", "social", &rated_id));
+    let body = read(social[&rated_id].path.clone(), v1::Root::Priv).await;
+    assert_eq!(
+        (&body["kind"], &body["parent"]),
+        (&"rating".into(), &songs[0].into())
+    );
+    assert_eq!(body["content"], r#"{"rating":8,"text":"Old favourite"}"#);
+    // The comment: a newer version that replies to the song
+    assert_ne!(social[&comment_id].edit_id, comment_id);
+    let body = read(social[&comment_id].path.clone(), v1::Root::Priv).await;
+    assert_eq!(
+        (&body["kind"], &body["parent"]),
+        (&"note".into(), &songs[1].into())
+    );
+    assert!(body["embed"].is_null(), "{body}");
+    // The other app's note is untouched
+    assert_eq!(social[&others_note].edit_id, others_note);
+    let mine = |all: &serde_json::Value| -> Vec<(String, serde_json::Value)> {
+        let mut v: Vec<_> = all["ratings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["uri"].as_str().unwrap().to_string(), r["rating"].clone()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    let (_, all) = call(&app, "GET", "/v1/ratings", None).await;
+    let mut want = vec![
+        (songs[0].to_string(), serde_json::json!(8)),
+        (songs[1].to_string(), serde_json::Value::Null),
+        (songs[2].to_string(), serde_json::json!(6)),
+    ];
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(mine(&all), want, "{all}");
+    // Once: the next sync moves nothing
+    let r = sync.sync(&a.library).await.unwrap();
+    assert_eq!((r.pulled, r.pushed, r.deleted), (0, 0, 0), "{r:?}");
+
+    // Public, then private again: the published copy comes and goes, the draft stays
+    let put = |rating: u8, public: bool| serde_json::json!({"uri": songs[0], "rating": rating, "text": "Old favourite", "public": public});
+    let (_, r) = call(&app, "PUT", "/v1/ratings", Some(put(9, true))).await;
+    assert_eq!((&r["id"], &r["public"]), (&rated_id.clone().into(), &true.into()));
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let public = heads(v1::Root::Pub, "social").await;
+    let body = read(public[&rated_id].path.clone(), v1::Root::Pub).await;
+    assert_eq!(
+        (&body["kind"], &body["parent"]),
+        (&"rating".into(), &songs[0].into())
+    );
+    assert_eq!(body["content"], r#"{"rating":9,"text":"Old favourite"}"#);
+    call(&app, "PUT", "/v1/ratings", Some(put(9, false))).await;
+    sync.sync(&a.library).await.unwrap();
+    assert!(!heads(v1::Root::Pub, "social").await.contains_key(&rated_id));
+    assert!(heads(v1::Root::Priv, "social").await.contains_key(&rated_id));
+
+    // An older node writes a music review meanwhile; a fresh node reads everything and moves it
+    let late = v1::id_of(pm_pubky::ids::now_micros());
+    homeserver
+        .write_object(
+            sync.session(),
+            &at("priv", "music", &late),
+            &old_review(7, "Late", songs[3]),
+        )
+        .await
+        .unwrap();
+    let fresh = node(dir.path(), "fresh");
+    let r = sync.sync(&fresh.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let (_, all) = call(&router(fresh.clone()), "GET", "/v1/ratings", None).await;
+    want.push((songs[3].to_string(), serde_json::json!(7)));
+    want.iter_mut().find(|(u, _)| u == songs[0]).unwrap().1 = serde_json::json!(9);
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(mine(&all), want, "{all}");
+    let r = sync.sync(&fresh.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(!heads(v1::Root::Priv, "music").await.contains_key(&late));
+    let body = read(at("priv", "social", &late), v1::Root::Priv).await;
+    assert_eq!(
+        (&body["kind"], &body["parent"]),
+        (&"rating".into(), &songs[3].into())
+    );
 }
