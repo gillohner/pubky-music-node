@@ -7,8 +7,9 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
   It knows nothing about this app.
 - **Pubky Music's app data** (`crates/pm-appdata`, this page): what only this app and its node use, under
   `/priv/pubky.music/`. Every path is a constant in `pm_appdata::paths`. A test fails if one is missing
-  here. (`/pub/pubky.music/tags/` is the one public path, from before tags moved to social v1; the
-  node only reads and empties it.)
+  here. App data is private: nothing of it is under `/pub/`. (`/pub/pubky.music/tags/` held tags from
+  2026-10-21 to 2026-10-26, before they moved to social v1; it is not app data, and the node only empties
+  it, below.)
 
 ## App paths
 
@@ -24,7 +25,7 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 | `/priv/pubky.music/vault/index.json` | the same clients | the vault's device list, every entry with a grant proof (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.json` | the same clients | one sign-in's envelope (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.lease.json` | the same clients | a refresh lease, only on homeservers without locks (VAULT.md) | — |
-| `/pub/pubky.music/tags/` | the node, from 2026-10-21 to 2026-10-26; nothing new since | music tags as `PubkyAppTag`s; the sync moves them to `/pub/social/v1/tags/` once and reads them until then (below) | pubky-app-specs tag |
+| `/priv/pubky.music/shares.json` | the node, only on its own bundled homeserver (ADR 0016) | the libraries the person shares on the node, so a reinstalled node gets them back. Planned: not written yet | — |
 
 Everything under `/priv/` is readable by the homeserver's operator. The vault is therefore encrypted on the
 device. The rest is the person's own data, as [ADR 0016](adr/0016-many-people-one-node.md) says.
@@ -41,13 +42,14 @@ folders until then. Nothing else social is kept in app data.
 
 | Path | Objects | Spec |
 | :-- | :-- | :-- |
-| `/pub|priv/music/v1/posts/` | music `review`, `listen` (under the root the listen history setting picks), `listening` and `session` | pubky-music-specs |
-| `/pub|priv/social/v1/posts/` | collections as `collection` posts with `ext.music` hints: always the private draft, and the published copy under `/pub/` while public | pubky-social-specs, pubky-music-specs `ext` |
+| `/pub|priv/music/v1/posts/` | music `listen` (under the root the listen history setting picks), `listening` and `session`. Older rated reviews (music `review`) were here under `/priv/`; the sync rewrites each as a social `rating` and deletes it | pubky-music-specs |
+| `/pub|priv/social/v1/posts/` | collections as `collection` posts with `ext.music` hints; ratings as social `rating`s and comments as `note`s, both with `parent` = the music URL. Always the private draft, and the published copy under `/pub/` while public | pubky-social-specs (ratings: 1.1), pubky-music-specs `ext` |
 | `/priv/social/v1/bookmarks/` | bookmarks of music URLs and of public posts (someone's collection) | pubky-social-specs |
 | `/pub/social/v1/tags/` | tags on music URLs | pubky-social-specs |
 | `/pub/social/v1/follows/` | follows | pubky-social-specs |
 | `/pub/pubky.app/follows/` | follows again, the older form, until Nexus indexes v1 follows | pubky-app-specs |
 | `/priv/pubky.app/`, `/pub/pubky.app/` | older objects from before ADR 0014, read for the one-time move | pubky-app-specs |
+| `/pub/pubky.music/tags/` | tags the node wrote from 2026-10-21 to 2026-10-26, nothing since; the sync moves them to `/pub/social/v1/tags/` once and reads them until then (above) | pubky-app-specs tag |
 
 ## What the node asks Ring for
 The node's sign-in requests `/priv/pubky.music/vault/:rw` (named on its own: VAULT.md trusts no wider

@@ -19,18 +19,19 @@ Music uses the shared social objects and only adds what is musical.
 | :-- | :-- | :-- |
 | Tags on a song, album or artist | social `tag` on the canonical music URL | `/pub/social/v1/tags/` (amended 2026-10-26) |
 | Bookmarks (once "favourites") | social `bookmark` (private) of a music URL or a public post | `/priv/social/v1/bookmarks/` |
-| Comments, threads | social `post`, `parent` = the music URL | `/{pub,priv}/social/v1/posts/` |
+| Comments, threads | social `note`, `parent` = the music URL | `/priv/social/v1/posts/`, also `/pub/` while public (amended 2026-10-27) |
 | Collections (a playlist is one of songs) | social `collection` post with its `layout`; items `{uri, note?, ext.music.source?, ext.music.added_at}` (songs, albums, artists, public posts); the collection's `ext.music.source_order` and, on a duplicate, `ext.music.original` | `/priv/social/v1/posts/`, also `/pub/` while public |
-| Ratings and reviews | music kind `review`: `{rating: 1–10, text?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` |
+| Ratings | ~~music kind `review`~~ social `rating` (pubky-social-specs 1.1): `{rating: 1–10, text?}`, `parent` = the music URL | `/priv/social/v1/posts/`, also `/pub/` while public (amended 2026-10-27) |
 | Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` (amended 2026-10-26, below) |
 | Now playing, sessions | music kinds `listening` and `session`, `embed` = the music playing now | `/{pub,priv}/music/v1/posts/` |
 
-- **`crates/pubky-music-specs`** owns the two music kinds (`MusicPostKind { Review, Listen }` on
-  `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
+- **`crates/pubky-music-specs`** owns the music kinds (`MusicPostKind { Listen, Listening, Session }`
+  on `PostEnvelope`, namespace `music`; `Review` until 2026-10-27) and their content rules, plus readers and writers for the
   `ext.music` hints. It depends only on `pubky-social-specs` and serde, never on node code, so it can
   move to its own repository like `mapky-app-specs` and `eventky-app-specs`. `pubky-social-specs` is a git
   dependency pinned to `acde362` until a release is published. (Since 2026-10-26 it is the crates.io
-  release `=1.0.0-rc.1`, tag `v1.0.0-rc.1`: the same data model.)
+  release `=1.0.0-rc.1`, tag `v1.0.0-rc.1`: the same data model. Since 2026-10-27 it is 1.1, for the
+  `rating` kind: a git pin until 1.1 is released, below.)
 - **Ratings are 1 to 10**, the same shape as Mapky's review. The UI shows five stars with halves; the
   node's existing 1–5 ratings double on migration.
 - **`ext.music` is hostile input** (RFC Part C2, rules 10 and 11): the readers return only a
@@ -46,7 +47,8 @@ Music uses the shared social objects and only adds what is musical.
   moved on 2026-10-26 (below).
 - **Migration** reads the node's existing `/priv/pubky.app/posts/` envelopes and `/priv/pubky.app/bookmarks/`
   once and writes the v1 objects. The old files are kept (RFC Part C: a migration never deletes).
-- If a shared rating kind lands in `social/v1` later, `review` switches to it.
+- ~~If a shared rating kind lands in `social/v1` later, `review` switches to it.~~ It did on
+  2026-10-27 (below).
 
 ## Consequences
 
@@ -134,3 +136,41 @@ spellings). A listen's `source` is where it played: an imported listen (ListenBr
 - The node reads `/pub/social/v1/profile.json` first, then `/pub/pubky.app/profile.json`.
 - It writes the social v1 follow (`/pub/social/v1/follows/<key>.json`), and the older pubky.app follow
   until Nexus indexes v1 follows.
+
+## Amendment (2026-10-27): a rating is the social `rating` (STEWARD-SOCIAL-V1-MUSIC.md Part A2)
+
+The owner's decision: a music review (`{rating 1–10, text?}` on a song) is the same thing as the
+`rating` kind of pubky-social-specs 1.1: the same content and scale, `parent` = the thing rated, one per
+author per target with the newest winning, and counted by Nexus. A track, a place or a listing has one
+set of ratings. The music spec keeps only what is music-only (`listen`, `listening`, `session`).
+
+- **The pin.** 1.1 is not released: the node pins `pubky-social-specs` by git rev to the head of
+  branch `v1.1-subspecs` (draft pubky/pubky-social-specs#207, `8e7f1ad`, 1.1.0-alpha.1). The PR stays a
+  draft until 1.1 lands. 1.1 changes nothing of 1.0.
+- **`pubky-music-specs`** has no `review` kind any more. An old one reads as an unknown kind (and fails
+  validation); `retired::rating_from_review` gives the rating to write in its place: `parent` is its
+  `embed`, the same rating and text, unknown members kept.
+- **Writes.** Rating a song, album or artist writes a social `rating` whose `parent` is the canonical
+  music URL. Text alone is a comment: a social `note` whose `parent` is the music URL (never `embed`).
+  Both are private (`/priv/social/v1/posts/`) unless their owner publishes them, with the collections'
+  switch: the private draft stays, the same version is copied under `/pub/` while public.
+- **What moves.** No review was ever public. The node moves its own, once per node
+  (`pubky.ratings_social_v1`), with their ids, so they keep their creation time:
+  - a rated review, a music `review` under `/priv/music/v1/posts/`: written as a `rating` under
+    `/priv/social/v1/posts/`, then the music copy is deleted;
+  - a text review, a note under `/priv/social/v1/posts/` *embedding* the music URL: a new version
+    that replies to the URL instead;
+  - a review in `/priv/pubky.app/posts/` (a node that never moved to v1): read by the v1 move as before
+    and written in the new form; that old file stays (a migration never deletes it).
+  The sync reads the old forms until then, and rewrites one an older node writes later when it meets it.
+- **What is a music rating.** The node reads a `rating` or a `note` as one only when its `parent` is a
+  canonical music URL and it carries nothing the node cannot keep (an `embed`, attachments, a lock),
+  so its edits never drop them. A note that only embeds a music URL is someone's post: the node reads
+  one only when it already holds that id as its own review (the move above), so it never edits or
+  deletes another app's note. Another app's rating of a song is the person's rating of it, when it
+  is private or has a private draft: the sync reads a public social post only as the published copy
+  of a private draft, never the person's other public posts (pubky-social-migrator copies all of them
+  to v1), so a rating another app published directly is not read yet (TODO(nexus): ask the indexer for
+  the person's ratings of music).
+- **One per target.** The node keeps one per target: a rating before a comment, then the newest.
+- **API.** `/v1/ratings`; `/v1/reviews` answers the same for one release (docs/api.md, Deprecated).

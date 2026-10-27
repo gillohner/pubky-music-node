@@ -21,6 +21,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-27
 
+- **Ratings are the shared social rating** (STEWARD-SOCIAL-V1-MUSIC.md Part A2): rating a song, album or artist writes a pubky-social-specs 1.1 `rating` whose `parent` is the music URL, the kind every app and Nexus's counts read. Text alone is a comment: a social note replying to the music URL.
+  - Private by default, with the collections' public switch (`public` in `PUT /v1/ratings`): the private draft stays and the published copy comes and goes.
+  - The node's older ratings move once, with their ids: music `review`s become `rating`s (the old copy is deleted), notes that embedded the music URL get a version that replies to it. Old forms another node writes later are rewritten when the sync meets them.
+  - The node no longer reads another app's note as a review, so it can never edit or delete one. Another app's rating of a song is the person's rating.
+  - `/v1/ratings`; `/v1/reviews` answers the same for one release, marked deprecated.
+  - `pubky-music-specs` drops the `review` kind (`listen` is its default now); `retired::rating_from_review` rewrites an old one.
+  - pubky-social-specs is pinned to the 1.1 branch by git rev (`8e7f1ad`, draft #207) until 1.1 is released.
 - **A node on the network never runs an open admin API** (security review 2026-10-27, high). Without `[api] token` (or `PM_TOKEN`) and listening beyond localhost, `pm-node` makes a token on first start and keeps it in `<data_dir>/api-token` (0600), the same one on every start; the log names the file, never the token. The file is written whole and linked into place, so a crash never leaves it empty; an emptied file stops the start, and one readable by others is made 0600. A documented placeholder (`change-me`, `change-me-to-a-long-random-secret`) is never used: those installs get a made token and a warning. The encrypted backup carries the made token. Only a loopback `listen` still runs without a token. The Docker entrypoint, the TrueNAS compose file (no more `change-me` token) and `docs/deploy.md` say where to find it; Umbrel and the bundle already set one.
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
