@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-27
+
+- **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
+
 ## 2026-10-26
 
 - **Settings › This node › Home for everyone**: the node's default Home, which Edit Home no longer writes since it saves your own layout (#123 follow-up). It shows how many rows the default has, and "Make my Home the default for everyone" copies your rows and order to the node (`PUT /v1/home/layout`); your own layout stays yours.
