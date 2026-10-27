@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-26
 
+- **Settings › This node › Home for everyone**: the node's default Home, which Edit Home no longer writes since it saves your own layout (#123 follow-up). It shows how many rows the default has, and "Make my Home the default for everyone" copies your rows and order to the node (`PUT /v1/home/layout`); your own layout stays yours.
+
 - **Settings in four groups, by where each setting is saved** (STEWARD-SETTINGS-GROUPS.md; build step 4 of docs/ux/responsive.md):
   - **You** (saved on your homeserver, so it follows you): My accounts, Home, and Playback quality. Each choice says whether yours or the node's default applies.
   - **This device:** Display (theme, layout, Dense lists, colour), kept in this browser.

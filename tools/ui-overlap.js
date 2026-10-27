@@ -12,7 +12,7 @@
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2] || ''; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const SETTINGS = ['accounts', 'home', 'quality', 'appearance', 'apps', 'library', 'playback', 'discover', 'backup', 'import', 'about'];
+const SETTINGS = ['accounts', 'home', 'quality', 'appearance', 'apps', 'nodehome', 'library', 'playback', 'discover', 'backup', 'import', 'about'];
 
 const inspect = () => {
   const out = { scroll: document.documentElement.scrollWidth - innerWidth, spill: [], overlap: [] };
