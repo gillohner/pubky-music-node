@@ -90,6 +90,8 @@ Newest first. Dates are when the change landed on `main`.
 - **Umbrel store repository:** install the app from the community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel), which mirrors `deploy/umbrel/` (first sync done by hand). The `umbrel-mirror` workflow keeps it in step once its deploy key `UMBREL_MIRROR_KEY` is set. README, deploy.md and RELEASING.md point at it.
 - **v0.1.0, the first versioned release.** The signed tag `v0.1.0` (main @ dbc7ddd) published the multi-arch image `ghcr.io/gillohner/pubky-music-node:0.1.0` (also `0.1` and `latest`), the desktop apps, the Android app and the node binaries. The Umbrel app now pins that image by digest, at version `0.1.0`.
 
+- **One front for the quality choice, and `healthy` on the Sources list** (STEWARD-UX-PLAYER-SOURCES.md §1–2): `GET/PUT /v1/sources/{source}/quality` lists what a source lets you choose (TIDAL max/high for full tracks, Qobuz max/cd/mp3 with MP3 320 new, librespot 320/160/96 kbps new, applying on a restart), what is chosen and when a change applies; sources that send one format say so. The Qobuz browser relay sends `audio/mpeg` for MP3 and `audio/flac` for either lossless choice. Every `/v1/sources` row carries `healthy` (switched on and working).
+
 ## 2026-10-25
 
 - **ffmpeg ships with the node** (steward's decision): the Docker image, and so Umbrel and TrueNAS, carries Debian's ffmpeg 5.1 series, pinned by `FFMPEG_VERSION` and checked at build time for the AAC, MP3 and Opus encoders. Phones can therefore download smaller copies, not only originals. The bare-metal steps install it too.

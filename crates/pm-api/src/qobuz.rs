@@ -157,7 +157,7 @@ fn save(lib: &pm_library::Library, st: &ModeState) {
     let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
 }
 
-fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
+pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib);
     f(&mut st);
@@ -636,8 +636,8 @@ pub(crate) async fn put(
     Json(u): Json<QobuzUpdate>,
 ) -> ApiResult<QobuzStatus> {
     if let Some(q) = &u.quality {
-        if q != "max" && q != "cd" {
-            return Err(ApiError::bad_request("quality is max or cd"));
+        if q != "max" && q != "cd" && q != "mp3" {
+            return Err(ApiError::bad_request("quality is max, cd or mp3"));
         }
     }
     if let Some(id) = &u.app_id {
@@ -799,12 +799,22 @@ fn file_url_query(app: &App, id: &str, format_id: u32, ts: i64) -> Vec<(&'static
     ]
 }
 
-/// FLAC 24-bit up to 192 kHz (27) or 16-bit/44.1 kHz (6).
+/// FLAC 24-bit up to 192 kHz (27), 16-bit/44.1 kHz (6), or MP3 320 kbps (5).
 fn format_id(st: &ModeState) -> u32 {
-    if st.quality == "cd" || st.session.as_ref().is_some_and(|x| !x.hires) {
+    if st.quality == "mp3" {
+        5
+    } else if st.quality == "cd" || st.session.as_ref().is_some_and(|x| !x.hires) {
         6
     } else {
         27
+    }
+}
+
+fn content_type_for(format: u32) -> &'static str {
+    if format == 5 {
+        "audio/mpeg"
+    } else {
+        "audio/flac"
     }
 }
 
@@ -877,15 +887,14 @@ pub fn file_url_blocking(
     judge_file_url(status, &v)
 }
 
-async fn file_url(s: &NodeState, id: &str) -> Result<String, StreamError> {
+async fn file_url(s: &NodeState, id: &str, format: u32) -> Result<String, StreamError> {
     let (app, sess) = ready(s).map_err(|e| StreamError::Track(e.message))?;
-    let st = load(&s.library.lock().expect("library poisoned"));
     let resp = s
         .http_client()
         .get(format!("{}/track/getFileUrl", api_base()))
         .header("X-App-Id", &app.id)
         .header("X-User-Auth-Token", &sess.token)
-        .query(&file_url_query(&app, id, format_id(&st), now()))
+        .query(&file_url_query(&app, id, format, now()))
         .send()
         .await
         .map_err(|e| StreamError::Track(format!("Qobuz: {}", e.without_url())))?;
@@ -947,7 +956,9 @@ pub(crate) async fn stream(
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
-    let r = file_url(&s, &id).await;
+    // Use one snapshot for the request and its response type, even if quality changes in flight.
+    let format = format_id(&load(&s.library.lock().expect("library poisoned")));
+    let r = file_url(&s, &id, format).await;
     record(&s.library, &r);
     let url = r.map_err(|e| match e {
         StreamError::Mode(m) => ApiError::new(StatusCode::BAD_GATEWAY, m),
@@ -964,7 +975,7 @@ pub(crate) async fn stream(
     }
     let len = resp.content_length();
     let mut out = axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, "audio/flac")
+        .header(axum::http::header::CONTENT_TYPE, content_type_for(format))
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     if let Some(n) = len {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);
@@ -976,6 +987,13 @@ pub(crate) async fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_content_type_matches_the_requested_format() {
+        assert_eq!(content_type_for(5), "audio/mpeg");
+        assert_eq!(content_type_for(6), "audio/flac");
+        assert_eq!(content_type_for(27), "audio/flac");
+    }
 
     #[test]
     fn the_file_url_request_is_signed_with_the_app_secret() {
