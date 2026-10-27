@@ -62,6 +62,8 @@ struct PatternSource {
     gate: Arc<Gate>,
     /// An in-stream title announced after the second block (radio).
     title: Option<String>,
+    /// Streams MP3 (a uri ending in `.mp3`), else FLAC.
+    mp3: bool,
 }
 
 impl FrameSource for PatternSource {
@@ -96,6 +98,14 @@ impl FrameSource for PatternSource {
         Some(true)
     }
 
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(pm_zones::StreamInfo {
+            codec: if self.mp3 { "MP3" } else { "FLAC" }.into(),
+            lossless: !self.mp3,
+            bitrate_kbps: self.mp3.then_some(320),
+            ..Default::default()
+        })
+    }
     fn stream_title(&mut self) -> Option<String> {
         if self.pos >= 2 * BLOCK {
             return self.title.take();
@@ -138,6 +148,7 @@ impl SourceFactory for Factory {
             pos: 0,
             gate: self.gate.clone(),
             title: item.uri.contains("icy").then(|| "Nils Frahm - Says".to_string()),
+            mp3: item.uri.ends_with(".mp3"),
         }))
     }
 
@@ -698,4 +709,45 @@ async fn crossfade_stops_when_its_track_is_removed_during_the_fade() {
         ["start:a:false", "end:a", "start:c:true", "end:c", "stopped"]
     );
     assert_eq!(r.zone.queue().len(), 2);
+}
+
+#[tokio::test]
+async fn now_playing_says_what_is_arriving() {
+    let r = rig(&[("tidal:track:7", RATE, 1000)]);
+    r.zone.enqueue(vec![QueueItem::new("tidal:track:7")], Insert::End);
+    r.zone.play();
+    wait_for(|| r.zone.state().now_playing.is_some()).await;
+    let f = r.zone.state().now_playing.unwrap().format.expect("format");
+    assert_eq!(f.codec, "FLAC");
+    assert!(f.lossless);
+    assert_eq!(
+        f.service, "tidal",
+        "the engine fills the service from the queue item"
+    );
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+}
+
+/// What is streaming follows each track: a gapless join and a crossfade into another codec
+/// both show the new track's format (worked out once when the track starts).
+#[tokio::test]
+async fn the_stream_format_follows_each_track() {
+    for crossfade in [0, 30] {
+        let r = rig(&[("a", RATE, 1000), ("b.mp3", RATE, 3000)]);
+        r.zone.set_crossfade_ms(crossfade);
+        r.zone
+            .enqueue(vec![QueueItem::new("a"), QueueItem::new("b.mp3")], Insert::End);
+        // all of a and a few blocks of b, then the engine waits on the gate
+        r.gate.allow(16);
+        r.zone.play();
+        wait_for(|| r.zone.state().now_playing.is_some_and(|n| n.item.uri == "b.mp3")).await;
+        let np = r.zone.state().now_playing.unwrap();
+        let f = np.format.expect("a format for b");
+        assert_eq!(f.codec, "MP3", "crossfade {crossfade} ms");
+        assert!(!f.lossless);
+        assert_eq!(f.bitrate_kbps, Some(320));
+        assert_eq!(f.service, "library", "filled from a uri without a scheme");
+        r.gate.allow(1000);
+        r.zone.wait_stopped().await;
+    }
 }

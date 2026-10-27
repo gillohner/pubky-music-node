@@ -25,6 +25,9 @@ use std::sync::{Arc, Condvar, Mutex};
 pub const STATE_KEY: &str = "spotify.librespot";
 /// The live item a zone plays while librespot pipes into it.
 pub const LIVE_URI: &str = "librespot:connect";
+
+/// The `--bitrate` librespot was last started with (kbps; 0 until it starts).
+static REQUESTED_KBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub const WARNING: &str = "librespot is a community-made Spotify client, not approved by Spotify. It can stop working at any time, and Spotify could act on the account that picks it. It needs Spotify Premium.";
 const FORMAT: AudioFormat = AudioFormat::pcm(44_100, 16, 2);
 /// Frames per block handed to the zone.
@@ -368,6 +371,20 @@ impl pm_zones::FrameSource for LiveSource {
         FORMAT
     }
 
+    /// Ogg Vorbis from Spotify, at the bitrate librespot was started with. That is the bitrate
+    /// *requested*: librespot falls back to a lower one when a track has no file at it.
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        let kbps = REQUESTED_KBPS.load(std::sync::atomic::Ordering::Relaxed);
+        Some(pm_zones::StreamInfo {
+            codec: "Vorbis".into(),
+            bitrate_kbps: (kbps > 0).then_some(kbps),
+            lossless: false,
+            service: "spotify".into(),
+            tier: None,
+            preview: false,
+        })
+    }
+
     fn duration_ms(&self) -> Option<u64> {
         None
     }
@@ -581,7 +598,13 @@ fn watch(
             .arg("--device-type")
             .arg("speaker")
             .arg("--bitrate")
-            .arg("320")
+            .arg({
+                // Recorded here for the player's label (`LiveSource::stream_info`), never read
+                // from the settings on every publish
+                let kbps = 320;
+                REQUESTED_KBPS.store(kbps, std::sync::atomic::Ordering::Relaxed);
+                kbps.to_string()
+            })
             .arg("--cache")
             .arg(dir.join("cache"))
             .arg("--system-cache")

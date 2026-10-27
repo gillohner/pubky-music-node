@@ -369,6 +369,11 @@ impl FrameSource for HttpStream {
     fn lossy_source(&self) -> bool {
         self.inner.is_lossy()
     }
+    /// The codec as decoded; the engine adds the service from the queue item. A source with
+    /// tiers (TIDAL, Qobuz) can add its `tier` here (STEWARD-UX-PLAYER-SOURCES.md §2).
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(self.inner.stream_info())
+    }
     fn stream_title(&mut self) -> Option<String> {
         let now = self.title.lock().expect("title lock").clone();
         if now.is_some() && now != self.last {

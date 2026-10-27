@@ -851,6 +851,23 @@
   // ---- player bar ----------------------------------------------------------
   const ORDER = { bit_perfect: 0, enhanced: 1, lossless: 2, lossy: 3 };
   const LABEL = { bit_perfect: 'Bit-perfect', enhanced: 'Enhanced', lossless: 'Lossless', lossy: 'Lossy' };
+  // What is arriving, as people say it (STEWARD-UX-PLAYER-SOURCES §2): "FLAC 44.1/16 · TIDAL",
+  // "AAC 320 kbps · Deezer", "MP3 128 kbps · preview", "FLAC 96/24 · local file", and "→ 48 kHz"
+  // when the node converts for the zone. Null when the node doesn't say (older nodes).
+  const kHz = (hz) => String(Math.round(hz / 100) / 10);
+  const streamLabel = (np, long = false) => {
+    const f = np && np.format; if (!f) return null;
+    const sf = np.source_format; const of = np.output_format;
+    const what = sf && sf.kind === 'dsd' ? `DSD${Math.round(sf.rate_hz / 44100)}`
+      : f.lossless && sf ? (long ? `${f.codec} ${kHz(sf.rate_hz)} kHz / ${sf.bits} bit` : `${f.codec} ${kHz(sf.rate_hz)}/${sf.bits}`)
+      : `${f.codec}${f.bitrate_kbps ? ` ${f.bitrate_kbps} kbps` : ''}`;
+    const tier = f.tier ? ` ${f.tier.charAt(0).toUpperCase()}${f.tier.slice(1)}` : '';
+    const from = f.preview ? 'preview' : f.service === 'library' ? 'local file' : f.service === 'stream' ? 'stream' : f.service === 'download' ? 'downloaded' : `${SERVICE_NAMES[f.service] || srcName(f.service)}${tier}`;
+    const conv = sf && of && sf.kind !== 'dsd' && of.kind !== 'dsd' ? (of.rate_hz !== sf.rate_hz ? ` → ${kHz(of.rate_hz)} kHz` : f.lossless && of.bits < sf.bits ? ` → ${of.bits} bit` : '') : '';
+    return `${what}${conv} · ${from}`;
+  };
+  // Why the node converts, from the signal path's own notes (resample, requantize, DSD to PCM)
+  const conversionWhy = (np) => (np.signal_path ? np.signal_path.stages.filter((x) => /^(resample|requantize|dither|dop|src)$/.test(x.name) || (x.name === 'decode' && x.note)).map((x) => `${x.name}${x.note ? ': ' + x.note : ''}`) : []);
   const headline = (p) => p.stages.reduce((w, s) => (ORDER[s.quality] > ORDER[w] ? s.quality : w), 'bit_perfect');
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
   // The artists a credit names ("Sefa, Dr. Peacock" → two links), like the node splits them
@@ -987,12 +1004,15 @@
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     const h = np.signal_path ? headline(np.signal_path) : null;
     q.className = 'quality ' + (h ? 'q-' + h : '');
-    $('.qtext', q).textContent = h ? LABEL[h] : 'In this browser'; q.setAttribute('aria-label', `Sound quality: ${h ? LABEL[h] : 'played by this browser'}. Show how the sound gets to you`);
+    const sl = streamLabel(np);
+    $('.qtext', q).textContent = sl || (h ? LABEL[h] : 'In this browser'); q.setAttribute('aria-label', `Sound quality: ${sl || (h ? LABEL[h] : 'played by this browser')}. Change the quality`);
     q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
   };
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
-  $('#quality').onclick = () => toggleNowPlaying(true);
+  // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
+  // an older node) the label opens Now playing, where the signal path is
+  $('#quality').onclick = () => { const z = currentZone(); if (z && z.now_playing && z.now_playing.format) qualitySheet(); else toggleNowPlaying(true); };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -1130,7 +1150,7 @@
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it)}</div>
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
-            <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}</span></button>
+            <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
             <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
@@ -1158,7 +1178,8 @@
       if (j >= 0) { e.preventDefault(); e.stopPropagation(); openSheet(ks[j]); }
     };
     $('#npsheetclose').onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
-    $('#npquality').onclick = () => openSheet('details');
+    // What is streaming opens the quality sheet (#94); without it, Details (the signal path)
+    $('#npquality').onclick = () => (np.format ? qualitySheet() : openSheet('details'));
     {
       // Phones: drag the sheet's head down to close it
       let y0 = null; const head = $('.np-sheet-head', overlay);
@@ -1183,6 +1204,67 @@
     setArtTint();
     npRestore();
     refreshSleep();
+  };
+  // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
+  // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
+  // Play from order and the zone's output settings.
+  // On a source's tab, bring its quality setting into view (it may load a moment after the page)
+  const focusQualityControl = (svc, tries = 20) => {
+    if (state.view !== 'sources') return; // they went elsewhere
+    // that service's own control ("Qobuz quality", "TIDAL full track quality"), not another's
+    const name = String(SERVICE_NAMES[svc] || srcName(svc) || '').toLowerCase();
+    const el = name && $$('[aria-label]', main).find((e) => { const l = e.getAttribute('aria-label').toLowerCase(); return l.startsWith(name) && l.includes('quality') && e.offsetParent !== null; });
+    if (!el) { if (tries > 0) setTimeout(() => focusQualityControl(svc, tries - 1), 200); return; }
+    el.scrollIntoView({ block: 'center' }); el.focus({ preventScroll: true });
+    const row = el.closest('.set-row') || el; row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1600);
+  };
+  const qualitySheet = async () => {
+    const z = currentZone(); const np = z && z.now_playing; if (!np) return;
+    const f = np.format || {};
+    const svc = f.service || '';
+    const d = document.createElement('dialog'); d.className = 'dialog qsheet';
+    const svcRow = svc ? '' : ' hidden';
+    const conv = conversionWhy(np);
+    // "As it arrives" only when the signal path says bit-perfect; else what changes the sound
+    const enhancing = np.signal_path ? np.signal_path.stages.filter((x) => x.quality !== 'bit_perfect').map((x) => `${x.name}${x.note ? ': ' + x.note : ''}`) : [];
+    const onTheWay = conv.length ? `. Changed on the way: ${esc(conv.join('; '))}`
+      : np.signal_path && headline(np.signal_path) === 'bit_perfect' ? ', as it arrives'
+        : enhancing.length ? `. On the way: ${esc(enhancing.join('; '))}` : '';
+    const arriving = streamLabel(np, true) || (np.signal_path ? fmtFormat(np.source_format) : 'Played by this browser');
+    const zonePlays = np.output_format ? `Plays it as ${np.output_format.kind === 'dsd' ? fmtFormat(np.output_format) : `${kHz(np.output_format.rate_hz)} kHz / ${np.output_format.bits} bit`}` : '';
+    d.innerHTML = `<h2>Sound quality</h2>
+      <div class="set-rows">
+        <div class="set-row"><div class="set-label"><div class="set-name">Arriving</div><p class="set-help">${esc(arriving)}</p></div></div>
+        ${zonePlays ? `<div class="set-row"><div class="set-label"><div class="set-name">On ${esc(z.name)}</div><p class="set-help">${esc(zonePlays)}${onTheWay}.</p></div></div>` : ''}
+        <div class="set-row" id="qsvc"${svcRow}><div class="set-label"><div class="set-name">${esc(svc === 'library' ? 'Your files' : SERVICE_NAMES[svc] || srcName(svc) || 'Source')}</div><p class="set-help muted">${svc === 'library' ? 'Your files play as they are.' : '<span class="spin"></span> Asking for its quality choices…'}</p></div></div>
+      </div>
+      <div class="dialog-actions">${isOwner() ? '<button class="btn ghost" data-qplay>Play from order</button><button class="btn ghost" data-qout>Output and DSP</button>' : ''}<button class="btn" data-qclose>Close</button></div>`;
+    document.body.appendChild(d);
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); };
+    transients.push(tr); pushTransient();
+    $('[data-qclose]', d).onclick = () => done();
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    const qp = $('[data-qplay]', d); if (qp) qp.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'playback'); };
+    const qo = $('[data-qout]', d); if (qo) qo.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    if (svc === 'library') return;
+    const box = $('#qsvc .set-help', d);
+    const goSource = `<button class="lnk" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} settings</button>`;
+    // Straight to the service's own quality setting (its Sources tab), for owners
+    const goQuality = isOwner() && svc && svc !== 'stream' && svc !== 'library' ? `<button class="lnk qjump" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} quality settings ›</button>` : '';
+    let qs = null;
+    if (isOwner() && svc && svc !== 'stream') { try { qs = await api('GET', `/sources/${encodeURIComponent(svc)}/quality`); } catch { qs = null; } }
+    if (!d.isConnected) return;
+    if (qs && (qs.options || []).length) {
+      const when = qs.applies === 'now' ? 'Applies now.' : 'Applies from the next song.';
+      box.classList.remove('muted');
+      box.innerHTML = goQuality + `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>${qs.note ? `<span class="muted small qnote">${esc(qs.note)}</span>` : ''}`;
+      $$('[data-qopt]', box).forEach((b) => b.onclick = async () => { try { await api('PUT', `/sources/${encodeURIComponent(svc)}/quality`, { id: b.dataset.qopt }); $$('[data-qopt]', box).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); toast(`${SERVICE_NAMES[svc] || srcName(svc)}: ${b.textContent}. ${when}`); } catch (e) { toast(e.message, 'error'); } });
+    } else {
+      box.innerHTML = f.preview ? `Previews only (30 s). Full songs need another service.${isOwner() ? ' ' + goSource : ''}` : qs && qs.note ? esc(qs.note) : svc === 'stream' || !isOwner() ? 'As the stream sends it.' : `Its quality is set in ${goSource}.`;
+    }
+    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = async () => { done(); if (!overlay.hidden) toggleNowPlaying(); await setView('sources', { source: svc }); focusQualityControl(svc); };
   };
   // Put back what the last render had (scroll, focus) once the content it needs is there; for that
   // render only, and only in its first seconds so a late answer never yanks the view
