@@ -4151,12 +4151,16 @@
           const homeL = prefs && prefs.home_layout;
           const homeTab = group('Your Home', row('Rows on Home', `${homeL ? `${applies(homeL.applies)}. ` : ''}Which rows show and in what order; change them with Edit Home on Home.`, `<button class="btn ghost" id="sethomeedit">${icon('settings')} Edit Home</button>${homeL && homeL.applies === 'yours' ? ' <button class="btn ghost" id="sethomereset">Use the node’s default</button>' : ''}`)
             + row('Saved on', prefs ? (prefs.saved_on === 'homeserver' ? 'Your homeserver, so it follows you to every node and device.' : 'This node for now; it goes to your homeserver once it can be reached.') : '', ''));
-          // This node › Home for everyone: the default, which Edit Home no longer writes (#123 follow-up)
-          const mine = homeL && homeL.value;
-          const same = (x, y) => !!x && !!y && JSON.stringify([x.order || [], x.hidden || []]) === JSON.stringify([y.order || [], y.hidden || []]);
-          const rowsOf = (l) => { if (!l) return 'Not read'; const o = (l.order || []).length; const h = (l.hidden || []).length; if (!o && !h) return 'The built-in rows, in the built-in order'; return `${o ? `${countOf(o, 'rows')} arranged` : 'The built-in order'}${h ? `, ${countOf(h, 'rows')} hidden` : ''}`; };
+          // This node › Home for everyone: the default, which Edit Home no longer writes (#123 follow-up).
+          // Yours is what Home holds right now when it has loaded (a save may still be on its way), else the prefs answer.
+          const mine = state.homeLayout || (homeL && homeL.value) || null;
+          const shape = (l) => JSON.stringify([l.order || [], [...(l.hidden || [])].sort()]);
+          const same = (x, y) => !!x && !!y && shape(x) === shape(y);
+          const rowsOf = (l) => { if (!l) return 'Couldn’t read the node’s default'; const o = (l.order || []).length; const h = (l.hidden || []).length; if (!o && !h) return 'The built-in rows, in the built-in order'; return `${o ? `${countOf(o, 'rows')} arranged` : 'The built-in order'}${h ? `, ${countOf(h, 'rows')} hidden` : ''}`; };
+          const canSetDefault = !!mine && !same(mine, nodeHome);
+          const whyDefault = !mine ? 'Your Home couldn’t be read.' : canSetDefault ? 'Copies your Home’s rows and order to the node; your own stays yours.' : homeL && homeL.applies !== 'yours' ? 'You haven’t arranged your own Home yet; use Edit Home on Home first.' : 'Your Home already is the default.';
           const nodeHomeTab = group('The default Home', row('Rows on Home for everyone', `${rowsOf(nodeHome)}. What Home shows to everyone who hasn’t arranged their own.`, '')
-            + row('Make yours the default', mine && !same(mine, nodeHome) ? 'Copies your Home’s rows and order to the node; your own stays yours.' : 'Your Home already is the default.', `<button class="btn ghost" id="sethomedefault" ${mine && !same(mine, nodeHome) ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`));
+            + row('Make yours the default', `<span id="sethomedefault-why">${whyDefault}</span>`, `<button class="btn ghost" id="sethomedefault" aria-describedby="sethomedefault-why" ${canSetDefault ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`));
           // You › Playback quality: your choice per service over the node's
           const qEntries = Object.entries((prefs && prefs.quality) || {});
           const qualityTab = group('Per service', qEntries.length
