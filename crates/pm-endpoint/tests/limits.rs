@@ -2,7 +2,8 @@
 //! opening an output, is closed; sessions beyond the cap are refused and the endpoint takes new
 //! ones once others end (security review 2026-10-27, #6). Only the node with the player's key
 //! gets a session: a missing or wrong key, or an old protocol, is refused with a reason, and
-//! such connections never hold a session slot or outlast the Hello deadline.
+//! such connections never hold a session slot or outlast the Hello deadline. One LAN host
+//! cannot fill the waiting room, and the node's address waits apart from everyone else.
 
 use pm_endpoint::{Endpoint, Limits};
 use pm_stream::{read_frame, write_frame, Frame, Incoming, Key};
@@ -14,14 +15,37 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn start(limits: Limits) -> (SocketAddr, Key) {
+    let (addr, key, _) = start_endpoint(limits);
+    (addr, key)
+}
+
+fn start_endpoint(limits: Limits) -> (SocketAddr, Key, Arc<Endpoint>) {
     let outputs = OutputRegistry::new();
     outputs.register(Arc::new(NullOutput::new()));
     let key = Key::random();
     let ep = Endpoint::with_limits("Test", outputs, key.clone(), limits);
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
-    std::thread::spawn(move || ep.serve(l).unwrap());
-    (addr, key)
+    let served = ep.clone();
+    std::thread::spawn(move || served.serve(l).unwrap());
+    (addr, key, ep)
+}
+
+/// A connection from another loopback address (`127.0.0.N`), as from another LAN host.
+fn connect_from(addr: SocketAddr, from: [u8; 4]) -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    sock.bind(&SocketAddr::from((from, 0)).into()).unwrap();
+    sock.connect(&addr.into()).unwrap();
+    let s: TcpStream = sock.into();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    (BufReader::new(s.try_clone().unwrap()), BufWriter::new(s))
+}
+
+fn first_frame(r: &mut BufReader<TcpStream>) -> Frame {
+    match read_frame(r).unwrap() {
+        Incoming::Control(f) => f,
+        Incoming::Audio(_) => panic!("audio"),
+    }
 }
 
 fn connect(addr: SocketAddr) -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
@@ -69,6 +93,7 @@ fn silent_peers_are_closed() {
     let (addr, key) = start(Limits {
         max_sessions: 4,
         max_pending: 4,
+        max_pending_per_peer: 4,
         hello: short,
         idle: short,
     });
@@ -143,6 +168,7 @@ fn bad_keys_never_take_a_session_slot() {
     let (addr, key) = start(Limits {
         max_sessions: 1,
         max_pending: 3,
+        max_pending_per_peer: 4,
         hello: short,
         idle: Duration::from_secs(30),
     });
@@ -173,6 +199,7 @@ fn sessions_beyond_the_cap_are_refused() {
     let (addr, key) = start(Limits {
         max_sessions: 2,
         max_pending: 4,
+        max_pending_per_peer: 4,
         hello: long,
         idle: long,
     });
@@ -192,4 +219,49 @@ fn sessions_beyond_the_cap_are_refused() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn one_lan_host_cannot_lock_the_node_out() {
+    let (addr, key, ep) = start_endpoint(Limits {
+        max_sessions: 16,
+        max_pending: 4,
+        max_pending_per_peer: 2,
+        hello: Duration::from_secs(5),
+        idle: Duration::from_secs(30),
+    });
+    // The node has played here before, from 127.0.0.1
+    assert!(matches!(hello(addr, &key).0, Frame::Welcome { .. }));
+    // One host holds its two places and is turned away after that
+    let mut held: Vec<_> = (0..2).map(|_| connect_from(addr, [127, 0, 0, 2])).collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let (mut r, _w) = connect_from(addr, [127, 0, 0, 2]);
+    assert_eq!(
+        refusal(first_frame(&mut r)),
+        "too many connections from this address"
+    );
+    // Hosts together fill the waiting room
+    held.extend((0..2).map(|_| connect_from(addr, [127, 0, 0, 3])));
+    std::thread::sleep(Duration::from_millis(100));
+    let (mut r, _w) = connect_from(addr, [127, 0, 0, 4]);
+    assert_eq!(refusal(first_frame(&mut r)), "too many connections");
+    // The node still gets in at once, several connections at a time
+    let t = Instant::now();
+    let node: Vec<_> = (0..3).map(|_| hello(addr, &key)).collect();
+    assert!(node.iter().all(|(f, ..)| matches!(f, Frame::Welcome { .. })));
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    // And so does an address the app expects its node at, before it has ever shown the key
+    ep.expect_peer([127, 0, 0, 5].into());
+    let (mut r, mut w) = connect_from(addr, [127, 0, 0, 5]);
+    write_frame(
+        &mut w,
+        &Frame::Hello {
+            client: "node".into(),
+            version: pm_stream::PROTOCOL_VERSION,
+            key,
+        },
+    )
+    .unwrap();
+    assert!(matches!(first_frame(&mut r), Frame::Welcome { .. }));
+    drop(held);
 }

@@ -14,9 +14,9 @@ use pm_stream::{block_on, decode_samples, read_frame, write_frame, Frame, Incomi
 /// The outputs an endpoint offers (for the app, which has no other use for `pm-zones`).
 pub use pm_zones::OutputRegistry;
 use pm_zones::{AudioSink, Output, OutputId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 /// Sessions at once: a zone per output plus the node's short control sessions fit many times.
 pub const MAX_SESSIONS: usize = 16;
 /// Connections at once that have not shown the key yet; each is closed by the `Hello` deadline.
+/// Addresses that have shown it (the node) wait apart, with room of the same size.
 pub const MAX_PENDING: usize = 8;
+/// Of those, from one address: one LAN host cannot take the whole waiting room.
+pub const MAX_PENDING_PER_PEER: usize = 2;
 /// How long a new connection has to say `Hello` with the key, all of it.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a session without an open output may be silent (the node's control sessions are short).
@@ -42,7 +45,9 @@ pub struct Endpoint {
     /// Outputs with an open session; a second `Open` is refused.
     busy: Mutex<HashSet<OutputId>>,
     sessions: Arc<AtomicUsize>,
-    pending: Arc<AtomicUsize>,
+    waiting: Arc<Mutex<Waiting>>,
+    /// Addresses that showed the key, or where the app expects its node: they wait apart.
+    known: Mutex<HashSet<IpAddr>>,
     limits: Limits,
 }
 
@@ -51,8 +56,10 @@ pub struct Endpoint {
 pub struct Limits {
     /// Sessions of clients that showed the key.
     pub max_sessions: usize,
-    /// Connections that have not shown it yet.
+    /// Connections that have not shown it yet (and, apart, as many from known addresses).
     pub max_pending: usize,
+    /// Of those, from one address that is not known.
+    pub max_pending_per_peer: usize,
     pub hello: Duration,
     pub idle: Duration,
 }
@@ -62,6 +69,7 @@ impl Default for Limits {
         Self {
             max_sessions: MAX_SESSIONS,
             max_pending: MAX_PENDING,
+            max_pending_per_peer: MAX_PENDING_PER_PEER,
             hello: HELLO_TIMEOUT,
             idle: IDLE_TIMEOUT,
         }
@@ -84,6 +92,38 @@ impl Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Connections waiting for their `Hello`: from known addresses, from others, and per address.
+#[derive(Default)]
+struct Waiting {
+    known: usize,
+    strangers: usize,
+    by_peer: HashMap<IpAddr, usize>,
+}
+
+/// A connection's place in the waiting room, until it has shown the key.
+struct Pending {
+    waiting: Arc<Mutex<Waiting>>,
+    ip: IpAddr,
+    known: bool,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut w = self.waiting.lock().expect("waiting room");
+        if self.known {
+            w.known -= 1;
+            return;
+        }
+        w.strangers -= 1;
+        if let Some(n) = w.by_peer.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                w.by_peer.remove(&self.ip);
+            }
+        }
     }
 }
 
@@ -154,8 +194,50 @@ impl Endpoint {
             key,
             busy: Mutex::new(HashSet::new()),
             sessions: Arc::new(AtomicUsize::new(0)),
-            pending: Arc::new(AtomicUsize::new(0)),
+            waiting: Arc::default(),
+            known: Mutex::default(),
             limits,
+        })
+    }
+
+    /// Give `ip` (where the app expects its node) room of its own before `Hello`, as an address
+    /// that has shown the key gets, so others filling the waiting room cannot lock the node out.
+    /// It still has to show the key.
+    pub fn expect_peer(&self, ip: IpAddr) {
+        self.known.lock().expect("known peers").insert(ip.to_canonical());
+    }
+
+    /// Whether `ip` waits apart (it showed the key, or the app expects its node there).
+    pub fn expects(&self, ip: IpAddr) -> bool {
+        self.known
+            .lock()
+            .expect("known peers")
+            .contains(&ip.to_canonical())
+    }
+
+    /// A place in the waiting room for a new connection from `ip`, or why there is none.
+    fn admit(&self, ip: IpAddr) -> Result<Pending, &'static str> {
+        let known = self.expects(ip);
+        let mut w = self.waiting.lock().expect("waiting room");
+        if known {
+            if w.known >= self.limits.max_pending {
+                return Err("too many connections");
+            }
+            w.known += 1;
+        } else {
+            if w.by_peer.get(&ip).copied().unwrap_or(0) >= self.limits.max_pending_per_peer {
+                return Err("too many connections from this address");
+            }
+            if w.strangers >= self.limits.max_pending {
+                return Err("too many connections");
+            }
+            w.strangers += 1;
+            *w.by_peer.entry(ip).or_default() += 1;
+        }
+        Ok(Pending {
+            waiting: self.waiting.clone(),
+            ip,
+            known,
         })
     }
 
@@ -193,10 +275,16 @@ impl Endpoint {
                 }
             };
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-            let Some(pending) = Slot::take(&self.pending, self.limits.max_pending) else {
-                tracing::warn!(%peer, "refused: {} connections already waiting for Hello", self.limits.max_pending);
-                refuse(&stream, "too many connections");
-                continue;
+            let ip = stream
+                .peer_addr()
+                .map_or(IpAddr::from([0, 0, 0, 0]), |a| a.ip().to_canonical());
+            let pending = match self.admit(ip) {
+                Ok(p) => p,
+                Err(why) => {
+                    tracing::warn!(%peer, "refused: {why} waiting for Hello");
+                    refuse(&stream, why);
+                    continue;
+                }
             };
             let ep = self.clone();
             let spawned = std::thread::Builder::new()
@@ -221,7 +309,7 @@ impl Endpoint {
     }
 
     /// A new connection: `Hello` with the key by the deadline, then a session slot.
-    fn connection(&self, stream: TcpStream, pending: Slot) -> Result<(), StreamError> {
+    fn connection(&self, stream: TcpStream, pending: Pending) -> Result<(), StreamError> {
         stream.set_nodelay(true)?;
         // Until the key is shown nothing may hold the thread past the Hello deadline
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -253,6 +341,8 @@ impl Endpoint {
                     refuse(&stream, msg);
                     return Err(StreamError::Remote(msg.into()));
                 }
+                // The node's address: from now on it waits apart
+                self.expect_peer(pending.ip);
                 client
             }
             Ok(_) => {

@@ -109,6 +109,15 @@ pub async fn register(mut s: Settings, player: Option<Arc<Player>>) -> Settings 
         tracing::warn!("player not registered: no route to the node");
         return s;
     };
+    // Where the node connects from, as far as this machine can tell: it gets room of its own
+    // before Hello, so another host filling the waiting room cannot lock it out
+    let node_addrs = url::Url::parse(&s.node_url)
+        .ok()
+        .and_then(|u| u.socket_addrs(|| Some(80)).ok())
+        .unwrap_or_default();
+    for a in node_addrs {
+        player.endpoint.expect_peer(a.ip());
+    }
     let Some(port) = player.listen(bind) else { return s };
     let address = SocketAddr::new(ip, port).to_string();
     if !s.player_address.is_empty() && s.player_address != address {
@@ -196,6 +205,10 @@ mod tests {
         let addr: SocketAddr = body["address"].as_str().unwrap().parse().unwrap();
         assert!(addr.ip().is_loopback(), "{addr}");
         assert_eq!(s.player_address, addr.to_string());
+        assert!(
+            player.endpoint.expects(addr.ip()),
+            "the node's address waits apart"
+        );
         let bound = player.serving.lock().unwrap().as_ref().unwrap().addr();
         assert_eq!(bound, addr);
         // The key works there, and nothing else does

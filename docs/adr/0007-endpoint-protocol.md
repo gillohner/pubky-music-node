@@ -25,10 +25,9 @@ and a second notion of formats for little gain, and a fork would be ours to main
 
 ### 2026-10-28: the app's built-in player only, paired with its own node
 
-The owner's decision after the security review of 2026-10-27 (#6: anyone on the LAN could play to
-an endpoint or hold its sessions). `pm-endpoint` is only the Pubky Music app's built-in player;
-speakers on a Pi or another computer with a DAC run squeezelite (the node's Slimproto server), and
-network speakers keep their own protocols.
+Without a pairing, anyone on the LAN could play to an endpoint or hold its sessions. `pm-endpoint`
+is now only the Pubky Music app's built-in player; speakers on a Pi or another computer with a DAC
+run squeezelite (the node's Slimproto server), and network speakers keep their own protocols.
 
 - **Key.** The app makes a random key (32 bytes from the OS CSPRNG, hex) each time it starts the
   player, and registers it with its node together with the address (`POST /v1/outputs/endpoints
@@ -37,9 +36,13 @@ network speakers keep their own protocols.
 - **Hello.** Protocol 2: `Hello` carries the key. The endpoint compares it in constant time within
   the `Hello` deadline and answers a missing or wrong key, or another protocol version, with an
   `Error` naming the reason (both versions for a mismatch) before anything else.
-- **Connections.** One without the key waits in a small separate cap (8) and is closed by the
-  `Hello` deadline (10 s for all of it, not per read); only a client with the key takes one of the
-  16 session slots.
+- **Connections.** One without the key waits in a small waiting room (8 places, at most 2 per
+  address) and is closed by the `Hello` deadline (10 s for all of it, not per read); only a client
+  with the key takes one of the 16 session slots. An address that has shown the key, or where the
+  app expects its node, waits apart in a room of its own, so other hosts cannot lock the node out.
+- **Not yet:** the key crosses the LAN in the clear in each `Hello`, so a sniffer on the segment
+  could replay it until the app restarts; a challenge (the endpoint sends a nonce, the node answers
+  with an HMAC of it under the key) would close that.
 - **No discovery.** Endpoints no longer advertise over mDNS and the node no longer browses or reads
   `[outputs] endpoints` (it warns when that is set): an endpoint is added by registration only.
 - **Loopback when local.** For a node on the same computer the player listens on 127.0.0.1 and

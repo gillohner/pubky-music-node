@@ -5787,7 +5787,7 @@ mod tests {
         assert!(outs3.as_array().unwrap().iter().all(|o| o["protocol"] != "net"));
     }
 
-    /// The player's key (security review 2026-10-27, #6): the node stores it per address in a
+    /// The player's key: the node stores it per address in a
     /// private file, replaces it when the app registers again with a new one, uses it after a
     /// restart, and never shows it; a missing or wrong key is refused with a reason.
     #[tokio::test]

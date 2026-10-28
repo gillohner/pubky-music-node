@@ -346,13 +346,16 @@ sudo apt install squeezelite
 squeezelite -n "Kitchen" -s <node-ip> -o hw:0,0      # `squeezelite -l` lists the devices
 ```
 
-Network speakers play in their own protocols: UPnP/OpenHome renderers, Chromecast, AirPlay, BluOS,
-MPD and Snapcast (`[outputs]` and Settings › Speakers and outputs).
+Network speakers play in their own protocols: UPnP/OpenHome renderers (Sonos and HEOS players too,
+with their own grouping), Chromecast, AirPlay, BluOS, MPD and Snapcast (`[outputs]` and Settings ›
+Speakers and outputs).
 
 The computer the Pubky Music app runs on is a zone through the app's **built-in player** (ADR 0007).
 It answers only its own node: each time the app starts it makes a random key and registers the
 player with the node it is connected to (`POST /v1/outputs/endpoints {address, key}`); the node
-keeps the key in `<data_dir>/endpoint-keys.json` (0600) and shows it in every connection. With the
+keeps the key in `<data_dir>/endpoint-keys.json` (0600) and shows it in every connection. Another
+host on the LAN can hold at most two connections waiting for their `Hello`, and the node's address
+waits apart, so no one can lock the node out of its player. With the
 node on the same computer (a `localhost` or `127.0.0.1` address) the player listens on loopback
 only; otherwise the node must reach this computer on TCP 7790. The player receives the negotiated
 format and packs it for its DAC exactly as the node would locally; its DAC buffer paces the stream.

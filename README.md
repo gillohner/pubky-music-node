@@ -36,7 +36,8 @@ and Pubky playlists by ISRC. Other subscription services plug in at the same poi
 
 **Outputs.** Local ALSA devices on the node; squeezelite on a Raspberry Pi or another computer next
 to a DAC (Slimproto: bit-perfect PCM, groups start together and stay in time); network speakers in
-their own protocols (UPnP/OpenHome, Chromecast, AirPlay, BluOS, MPD, Snapcast, Squeezebox); the
+their own protocols (UPnP/OpenHome, Sonos, HEOS, Chromecast, AirPlay, BluOS, MPD, Snapcast,
+Squeezebox); the
 Pubky Music app's built-in player on the computer it runs on (own protocol, ADR 0007, paired with
 its own node); and any browser.
 
