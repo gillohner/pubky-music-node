@@ -330,6 +330,14 @@ async fn a_backup_rebuilds_the_node() {
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{garbage}");
 
     // ---- the right one: everything comes back
+    // A key already there, readable by others: replaced, and private afterwards
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let old = dir.path().join("b/remote.key");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
     let (st, report) = restore(&app_b, &locked, Some("correct horse battery")).await;
     assert_eq!(st, StatusCode::OK, "{report}");
     assert_eq!(report["expected"], report["restored"], "{report}");
@@ -350,6 +358,15 @@ async fn a_backup_rebuilds_the_node() {
         std::fs::read(dir.path().join("b/api-token")).unwrap(),
         b"made-by-the-node"
     );
+    #[cfg(unix)]
+    for f in ["b/remote.key", "b/pubky-session.secret", "b/api-token"] {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(dir.path().join(f))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(m & 0o777, 0o600, "{f}");
+    }
     assert!(std::fs::read_to_string(dir.path().join("b/node.restored.toml"))
         .unwrap()
         .contains("app-secret"));
