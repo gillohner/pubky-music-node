@@ -41,6 +41,8 @@ struct AppState {
     tunnel: tokio::sync::Mutex<Option<pm_remote::ClientTunnel>>,
     /// Music kept on this device (`pm-offline`); `None` when its folder can't be opened.
     offline: Option<Arc<offline::Offline>>,
+    /// The remembered node at the address a node claiming its id answered from on the LAN.
+    moved: Mutex<Option<Settings>>,
 }
 
 /// Set while the offline page waits for the node to come back (one waiter at a time).
@@ -295,15 +297,8 @@ async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Se
     };
     if !s.node_id.is_empty() {
         let found = discover(app).await;
-        if let Some(moved) = found
-            .into_iter()
-            .find(|n| n.id == s.node_id && n.url != s.node_url)
-        {
-            tracing::info!(from = %s.node_url, to = %moved.url, "the node moved; following it");
-            s.node_url = moved.url;
-            if let Ok(info) = node::probe(&s).await {
-                return Ok((s, info));
-            }
+        if let Some(Ok(done)) = after_lan_search(&state.moved, &s, &found).await {
+            return Ok(done);
         }
     }
     if s.iroh.is_empty() {
@@ -324,6 +319,21 @@ async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Se
         old.close().await;
     }
     Ok((s, info))
+}
+
+/// After the LAN search, for a remembered node that did not answer at its address: a node that
+/// claims its id from another address.
+async fn after_lan_search(
+    moved: &Mutex<Option<Settings>>,
+    s: &Settings,
+    found: &[pm_discovery::FoundNode],
+) -> Option<Result<(Settings, node::Info), String>> {
+    let n = found.iter().find(|n| n.id == s.node_id && n.url != s.node_url)?;
+    tracing::info!(from = %s.node_url, to = %n.url, "the node moved; following it");
+    let _ = moved;
+    let mut next = s.clone();
+    next.node_url = n.url.clone();
+    node::probe(&next).await.ok().map(|info| Ok((next, info)))
 }
 
 /// Nodes on the LAN (mDNS and SSDP, `pm-discovery`).
@@ -505,6 +515,7 @@ pub fn run() {
                 player_port,
                 tunnel: Default::default(),
                 offline,
+                moved: Mutex::new(None),
             });
 
             let handle = app.handle().clone();
@@ -565,6 +576,77 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MOVED: &str = "Moved: ";
+
+    /// Stands in at the claimed address: answers `/v1/info` as the node would, and hands every
+    /// request it gets to the test.
+    fn claimant() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let body = r#"{"name":"Living room","id":"node-1"}"#;
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, rx)
+    }
+
+    /// The node's id is announced in the clear, so anyone on the LAN can claim it from another
+    /// address: nothing goes there, the token least of all, until the person says so (security
+    /// review 2026-10-27, #3).
+    #[tokio::test]
+    async fn a_node_claiming_the_id_elsewhere_gets_no_token_until_the_person_says_so() {
+        let (url, seen) = claimant();
+        // A test token, built at run time
+        let mut s = Settings::new("http://127.0.0.1:9", &["saved", "token"].join("-"));
+        s.node_id = "node-1".into();
+        let found = vec![pm_discovery::FoundNode {
+            id: "node-1".into(),
+            name: "Living room".into(),
+            url: url.clone(),
+            version: String::new(),
+            token_required: true,
+            via: vec!["mdns".into()],
+        }];
+        let slot = Mutex::new(None);
+        let r = after_lan_search(&slot, &s, &found).await;
+        if let Ok(req) = seen.recv_timeout(std::time::Duration::from_millis(300)) {
+            panic!("the claimed address got a request before the person said yes:\n{req}");
+        }
+        match r {
+            Some(Err(msg)) => assert_eq!(msg, format!("{MOVED}{url}")),
+            other => panic!("expected the page to be asked, got {other:?}"),
+        }
+        let kept = slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the address is kept for the person");
+        assert_eq!(
+            (kept.node_url.as_str(), kept.token.as_str()),
+            (url.as_str(), s.token.as_str())
+        );
+        // A node at the remembered address, or with another id, is not a move.
+        let mut same = found.clone();
+        same[0].url = s.node_url.clone();
+        assert!(after_lan_search(&slot, &s, &same).await.is_none());
+        let mut other = found.clone();
+        other[0].id = "node-2".into();
+        assert!(after_lan_search(&slot, &s, &other).await.is_none());
+    }
 
     #[test]
     fn the_token_goes_only_to_the_node_origin() {
