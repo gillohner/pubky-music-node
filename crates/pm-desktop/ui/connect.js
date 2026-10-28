@@ -73,10 +73,39 @@
   const RETRIES = [2, 3, 5, 5, 10, 10, 15, 15];
   let attempt = 0; // bumped by every new reconnect, so an older retry loop stops
 
+  // A node on the network claims the remembered node's id from another address. Anyone can claim
+  // an id, so the shell sends nothing there until the person says yes here (follow_moved).
+  const MOVED = 'Moved: ';
+  function askMoved(e, oldUrl) {
+    const m = String(e);
+    if (!m.startsWith(MOVED)) return false;
+    const url = m.slice(MOVED.length);
+    attempt++;
+    show('connect', false);
+    show('saved');
+    clearErr();
+    $('saved-msg').textContent = (oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
+      + ' node with its id answers at ' + url + '. If you moved the node or its address changed, use the new address. '
+      + 'Anyone on this network can claim to be your node, so your token goes there only if you say so.';
+    const yes = $('moved-yes');
+    yes.textContent = 'Use ' + url;
+    yes.disabled = false;
+    show('moved-yes');
+    show('retry');
+    show('other');
+    yes.onclick = async () => {
+      clearErr();
+      yes.disabled = true;
+      try { await invoke('follow_moved', { nodeUrl: url }); } catch (err) { fail(err); show('moved-yes', false); } finally { yes.disabled = false; }
+    };
+    return true;
+  }
+
   async function reconnect(nodeUrl) {
     const mine = ++attempt;
     show('connect', false);
     show('saved');
+    show('moved-yes', false);
     show('retry', false);
     show('other', false);
     clearErr();
@@ -87,6 +116,7 @@
         return;
       } catch (e) {
         if (mine !== attempt) return;
+        if (askMoved(e, nodeUrl)) return;
         // Away from the node with music on this device: play it now; the app comes back to the
         // node by itself when it answers (open_offline)
         if (i === 0 && String(e).startsWith("Can't reach") && await invoke('has_downloads').catch(() => false)) {
@@ -130,7 +160,7 @@
     try {
       await invoke('ring_connect');
     } catch (e) {
-      fail(e);
+      if (!askMoved(e)) fail(e);
       show('ring-out', false);
     } finally {
       $('ring').disabled = false;

@@ -18,6 +18,10 @@
           "token": "API token"
         }
       },
+      "zeroconf_moved": {
+        "title": "Pubky Music node at a new address?",
+        "description": "{name} is set up at {old}, and a node with its id now answers at {new}. Anyone on your network can claim a node's id, so the API token goes to {new} only if you say so. Use the new address if you moved the node or its address changed; otherwise ignore this."
+      },
       "reauth_confirm": {
         "title": "New API token",
         "description": "The node refused the token. Enter its current API token.",
@@ -28,12 +32,14 @@
     },
     "error": {
       "cannot_connect": "Can't reach the node at that address.",
-      "invalid_auth": "The node refused the API token."
+      "invalid_auth": "The node refused the API token.",
+      "not_this_node": "The node at the new address is a different node."
     },
     "abort": {
       "already_configured": "This node is already set up.",
       "not_a_node": "That is a Pubky Music endpoint, not a node.",
-      "reauth_successful": "The new token works."
+      "reauth_successful": "The new token works.",
+      "moved": "The node's new address is saved."
     }
   }
 }
