@@ -67,8 +67,8 @@ docker exec pubky-music cat /data/api-token
 ```
 
 Open `http://192.168.1.10:7788` (your address), click **Or paste the API token**, paste it and
-press **Connect**. Then in **Settings › Library folders**, type `/music` and press **Add folder**:
-inside the container, your music folder is `/music`. Continue with the
+press **Connect**. The node reads your music folder (`/music` inside the container) by itself
+when it starts; **Settings › Library folders** lists it. Continue with the
 [first steps](../../README.md#first-steps-after-installing).
 
 To choose the token yourself instead, add `PM_TOKEN: "<a long random string>"` under

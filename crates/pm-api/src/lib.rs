@@ -9,6 +9,7 @@
 //! trusts whoever can reach the socket, so bind to localhost. Remote access
 //! by pubkey (M5) wraps this API rather than replacing it.
 
+pub mod access_token;
 pub mod activity;
 pub mod archive;
 pub mod art;
@@ -43,6 +44,7 @@ pub mod events;
 pub mod favourites;
 pub mod files;
 pub mod first_run;
+pub mod first_steps;
 pub mod gpodder;
 pub mod groups;
 pub mod health;
@@ -199,6 +201,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node", get(groups::index))
         .route("/node/apps", get(apps::get))
         .route("/node/settings", get(node_settings).put(update_node_settings))
+        .route("/node/token", post(access_token::replace))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))
@@ -618,6 +621,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
         .route("/me/prefs", get(prefs::get).put(prefs::put))
+        .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
@@ -808,7 +812,7 @@ fn token_ok(
     headers: &HeaderMap,
     query: &std::collections::HashMap<String, String>,
 ) -> bool {
-    let Some(token) = &state.token else { return true };
+    let Some(token) = state.token() else { return true };
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -971,8 +975,43 @@ async fn upnp_description(State(s): State<Arc<NodeState>>) -> Response {
     ([(header::CONTENT_TYPE, "text/xml; charset=utf-8")], xml).into_response()
 }
 
-async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputInfo>> {
-    Json(s.outputs.list())
+/// An output as `GET /v1/outputs` lists it.
+#[derive(Debug, serde::Serialize)]
+struct OutputView {
+    #[serde(flatten)]
+    info: OutputInfo,
+    /// The speaker system that groups it with others of its kind itself (`sonos`, `heos`,
+    /// `bluos`): a zone of only those is that system's own group, in sync (`POST /v1/zones`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_by: Option<&'static str>,
+}
+
+async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
+    // One lock at a time
+    fn ids<T>(m: &std::collections::HashMap<OutputId, T>) -> std::collections::HashSet<OutputId> {
+        m.keys().cloned().collect()
+    }
+    let sonos = ids(&s.sonos.lock().expect("sonos lock"));
+    let heos = ids(&s.heos.lock().expect("heos lock"));
+    let bluos = ids(&s.bluos_players.lock().expect("bluos lock"));
+    Json(
+        s.outputs
+            .list()
+            .into_iter()
+            .map(|info| {
+                let group_by = if sonos.contains(&info.id) {
+                    Some("sonos")
+                } else if heos.contains(&info.id) {
+                    Some("heos")
+                } else if bluos.contains(&info.id) {
+                    Some("bluos")
+                } else {
+                    None
+                };
+                OutputView { info, group_by }
+            })
+            .collect(),
+    )
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -2300,22 +2339,14 @@ async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiRes
 }
 
 async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool)>> {
-    let f = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .list_folders()?
-        .into_iter()
-        .map(|(p, present)| (p.to_string_lossy().into_owned(), present))
-        .collect();
-    Ok(Json(f))
+    Ok(Json(folder_list(&s)?))
 }
 
 fn settings_view(s: &NodeState) -> NodeSettingsView {
     let copy_rate = files::copy_rate(s);
     // One lock, taken and released here: a guard in a struct literal lives until the end of the
     // whole expression, so a second `lock()` in another field would wait for ever
-    let (jukebox_zone, dev_setting, genre_tags, prefer_full) = {
+    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden) = {
         let lib = s.library.lock().expect("library poisoned");
         let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
         (
@@ -2326,6 +2357,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             on(DEV_OUTPUTS_KEY),
             tags::genre_tags_on(&lib),
             on(item::PREFER_FULL_KEY),
+            on(first_steps::HIDDEN_KEY),
         )
     };
     NodeSettingsView {
@@ -2336,6 +2368,9 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         dev_outputs: std::env::var("PM_DEV_OUTPUTS").is_ok_and(|v| v == "1") || dev_setting,
         genre_tags,
         prefer_full,
+        first_steps_hidden,
+        config_folders: config_folders(s),
+        token_replaceable: s.token_file().is_some(),
     }
 }
 
@@ -2410,6 +2445,12 @@ async fn update_node_settings(
             tracing::info!(tags = n, "files' genres published as tags");
         }
     }
+    if let Some(h) = req.first_steps_hidden {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(first_steps::HIDDEN_KEY, if h { "1" } else { "0" })?;
+    }
     if let Some(d) = req.dev_outputs {
         s.library
             .lock()
@@ -2425,14 +2466,30 @@ async fn update_node_settings(
     Ok(Json(settings_view(&s)))
 }
 
+/// `[path, present]` for the config's folders, then the ones added through the API; present: the
+/// folder is there now.
 fn folder_list(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
-    Ok(s.library
-        .lock()
-        .expect("library poisoned")
-        .list_folders()?
+    let added = s.library.lock().expect("library poisoned").list_folders()?;
+    let mut out: Vec<(std::path::PathBuf, bool)> = s.scan_folders.iter().map(|p| (p.clone(), true)).collect();
+    for (p, enabled) in added {
+        if !out.iter().any(|(q, _)| *q == p) {
+            out.push((p, enabled));
+        }
+    }
+    Ok(out
         .into_iter()
-        .map(|(p, present)| (p.to_string_lossy().into_owned(), present))
+        .map(|(p, enabled)| {
+            let present = enabled && p.is_dir();
+            (p.to_string_lossy().into_owned(), present)
+        })
         .collect())
+}
+
+fn config_folders(s: &NodeState) -> Vec<String> {
+    s.scan_folders
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// `POST /v1/library/folders {path}`: add a folder, watch it, scan it.
@@ -2459,6 +2516,7 @@ async fn add_folder(
     let scan_started = matches!(s.start_scan(vec![path]), Ok(true));
     Ok(Json(FoldersChanged {
         folders: folder_list(&s)?,
+        config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
         removed_tracks: 0,
@@ -2472,6 +2530,15 @@ async fn remove_folder(
     Query(req): Query<FolderRequest>,
 ) -> ApiResult<FoldersChanged> {
     let path = std::path::PathBuf::from(req.path.trim());
+    if s.is_config_folder(&path) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker), which adds it back at every start; remove it there and restart the node",
+                path.display()
+            ),
+        ));
+    }
     if s.is_scanning() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -2483,6 +2550,7 @@ async fn remove_folder(
     s.notify_library();
     Ok(Json(FoldersChanged {
         folders: folder_list(&s)?,
+        config_folders: config_folders(&s),
         scan_started: false,
         removed_files,
         removed_tracks,
@@ -2528,6 +2596,7 @@ async fn move_folder(
     s.notify_library();
     Ok(Json(FoldersChanged {
         folders: folder_list(&s)?,
+        config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
         removed_tracks: 0,
@@ -2739,7 +2808,7 @@ async fn controller_login_poll(
             tracing::info!(%who, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
                 status: "ok".into(),
-                token: s.token.clone(),
+                token: s.token(),
                 user: Some(who),
                 role: Some("owner".into()),
             }))
@@ -3270,7 +3339,9 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["removed_tracks"], 1);
-        assert!(r["folders"].as_array().unwrap().is_empty());
+        // Only the config's folder is left
+        let music = dir.path().join("music");
+        assert_eq!(r["folders"], serde_json::json!([[music.to_string_lossy(), true]]));
         let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
         assert!(tracks["tracks"].as_array().unwrap().is_empty());
     }

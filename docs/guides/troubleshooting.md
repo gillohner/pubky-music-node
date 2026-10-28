@@ -19,31 +19,36 @@ First look at the node's log; most problems are named there.
 
 ## It asks for a token, or the token is refused
 
-Click **Or paste the API token** and paste the token. Where it is:
+Click **Or paste the API token** and paste the token. Unless one is set, the node makes one on
+its first start and keeps it in the `api-token` file in its data folder. Where it is:
 
 | Install | Token |
 | :-- | :-- |
 | Docker | `docker exec pubky-music cat /data/api-token`, or `PM_TOKEN` if you set one |
 | Docker bundle | `PM_TOKEN` in `deploy/bundle/.env` |
-| Umbrel | the password umbrelOS shows for the app |
+| Umbrel | the password umbrelOS shows for the app (`PM_TOKEN` is set to it) |
 | Linux without Docker | `token` in `/etc/pubky-music/node.toml` |
 
 - **Sign in with Pubky Ring** says the node is not signed in yet: use the token the first time,
   then sign the node in under **Settings › My accounts**.
 - You set `PM_TOKEN` after the first start and it has no effect: the config is written only once.
   Add `PM_REWRITE_CONFIG: "1"`, run `docker compose up -d`, then remove the line again.
-- **Settings › About and updates › Change access token** lets this browser use another token; it
-  doesn't change the node's token.
-- To give the node a new token: Docker with a generated token: `docker exec pubky-music rm
-  /data/api-token`, then `docker restart pubky-music` makes a new one. With `PM_TOKEN` or on
+- **Settings › About and updates › Use a different token in this browser** changes only the
+  token this browser uses, not the node's.
+- To give the node a new token: with a token the node made, **Settings › About and updates ›
+  Make a new token** (shown once; the old one stops working at once). With `PM_TOKEN` or on
   Linux, change the token there and restart (Docker also needs `PM_REWRITE_CONFIG`, as above).
   Every app and browser then needs the new one. On Umbrel the token is the app's password.
 
 ## The library stays empty
 
-- Add the folder in **Settings › Library folders**: type the path and press **Add folder**. In
-  Docker and Umbrel the path is `/music`, not the path on the host.
-- After adding files while the node was stopped, press **Scan now** on the same page.
+- **Settings › Library folders** lists the folders. In Docker and Umbrel, `/music` (your mounted
+  music folder) is there by itself, marked **From config**, and read at every start. "Not found
+  on this computer" means the folder isn't mounted or the path is wrong.
+- Another folder: type its path there and press **Add folder**. In Docker the path is the one
+  inside the container, not the one on the host.
+- Files added to a folder you added in Settings while the node was stopped: press **Scan now** on
+  the same page.
 - **Permissions:** the node must be able to read the files. In Docker it runs as user id 1000:
   `docker exec pubky-music ls /music` must list your files. If it says "Permission denied", make
   the folder readable for everyone (`chmod -R a+rX /srv/music`) or owned by user 1000. Without

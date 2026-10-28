@@ -380,8 +380,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: headless smoke test of every view
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
@@ -484,8 +484,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: every visible control does something (real browser)
         timeout-minutes: 45
         run: |
@@ -527,8 +527,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: Playwright and Chromium
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
@@ -546,6 +546,9 @@ jobs:
       - name: no overlap on any screen (1440, 1024, 390 px; light and dark)
         timeout-minutes: 20
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-overlap.js ci-token http://127.0.0.1:7788
+      - name: setting a node up (Get started, config folders, grouping every kind of output, tokens)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-setup.js ci-token http://127.0.0.1:7788
       - name: first run from zero (a new node, no folders, contact or Pubky identity, until music plays)
         timeout-minutes: 10
         run: |
