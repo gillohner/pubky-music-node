@@ -70,3 +70,4 @@ id3 = { workspace = true }
 hound = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tokio-tungstenite = "0.30"

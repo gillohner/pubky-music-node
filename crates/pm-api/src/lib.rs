@@ -1334,8 +1334,12 @@ fn zone_of(s: &NodeState, id: &str) -> Result<Arc<Zone>, ApiError> {
         .ok_or_else(|| ApiError::not_found(format!("no zone {id}")))
 }
 
-async fn zones(State(s): State<Arc<NodeState>>) -> Json<Vec<ZoneState>> {
-    Json(s.zones.list())
+async fn zones(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
+) -> Json<Vec<ZoneState>> {
+    // A listener sees only the zones open to listeners
+    Json(events::visible(&s, &c, s.zones.list()))
 }
 
 async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
@@ -1674,9 +1678,16 @@ async fn sleep_set(
 /// whatever it was doing; the source is left stopped and empty.
 async fn transfer(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
     Path(id): Path<String>,
     Json(body): Json<TransferRequest>,
 ) -> ApiResult<ZoneState> {
+    // The middleware checked the zone in the path; the target needs the same right
+    if !accounts::may_use_zone(&s, &c, &body.to) {
+        return Err(accounts::refused(
+            "the owner has not opened that zone to listeners",
+        ));
+    }
     if body.to == id {
         return Err(ApiError::bad_request("cannot transfer a zone to itself"));
     }
