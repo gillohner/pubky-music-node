@@ -33,6 +33,12 @@ player provider finds the zones by itself (it searches every 5 minutes; reloadin
 searches at once). Home Assistant's DLNA Digital Media Renderer integration, BubbleUPnP and other
 UPnP controllers find them too.
 
+Like any renderer the zones take no token, so the node answers renderer requests from the LAN only:
+a private or loopback source address on its own port, never through remote access (iroh), the
+Cloudflare tunnel or a reverse proxy (403). The URIs a controller sets and its event callbacks must
+be LAN or public addresses; loopback only for a controller on the node's own machine, and never
+link-local (`169.254.x`, e.g. a cloud metadata service).
+
 - **Two ways MA streams:**
   - *Flow mode*, MA's default for DLNA: one continuous stream; MA does the queue, crossfade and seek.
   - *Flow mode off*: track URLs with `SetNextAVTransportURI`; the zone plays them back to back,

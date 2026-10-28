@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-28
+
+- **The zones answer as renderers on the LAN only** (security review 2026-10-27, high 2). The UPnP/DLNA routes take no token, like any renderer, so the node now serves them only to a private or loopback source address on its own listener: never through remote access (iroh gets its own listener, so the node knows), the Cloudflare tunnel or a proxy (any forwarding header), which get 403. The URIs a controller sets (`SetAVTransportURI`, `SetNextAVTransportURI`, which now also needs http(s)) and its GENA callbacks must resolve to LAN or public addresses: loopback only for a controller on the same machine, never link-local (cloud metadata), unspecified or multicast. A node without an API token answers only directly, and its remote access stays off.
+
 ## 2026-10-27
 
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.

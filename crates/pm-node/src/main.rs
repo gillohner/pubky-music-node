@@ -309,8 +309,19 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             cfg.library.watch_quiet_secs.max(1),
         ));
     }
-    if let Some(remote) = remote_config(cfg) {
-        state.configure_remote(remote).await;
+    if cfg.remote.enabled && state.token.is_none() {
+        // Whoever reached a tokenless node through the tunnel would be its owner
+        tracing::info!("remote access off: the node has no API token");
+    } else if cfg.remote.enabled {
+        // The tunnel gets its own listener, so the node knows those requests came through it
+        match pm_api::peer::serve_remote(state.clone()).await {
+            Ok(target) => {
+                if let Some(remote) = remote_config(cfg, target) {
+                    state.configure_remote(remote).await;
+                }
+            }
+            Err(e) => tracing::warn!("remote access off: no listener for it: {e}"),
+        }
     }
     let secret_file = session_secret_path(cfg);
     if secret_file.exists() {
@@ -412,18 +423,12 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::serve(state, &cfg.api.listen).await
 }
 
-/// Remote access settings from `[remote]`, or `None` when it is off or misconfigured.
-fn remote_config(cfg: &NodeConfig) -> Option<pm_api::remote::RemoteConfig> {
+/// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when
+/// it is off or misconfigured.
+fn remote_config(cfg: &NodeConfig, target: std::net::SocketAddr) -> Option<pm_api::remote::RemoteConfig> {
     if !cfg.remote.enabled {
         return None;
     }
-    let listen: std::net::SocketAddr = cfg.api.listen.parse().ok()?;
-    // The tunnel talks to the API from this machine.
-    let target = if listen.ip().is_unspecified() {
-        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, listen.port()))
-    } else {
-        listen
-    };
     let relays = match cfg.remote.relay.trim() {
         "" => pm_remote::Relays::Public,
         "none" => pm_remote::Relays::Off,

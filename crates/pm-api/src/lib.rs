@@ -62,6 +62,7 @@ pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
 pub mod party;
+pub mod peer;
 pub mod people;
 pub mod pinakes_reader;
 pub mod play_from;
@@ -724,8 +725,19 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .with_state(state.clone()),
         )
         .merge(subsonic::router(state.clone()))
-        // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`).
-        .merge(state.renderer.get().map(|r| r.router()).unwrap_or_default())
+        // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`),
+        // to LAN peers only (peer.rs)
+        .merge(
+            state
+                .renderer
+                .get()
+                .map(|r| r.router().layer(middleware::from_fn(peer::lan_only)))
+                .unwrap_or_default(),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::tokenless_direct_only,
+        ))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -737,7 +749,12 @@ pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    axum::serve(listener, router(state)).await?;
+    // Peer addresses: the renderer answers LAN peers only (peer.rs)
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
