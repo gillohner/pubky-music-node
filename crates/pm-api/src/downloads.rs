@@ -12,7 +12,7 @@
 //! the PATH); without it they answer 501 and the original stays available. At most one transcode
 //! per CPU runs at a time, each within a time limit (killed past it), and a file is never read
 //! into memory whole: the cache fills and answers in bounded chunks. The browser stream
-//! (`/v1/library/tracks/{id}/file`) and Subsonic's `stream` answer the same way ([`stream_file`]).
+//! (`/v1/library/tracks/{id}/file`) and Subsonic's `stream` answer the same way (`stream_file`).
 
 use crate::state::NodeState;
 use crate::ApiError;
