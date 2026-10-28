@@ -190,7 +190,7 @@ def main():
 [library]
 folders = ["{out}/music"]
 [api]
-listen = "{os.environ.get('PM_TEST_LISTEN', '0.0.0.0:7788')}"
+listen = "{os.environ.get('PM_TEST_LISTEN', '127.0.0.1:7788')}"
 announce = false
 [outputs]
 discover = false
