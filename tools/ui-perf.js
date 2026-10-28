@@ -7,6 +7,10 @@
 //   node tools/ui-perf.js <api token> [http://127.0.0.1:7788] [--budget tools/perf-budget.json] [--runs 3]
 // With --budget, exits 1 when a number is over its budget (CI: the 5,000-track fixture).
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// Waits until fn(arg) is truthy in the page and returns its value. Playwright's waitForFunction rebuilds the
+// predicate with new Function inside the page, which the node's Content-Security-Policy forbids, so this polls
+// through evaluate instead.
+const waitFor = async (page, fn, arg = null, timeout = 30000) => { const end = Date.now() + timeout; for (;;) { const v = await page.evaluate(fn, arg).catch(() => null); if (v) return v; if (Date.now() > end) throw new Error('timed out waiting in the page'); await new Promise((r) => setTimeout(r, 100)); } };
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : dflt; };
 const budgetFile = opt('--budget', null); const RUNS = Number(opt('--runs', 3));
@@ -34,12 +38,12 @@ const measure = async (p, path, selector) => {
   await p.goto('about:blank');
   const t0 = Date.now();
   await p.goto(BASE + path, { waitUntil: 'commit' });
-  await p.waitForSelector(`main :is(${selector})`, { timeout: 60000 }).catch(() => null);
+  await p.waitForSelector(`main :is(${selector})`, 60000).catch(() => null);
   // Ready: the selector is on screen; then the first idle moment of the main thread.
   return p.evaluate(async () => {
     const nav = performance.getEntriesByType('navigation')[0];
     const ready = performance.now();
-    await new Promise((r) => requestIdleCallback(r, { timeout: 30000 }));
+    await new Promise((r) => requestIdleCallback(r, 30000));
     const idle = performance.now();
     const fcp = (performance.getEntriesByName('first-contentful-paint')[0] || {}).startTime || null;
     const json = performance.getEntriesByType('resource').filter((e) => e.name.includes('/v1/')).reduce((n, e) => n + (e.encodedBodySize || 0), 0);
@@ -69,9 +73,9 @@ const measure = async (p, path, selector) => {
     await p.evaluate(() => { window.pmLastSearch = null; });
     for (const ch of w) await p.keyboard.type(ch, { delay: 40 });
     const t = Date.now();
-    await p.waitForSelector('#sresults #stop', { timeout: 15000 }).catch(() => null);
+    await p.waitForSelector('#sresults #stop', 15000).catch(() => null);
     typed.push(Date.now() - t);
-    const ms = await p.waitForFunction((q) => window.pmLastSearch && window.pmLastSearch.q === q && window.pmLastSearch.sources.library, w, { timeout: 15000 }).then((h) => h.jsonValue()).catch(() => null);
+    const ms = await waitFor(p, (q) => window.pmLastSearch && window.pmLastSearch.q === q && window.pmLastSearch.sources.library, w, 15000).catch(() => null);
     node.push(ms);
   }
   out.search = { after_last_key_ms: median(typed), node_ms: median(node), node_max_ms: Math.max(...node) };

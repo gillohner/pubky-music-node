@@ -5,6 +5,10 @@
 // runners to sign in first, so the real one can't be relied on there); --live uses the real one.
 //   node tools/ui-youtube.js <api token> [http://127.0.0.1:7788] [--live]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// Waits until fn(arg) is truthy in the page and returns its value. Playwright's waitForFunction rebuilds the
+// predicate with new Function inside the page, which the node's Content-Security-Policy forbids, so this polls
+// through evaluate instead.
+const waitFor = async (page, fn, arg = null, timeout = 30000) => { const end = Date.now() + timeout; for (;;) { const v = await page.evaluate(fn, arg).catch(() => null); if (v) return v; if (Date.now() > end) throw new Error('timed out waiting in the page'); await new Promise((r) => setTimeout(r, 100)); } };
 const args = process.argv.slice(2).filter((a) => a !== '--live'); const LIVE = process.argv.includes('--live');
 const TOKEN = args[0] || ''; const BASE = args[1] || 'http://127.0.0.1:7788';
 // The stand-in: YT.Player with the calls and events the page uses; ids starting with "x" can't be embedded (150)
@@ -28,7 +32,7 @@ const VIDEO = 'aqz-KE-bpKQ'; // Big Buck Bunny (Blender Foundation), embeddable
     await ctx.route('https://www.youtube.com/embed/**', (r) => r.fulfill({ contentType: 'text/html', body: '<body style="background:#000"></body>' }));
   }
   const p = await ctx.newPage(); const errs = []; p.on('pageerror', (e) => errs.push(e.message));
-  await p.goto(BASE + '/'); await p.waitForFunction(() => window.pmPlayer, null, { timeout: 15000 });
+  await p.goto(BASE + '/'); await waitFor(p, () => !!window.pmPlayer, null, 15000);
   const lib = await p.evaluate(async (t) => (await (await fetch('/v1/library/tracks?limit=1', { headers: { authorization: 'Bearer ' + t } })).json()).tracks[0], TOKEN);
   const file = `${BASE}/v1/library/tracks/${lib.id}/file?token=${encodeURIComponent(TOKEN)}`;
   await p.evaluate(([v, f]) => window.pmPlayer.play([{ uri: `youtube:video:${v}`, title: 'Big Buck Bunny' }, { uri: f, title: 'A library song' }]), [VIDEO, file]);

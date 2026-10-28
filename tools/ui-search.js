@@ -3,6 +3,10 @@
 // merged rows, the progress bar, and a pasted link opening its item page.
 //   node tools/ui-search.js <api token> [http://127.0.0.1:7788] [screenshot dir]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// Waits until fn(arg) is truthy in the page and returns its value. Playwright's waitForFunction rebuilds the
+// predicate with new Function inside the page, which the node's Content-Security-Policy forbids, so this polls
+// through evaluate instead.
+const waitFor = async (page, fn, arg = null, timeout = 30000) => { const end = Date.now() + timeout; for (;;) { const v = await page.evaluate(fn, arg).catch(() => null); if (v) return v; if (Date.now() > end) throw new Error('timed out waiting in the page'); await new Promise((r) => setTimeout(r, 100)); } };
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788'; const OUT = process.argv[4] || null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
@@ -16,7 +20,7 @@ const errors = [];
     await p.fill('#search', q); await p.press('#search', 'Enter');
     await sleep(150);
     const progressShown = await p.$eval('#sprog', (e) => !e.hidden).catch(() => false);
-    await p.waitForFunction(() => document.querySelector('#sprog').hidden, null, { timeout: 40000 }).catch(() => {});
+    await waitFor(p, () => document.querySelector('#sprog').hidden, null, 40000).catch(() => {});
     const t = await p.evaluate(() => window.pmLastSearch);
     const chips = await p.$$eval('#scopechips .chip', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
     const sections = await p.$$eval('#sresults .section h3', (els) => els.map((e) => e.textContent));
@@ -36,7 +40,7 @@ const errors = [];
   console.log('Back →', new URL(p.url()).search);
   // A pasted link opens its item page.
   await p.fill('#search', 'https://tidal.com/album/199574241'); await p.press('#search', 'Enter');
-  await p.waitForSelector('#main #iabout', { timeout: 30000 }).catch(() => {});
+  await p.waitForSelector('#main #iabout', 30000).catch(() => {});
   const h1 = await p.textContent('#main h1').catch(() => null);
   console.log('pasted TIDAL link →', new URL(p.url()).pathname, '|', h1);
   if (!/^\/album\/(u|tidal)-/.test(new URL(p.url()).pathname)) errors.push('a pasted link did not open its item page');

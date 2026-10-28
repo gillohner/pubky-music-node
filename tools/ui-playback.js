@@ -7,10 +7,14 @@
 // fast while 400 MB are copied, and the copy keeps its pace).
 //   node tools/ui-playback.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// Waits until fn(arg) is truthy in the page and returns its value. Playwright's waitForFunction rebuilds the
+// predicate with new Function inside the page, which the node's Content-Security-Policy forbids, so this polls
+// through evaluate instead.
+const waitFor = async (page, fn, arg = null, timeout = 30000) => { const end = Date.now() + timeout; for (;;) { const v = await page.evaluate(fn, arg).catch(() => null); if (v) return v; if (Date.now() > end) throw new Error('timed out waiting in the page'); await new Promise((r) => setTimeout(r, 100)); } };
 const TOKEN = process.argv[2] || ''; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const problems = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) problems.push(what); };
-const playing = (p) => p.waitForFunction(() => { const a = document.querySelector('audio'); return a && a.src && !a.paused && a.currentTime > 0.3; }, null, { timeout: 15000 }).then(() => true).catch(() => false);
+const playing = (p) => waitFor(p, () => { const a = document.querySelector('audio'); return a && a.src && !a.paused && a.currentTime > 0.3; }, null, 15000).then(() => true).catch(() => false);
 
 (async () => {
   // The first FLAC of the Tracks page (fixtures may have no album tags)
