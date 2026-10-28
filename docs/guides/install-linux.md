@@ -51,7 +51,9 @@ EOF
 echo "Web page: http://$LAN_IP:7788  token: $TOKEN"
 ```
 
-Write the token down; it is also in `/etc/pubky-music/node.toml`. Your music folder must be
+Write the token down; it is also in `/etc/pubky-music/node.toml`. The node gives speakers this
+machine's address on the way to your router. With a VPN running or several networks that may be
+the wrong one: then add `public_url = "http://$LAN_IP:7788"` under `[api]`. Your music folder must be
 readable by the `pubky-music` user: `sudo -u pubky-music ls /srv/music` (your folder) shows
 whether it is.
 

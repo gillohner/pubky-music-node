@@ -76,8 +76,10 @@ The data folder must be writable by user id 1000. With a folder instead of a Doc
 ## A speaker is listed but stays silent
 
 - Speakers fetch the music from the node's address on your network. The node finds it by itself
-  and writes it in its log at start (`speakers fetch music from this address`). On a machine with
-  several networks it may pick one the speakers can't reach: set `PM_PUBLIC_URL` (`public_url`)
+  and writes it in its log at start (`speakers fetch music from this address`). It is the address on
+  the way to the internet, so with a VPN running, several networks, or Docker without host
+  networking it may be one the speakers can't reach (**Explain what is on the network** says
+  when it looks like a VPN or Docker address): set `PM_PUBLIC_URL` (`public_url`)
   to the right one, for example `http://192.168.1.10:7788`. **Explain what is on the network**
   warns when the address can't work (`localhost`, `0.0.0.0`).
 - The speaker must reach the node on TCP 7788 (check firewalls between networks).

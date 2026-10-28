@@ -1242,6 +1242,14 @@ async fn discovery_report(
             local_address.as_deref().unwrap_or("<node ip>")
         ));
     }
+    if s.public_url_guessed() {
+        if let Some(why) = doubtful_guess(&s.public_url) {
+            notes.push(format!(
+                "public_url is not set, so the node picked {}, which {why}. If speakers stay silent, set [api] public_url (PM_PUBLIC_URL) to the address they reach.",
+                s.public_url
+            ));
+        }
+    }
     Ok(Json(DiscoveryReport {
         upnp: upnp
             .into_iter()
@@ -1271,6 +1279,23 @@ async fn discovery_report(
         saved_endpoints: s.endpoint_addresses(),
         node: s.name.clone(),
     }))
+}
+
+/// Why an address the node picked for itself may not be the one speakers reach: a VPN's or
+/// another non-home address, or Docker's default bridge (the container is not on the host
+/// network). `None` when it looks like a home network address.
+fn doubtful_guess(public_url: &str) -> Option<&'static str> {
+    let host = url::Url::parse(public_url).ok()?.host_str()?.to_string();
+    let std::net::IpAddr::V4(ip) = host.parse().ok()? else {
+        return None;
+    };
+    if ip.octets()[..2] == [172, 17] {
+        Some("looks like Docker's bridge network (run the container on the host network)")
+    } else if !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() {
+        Some("is not a home network address (a VPN?)")
+    } else {
+        None
+    }
 }
 
 /// The address this node talks to the network from.
@@ -11987,5 +12012,94 @@ exec sleep 300
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// A node at `public_url`, which the binary guessed (none configured) or the owner set.
+    async fn state_at(dir: &std::path::Path, public_url: &str, guessed: bool) -> Arc<NodeState> {
+        let db = dir.join("lib.sqlite");
+        let s = NodeState::new(
+            NodeSettings {
+                name: "test".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.join("art"),
+                mirror_dir: dir.join("homeserver"),
+                pipeline: PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: public_url.into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            Library::open(&db).unwrap(),
+            OutputRegistry::new(),
+        );
+        s.set_public_url_guessed(guessed);
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            scopes: String::new(),
+        };
+        s
+    }
+
+    async fn tidal_redirect(s: Arc<NodeState>, host: &str) -> String {
+        let req = Request::builder()
+            .uri("/v1/sources/tidal/status")
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(s).oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v["redirect_uri"].as_str().unwrap().to_string()
+    }
+
+    /// The LAN address the node picks for speakers when public_url is empty is not where the
+    /// browser is: sign-in callbacks follow the request (localhost, umbrel.local, a proxy). A
+    /// public_url the owner set is used as it is.
+    #[tokio::test]
+    async fn a_guessed_public_url_leaves_sign_in_callbacks_to_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lan = "http://192.168.1.10:7788";
+        for host in ["localhost:7788", "umbrel.local:7788"] {
+            let s = state_at(dir.path(), lan, true).await;
+            assert_eq!(
+                tidal_redirect(s, host).await,
+                format!("http://{host}/tidal/callback")
+            );
+        }
+        let s = state_at(dir.path(), lan, false).await;
+        assert_eq!(
+            tidal_redirect(s, "localhost:7788").await,
+            "http://192.168.1.10:7788/tidal/callback"
+        );
+    }
+
+    /// The network check says when an address the node picked for itself looks wrong for
+    /// speakers (Docker's bridge, a VPN); never about one the owner set.
+    #[tokio::test]
+    async fn the_network_check_doubts_a_guessed_bridge_or_vpn_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = |s: Arc<NodeState>| async move {
+            let (_, r) = call(&router(s), "GET", "/v1/outputs/discovery?quick=1", None).await;
+            r["notes"].to_string()
+        };
+        let docker = notes(state_at(dir.path(), "http://172.17.0.2:7788", true).await).await;
+        assert!(docker.contains("Docker's bridge network"), "{docker}");
+        let vpn = notes(state_at(dir.path(), "http://100.101.2.3:7788", true).await).await;
+        assert!(vpn.contains("a VPN?"), "{vpn}");
+        let home = notes(state_at(dir.path(), "http://192.168.1.10:7788", true).await).await;
+        assert!(!home.contains("picked"), "{home}");
+        let set = notes(state_at(dir.path(), "http://172.17.0.2:7788", false).await).await;
+        assert!(!set.contains("picked"), "{set}");
     }
 }

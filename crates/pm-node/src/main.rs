@@ -194,6 +194,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         ),
         api_token::Source::Configured | api_token::Source::None => {}
     }
+    let (public_url, public_url_guessed) = public_url(cfg);
     let state = pm_api::NodeState::new(
         pm_api::NodeSettings {
             name: cfg.api.name.clone(),
@@ -206,7 +207,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             token,
             subsonic_user: cfg.api.subsonic_user.clone(),
             pubky: cfg.pubky.clone(),
-            public_url: public_url(cfg),
+            public_url,
             upnp: cfg.outputs.upnp,
             cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
@@ -264,6 +265,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         lib,
         registry,
     );
+    state.set_public_url_guessed(public_url_guessed);
     state.zones_for_all_outputs();
     {
         let st = state.clone();
@@ -487,10 +489,11 @@ fn renderers(
     state.start_renderer(addr.port(), !addr.ip().is_loopback())
 }
 
-/// `[api] public_url`, or one devices can reach when it is empty (the log says which).
-fn public_url(cfg: &NodeConfig) -> String {
+/// `[api] public_url`, or one devices can reach when it is empty (the log says which), and
+/// whether it was guessed.
+fn public_url(cfg: &NodeConfig) -> (String, bool) {
     if !cfg.api.public_url.is_empty() {
-        return cfg.api.public_url.clone();
+        return (cfg.api.public_url.clone(), false);
     }
     let url = config::default_public_url(&cfg.api.listen, config::route_address());
     if url.contains("0.0.0.0") || url.contains("[::]") {
@@ -498,7 +501,7 @@ fn public_url(cfg: &NodeConfig) -> String {
     } else {
         tracing::info!(%url, "public_url is not set: speakers fetch music from this address (set [api] public_url to change it)");
     }
-    url
+    (url, true)
 }
 
 fn session_secret_path(cfg: &NodeConfig) -> PathBuf {
