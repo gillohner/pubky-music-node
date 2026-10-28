@@ -85,13 +85,30 @@ pub fn save(path: &Path, s: Option<&Settings>) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(s)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // The file holds the node's token: it is created 0600 under a side name and renamed into
+    // place, so it is never readable by others, not even for a moment, and a crash mid-write
+    // leaves the old file (security review 2026-10-27, low).
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("settings");
+    let side = path.with_file_name(format!(".{name}.tmp"));
+    let _ = std::fs::remove_file(&side);
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600);
+        }
+        let mut f = open.open(&side)?;
+        f.write_all(&serde_json::to_vec_pretty(s)?)?;
+        f.sync_all()?;
+        std::fs::rename(&side, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&side);
     }
-    Ok(())
+    Ok(written?)
 }
 
 #[cfg(test)]
@@ -127,6 +144,39 @@ mod tests {
         assert_eq!(load(&path).unwrap().node_url, "http://b:2");
         save(&path, None).unwrap();
         assert_eq!(load(&path), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The file holds the node's token. Written in place and then chmod'ed, it was readable by
+    /// anyone for a moment, and whoever had it open then reads the token through that handle for
+    /// good (security review 2026-10-27, low). It is created 0600 under a side name and renamed
+    /// into place: an old handle still sees the old file, and the new one never was wider.
+    #[cfg(unix)]
+    #[test]
+    fn the_token_is_never_in_a_file_others_can_read() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pm-desktop-perm-{}", std::process::id()));
+        let path = dir.join("node.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A settings file from before, readable by others, held open by someone
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut theirs = std::fs::File::open(&path).unwrap();
+        let token = ["fresh", "token"].join("-"); // built at run time
+        save(&path, Some(&Settings::new("http://a:1", &token))).unwrap();
+        let mut seen = String::new();
+        theirs.read_to_string(&mut seen).unwrap();
+        assert!(!seen.contains(&token), "an old handle read the new token: {seen}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+        assert_eq!(load(&path).unwrap().token, token);
+        // Nothing is left beside it
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["node.json"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
