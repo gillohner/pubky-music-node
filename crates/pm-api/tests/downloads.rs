@@ -643,3 +643,101 @@ async fn a_stuck_transcode_is_killed_at_its_time_limit() {
         .flatten()
         .all(|e| !e.file_name().to_string_lossy().contains("opus")));
 }
+
+/// A big file from a slow share streams into the cache for longer than the node's usual 20 s
+/// request limit: only a share that stops sending is given up on (review of #130).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_share_file_gets_through_past_twenty_seconds() {
+    let chunks = 23u8;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    // One chunk a second: steady, never idle, longer than 20 s in all
+    let share = axum::Router::new().route(
+        "/dav/{name}",
+        axum::routing::get(move || async move {
+            let body = futures_util::stream::unfold(0u8, move |i| async move {
+                if i == chunks {
+                    return None;
+                }
+                if i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Some((Ok::<_, std::io::Error>(vec![i; 1000]), i + 1))
+            });
+            axum::body::Body::from_stream(body)
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, share).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    Library::open(&db)
+        .unwrap()
+        .set_setting(
+            "webdav.shares",
+            &serde_json::json!([{"id": "slow", "name": "Slow", "url": format!("{base}/dav/")}]).to_string(),
+        )
+        .unwrap();
+    let s = node(dir.path());
+    let id = add_track(&s, std::path::Path::new("webdav://slow/09 Long.flac"), "flac");
+    let app = router(s.clone());
+    let g = get(&app, OWNER, &format!("/v1/library/tracks/{id}/file"), &[]).await;
+    assert_eq!(g.status, StatusCode::OK, "{}", String::from_utf8_lossy(&g.body));
+    let want: Vec<u8> = (0..chunks).flat_map(|i| vec![i; 1000]).collect();
+    assert_eq!(g.body, want);
+}
+
+/// A client that goes away mid-transcode drops the request: ffmpeg is killed and its partial file
+/// is removed at once (review of #130).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_transcode_leaves_no_partial_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let file = dir.path().join("10 Song.flac");
+    std::fs::write(&file, vec![7u8; 1000]).unwrap();
+    let id = add_track(&s, &file, "flac");
+    let fake = dir.path().join("slow-ffmpeg");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nfor last; do :; done\necho partial > \"$last\"\nexec sleep 60\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::downloads::FFMPEG_SETTING, fake.to_str().unwrap())
+        .unwrap();
+    let app = router(s.clone());
+    let parts = || {
+        std::fs::read_dir(dir.path().join("downloads"))
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let uri = format!("/v1/library/tracks/{id}/download?format=mp3");
+    // Boxed, so dropping it drops the request itself
+    let mut request = Box::pin(get(&app, OWNER, &uri, &[]));
+    // Running: ffmpeg has started its partial file
+    let mut started = false;
+    for _ in 0..100 {
+        if tokio::time::timeout(std::time::Duration::from_millis(50), &mut request)
+            .await
+            .is_ok()
+        {
+            panic!("the stuck transcode answered");
+        }
+        if parts() == 1 {
+            started = true;
+            break;
+        }
+    }
+    assert!(started, "ffmpeg started");
+    // The client goes away
+    drop(request);
+    assert_eq!(parts(), 0, "the partial file went with the request");
+}

@@ -662,13 +662,7 @@ pub(crate) async fn fetch_file(s: &NodeState, key: &Path) -> std::io::Result<req
         .await
         .map_err(std::io::Error::other)?
         .map_err(std::io::Error::other)?;
-    let resp = s
-        .http_client()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| std::io::Error::other(e.without_url().to_string()))?;
+    let resp = crate::downloads::send_for_cache(s.http_client().get(url).bearer_auth(token)).await?;
     if !resp.status().is_success() {
         return Err(std::io::Error::other(format!(
             "the drive answered {}",

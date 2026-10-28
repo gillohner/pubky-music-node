@@ -459,10 +459,7 @@ pub(crate) async fn fetch_library_file(s: &NodeState, path: &Path) -> std::io::R
     if !share.user.is_empty() {
         rb = rb.basic_auth(&share.user, Some(&share.password));
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| std::io::Error::other(e.without_url().to_string()))?;
+    let resp = crate::downloads::send_for_cache(rb).await?;
     if !resp.status().is_success() {
         return Err(std::io::Error::other(format!(
             "the share answered {}",

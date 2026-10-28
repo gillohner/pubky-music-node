@@ -37,6 +37,11 @@ pub const TRANSCODE_TIMEOUT_SETTING: &str = "downloads.transcode_timeout_s";
 const SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// What one read or write of a file moves at most.
 const CHUNK: usize = 256 * 1024;
+/// A share or a drive that sends nothing for this long is given up on. A fetch into the cache has
+/// no shorter total limit than [`FETCH_MAX`], so a big file over a slow link gets through.
+pub(crate) const FETCH_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+/// The longest one fetch into the cache may take, however steadily it moves.
+pub(crate) const FETCH_MAX: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
 /// `?format=&bitrate=`
 #[derive(Debug, Deserialize, Default)]
@@ -208,6 +213,45 @@ fn evict(dir: &FsPath, cap: u64, keep: &FsPath) {
     }
 }
 
+/// Sends a request for a file to fill the cache with: no total limit shorter than [`FETCH_MAX`]
+/// (it replaces the node client's 20 s), and the answer's headers within [`FETCH_IDLE`]; the body
+/// is then read with [`FETCH_IDLE`] between chunks.
+pub(crate) async fn send_for_cache(rb: reqwest::RequestBuilder) -> std::io::Result<reqwest::Response> {
+    tokio::time::timeout(FETCH_IDLE, rb.timeout(FETCH_MAX).send())
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer"))?
+        .map_err(|e| std::io::Error::other(e.without_url().to_string()))
+}
+
+/// A `.part` file being written into the cache. It is removed when dropped (a failure, a timeout,
+/// a client that went away and dropped the request), unless [`PartFile::finish`] moved it in place.
+struct PartFile(Option<PathBuf>);
+
+impl PartFile {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn path(&self) -> &FsPath {
+        self.0.as_deref().expect("a part file until it is finished")
+    }
+
+    /// Moves it to `dest`; when that fails it is removed like any other.
+    async fn finish(mut self, dest: &FsPath) -> std::io::Result<()> {
+        tokio::fs::rename(self.path(), dest).await?;
+        self.0 = None;
+        Ok(())
+    }
+}
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// The track's file on this machine: the library path itself when it is a local file, else a copy
 /// in the cache (fetched once from its share or drive, in chunks).
 pub(crate) async fn local_original(
@@ -232,49 +276,51 @@ pub(crate) async fn local_original(
         .await
         .map_err(|e| ApiError::not_found(format!("file for track {id}: {e}")))?;
     let cap = cache_cap_bytes(s);
-    fill_cache(&dir, &dest, resp, cap).await?;
+    fill_cache(&dir, &dest, resp, cap, FETCH_IDLE).await?;
     evict(&dir, cap, &dest);
     Ok(dest)
 }
 
-/// Writes the body into the cache chunk by chunk (never more than the cache's cap), then moves it
-/// in place; nothing is left behind when it fails.
+/// Writes the body into the cache chunk by chunk (never more than the cache's cap, giving up when
+/// the source sends nothing for `idle`), then moves it in place; nothing is left behind when it
+/// fails or is dropped.
 async fn fill_cache(
     dir: &FsPath,
     dest: &FsPath,
     mut resp: reqwest::Response,
     cap: u64,
+    idle: std::time::Duration,
 ) -> Result<(), ApiError> {
     use tokio::io::AsyncWriteExt;
     let io =
         |e: std::io::Error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("download cache: {e}"));
     tokio::fs::create_dir_all(dir).await.map_err(io)?;
-    let part = dest.with_extension("part");
-    let filled = async {
-        let mut f = tokio::fs::File::create(&part).await.map_err(io)?;
-        let mut written = 0u64;
-        while let Some(chunk) = resp
-            .chunk()
+    let part = PartFile::new(dest.with_extension("part"));
+    let mut f = tokio::fs::File::create(part.path()).await.map_err(io)?;
+    let mut written = 0u64;
+    loop {
+        let chunk = tokio::time::timeout(idle, resp.chunk())
             .await
-            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("the file's source: {e}")))?
-        {
-            written += chunk.len() as u64;
-            if written > cap {
-                return Err(ApiError::new(
-                    StatusCode::INSUFFICIENT_STORAGE,
-                    "the file is bigger than the download cache",
-                ));
-            }
-            f.write_all(&chunk).await.map_err(io)?;
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("the file's source sent nothing for {} s", idle.as_secs()),
+                )
+            })?
+            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("the file's source: {e}")))?;
+        let Some(chunk) = chunk else { break };
+        written += chunk.len() as u64;
+        if written > cap {
+            return Err(ApiError::new(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "the file is bigger than the download cache",
+            ));
         }
-        f.flush().await.map_err(io)
+        f.write_all(&chunk).await.map_err(io)?;
     }
-    .await;
-    if let Err(e) = filled {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(e);
-    }
-    tokio::fs::rename(&part, dest).await.map_err(io)
+    f.flush().await.map_err(io)?;
+    drop(f);
+    part.finish(dest).await.map_err(io)
 }
 
 /// Transcode `src` (a track `duration_ms` long) to `t` into the cache (once), and return the
@@ -305,7 +351,8 @@ async fn transcoded(
     let io =
         |e: std::io::Error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("download cache: {e}"));
     tokio::fs::create_dir_all(&dir).await.map_err(io)?;
-    let part = dir.join(format!("{key}.part"));
+    // Declared after the lock, so it is removed before another request may make the same file
+    let part = PartFile::new(dir.join(format!("{key}.part")));
     let program = ffmpeg(s);
     let limit = transcode_timeout(s, duration_ms);
     // kill_on_drop: past the limit the future is dropped, and ffmpeg with it
@@ -315,12 +362,11 @@ async fn transcoded(
         .args(["-vn", "-map_metadata", "0", "-c:a", t.codec, "-b:a"])
         .arg(format!("{}k", t.kbps))
         .args(["-f", t.muxer])
-        .arg(&part)
+        .arg(part.path())
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
     let Ok(out) = tokio::time::timeout(limit, run).await else {
-        let _ = tokio::fs::remove_file(&part).await;
         return Err(ApiError::new(
             StatusCode::GATEWAY_TIMEOUT,
             format!(
@@ -340,7 +386,6 @@ async fn transcoded(
         }
         Err(e) => return Err(io(e)),
         Ok(o) if !o.status.success() => {
-            let _ = tokio::fs::remove_file(&part).await;
             let why = String::from_utf8_lossy(&o.stderr);
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
@@ -349,7 +394,7 @@ async fn transcoded(
         }
         Ok(_) => {}
     }
-    tokio::fs::rename(&part, &dest).await.map_err(io)?;
+    part.finish(&dest).await.map_err(io)?;
     evict(&dir, cache_cap_bytes(s), &dest);
     Ok(dest)
 }
@@ -560,6 +605,38 @@ mod tests {
         assert!(held());
         drop(again);
         assert!(!held());
+    }
+
+    /// A source that sends a little and then nothing is given up on after `idle`, and its partial
+    /// copy goes.
+    #[tokio::test]
+    async fn a_stalled_source_is_given_up_on_and_leaves_nothing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/song.flac", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/song.flac",
+            axum::routing::get(|| async {
+                use futures_util::StreamExt;
+                let first = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"the start"))
+                });
+                axum::body::Body::from_stream(first.chain(futures_util::stream::pending()))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("1-1-1-original.flac");
+        let resp = reqwest::get(&url).await.unwrap();
+        let idle = std::time::Duration::from_millis(300);
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fill_cache(dir.path(), &dest, resp, 1 << 20, idle),
+        )
+        .await
+        .expect("given up on")
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::GATEWAY_TIMEOUT, "{}", err.message);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing left");
     }
 
     #[test]
