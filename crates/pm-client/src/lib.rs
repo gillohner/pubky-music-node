@@ -176,14 +176,15 @@ impl NodeClient {
             .await
     }
 
-    /// Add a `pm-endpoint` at `host:port` (the desktop app registers its
-    /// own player this way); returns its outputs.
-    pub async fn add_endpoint(&self, address: &str) -> Result<Vec<OutputInfo>> {
+    /// Register an endpoint at `host:port` with its key (the desktop app registers its own
+    /// player this way); returns its outputs.
+    pub async fn add_endpoint(&self, address: &str, key: &EndpointKey) -> Result<Vec<OutputInfo>> {
         self.send(
             reqwest::Method::POST,
             "outputs/endpoints",
             Some(&AddEndpoint {
                 address: address.to_string(),
+                key: key.clone(),
             }),
         )
         .await

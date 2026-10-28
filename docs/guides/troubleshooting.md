@@ -100,7 +100,7 @@ The data folder must be writable by user id 1000. With a folder instead of a Doc
 | :-- | :-- | :-- |
 | TCP 7788 | web page, API, Subsonic apps, the music stream speakers fetch | your home network |
 | TCP and UDP 3483 | Squeezebox and squeezelite players | your home network |
-| TCP 7790 on the computer running the app (another port if that one is taken) | the app's own player: the node connects to it | your home network |
+| TCP 7790 on the computer running the app (another port if that one is taken) | the app's own player: the node connects to it (not needed when the node runs on that computer) | your home network |
 | UDP 1900 | UPnP search (SSDP) | your home network |
 | UDP 5353 | mDNS: Chromecast, AirPlay, BluOS, the apps finding the node | your home network |
 | TCP 6287 | Pubky homeserver (Umbrel and the bundle only) | your home network, or forwarded for your own domain |

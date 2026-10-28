@@ -9,7 +9,7 @@ A zone's `output` id starts with its protocol, which says what kind of device it
 | `output` starts with | Device | Icon idea |
 | :-- | :-- | :-- |
 | `alsa:`, `cpal:` | a DAC or the sound card on the node's machine | DAC |
-| `net:` | a `pm-endpoint` (a Pi, the desktop app's built-in player: "this computer") | speaker / computer |
+| `net:` | the Pubky Music app's built-in player: "this computer" or the phone | computer |
 | `upnp:` | a DLNA renderer or smart TV, or a Sonos player (`GET /v1/outputs`: name and caps) | TV / speaker |
 | `sonos-group:` | Sonos players grouped Sonos's own way | speakers |
 | `heos-group:` | HEOS players (Denon, Marantz) grouped HEOS's own way | speakers |

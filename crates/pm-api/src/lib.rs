@@ -1353,16 +1353,23 @@ async fn remove_upnp_address(
     Ok(Json(s.upnp_addresses()))
 }
 
-/// `POST /v1/outputs/endpoints {address}`: add a `pm-endpoint` (the desktop
-/// app registers its player this way) at `host:port`; its outputs become
-/// zones and the address is kept for the next start.
+/// `POST /v1/outputs/endpoints {address, key}`: the desktop app registers its player at
+/// `host:port` with the key it made; the outputs become zones, and the address and key are kept
+/// for the next start (a new key for the same address replaces the old).
 async fn add_endpoint(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<AddEndpoint>,
 ) -> ApiResult<Vec<OutputInfo>> {
+    let key = pm_stream::Key::parse(body.key.expose()).map_err(|_| {
+        ApiError::bad_request(if body.key.is_empty() {
+            "the player's key is missing: update the Pubky Music app".to_string()
+        } else {
+            "the player's key is not 32 to 256 visible ASCII characters".to_string()
+        })
+    })?;
     let st = s.clone();
     let address = body.address.clone();
-    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address))
+    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| {
@@ -5788,7 +5795,8 @@ mod tests {
     async fn an_endpoint_can_be_added_by_address() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let ep = pm_endpoint::Endpoint::new("Gil's laptop", pm_endpoint::local_outputs());
+        let key = pm_stream::Key::random();
+        let ep = pm_endpoint::Endpoint::new("Gil's laptop", pm_endpoint::local_outputs(), key.clone());
         std::thread::spawn(move || ep.serve(listener));
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
@@ -5797,7 +5805,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": address})),
+            Some(serde_json::json!({"address": address, "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{outs}");
@@ -5821,7 +5829,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": address})),
+            Some(serde_json::json!({"address": address, "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -5832,7 +5840,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+            Some(serde_json::json!({"address": "127.0.0.1:1", "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
@@ -5848,6 +5856,97 @@ mod tests {
             .all(|z| z["output"] != outs[0]["id"]));
         let (_, outs3) = call(&app, "GET", "/v1/outputs", None).await;
         assert!(outs3.as_array().unwrap().iter().all(|o| o["protocol"] != "net"));
+    }
+
+    /// The player's key: the node stores it per address in a
+    /// private file, replaces it when the app registers again with a new one, uses it after a
+    /// restart, and never shows it; a missing or wrong key is refused with a reason.
+    #[tokio::test]
+    async fn an_endpoint_key_is_kept_per_address_and_never_shown() {
+        fn endpoint(key: &pm_stream::Key, l: std::net::TcpListener) -> pm_endpoint::Serving {
+            let outs = pm_zones::OutputRegistry::new();
+            outs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
+            pm_endpoint::Endpoint::new("Laptop", outs, key.clone())
+                .spawn(l)
+                .unwrap()
+        }
+        let first = pm_stream::Key::random();
+        let serving = endpoint(&first, std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+        let address = serving.addr().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let register = |key: serde_json::Value| {
+            let (app, address) = (app.clone(), address.clone());
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/outputs/endpoints",
+                    Some(serde_json::json!({"address": address, "key": key})),
+                )
+                .await
+            }
+        };
+        let stored = || std::fs::read_to_string(dir.path().join("endpoint-keys.json")).unwrap_or_default();
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/outputs/endpoints",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(e.to_string().contains("update the Pubky Music app"), "{e}");
+        let (st, e) = register(serde_json::json!(pm_stream::Key::random().expose())).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(e.to_string().contains("wrong key"), "{e}");
+        assert!(stored().is_empty(), "a key that did not work is not kept");
+
+        let (st, outs) = register(serde_json::json!(first.expose())).await;
+        assert_eq!(st, StatusCode::OK, "{outs}");
+        let out_id = outs[0]["id"].as_str().unwrap().to_string();
+        assert!(stored().contains(first.expose()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("endpoint-keys.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        for path in ["/v1/outputs", "/v1/zones", "/v1/outputs/discovery?quick=1"] {
+            let (_, body) = call(&app, "GET", path, None).await;
+            assert!(!body.to_string().contains(first.expose()), "{path} shows the key");
+        }
+        assert!(!outs.to_string().contains(first.expose()));
+
+        // The app starts again: the same address, a new key. The zone it had plays with it.
+        drop(serving);
+        let second = pm_stream::Key::random();
+        let _serving = endpoint(&second, std::net::TcpListener::bind(&address).unwrap());
+        let (st, again) = register(serde_json::json!(second.expose())).await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        assert!(stored().contains(second.expose()) && !stored().contains(first.expose()));
+        let out = s.outputs.get(&OutputId(out_id.clone())).unwrap();
+        let fmt = pm_model::AudioFormat::pcm(48_000, 16, 2);
+        drop(out.open(fmt).await.unwrap());
+
+        // The node restarts: the stored key reaches the player
+        let s2 = state(dir.path(), None).await;
+        assert!(s2.outputs.get(&OutputId(out_id.clone())).is_none());
+        let st2 = s2.clone();
+        let found = tokio::task::spawn_blocking(move || st2.restore_endpoint_addresses())
+            .await
+            .unwrap();
+        assert_eq!(found, vec![OutputId(out_id.clone())]);
+
+        // Forgotten: the key goes too
+        let enc = address.replace(':', "%3A");
+        let (st, _) = call(&app, "DELETE", &format!("/v1/outputs/endpoints/{enc}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!stored().contains(second.expose()));
     }
 
     /// an output and a zone, is remembered for the next start, and can be
