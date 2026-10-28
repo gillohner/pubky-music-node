@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-28
+
+- **A listener sees and plays only the zones open to listeners, everywhere** (security review 2026-10-27, medium 5). A transfer's target zone now needs the same right as its source (it was not checked). `GET /v1/zones` and the event socket's snapshot listed every zone to every caller; a listener now gets only theirs, and an event about another zone arrives as `{"seq","type":"hidden"}`, so `seq` stays without gaps and clients do not resync.
+
 ## 2026-10-27
 
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
