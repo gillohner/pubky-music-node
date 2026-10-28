@@ -5,7 +5,7 @@ search, play to any zone or in the browser itself, queue, playlists, discover, s
 
 HTTP + WebSocket served by `pm-node serve` on `[api] listen` (default `127.0.0.1:7788`).
 Set `[api] token` to require `Authorization: Bearer <token>` (or `?token=` on the WebSocket).
-Without a token, keep the listener on localhost. Remote access by pubkey (M5) wraps this API.
+Without one, a node listening beyond localhost makes its own on first start (`<data_dir>/api-token`, 0600); a documented placeholder such as `change-me` is never used as the token. Remote access by pubkey (M5) wraps this API.
 
 | Method | Path | Body / query | Returns |
 | :-- | :-- | :-- | :-- |
@@ -299,7 +299,7 @@ Types live in `pm_api::types`; a Rust client reuses them.
 
 The same server also speaks the Subsonic API (XML by default, JSON with `f=json`) for existing clients: Symfonium,
 Feishin, Amperfy, play:Sub, Supersonic. Log in with `[api] subsonic_user` (default `pubky`) and the
-API token as the password (token auth `t`+`s` or plain `p`); without a token anyone can connect.
+API token as the password (token auth `t`+`s` or plain `p`). Only a node listening on localhost runs without a token; on any other address the node makes one (`<data_dir>/api-token`) when none is set.
 
 Implemented: `ping`, `getLicense`, `getOpenSubsonicExtensions`, `getMusicFolders`, `getArtists`,
 `getIndexes`, `getArtist`, `getAlbum`, `getMusicDirectory`, `getAlbumList(2)` (newest, random,

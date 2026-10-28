@@ -1,7 +1,8 @@
 #!/bin/sh
 # Writes /data/node.toml from the environment unless one is mounted, then runs pm-node.
 #   PM_LISTEN    host:port for the API (default 0.0.0.0:7788 in the image)
-#   PM_TOKEN     bearer token clients must send (required when listening beyond localhost)
+#   PM_TOKEN     bearer token clients must send. Empty while listening beyond localhost: the node
+#                makes one on first start and keeps it in $PM_DATA_DIR/api-token (0600)
 #   PM_DATA_DIR  where the SQLite library lives (default /data)
 #   PM_FOLDERS   colon-separated music folders to scan (default /music)
 #   PM_CONTACT   email or URL for outbound User-Agent strings (optional here; it can also be
@@ -49,8 +50,5 @@ client_secret = "${PM_SPOTIFY_CLIENT_SECRET:-}"
 [acoustid]
 api_key = "${PM_ACOUSTID_KEY:-}"
 TOML
-fi
-if [ -z "${PM_TOKEN:-}" ] && [ "${PM_LISTEN:-0.0.0.0:7788}" != "127.0.0.1:7788" ]; then
-  echo "warning: PM_TOKEN is empty while the API listens on ${PM_LISTEN:-0.0.0.0:7788}" >&2
 fi
 exec pm-node -c "$CONF" "$@"
