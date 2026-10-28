@@ -25,16 +25,13 @@ fetch the music from the node. The install guides set both.
 | The Pubky Music app | your computer or Android phone | the app adds the device while it is connected at home, for its own node only ([guide](desktop-app.md)) |
 | A browser | the web page itself | **This browser**, always there |
 
-To play the same music in several rooms, pick the speakers in **Settings › Zones and outputs ›
-Group outputs** and press **Create group**. The list sorts them by kind, and says what a group
-of the ones you picked becomes:
+To play the same music in several rooms in sync, pick speakers of one kind in **Settings › Zones
+and outputs › Group outputs** and press **Create group**:
 
-- **Sonos with Sonos, HEOS with HEOS, BluOS with BluOS:** that system groups them itself, in sync.
-  For HEOS, the speakers' HEOS control (TCP 1255) must answer; otherwise they play loosely synced.
-- **Squeezelite players with each other, or the Pubky Music app's DACs with each other:** the node
-  keeps them in time sample by sample.
-- **Any other mix:** they start together and may drift apart by a fraction of a second.
-- Speakers that share no sample rate with the ones picked can't join them.
+- **Sonos with Sonos, HEOS with HEOS, BluOS with BluOS:** that system groups them itself. For
+  HEOS, the speakers' HEOS control (TCP 1255) must answer; otherwise they play loosely synced.
+- **Squeezelite players with each other:** the node keeps them in time sample by sample. A player
+  that shares no sample rate with the ones picked can't join them.
 - **Snapcast:** group the players in Snapcast; each Snapcast group is one zone.
 - **Chromecast:** a speaker group made in the Google Home app shows up as one speaker.
 

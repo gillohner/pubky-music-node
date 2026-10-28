@@ -3,10 +3,10 @@
 //! hid it (`PUT /v1/node/settings {first_steps_hidden}`, kept on the node), and not once every step
 //! that isn't optional is done.
 //!
-//! - `music` (the owner): add a music folder. Not shown when the node already has a folder (from
-//!   the config, added, a mounted `/music`), a WebDAV share or cloud drive, or plays from a
-//!   service someone signed in to or a server of their own (streaming only). Done: tracks in the
-//!   library.
+//! - `music` (the owner): add a music folder. Not shown when the node already has a folder with
+//!   something in it (from the config, added, a mounted `/music`), a WebDAV share or cloud
+//!   drive, or plays from a service someone signed in to or a server of their own (streaming
+//!   only). Done: tracks in the library.
 //! - `play` (everyone): play something. Done: anything played on the node.
 //! - `contact` (the owner): the contact Discover needs. Done: one is set.
 //! - `speakers` (the owner, optional): only while the node has no output but the browser.
@@ -60,6 +60,10 @@ fn streams_from_an_account(s: &NodeState) -> bool {
     })
 }
 
+fn has_entries(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some())
+}
+
 pub(crate) fn first_steps(s: &NodeState, role: Role) -> Result<FirstSteps, ApiError> {
     let (tracks, played, hidden) = {
         let lib = s.library.lock().expect("library poisoned");
@@ -73,7 +77,9 @@ pub(crate) fn first_steps(s: &NodeState, role: Role) -> Result<FirstSteps, ApiEr
     let mut steps = Vec::new();
     let owner = role == Role::Owner;
     if owner {
-        let has_place = !s.all_folders().is_empty()
+        // A folder counts once it has something in it: Docker's `/music` is there even when
+        // nothing is mounted on it
+        let has_place = s.all_folders().iter().any(|p| has_entries(p))
             || !s.webdav.read().expect("webdav").is_empty()
             || !s.drives.read().expect("drives").roots.is_empty();
         if !has_place && !streams_from_an_account(s) {

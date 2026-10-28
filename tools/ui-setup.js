@@ -3,8 +3,9 @@
 //     goes when hidden, stays hidden in a new browser (kept on the node), comes back from
 //     Settings › Home for everyone, and goes by itself when only optional steps are left;
 //   * Library folders marks the config's folder and offers no Remove for it;
-//   * Group outputs offers every output, by kind, says what a pick becomes, and doesn't offer
-//     outputs that share no sample rate with the ones picked (the API refuses those);
+//   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite), by
+//     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
+//     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
 //     replaced and shown once; the login dialog says where the token is.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
@@ -22,9 +23,12 @@ const OUTS = [
   { id: 'upnp:RINCON_B', name: 'Sonos Living', protocol: 'upnp', caps: rate([44100, 48000]), group_by: 'sonos' },
   { id: 'bluos:aa01', name: 'Bluesound Study', protocol: 'bluos', caps: rate([44100, 48000, 96000]), group_by: 'bluos' },
   { id: 'slim:00:04:20:00:00:01', name: 'Pi Bedroom', protocol: 'slim', caps: { ...rate([44100, 96000]), groupable: true } },
+  { id: 'slim:00:04:20:00:00:02', name: 'Pi Hall', protocol: 'slim', caps: { ...rate([44100]), groupable: true } },
+  { id: 'slim:00:04:20:00:00:03', name: 'Old Pi', protocol: 'slim', caps: { ...rate([8000]), groupable: true } },
   { id: 'upnp:streamer', name: 'Streamer', protocol: 'upnp', caps: rate([44100, 48000, 192000]) },
-  { id: 'airplay:phone', name: 'Old phone', protocol: 'airplay', caps: rate([8000]) },
+  { id: 'airplay:phone', name: 'Old phone', protocol: 'airplay', caps: rate([44100]) },
 ];
+const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => o.id);
 
 (async () => {
   const browser = await chromium.launch();
@@ -79,18 +83,20 @@ const OUTS = [
     await p.goto(BASE + '/settings/playback');
     await p.waitForSelector('#groupouts');
     const offered = await p.$$eval('#groupouts input', (els) => els.map((e) => e.value));
-    check(OUTS.every((o) => offered.includes(o.id)), `every output is offered (${offered.length} of ${OUTS.length})`);
+    check(JSON.stringify(offered.slice().sort()) === JSON.stringify(GROUPABLE.slice().sort()), `the outputs that group in sync are offered, the others not (${offered.join(', ')})`);
     const kinds = await p.$$eval('#groupouts .groupkind .small', (els) => els.map((e) => e.textContent));
     check(['Sonos', 'BluOS', 'Squeezelite'].every((k) => kinds.some((x) => x.startsWith(k))), `by kind (${kinds.join(' · ')})`);
     const box = (id) => p.locator(`#groupouts input[value="${id}"]`);
     await box('upnp:RINCON_A').check(); await box('upnp:RINCON_B').check();
     check(/Sonos groups them itself/.test(await p.textContent('#groupsync')), 'two Sonos: Sonos groups them');
-    check(await box('airplay:phone').isDisabled(), 'an output with no sample rate in common is not offered');
-    await box('upnp:RINCON_B').uncheck(); await box('bluos:aa01').check();
-    check(/Loosely synced/.test(await p.textContent('#groupsync')), 'a mix: loosely synced, said so');
+    check(await box('bluos:aa01').isDisabled() && await box('slim:00:04:20:00:00:01').isDisabled(), 'another kind is not offered with them');
     await p.fill('#groupname', 'Downstairs'); await p.click('#groupmake');
     await p.waitForTimeout(500);
-    check(made && JSON.stringify(made.outputs) === JSON.stringify(['upnp:RINCON_A', 'bluos:aa01']), `the group the page asks for (${JSON.stringify(made)})`);
+    check(made && JSON.stringify(made.outputs) === JSON.stringify(['upnp:RINCON_A', 'upnp:RINCON_B']), `the group the page asks for (${JSON.stringify(made)})`);
+    await p.goto(BASE + '/settings/playback'); await p.waitForSelector('#groupouts');
+    await box('slim:00:04:20:00:00:01').check(); await box('slim:00:04:20:00:00:02').check();
+    check(/In sync: the node keeps them in time/.test(await p.textContent('#groupsync')), 'two squeezelite players: the node keeps them in time');
+    check(await box('slim:00:04:20:00:00:03').isDisabled(), 'a player that shares no sample rate with them is not offered');
     await c.close();
 
     // ---- About: tokens ----
@@ -98,7 +104,7 @@ const OUTS = [
     await p.goto(BASE + '/settings/about');
     await p.waitForSelector('#logout');
     check((await p.textContent('#logout')).trim() === 'Use a different token in this browser', 'the browser token button says what it does');
-    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#main')), 'a config token: changed in the config, with the guide');
+    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#main')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
     await p.route(/\/v1\/node\/settings$/, async (r) => { if (r.request().method() !== 'GET') return r.continue(); const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, token_replaceable: true } }); });
     let rotated = 0; await p.route(/\/v1\/node\/token$/, (r) => { rotated++; return r.fulfill({ json: { token: 'f'.repeat(64) } }); });
     await p.goto(BASE + '/settings/about');
@@ -107,6 +113,8 @@ const OUTS = [
     check(await visible(p, '#tokenout code'), 'the new token is shown');
     check(rotated === 1 && (await p.textContent('#tokenout code')) === 'f'.repeat(64), 'once, as the node made it');
     check(await p.evaluate(() => localStorage.getItem('pm.token')) === 'f'.repeat(64), 'this browser uses it');
+    await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
+    check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
 
     // ---- The login dialog ----

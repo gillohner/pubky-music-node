@@ -521,19 +521,17 @@
   // listed while it is the zone in use)
   const devOutput = (id) => /^null/.test(String(id || ''));
   const TOKEN_GUIDE = 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused';
-  // Group outputs (POST /zones): the node groups any outputs that share a sample rate. Sonos, HEOS
-  // and BluOS speakers of one kind become that system's own group; squeezelite players or the
-  // app's DACs on their own are kept in time by the node; any other mix is loosely synced.
-  const GROUP_KINDS = [['sonos', 'Sonos'], ['heos', 'HEOS (Denon, Marantz)'], ['bluos', 'BluOS (Bluesound, NAD)'], ['slim', 'Squeezelite players'], ['net', 'The Pubky Music app'], ['other', 'Other speakers and outputs']];
-  const groupKind = (o) => o.group_by || ({ slim: 'slim', net: 'net' })[String(o.id).split(':')[0]] || 'other';
+  // Group outputs (POST /zones): speakers of one kind, kept in sync. Sonos, HEOS and BluOS speakers
+  // become that system's own group; outputs the node keeps in time itself (caps.groupable:
+  // squeezelite) a node group, of outputs that share a sample rate. Kinds don't mix, and other
+  // outputs (which the API would only group loosely) aren't offered.
+  const GROUP_KINDS = [['sonos', 'Sonos'], ['heos', 'HEOS (Denon, Marantz)'], ['bluos', 'BluOS (Bluesound, NAD)'], ['node', 'Squeezelite players']];
+  const groupKind = (o) => o.group_by || (o.caps.groupable ? 'node' : null);
   const groupSync = (picked) => {
     if (picked.length < 2) return '';
     const k = groupKind(picked[0]);
-    const same = picked.every((o) => groupKind(o) === k);
-    if (same && (k === 'sonos' || k === 'bluos')) return `${k === 'sonos' ? 'Sonos' : 'BluOS'} groups them itself, in sync.`;
-    if (same && k === 'heos') return 'HEOS groups them itself, in sync (if HEOS doesn’t know one of them, they play loosely synced).';
-    if (same && (k === 'slim' || k === 'net') && !picked.some((o) => o.id.includes('/cpal:'))) return 'In sync: the node keeps them in time sample by sample.';
-    return 'Loosely synced: they start together and may drift apart by a fraction of a second.';
+    if (k === 'heos') return 'HEOS groups them itself, in sync (if HEOS doesn’t know one of them, they play loosely synced).';
+    return k === 'node' ? 'In sync: the node keeps them in time sample by sample.' : `${k === 'sonos' ? 'Sonos' : 'BluOS'} groups them itself, in sync.`;
   };
   // Who is using the page (#46): the owner, or a listener with their own Ring sign-in, who plays
   // the shared library on the zones the owner opened and has nothing of the owner's
@@ -4242,7 +4240,7 @@
           const panel = (k, html) => tabs.panel(k, html);
           const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
           const library = group('Music folders',
-            (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker): read at every start, and removed there.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
+            (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker), read at every start. To remove it, take it out there and restart the node; then Remove here forgets its songs.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
             + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
             + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
             + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
@@ -4260,7 +4258,7 @@
             + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Pubky Music app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
               + block('Add a renderer by address', 'For a UPnP speaker or streamer the network scan doesn’t find: its IP address or its description URL. For a Linn: its IP address, MAC address and serial number, with spaces between.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
-              + block('Group outputs', 'Pick two or more to play as one zone; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind in sync, as do squeezelite players and the Pubky Music app; any other mix starts together and may drift a little.', shownOuts.length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">Two or more speakers or outputs are needed.</p>'))
+              + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           // Accounts (STEWARD-BUNDLED-HOMESERVER.md §7): saving is the node's business. One status
           // line and where the music is; saving by hand, the private-file list and (with a homeserver
@@ -4304,7 +4302,7 @@
             + group('Access', row('This browser', 'Changes only the token this browser uses to reach the node; the node’s token stays as it is.', '<button class="btn ghost" id="logout">Use a different token in this browser</button>')
               + (ns.token_replaceable
                 ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app, browser and Subsonic app needs the new one. People you invited keep their own sign-ins.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
-                : row('The node’s token', `Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker, the app password on Umbrel): <a class="lnk" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">how to change it</a>.`, '')))
+                : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker, the app password on Umbrel): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
           // You › Home: whose layout applies; edit it on Home itself
@@ -4375,7 +4373,8 @@
             const update = () => {
               const picked = order.map((id) => byId[id]);
               const rates = picked.length ? picked.reduce((r, o) => r.filter((x) => o.caps.pcm_rates.includes(x)), picked[0].caps.pcm_rates) : null;
-              $$('input', groupBox).forEach((i) => { const off = !i.checked && !!rates && !byId[i.value].caps.pcm_rates.some((x) => rates.includes(x)); i.disabled = off; i.closest('label').title = off ? 'Shares no sample rate with the ones picked' : ''; });
+              const kind = picked.length ? groupKind(picked[0]) : null;
+              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && kind === 'node' && !o.caps.pcm_rates.some((x) => rates.includes(x))); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with the ones picked' : ''; });
               $('#groupsync').textContent = groupSync(picked);
             };
             $$('input', groupBox).forEach((i) => i.onchange = () => { const at = order.indexOf(i.value); if (i.checked && at < 0) order.push(i.value); if (!i.checked && at >= 0) order.splice(at, 1); update(); });
@@ -4437,7 +4436,8 @@
               const r = await api('POST', '/node/token');
               // Every later call (and a reconnect of the event socket) uses it
               state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
-              $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps:</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm" data-copylink="${esc(r.token)}">Copy</button></div>`;
+              $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
+              $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
             } catch (e) { toast(e.message, 'error'); tn.disabled = false; }
           };
           const pkf = $('#pkfiles'); if (pkf) {

@@ -132,6 +132,8 @@ pub struct NodeState {
     /// The file the token came from when the node made it itself (`<data_dir>/api-token`), so the
     /// owner may replace it; `None` when it is set in the config or there is none.
     token_file: std::sync::OnceLock<PathBuf>,
+    /// Counts token replacements; the owner's event sockets end when it moves.
+    pub(crate) token_changed: tokio::sync::watch::Sender<u64>,
     pub subsonic_user: String,
     pub public_url: String,
     pub upnp: bool,
@@ -386,6 +388,7 @@ impl NodeState {
             sources,
             token: std::sync::RwLock::new(settings.token),
             token_file: std::sync::OnceLock::new(),
+            token_changed: tokio::sync::watch::channel(0).0,
             subsonic_user: settings.subsonic_user,
             public_url: settings.public_url,
             upnp: settings.upnp,

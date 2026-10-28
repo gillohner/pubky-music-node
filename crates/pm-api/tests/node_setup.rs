@@ -4,6 +4,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use pm_api::{router, NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
@@ -244,6 +245,166 @@ async fn the_owner_replaces_a_token_the_node_made_and_the_old_one_stops_working(
     assert_eq!(st, StatusCode::OK, "listeners keep their own tokens");
 }
 
+/// Replacements at once: one wins, and the file holds the token the node checks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacements_at_once_leave_the_file_and_the_node_agreeing() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("api-token");
+    std::fs::write(&file, OWNER).unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    s.set_token_file(file.clone());
+    let app = router(s.clone());
+    let mut kept = String::new();
+    for round in 0..20 {
+        let current = s.token().unwrap();
+        let calls = (0..8).map(|_| {
+            let (app, t) = (app.clone(), current.clone());
+            tokio::spawn(async move { call(&app, &t, "POST", "/v1/node/token", None).await })
+        });
+        let mut answered = Vec::new();
+        for c in calls {
+            // A call that comes in once another has replaced the token is refused
+            let (st, v) = c.await.unwrap();
+            assert!(st == StatusCode::OK || st == StatusCode::UNAUTHORIZED, "{st} {v}");
+            if st == StatusCode::OK {
+                answered.push(v["token"].as_str().unwrap().to_string());
+            }
+        }
+        kept = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            Some(kept.clone()),
+            s.token(),
+            "round {round}: the file and the node agree"
+        );
+        assert!(answered.contains(&kept));
+    }
+    let (st, _) = call(&app, &kept, "GET", "/v1/info", None).await;
+    assert_eq!(st, StatusCode::OK);
+    // Nothing left beside the token but the time it was replaced
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("api-token"))
+        .collect();
+    names.sort();
+    assert_eq!(names, ["api-token", "api-token.replaced"]);
+    assert!(pm_api::access_token::replaced_after(dir.path(), 0));
+    assert!(
+        !pm_api::access_token::replaced_after(dir.path(), i64::MAX),
+        "a backup made later keeps its token"
+    );
+}
+
+/// The owner's event socket, opened with the old token, ends when the token is replaced; a
+/// listener's stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_sockets_opened_with_the_old_token_end_when_it_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("api-token");
+    std::fs::write(&file, OWNER).unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    s.set_token_file(file);
+    let person = listener(&s);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), l));
+    let open = |t: String| async move {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/events?token={t}"))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))),
+            "the snapshot"
+        );
+        ws
+    };
+    let mut owner = open(OWNER.to_string()).await;
+    let mut theirs = open(person).await;
+    let (st, _) = call(&router(s.clone()), OWNER, "POST", "/v1/node/token", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match owner.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None | Some(Err(_)) => {
+                    return true
+                }
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert_eq!(ended, Ok(true), "the owner's socket with the old token ended");
+    // The listener's is still there: nothing arrives, and it hasn't closed
+    let still = tokio::time::timeout(std::time::Duration::from_millis(500), theirs.next()).await;
+    assert!(
+        still.is_err()
+            || matches!(
+                still,
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_))))
+            ),
+        "{still:?}"
+    );
+}
+
+/// A config folder taken out of the config and the node restarted: an ordinary folder now, which
+/// Remove takes out with its songs (what the 409 says to do). And a config folder isn't moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_taken_out_of_the_config_is_removed_with_its_songs() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("one.wav"));
+    let s = node(dir.path(), vec![music.clone()], just_null());
+    s.scan_config_folders();
+    scanned(&s).await;
+    let app = router(s.clone());
+    let path = music.to_string_lossy().into_owned();
+    let (st, r) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/library/folders/move",
+        Some(json!({"from": path, "to": dir.path()})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    let (st, r) = call(
+        &app,
+        OWNER,
+        "DELETE",
+        &format!("/v1/library/folders?path={path}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(
+        r["error"].as_str().unwrap().contains("then remove it here"),
+        "{r}"
+    );
+    drop((app, s));
+    // Restarted without it in the config
+    let s = node(dir.path(), vec![], just_null());
+    let app = router(s);
+    let (_, ns) = call(&app, OWNER, "GET", "/v1/node/settings", None).await;
+    assert_eq!(ns["config_folders"], json!([]));
+    let (_, f) = call(&app, OWNER, "GET", "/v1/library/folders", None).await;
+    assert_eq!(f, json!([[path, true]]));
+    let (st, r) = call(
+        &app,
+        OWNER,
+        "DELETE",
+        &format!("/v1/library/folders?path={path}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["removed_tracks"], 1);
+    assert_eq!(r["folders"], json!([]));
+}
+
 fn upnp(name: &str, udn: &str) -> Arc<pm_out_upnp::UpnpOutput> {
     let r = pm_out_upnp::Renderer {
         udn: format!("uuid:{udn}"),
@@ -379,9 +540,10 @@ async fn get_started_shows_only_the_steps_that_matter() {
     let (st, v) = call(&app, &listener, "GET", "/v1/me/first-steps", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(ids(&v), ["play"], "{v}");
-    // A folder added: no music step
+    // A folder added, with something in it: no music step
     let more = dir.path().join("more");
     std::fs::create_dir(&more).unwrap();
+    write_wav(&more.join("one.wav"));
     let (st, _) = call(
         &app,
         OWNER,
@@ -394,13 +556,21 @@ async fn get_started_shows_only_the_steps_that_matter() {
     let (_, v) = call(&app, OWNER, "GET", "/v1/me/first-steps", None).await;
     assert!(!ids(&v).contains(&"music".to_string()), "{v}");
 
-    // A folder from the config (a mounted /music), and an output: no music or speaker step
+    // A folder from the config with nothing in it (Docker's /music, nothing mounted): the music
+    // step stays; with files in it (a mounted /music), and an output: no music or speaker step
     let dir = tempfile::tempdir().unwrap();
     let music = dir.path().join("music");
     std::fs::create_dir(&music).unwrap();
     let outputs = just_null();
     outputs.register(Arc::new(PullOutput::new("kitchen")));
-    let app = router(node(dir.path(), vec![music], outputs));
+    let app = router(node(dir.path(), vec![music.clone()], outputs));
+    let (_, v) = call(&app, OWNER, "GET", "/v1/me/first-steps", None).await;
+    assert_eq!(
+        ids(&v),
+        ["music", "play", "contact", "pubky"],
+        "an empty folder: {v}"
+    );
+    write_wav(&music.join("one.wav"));
     let (_, v) = call(&app, OWNER, "GET", "/v1/me/first-steps", None).await;
     assert_eq!(ids(&v), ["play", "contact", "pubky"], "{v}");
 

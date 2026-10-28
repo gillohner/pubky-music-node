@@ -2346,7 +2346,7 @@ async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiRes
 }
 
 async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool)>> {
-    Ok(Json(folder_list(&s)?))
+    Ok(Json(folder_list(&s).await?))
 }
 
 fn settings_view(s: &NodeState) -> NodeSettingsView {
@@ -2474,8 +2474,15 @@ async fn update_node_settings(
 }
 
 /// `[path, present]` for the config's folders, then the ones added through the API; present: the
-/// folder is there now.
-fn folder_list(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
+/// folder is there now. Off the async threads: a stale network mount can hang the check.
+async fn folder_list(s: &Arc<NodeState>) -> Result<Vec<(String, bool)>, ApiError> {
+    let st = s.clone();
+    tokio::task::spawn_blocking(move || folder_list_now(&st))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+}
+
+fn folder_list_now(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
     let added = s.library.lock().expect("library poisoned").list_folders()?;
     let mut out: Vec<(std::path::PathBuf, bool)> = s.scan_folders.iter().map(|p| (p.clone(), true)).collect();
     for (p, enabled) in added {
@@ -2522,7 +2529,7 @@ async fn add_folder(
     s.watch_more(&path);
     let scan_started = matches!(s.start_scan(vec![path]), Ok(true));
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
         config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
@@ -2541,7 +2548,7 @@ async fn remove_folder(
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             format!(
-                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker), which adds it back at every start; remove it there and restart the node",
+                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker), which reads it at every start: take it out there and restart the node, then remove it here to forget its songs",
                 path.display()
             ),
         ));
@@ -2556,7 +2563,7 @@ async fn remove_folder(
     let (removed_files, removed_tracks) = s.library.lock().expect("library poisoned").remove_folder(&path)?;
     s.notify_library();
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
         config_folders: config_folders(&s),
         scan_started: false,
         removed_files,
@@ -2578,6 +2585,15 @@ async fn move_folder(
     State(s): State<Arc<NodeState>>,
     Json(m): Json<FolderMove>,
 ) -> ApiResult<FoldersChanged> {
+    if s.is_config_folder(std::path::Path::new(m.from.trim())) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker): put the new place there and restart the node",
+                m.from.trim()
+            ),
+        ));
+    }
     let to = tokio::fs::canonicalize(m.to.trim())
         .await
         .map_err(|e| ApiError::bad_request(format!("{}: {e}", m.to.trim())))?;
@@ -2602,7 +2618,7 @@ async fn move_folder(
     let scan_started = matches!(s.start_scan(vec![to]), Ok(true));
     s.notify_library();
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
         config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
