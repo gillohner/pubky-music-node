@@ -23,7 +23,7 @@ mod update;
 use serde::Serialize;
 use settings::Settings;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
@@ -155,6 +155,7 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
 
 /// Connected: remember the node, show it and register the player.
 fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::Info) -> Result<(), String> {
+    take_moved(state);
     if !info.id.is_empty() {
         s.node_id = info.id.clone();
     }
@@ -280,8 +281,10 @@ async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String
     Ok(info.name)
 }
 
-/// Reach the node: at its address; else, on the LAN under its id (it may have a new address); else
-/// through the iroh tunnel when its record carries a key (away from home).
+/// Reach the node: at its address; else through the iroh tunnel when its record carries a key
+/// (away from home, or moved: the tunnel dials the node by its key, so it proves the node is this
+/// one); else, when a node on the LAN claims its id from another address, ask the person
+/// ([`MOVED`], then [`follow_moved`]).
 async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Settings, node::Info), String> {
     // TLS (an https node, the iroh relays, pkarr) needs the platform verifier, set up on the UI thread
     #[cfg(target_os = "android")]
@@ -295,12 +298,31 @@ async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Se
         Err(node::ProbeError::Unreachable(msg)) => msg,
         Err(e) => return Err(e.into()),
     };
+    let mut moved = None;
     if !s.node_id.is_empty() {
         let found = discover(app).await;
-        if let Some(Ok(done)) = after_lan_search(&state.moved, &s, &found).await {
-            return Ok(done);
+        match after_lan_search(&state.moved, &s, &found).await {
+            Some(Ok(done)) => return Ok(done),
+            Some(Err(ask)) => moved = Some(ask),
+            None => {}
         }
     }
+    match through_tunnel(state, s, msg).await {
+        Ok(done) => {
+            take_moved(state);
+            Ok(done)
+        }
+        Err(e) => Err(moved.unwrap_or(e)),
+    }
+}
+
+/// The node through the iroh tunnel, when its record carries a key; `msg` says why the address
+/// did not do.
+async fn through_tunnel(
+    state: &AppState,
+    mut s: Settings,
+    msg: String,
+) -> Result<(Settings, node::Info), String> {
     if s.iroh.is_empty() {
         return Err(msg);
     }
@@ -321,19 +343,48 @@ async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Se
     Ok((s, info))
 }
 
+/// Starts the error that asks the connect page whether to use a new address; the address follows.
+const MOVED: &str = "Moved: ";
+
 /// After the LAN search, for a remembered node that did not answer at its address: a node that
-/// claims its id from another address.
+/// claims its id from another address. The id is announced in the clear (mDNS, SSDP), so anyone on
+/// the network can claim it, and a probe there would hand over the saved token. So nothing is sent
+/// there: the address is kept for the person to confirm on the connect page ([`follow_moved`])
+/// (security review 2026-10-27, #3).
 async fn after_lan_search(
     moved: &Mutex<Option<Settings>>,
     s: &Settings,
     found: &[pm_discovery::FoundNode],
 ) -> Option<Result<(Settings, node::Info), String>> {
     let n = found.iter().find(|n| n.id == s.node_id && n.url != s.node_url)?;
-    tracing::info!(from = %s.node_url, to = %n.url, "the node moved; following it");
-    let _ = moved;
+    tracing::info!(from = %s.node_url, to = %n.url, "a node claims the remembered id at another address; asking first");
     let mut next = s.clone();
     next.node_url = n.url.clone();
-    node::probe(&next).await.ok().map(|info| Ok((next, info)))
+    *moved.lock().unwrap_or_else(PoisonError::into_inner) = Some(next);
+    Some(Err(format!("{MOVED}{}", n.url)))
+}
+
+fn take_moved(state: &AppState) -> Option<Settings> {
+    state.moved.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
+/// The person said yes to the new address the connect page showed: the token goes there now, and
+/// the node there must have the remembered id.
+#[tauri::command]
+async fn follow_moved(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    node_url: String,
+) -> Result<String, String> {
+    let s = take_moved(&state)
+        .filter(|m| m.node_url == node_url)
+        .ok_or("That address is no longer on offer. Try again.")?;
+    let info = node::probe(&s).await?;
+    if !s.node_id.is_empty() && info.id != s.node_id {
+        return Err(format!("The node at {} is a different node", s.node_url));
+    }
+    connected(&app, &state, s, &info)?;
+    Ok(info.name)
 }
 
 /// Nodes on the LAN (mDNS and SSDP, `pm-discovery`).
@@ -476,6 +527,7 @@ pub fn run() {
             saved,
             open_saved,
             connect_manual,
+            follow_moved,
             discover_nodes,
             ring_connect,
             open_ring,
@@ -576,8 +628,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const MOVED: &str = "Moved: ";
 
     /// Stands in at the claimed address: answers `/v1/info` as the node would, and hands every
     /// request it gets to the test.

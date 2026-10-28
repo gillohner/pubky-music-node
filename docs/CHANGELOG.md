@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-27
 
+- **Security: the API token no longer goes to whoever claims your node's id from another address** (security review 2026-10-27, #3 and #4). The id is announced in the clear on the LAN, so anyone could claim it.
+  - **The app:** when the remembered node doesn't answer and a node with its id answers at another address, the app tries the remote tunnel first (it reaches the node by its key, so it proves the node). Otherwise the connect page asks: "Use http://… ?" The token goes there only on yes, and the node there must have the same id.
+  - **Home Assistant:** a zeroconf announcement of a set-up node from another address no longer moves the entry and sends its token there. It shows a "node at a new address?" card; on yes it checks the node there and moves the entry only if the id matches. A node that is connected, or at the same address, is left alone.
+  - **Home Assistant cover images:** whether an image is on the node is decided by parsing the URL and comparing scheme, host and port. The prefix check gave the token to a URL whose user info was the node's address (so its host was another one), to `http://node:7788.attacker.example/…` and to `http://node:77880/…`.
+
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
 ## 2026-10-26
