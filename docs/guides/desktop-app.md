@@ -40,6 +40,11 @@ While connected at home, the app adds this device as a speaker on the node: "<co
 zone button in the player bar, like any other speaker. On Linux it plays bit-perfect to a DAC; on
 macOS and Windows it goes through the system's sound output.
 
+Only the node the app is connected to can play to this device: each time the app starts it makes
+a new key and gives it to that node, with nothing for you to set up. With the node on the same
+computer (`localhost`), the player is reachable from this computer only. Otherwise the node
+connects to it on TCP port 7790: allow that if your firewall asks.
+
 Away from home the app still controls the node and its speakers, but this device isn't offered as
 a speaker then.
 

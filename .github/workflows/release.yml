@@ -7,8 +7,8 @@ name: release
 # - the app (pm-desktop, Tauri 2): macOS universal .dmg, Windows .msi and
 #   setup .exe, Linux .AppImage and .deb for x86_64 and arm64, Android .apk
 #   (arm64-v8a and universal) and .aab, signed with the repo's release key;
-# - pm-node and pm-endpoint for Linux x86_64, arm64 and armv7 (Raspberry Pi),
-#   plus Windows and macOS;
+# - pm-node for Linux x86_64, arm64 and armv7 (Raspberry Pi), plus Windows and
+#   macOS (pm-endpoint is the app's built-in player and is not shipped alone);
 # - the multi-arch node image on GHCR.
 #
 # Builds are unsigned until the owner provides an Apple Developer ID and a
@@ -285,29 +285,29 @@ jobs:
         include:
           - platform: linux-x86_64
             os: ubuntu-22.04
-            build: cargo build --release --locked -p pm-node -p pm-endpoint --features alsa
+            build: cargo build --release --locked -p pm-node --features alsa
             dir: target/release
-            bins: pm-node pm-endpoint
+            bins: pm-node
           - platform: linux-arm64
             os: ubuntu-22.04-arm
-            build: cargo build --release --locked -p pm-node -p pm-endpoint --features alsa
+            build: cargo build --release --locked -p pm-node --features alsa
             dir: target/release
-            bins: pm-node pm-endpoint
+            bins: pm-node
           - platform: linux-armv7
             os: ubuntu-24.04
             build: tools/release/build-armv7.sh
             dir: target/armv7-unknown-linux-gnueabihf/release
-            bins: pm-node pm-endpoint
+            bins: pm-node
           - platform: windows-x86_64
             os: windows-2025
-            build: cargo build --release --locked -p pm-node -p pm-endpoint --features pm-endpoint/cpal
+            build: cargo build --release --locked -p pm-node
             dir: target/release
-            bins: pm-node.exe pm-endpoint.exe
+            bins: pm-node.exe
           - platform: macos-arm64
             os: macos-15
-            build: cargo build --release --locked -p pm-node -p pm-endpoint --features pm-endpoint/cpal
+            build: cargo build --release --locked -p pm-node
             dir: target/release
-            bins: pm-node pm-endpoint
+            bins: pm-node
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:

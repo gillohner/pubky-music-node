@@ -24,7 +24,7 @@ several networks.
 | Snapcast | Pis or old phones running `snapclient`, kept in tight sync | add your snapserver to the config (below) |
 | MPD | a Music Player Daemon you already run | add it to the config (below) |
 | A DAC on the node's machine | USB DAC, HDMI, the sound card | found by itself; in Docker, pass `/dev/snd` (see the compose file) |
-| The Pubky Music app | your computer or Android phone | the app adds the device while it is connected at home ([guide](desktop-app.md)) |
+| The Pubky Music app | your computer or Android phone | the app adds the device while it is connected at home, for its own node only ([guide](desktop-app.md)) |
 | A browser | the web page itself | **This browser**, always there |
 
 To play the same music in several rooms in sync:
