@@ -65,9 +65,9 @@ docker exec pubky-music cat /data/api-token
 Open `http://<this machine's address>:7788`, click **Or paste the API token**, paste it and
 press **Connect**. The address is the one in the log; on Linux, `hostname -I` shows it, on a NAS
 its network settings (Synology: Control Panel › Network), and your router's device list does too.
-Give the machine a fixed address in the router, so it doesn't change. Then in
-**Settings › Library folders**, type `/music` and press **Add folder**:
-inside the container, your music folder is `/music`. Continue with the
+Give the machine a fixed address in the router, so it doesn't change. The node reads your music
+folder (`/music` inside the container) by itself when it starts; **Settings › Library folders**
+lists it. Continue with the
 [first steps](../../README.md#first-steps-after-installing).
 
 To choose the token yourself instead, add `PM_TOKEN: "<a long random string>"` under

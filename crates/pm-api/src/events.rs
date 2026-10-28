@@ -187,9 +187,16 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
     // (and pm-client) never send anything.
     let mut pings = false;
     let mut last_heard = tokio::time::Instant::now();
+    // The owner came in with the API token: when it is replaced, this socket ends with it
+    let with_token = c.role == crate::accounts::Role::Owner && s.token().is_some();
+    let mut token_changed = s.token_changed.subscribe();
     loop {
         let idle = tokio::time::sleep_until(last_heard + IDLE_TIMEOUT);
         tokio::select! {
+            _ = token_changed.changed(), if with_token => {
+                let _ = tx.send(Message::Close(None)).await;
+                break;
+            }
             ev = events.recv() => match ev {
                 Ok(ev) => {
                     let sent = match for_caller(&s, &c, &ev.event) {

@@ -126,8 +126,14 @@ pub struct NodeState {
     pub mirror_dir: PathBuf,
     pub outputs: OutputRegistry,
     pub zones: Zones,
-    /// Optional bearer token; `None` = no auth (bind to localhost only).
-    pub token: Option<String>,
+    /// Optional bearer token; `None` = no auth (bind to localhost only). Read with
+    /// [`NodeState::token`]; only [`crate::access_token`] changes it.
+    pub(crate) token: std::sync::RwLock<Option<String>>,
+    /// The file the token came from when the node made it itself (`<data_dir>/api-token`), so the
+    /// owner may replace it; `None` when it is set in the config or there is none.
+    token_file: std::sync::OnceLock<PathBuf>,
+    /// Counts token replacements; the owner's event sockets end when it moves.
+    pub(crate) token_changed: tokio::sync::watch::Sender<u64>,
     pub subsonic_user: String,
     pub public_url: String,
     pub upnp: bool,
@@ -383,7 +389,9 @@ impl NodeState {
             outputs,
             zones: Zones::new(sources.clone()),
             sources,
-            token: settings.token,
+            token: std::sync::RwLock::new(settings.token),
+            token_file: std::sync::OnceLock::new(),
+            token_changed: tokio::sync::watch::channel(0).0,
             subsonic_user: settings.subsonic_user,
             public_url: settings.public_url,
             upnp: settings.upnp,
@@ -697,6 +705,31 @@ impl NodeState {
             }
         }
         out
+    }
+
+    /// Scan the config's folders that exist (`[library] folders`, `PM_FOLDERS` in Docker) in the
+    /// background, at start. The scan is incremental: files with the same size and time are not
+    /// opened again. When another scan holds the slot, this one waits for it.
+    pub fn scan_config_folders(self: &Arc<Self>) {
+        let folders: Vec<PathBuf> = self.scan_folders.iter().filter(|p| p.is_dir()).cloned().collect();
+        for p in self.scan_folders.iter().filter(|p| !p.is_dir()) {
+            tracing::warn!(folder = %p.display(), "library folder from the config not found; not scanned");
+        }
+        if folders.is_empty() {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            while let Ok(false) = state.start_scan(folders.clone()) {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+    }
+
+    /// Whether `path` is one of the config's library folders (they come back at every start, so
+    /// removing one needs the config).
+    pub fn is_config_folder(&self, path: &std::path::Path) -> bool {
+        self.scan_folders.iter().any(|p| p == path)
     }
 
     /// Start watching one more folder (after `watch_folders`); no-op without a watcher.
@@ -1572,6 +1605,21 @@ impl NodeState {
         *self.config_file.lock().expect("config file lock") = path;
     }
 
+    /// The API token clients must send now (`None`: the node has none).
+    pub fn token(&self) -> Option<String> {
+        self.token.read().expect("token lock").clone()
+    }
+
+    /// Set once at start when the node made its token itself and keeps it in `path`: then the
+    /// owner may replace it (`POST /v1/node/token`).
+    pub fn set_token_file(&self, path: PathBuf) {
+        let _ = self.token_file.set(path);
+    }
+
+    pub fn token_file(&self) -> Option<&std::path::Path> {
+        self.token_file.get().map(PathBuf::as_path)
+    }
+
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
     }
@@ -1679,7 +1727,7 @@ impl NodeState {
             name: self.name.clone(),
             port,
             version: self.version.clone(),
-            token_required: self.token.is_some(),
+            token_required: self.token().is_some(),
         }
     }
 }

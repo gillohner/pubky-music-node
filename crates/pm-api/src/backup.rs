@@ -542,6 +542,13 @@ async fn restore_locked(
     let dir = data_dir(s);
     if let Some(sec) = &secrets {
         for (name, value) in &sec.files {
+            // The owner replaced the token after this backup: the old one stays dead
+            if name == "api-token" && crate::access_token::replaced_after(&dir, m.created_at) {
+                report.notes.push(
+                    "The node's API token was replaced after this backup was made, so the node keeps its current one.".into(),
+                );
+                continue;
+            }
             let Ok(bytes) = b64().decode(value) else {
                 continue;
             };

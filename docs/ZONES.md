@@ -52,7 +52,13 @@ Every zone state has `sync`:
 - **Group:** `POST /v1/zones {name, outputs: [ids]}`.
   - A zone of Sonos players only becomes a Sonos group (`sonos-group:`, tight).
   - A zone of HEOS players only becomes a HEOS group (`heos-group:`, tight). The node asks the first player's HEOS CLI (TCP 1255) whether it knows them all, and makes a node group otherwise. The leader plays over UPnP, and HEOS plays its source on the others. The HEOS group ends when the zone stops.
-  - Anything else becomes a node group (`group:`), tight or loose as above.
+  - A zone of BluOS players only becomes a BluOS group (`bluos-group:`, tight).
+  - Anything else becomes a node group (`group:`), tight or loose as above. Outputs that share no
+    sample rate are refused (400).
+  - `GET /v1/outputs` marks Sonos, HEOS and BluOS players with `group_by`. Settings › Group
+    outputs offers the outputs that group in sync (those, and `caps.groupable` ones such as
+    squeezelite), one kind at a time, and not one that shares no sample rate with the ones
+    picked. Other mixes (Home Assistant's join, the API) are node groups, loosely synced.
 - **Ungroup:** `DELETE /v1/zones/{id}` on the group zone; its members' own zones remain.
 - **Volume:**
   - `POST /v1/zones/{id}/volume` (`{"percent"}`, `{"db"}`, `{"mute"}`, `"up"`/`"down"` where the device supports them).

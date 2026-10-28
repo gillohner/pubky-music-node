@@ -15,8 +15,8 @@ Install this app or Pubky's own "Pubky Homeserver" app, not both: both use port 
 ## 2. Open it
 
 1. Open the app from the Umbrel home screen.
-2. The page asks for the API token. It is the password umbrelOS shows for this app (right-click
-   the app's icon on the home screen). Paste it and press **Connect**.
+2. The page asks for the API token. On Umbrel it is the password umbrelOS shows for this app
+   (right-click the app's icon on the home screen). Paste it and press **Connect**.
 3. On Home, the **Get started** card offers **Create account here** (it is also in **Settings**,
    with your accounts). The Pubky Ring app on your phone creates your Pubky account on this
    Umbrel and signs the node in.
@@ -43,9 +43,9 @@ where some tabs have other names:
 ## Where the music comes from
 
 - **Umbrel's shared storage** (the Files app, downloads from other Umbrel apps) is visible to the
-  node, read-only, as `/music`. In **Settings › Library folders** (called **Library** in version
-  0.1.0), type `/music` and press **Add folder**. New files are picked up about 15 seconds after
-  they land.
+  node, read-only, as `/music`, and the node reads it by itself when it starts (in version 0.1.0:
+  in **Settings › Library**, type `/music` and press **Add folder**). New files are picked up
+  about 15 seconds after they land.
 - **Add music**, a button on the Albums and Tracks pages, uploads files from your browser, or
   copies a folder, into your homeserver's private storage. The node plays them from there without
   a second copy.

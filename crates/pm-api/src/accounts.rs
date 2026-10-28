@@ -248,7 +248,7 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         s.sync_handle()
             .map(|h| h.z32().trim_start_matches("pubky").to_string())
     };
-    let Some(api) = &s.token else {
+    let Some(api) = s.token() else {
         return Some(Caller {
             role: Role::Owner,
             key: owner_key(),
