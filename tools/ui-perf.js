@@ -38,12 +38,12 @@ const measure = async (p, path, selector) => {
   await p.goto('about:blank');
   const t0 = Date.now();
   await p.goto(BASE + path, { waitUntil: 'commit' });
-  await p.waitForSelector(`main :is(${selector})`, 60000).catch(() => null);
+  await p.waitForSelector(`main :is(${selector})`, { timeout: 60000 }).catch(() => null);
   // Ready: the selector is on screen; then the first idle moment of the main thread.
   return p.evaluate(async () => {
     const nav = performance.getEntriesByType('navigation')[0];
     const ready = performance.now();
-    await new Promise((r) => requestIdleCallback(r, 30000));
+    await new Promise((r) => requestIdleCallback(r, { timeout: 30000 }));
     const idle = performance.now();
     const fcp = (performance.getEntriesByName('first-contentful-paint')[0] || {}).startTime || null;
     const json = performance.getEntriesByType('resource').filter((e) => e.name.includes('/v1/')).reduce((n, e) => n + (e.encodedBodySize || 0), 0);
@@ -73,7 +73,7 @@ const measure = async (p, path, selector) => {
     await p.evaluate(() => { window.pmLastSearch = null; });
     for (const ch of w) await p.keyboard.type(ch, { delay: 40 });
     const t = Date.now();
-    await p.waitForSelector('#sresults #stop', 15000).catch(() => null);
+    await p.waitForSelector('#sresults #stop', { timeout: 15000 }).catch(() => null);
     typed.push(Date.now() - t);
     const ms = await waitFor(p, (q) => window.pmLastSearch && window.pmLastSearch.q === q && window.pmLastSearch.sources.library, w, 15000).catch(() => null);
     node.push(ms);

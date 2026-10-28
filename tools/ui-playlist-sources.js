@@ -33,7 +33,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       const p = await ctx.newPage();
       p.on('pageerror', (e) => errors.push('page error: ' + e.message));
       await p.goto(`${BASE}/playlist/${pl.id}`);
-      await p.waitForSelector('#plsongs [data-psrc]', 60000);
+      await p.waitForSelector('#plsongs [data-psrc]', { timeout: 60000 });
       const rows = await p.$$eval('#plsongs .srow', (r) => r.length);
       const chips = await p.$$eval('#plsongs [data-psrc]', (r) => r.length);
       check(rows === pl.items && chips === rows, `${width}: every row has a source chip (${chips}/${rows})`);
@@ -54,7 +54,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
         const menu = await p.$$eval('.popover.menu .pop-item span', (e) => e.map((x) => x.firstChild.textContent));
         check(menu[0] === 'Auto (follow the playlist)' && menu.length >= 2, `chip menu: ${JSON.stringify(menu)}`);
         if (OUT) await p.screenshot({ path: `${OUT}/playlist-source-menu-1280-dark.png` });
-        await p.click('.popover.menu .pop-item:nth-of-type(2)'); await p.waitForSelector(`[data-psrc="${k}"].pinned`, 30000).catch(() => {});
+        await p.click('.popover.menu .pop-item:nth-of-type(2)'); await p.waitForSelector(`[data-psrc="${k}"].pinned`, { timeout: 30000 }).catch(() => {});
         check(!!(await p.$(`[data-psrc="${k}"].pinned svg use[href="#i-pin"]`)), 'picking a source pins it (pin mark on the chip)');
         await p.click(`[data-psrc="${k}"]`); await sleep(300); await p.click('.popover.menu .pop-item:nth-of-type(1)');
         await waitFor(p, (kk) => { const c = document.querySelector(`[data-psrc="${kk}"]`); return c && !c.classList.contains('pinned'); }, k, 30000).catch(() => {});
@@ -73,17 +73,17 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       await p.click('#plownorder'); await waitFor(p, () => document.querySelector('#plownorder') && document.querySelector('#plownorder').checked, null, 30000).catch(() => {});
       check((await checkedOf(p, '#plownorder')) === true, '"Use my node’s order" goes back to the global order');
       // global order in Settings
-      await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', 20000);
+      await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);
       check(g === globalBefore.length, `Settings lists the global order (${g})`);
       if (OUT) { await p.$eval('#gordercard', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/settings-play-from-1280-dark.png` }); }
       // the import dialog asks once (opened and cancelled: nothing is imported)
       for (const svc of ['tidal', 'spotify']) {
-        await p.goto(`${BASE}/source/${svc}`); await p.waitForSelector(`[data-${svc[0]}pl]`, 20000).catch(() => {});
+        await p.goto(`${BASE}/source/${svc}`); await p.waitForSelector(`[data-${svc[0]}pl]`, { timeout: 20000 }).catch(() => {});
         const btn = await p.$(`[data-${svc[0]}pl]`);
         if (!btn) { console.log(`skip: no ${svc} playlists to import here`); continue; }
         const before = (await api('GET', '/playlists')).length;
-        await btn.click(); await p.waitForSelector('dialog[open] .choice', 10000).catch(() => {});
+        await btn.click(); await p.waitForSelector('dialog[open] .choice', { timeout: 10000 }).catch(() => {});
         const choices = await p.$$eval('dialog[open] .choice-label', (e) => e.map((x) => x.textContent));
         check(choices.length === 2 && choices[0].startsWith('Keep ') && choices[1] === 'Auto', `${svc} import asks: ${JSON.stringify(choices)}`);
         if (OUT) await p.screenshot({ path: `${OUT}/import-dialog-${svc}-1280-dark.png` });

@@ -29,7 +29,7 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
   p.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text()); });
 
   await p.goto(BASE + '/');
-  const card = await p.waitForSelector('#h-setup .setup-card', 20000).catch(() => null);
+  const card = await p.waitForSelector('#h-setup .setup-card', { timeout: 20000 }).catch(() => null);
   check(!!card, 'Home shows "Get started" on a new install');
   if (!card) { await browser.close(); process.exit(1); }
   check(/0 of 4 done/.test(await p.textContent('#h-setup')), 'nothing is ticked yet');
@@ -57,7 +57,7 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
   // 3. Contact: saved from the card; Pubky's sections come back
   await p.fill('#setupcontact', 'https://example.org/pm-first-run-check');
   await p.click('#setupcontactsave');
-  await p.waitForSelector('#h-trending-songs', 15000).catch(() => null);
+  await p.waitForSelector('#h-trending-songs', { timeout: 15000 }).catch(() => null);
   check(!!(await p.$('#h-trending-songs')), 'Pubky sections show once the contact is saved');
   await waitFor(p, () => { const s = document.querySelectorAll('#h-setup .setup-step')[2]; return s && s.classList.contains('done'); }, null, 15000).catch(() => null);
   check(await stepDone(p, 3), 'step 3 is ticked');
@@ -72,7 +72,7 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
   // Phone width: the card fits
   const phone = await browser.newContext({ viewport: { width: 375, height: 812 }, reducedMotion: 'reduce' });
   const q = await phone.newPage();
-  await q.goto(BASE + '/'); await q.waitForSelector('#h-setup .setup-card', 20000).catch(() => null);
+  await q.goto(BASE + '/'); await q.waitForSelector('#h-setup .setup-card', { timeout: 20000 }).catch(() => null);
   const overflow = await q.evaluate(() => document.documentElement.scrollWidth - innerWidth);
   check(overflow <= 1, `no sideways scroll at 375 px (${overflow} px)`);
   // Hide: gone now and after a reload

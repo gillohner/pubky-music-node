@@ -40,7 +40,7 @@ const errors = [];
   console.log('Back →', new URL(p.url()).search);
   // A pasted link opens its item page.
   await p.fill('#search', 'https://tidal.com/album/199574241'); await p.press('#search', 'Enter');
-  await p.waitForSelector('#main #iabout', 30000).catch(() => {});
+  await p.waitForSelector('#main #iabout', { timeout: 30000 }).catch(() => {});
   const h1 = await p.textContent('#main h1').catch(() => null);
   console.log('pasted TIDAL link →', new URL(p.url()).pathname, '|', h1);
   if (!/^\/album\/(u|tidal)-/.test(new URL(p.url()).pathname)) errors.push('a pasted link did not open its item page');
