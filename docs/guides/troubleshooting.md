@@ -75,9 +75,11 @@ The data folder must be writable by user id 1000. With a folder instead of a Doc
 
 ## A speaker is listed but stays silent
 
-- Speakers fetch the music from the node at `PM_PUBLIC_URL` (`public_url`). It must be the node's
-  network address, `http://192.168.1.10:7788`, never `localhost` or `0.0.0.0`. **Explain what
-  is on the network** warns when it is wrong.
+- Speakers fetch the music from the node's address on your network. The node finds it by itself
+  and writes it in its log at start (`speakers fetch music from this address`). On a machine with
+  several networks it may pick one the speakers can't reach: set `PM_PUBLIC_URL` (`public_url`)
+  to the right one, for example `http://192.168.1.10:7788`. **Explain what is on the network**
+  warns when the address can't work (`localhost`, `0.0.0.0`).
 - The speaker must reach the node on TCP 7788 (check firewalls between networks).
 - An AirPlay receiver that requires encryption is skipped; the log says so.
 
