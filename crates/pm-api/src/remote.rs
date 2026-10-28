@@ -13,7 +13,7 @@ pub struct RemoteConfig {
     /// The node's iroh key (made on first start, mode 600).
     pub key_path: PathBuf,
     pub relays: pm_remote::Relays,
-    /// The node's HTTP listener as reachable from this machine (loopback).
+    /// The tunnel's own loopback listener (`peer::serve_remote`), so its requests are known.
     pub target: SocketAddr,
 }
 

@@ -62,6 +62,7 @@ pub mod mbproxy;
 pub mod new_releases;
 pub mod opensubsonic;
 pub mod party;
+pub mod peer;
 pub mod people;
 pub mod pinakes_reader;
 pub mod play_from;
@@ -725,8 +726,19 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .with_state(state.clone()),
         )
         .merge(subsonic::router(state.clone()))
-        // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`).
-        .merge(state.renderer.get().map(|r| r.router()).unwrap_or_default())
+        // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`),
+        // to LAN peers only (peer.rs)
+        .merge(
+            state
+                .renderer
+                .get()
+                .map(|r| r.router().layer(middleware::from_fn(peer::lan_only)))
+                .unwrap_or_default(),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::tokenless_direct_only,
+        ))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -738,7 +750,12 @@ pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    axum::serve(listener, router(state)).await?;
+    // Peer addresses: the renderer answers LAN peers only (peer.rs)
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -773,7 +790,10 @@ async fn auth(
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).
-fn bearer(headers: &HeaderMap, query: &std::collections::HashMap<String, String>) -> Option<String> {
+pub(crate) fn bearer(
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -920,8 +940,18 @@ async fn web_ui() -> Response {
 
 // ---- handlers: node ----
 
-async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
+async fn info(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
+) -> ApiResult<Info> {
     let library = s.library.lock().expect("library poisoned").stats()?;
+    let mut last_scan = s.last_scan.lock().expect("last scan lock").clone();
+    // The unreadable files' paths are where the owner keeps music: a listener gets the count
+    if c.role != accounts::Role::Owner {
+        if let Some(l) = last_scan.as_mut() {
+            l.errors.clear();
+        }
+    }
     Ok(Json(Info {
         id: s.node_id.clone(),
         remote: s.remote_id.read().expect("remote id poisoned").clone(),
@@ -932,7 +962,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         zones: s.zones.list().len(),
         outputs: s.outputs.len(),
         scanning: s.is_scanning(),
-        last_scan: s.last_scan.lock().expect("last scan lock").clone(),
+        last_scan,
     }))
 }
 
@@ -1337,8 +1367,12 @@ fn zone_of(s: &NodeState, id: &str) -> Result<Arc<Zone>, ApiError> {
         .ok_or_else(|| ApiError::not_found(format!("no zone {id}")))
 }
 
-async fn zones(State(s): State<Arc<NodeState>>) -> Json<Vec<ZoneState>> {
-    Json(s.zones.list())
+async fn zones(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
+) -> Json<Vec<ZoneState>> {
+    // A listener sees only the zones open to listeners
+    Json(events::visible(&s, &c, s.zones.list()))
 }
 
 async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
@@ -1677,9 +1711,16 @@ async fn sleep_set(
 /// whatever it was doing; the source is left stopped and empty.
 async fn transfer(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
     Path(id): Path<String>,
     Json(body): Json<TransferRequest>,
 ) -> ApiResult<ZoneState> {
+    // The middleware checked the zone in the path; the target needs the same right
+    if !accounts::may_use_zone(&s, &c, &body.to) {
+        return Err(accounts::refused(
+            "the owner has not opened that zone to listeners",
+        ));
+    }
     if body.to == id {
         return Err(ApiError::bad_request("cannot transfer a zone to itself"));
     }
@@ -2002,9 +2043,6 @@ async fn track_file(
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let bytes = webdav::read_library_file(&s, &t.file.path)
-        .await
-        .map_err(|e| ApiError::not_found(format!("file for track {id}: {e}")))?;
     let mime = match t.file.container.as_str() {
         "flac" => "audio/flac",
         "wav" => "audio/wav",
@@ -2023,13 +2061,7 @@ async fn track_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("track-{id}"));
-    let mut resp = ranged_response(&headers, bytes, mime);
-    if let Ok(v) =
-        axum::http::HeaderValue::from_str(&format!("inline; filename=\"{}\"", name.replace('"', "")))
-    {
-        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-    }
-    Ok(resp)
+    downloads::stream_file(&s, id, &t.file, &headers, mime, Some(("inline", &name))).await
 }
 
 async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
@@ -2754,15 +2786,9 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match std::fs::write(path, secret) {
-                    Ok(()) => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-                        }
-                    }
-                    Err(e) => tracing::warn!(path = %path.display(), "cannot store the session secret: {e}"),
+                // Created 0600, never written first and made private after
+                if let Err(e) = imports::write_private(path, secret.as_bytes()) {
+                    tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
                 }
             }
             let hs = s

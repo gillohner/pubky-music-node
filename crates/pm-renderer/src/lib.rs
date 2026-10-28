@@ -9,9 +9,10 @@
 //! WAV, LPCM, MP3, AAC, Ogg) and the zone plays it like any other queue item, through its own
 //! output and DSP.
 //!
-//! The node implements [`Host`] over its zones. These routes take no API token: like any
-//! renderer on a LAN, whoever can reach the port can play to the zones. `[renderer] enabled =
-//! false` turns them off.
+//! The node implements [`Host`] over its zones. These routes take no API token, like any renderer,
+//! so the node serves them to LAN peers only (never through its tunnels) and adds the [`Peer`].
+//! The URIs a controller sets and the event callbacks it gives must be addresses that controller
+//! could reach itself ([`reachable_for`]). `[renderer] enabled = false` turns them off.
 
 pub mod ssdp;
 pub mod xml;
@@ -21,10 +22,100 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
+use axum::Extension;
 use axum::Router;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// The address a renderer request came from; the node's router adds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer(pub IpAddr);
+
+/// Whether the node may connect to `url` (a URI to play, an event callback) for a controller at
+/// `peer`: http(s) only, and every address the host resolves to must be one the controller could
+/// reach itself. LAN and public addresses pass (a NAS media server, Music Assistant's stream);
+/// loopback only for a controller on this machine; link-local (169.254.169.254, the cloud
+/// metadata service), unspecified, multicast and broadcast never. A name that does not resolve
+/// is refused. The zone resolves the name again when it fetches.
+pub async fn reachable_for(url: &str, peer: Option<IpAddr>) -> Result<(), String> {
+    let (host, port) = host_port(url).ok_or("only http(s) URIs play here")?;
+    let addrs: Vec<IpAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| format!("{host} did not resolve in time"))?
+        .map_err(|e| format!("{host} does not resolve: {e}"))?
+        .map(|a| a.ip())
+        .collect(),
+    };
+    if addrs.is_empty() {
+        return Err(format!("{host} does not resolve"));
+    }
+    match addrs.iter().find(|ip| !allowed(**ip, peer)) {
+        Some(ip) => Err(format!("{host} is {ip}, which this renderer does not fetch from")),
+        None => Ok(()),
+    }
+}
+
+/// `(host, port)` of an http(s) URL; user info is dropped.
+fn host_port(url: &str) -> Option<(String, u16)> {
+    let (rest, default) = if let Some(r) = strip_prefix_ci(url, "http://") {
+        (r, 80)
+    } else {
+        (strip_prefix_ci(url, "https://")?, 443)
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = if let Some(v6) = hostport.strip_prefix('[') {
+        let (h, after) = v6.split_once(']')?;
+        (h, after.strip_prefix(':'))
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (hostport, None),
+        }
+    };
+    let port = match port {
+        Some(p) => p.parse().ok()?,
+        None => default,
+    };
+    (!host.is_empty()).then(|| (host.to_ascii_lowercase(), port))
+}
+
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.get(..prefix.len())
+        .filter(|p| p.eq_ignore_ascii_case(prefix))
+        .map(|_| &s[prefix.len()..])
+}
+
+fn allowed(ip: IpAddr, peer: Option<IpAddr>) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    };
+    let link_local = match ip {
+        IpAddr::V4(v4) => v4.is_link_local() || v4.is_broadcast(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    };
+    if ip.is_unspecified() || ip.is_multicast() || link_local {
+        return false;
+    }
+    if ip.is_loopback() {
+        return peer.is_some_and(|p| {
+            match p {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(p, IpAddr::V4),
+                v4 => v4,
+            }
+            .is_loopback()
+        });
+    }
+    true
+}
 
 /// What a controller said (or the zone has) about the current item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -267,8 +358,10 @@ async fn describe(State(r): State<Arc<Renderer>>, Path((zone, file)): Path<(Stri
 async fn control(
     State(r): State<Arc<Renderer>>,
     Path((zone, service)): Path<(String, String)>,
+    peer: Option<Extension<Peer>>,
     body: Bytes,
 ) -> Response {
+    let peer = peer.map(|Extension(Peer(ip))| ip);
     let soap_fault = |code: u16, msg: &str| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -302,6 +395,8 @@ async fn control(
             let uri = call.arg("CurrentURI").trim().to_string();
             if !(uri.starts_with("http://") || uri.starts_with("https://")) {
                 Err((714, "Illegal MIME-type: only http(s) URIs play here".into()))
+            } else if let Err(e) = reachable_for(&uri, peer).await {
+                Err((716, format!("Resource not found: {e}")))
             } else {
                 let meta = xml::parse_didl(call.arg("CurrentURIMetaData"));
                 act(Act::SetUri { uri, meta })
@@ -312,11 +407,20 @@ async fn control(
         }
         ("avt", "SetNextAVTransportURI") => {
             let uri = call.arg("NextURI").trim().to_string();
-            let meta = xml::parse_didl(call.arg("NextURIMetaData"));
-            act(Act::SetNextUri { uri, meta })
-                .await
-                .map(|_| ok(&[]))
-                .map_err(|e| (501, e))
+            if !uri.is_empty() && !(uri.starts_with("http://") || uri.starts_with("https://")) {
+                Err((714, "Illegal MIME-type: only http(s) URIs play here".into()))
+            } else if let Err(e) = match uri.is_empty() {
+                true => Ok(()),
+                false => reachable_for(&uri, peer).await,
+            } {
+                Err((716, format!("Resource not found: {e}")))
+            } else {
+                let meta = xml::parse_didl(call.arg("NextURIMetaData"));
+                act(Act::SetNextUri { uri, meta })
+                    .await
+                    .map(|_| ok(&[]))
+                    .map_err(|e| (501, e))
+            }
         }
         ("avt", "Play") => act(Act::Play).await.map(|_| ok(&[])).map_err(|e| (501, e)),
         ("avt", "Pause") => act(Act::Pause).await.map(|_| ok(&[])).map_err(|e| (501, e)),
@@ -411,9 +515,11 @@ async fn control(
 async fn events(
     State(r): State<Arc<Renderer>>,
     Path((zone, service)): Path<(String, String)>,
+    peer: Option<Extension<Peer>>,
     method: Method,
     headers: HeaderMap,
 ) -> Response {
+    let peer = peer.map(|Extension(Peer(ip))| ip);
     if r.zone_known(&zone).is_none() || !matches!(service.as_str(), "avt" | "rc" | "cm") {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -432,9 +538,9 @@ async fn events(
     match method.as_str() {
         "SUBSCRIBE" => {
             let sid = h("sid");
-            let mut subs = r.subs.lock().expect("subs");
             if !sid.is_empty() {
                 // Renewal.
+                let mut subs = r.subs.lock().expect("subs");
                 return match subs.get_mut(&sid) {
                     Some(s) => {
                         s.expires = Instant::now() + Duration::from_secs(timeout);
@@ -443,12 +549,17 @@ async fn events(
                     None => StatusCode::PRECONDITION_FAILED.into_response(),
                 };
             }
-            let callbacks: Vec<String> = h("callback")
+            let mut callbacks: Vec<String> = Vec::new();
+            for c in h("callback")
                 .split('>')
                 .filter_map(|c| c.trim().strip_prefix('<'))
-                .map(str::to_string)
                 .filter(|c| c.starts_with("http://"))
-                .collect();
+            {
+                // NOTIFY goes only where the subscriber could send it itself
+                if reachable_for(c, peer).await.is_ok() {
+                    callbacks.push(c.to_string());
+                }
+            }
             if callbacks.is_empty() || h("nt") != "upnp:event" {
                 return StatusCode::PRECONDITION_FAILED.into_response();
             }
@@ -456,7 +567,7 @@ async fn events(
                 "uuid:{}",
                 r.udn(&format!("{zone}/{service}/{:?}", Instant::now()))
             );
-            subs.insert(
+            r.subs.lock().expect("subs").insert(
                 sid.clone(),
                 Sub {
                     zone,

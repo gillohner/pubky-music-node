@@ -3737,6 +3737,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite 0.30.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3829,6 +3830,7 @@ dependencies = [
  "pm-stream",
  "pm-zones",
  "serde_json",
+ "socket2",
  "tracing",
  "tracing-subscriber",
 ]

@@ -33,6 +33,22 @@ player provider finds the zones by itself (it searches every 5 minutes; reloadin
 searches at once). Home Assistant's DLNA Digital Media Renderer integration, BubbleUPnP and other
 UPnP controllers find them too.
 
+Like any renderer the zones take no token, so the node answers renderer requests from the LAN only:
+a private or loopback source address on its own port, never through remote access (iroh), the
+Cloudflare tunnel or a reverse proxy (403). The URIs a controller sets and its event callbacks must
+be LAN or public addresses; loopback only for a controller on the node's own machine, and never
+link-local (`169.254.x`, e.g. a cloud metadata service).
+
+- **The rule trusts the source address the node sees.** Rootless Docker or Podman (rootlesskit,
+  slirp4netns port forwarding) and some NAS app proxies show every client as a private gateway
+  address, so with the port published to the internet that way, internet clients would count as LAN.
+  Turn the renderer off (`[renderer] enabled = false`) when the port is reachable beyond the LAN
+  without a proxy in front.
+- **Tailscale and other CGNAT addresses (`100.64.0.0/10`) are not LAN** and get 403. Use remote access
+  or the app over Tailscale; a UPnP controller needs to be on the node's local network.
+- **A LAN peer can still use DNS rebinding:** the node checks a host name when the URI is set, and the
+  zone resolves it again when it fetches. Such a peer is already on the LAN, which the renderer trusts.
+
 - **Two ways MA streams:**
   - *Flow mode*, MA's default for DLNA: one continuous stream; MA does the queue, crossfade and seek.
   - *Flow mode off*: track URLs with `SetNextAVTransportURI`; the zone plays them back to back,

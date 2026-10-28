@@ -468,9 +468,10 @@ fn first_readable(c: Vec<(PathBuf, String)>) -> Option<(String, String, PathBuf)
         .find_map(|(path, shown)| Some((std::fs::read_to_string(&path).ok()?, shown, path)))
 }
 
-/// Write what the person picked, readable by the node's user only (0600), replacing what was
-/// there.
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write a secret (a sign-in, a session, a key), readable by the node's user only: created 0600
+/// as a side file and renamed into place, so it is never readable by others, not even briefly,
+/// and replaces a file there whatever that file's mode was.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }

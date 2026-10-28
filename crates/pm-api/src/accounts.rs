@@ -195,6 +195,16 @@ fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether this caller may see and play on `zone`: the owner every zone; a listener the zones
+/// the owner opened to listeners (every zone when none are chosen); a party guest none.
+pub fn may_use_zone(s: &NodeState, c: &Caller, zone: &str) -> bool {
+    match c.role {
+        Role::Owner => true,
+        Role::Listener => zone_refusal(s, zone).is_none(),
+        Role::Guest => false,
+    }
+}
+
 /// Whether a listener may make this request. `None` = yes; `Some(why)` = no.
 pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'static str> {
     // Inside the `/v1` router the prefix is gone; take either
@@ -288,18 +298,16 @@ pub(crate) async fn sign_out(
     State(s): State<Arc<NodeState>>,
     axum::Extension(c): axum::Extension<Caller>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<serde_json::Value> {
     if c.role != Role::Listener {
         return Err(ApiError::bad_request(
             "the owner's API token is set in the node's config, not signed out",
         ));
     }
-    let token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    let h = hash(token);
+    // The token the request was let in with, from the header or `?token=` (as the middleware read it)
+    let token = crate::bearer(&headers, &query).unwrap_or_default();
+    let h = hash(&token);
     let mut all = load_tokens(&s);
     all.retain(|t| t.hash != h);
     store_tokens(&s, &all)?;

@@ -51,6 +51,15 @@ jobs:
         run: |
           tail -60 /tmp/ha-dlna/node.log /tmp/ha-int/node.log || true
           grep -E 'ERROR|WARNING|pubky_music|dlna_dmr' /tmp/ha-dlna/ha.log /tmp/ha-int/ha.log | tail -80 || true
+  home-assistant-unit:
+    # The integration's own tests (integrations/home-assistant/tests): the token goes only to the
+    # node, and a node that moved is followed only once the person says so. No Home Assistant needed.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 -m venv /tmp/ha && /tmp/ha/bin/pip install -q aiohttp==3.14.5 voluptuous==0.16.0
+      - run: /tmp/ha/bin/python -m unittest discover -v -s integrations/home-assistant/tests
   music-assistant:
     # MA adds the node as an OpenSubsonic source and plays one of its tracks to a zone through
     # MA's DLNA player provider (tools/ma-check.py).

@@ -120,7 +120,7 @@ async fn describes_and_plays_a_uri() {
         soap(
             xml::AVT,
             "SetAVTransportURI",
-            &format!("<CurrentURI>http://ma:8097/flow/1.flac</CurrentURI><CurrentURIMetaData>{didl}</CurrentURIMetaData>"),
+            &format!("<CurrentURI>http://192.168.1.20:8097/flow/1.flac</CurrentURI><CurrentURIMetaData>{didl}</CurrentURIMetaData>"),
         ),
     )
     .await;
@@ -149,7 +149,7 @@ async fn describes_and_plays_a_uri() {
     )
     .await;
     assert!(
-        pos.contains("<TrackURI>http://ma:8097/flow/1.flac</TrackURI>"),
+        pos.contains("<TrackURI>http://192.168.1.20:8097/flow/1.flac</TrackURI>"),
         "{pos}"
     );
     assert!(pos.contains("Get Lucky"), "{pos}");
@@ -203,7 +203,7 @@ async fn describes_and_plays_a_uri() {
     let acts = host.acts.lock().unwrap().clone();
     assert_eq!(acts.len(), 4, "{acts:?}");
     assert!(
-        matches!(&acts[0], Act::SetUri { uri, meta } if uri == "http://ma:8097/flow/1.flac" && meta.title.as_deref() == Some("Get Lucky"))
+        matches!(&acts[0], Act::SetUri { uri, meta } if uri == "http://192.168.1.20:8097/flow/1.flac" && meta.title.as_deref() == Some("Get Lucky"))
     );
     assert_eq!(acts[1], Act::Play);
     assert_eq!(acts[2], Act::Seek(65_000));
@@ -223,6 +223,8 @@ async fn subscribers_get_the_state_and_its_changes() {
                 .method("SUBSCRIBE")
                 .uri("/upnp/zone/kitchen/evt/avt")
                 .header("CALLBACK", format!("<{cb}>"))
+                // A controller on this machine may have its callback on loopback
+                .extension(Peer("127.0.0.1".parse().unwrap()))
                 .header("NT", "upnp:event")
                 .header("TIMEOUT", "Second-300")
                 .body(Body::empty())
@@ -302,4 +304,79 @@ async fn subscribers_get_the_state_and_its_changes() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(r.subs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn uris_and_callbacks_only_reach_what_the_controller_could() {
+    let lan: Option<IpAddr> = Some("192.168.1.30".parse().unwrap());
+    let local: Option<IpAddr> = Some("127.0.0.1".parse().unwrap());
+    for ok in [
+        "http://192.168.1.20:8097/a.flac",
+        "https://1.1.1.1/x",
+        "http://[fd00::4]:80/",
+        "HTTP://10.0.0.2",
+    ] {
+        assert!(reachable_for(ok, lan).await.is_ok(), "{ok}");
+    }
+    for bad in [
+        "http://127.0.0.1:7788/v1/info",
+        "http://localhost:7788/",
+        "http://[::1]/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://0.0.0.0:22/",
+        "http://224.0.0.1/",
+        "http://192.168.1.20@127.0.0.1:7788/",
+        "file:///etc/passwd",
+        "http://no-such-host.invalid/a.flac",
+    ] {
+        assert!(reachable_for(bad, lan).await.is_err(), "{bad}");
+    }
+    // Loopback only for a controller on this machine; with no peer known, never
+    assert!(reachable_for("http://127.0.0.1:8097/a.flac", local).await.is_ok());
+    assert!(reachable_for("http://127.0.0.1:8097/a.flac", None).await.is_err());
+    assert!(reachable_for("http://169.254.169.254/", local).await.is_err());
+
+    // Through SOAP: refused with a fault, the zone never asked
+    let (r, host) = renderer();
+    let app = r.router();
+    let set = |uri: &str| {
+        soap(
+            xml::AVT,
+            "SetAVTransportURI",
+            &format!("<CurrentURI>{uri}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>"),
+        )
+    };
+    let (_, f) = post(
+        &app,
+        "/upnp/zone/kitchen/ctl/avt",
+        set("http://169.254.169.254/latest/meta-data/"),
+    )
+    .await;
+    assert!(f.contains("<errorCode>716</errorCode>"), "{f}");
+    let next = soap(
+        xml::AVT,
+        "SetNextAVTransportURI",
+        "<NextURI>file:///etc/passwd</NextURI><NextURIMetaData></NextURIMetaData>",
+    );
+    let (_, f) = post(&app, "/upnp/zone/kitchen/ctl/avt", next).await;
+    assert!(f.contains("<errorCode>714</errorCode>"), "{f}");
+    assert!(host.acts.lock().unwrap().is_empty());
+
+    // A subscriber whose only callback is the machine's own port, from the LAN: refused
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("SUBSCRIBE")
+                .uri("/upnp/zone/kitchen/evt/avt")
+                .header("CALLBACK", "<http://127.0.0.1:7788/v1/zones>")
+                .header("NT", "upnp:event")
+                .extension(Peer("192.168.1.30".parse().unwrap()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
 }

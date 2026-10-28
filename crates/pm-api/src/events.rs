@@ -8,6 +8,9 @@
 //! the zones in the snapshot replace its own. A gap in `seq` means it missed
 //! something; it sends `{"type":"resync"}` and gets a fresh snapshot.
 //!
+//! A listener sees only the zones open to listeners: the snapshot leaves the others out, and an
+//! event about one of them goes out as `{"seq":n,"type":"hidden"}`, so `seq` has no gaps.
+//!
 //! Controllers may also send `{"type":"ping","id":n}`; the node answers
 //! `{"type":"pong","id":n}` at once (no `seq`), which gives the round-trip
 //! time. A controller that pings is dropped after [`IDLE_TIMEOUT`] without
@@ -21,10 +24,12 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use axum::Extension;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::accounts::{may_use_zone, Caller};
 use crate::state::NodeState;
 use crate::types::ApiEvent;
 use pm_zones::ZoneState;
@@ -132,24 +137,48 @@ enum ClientMsg {
     Resync,
 }
 
-pub(crate) async fn events_ws(State(s): State<Arc<NodeState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| event_stream(socket, s))
+pub(crate) async fn events_ws(
+    State(s): State<Arc<NodeState>>,
+    Extension(c): Extension<Caller>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| event_stream(socket, s, c))
 }
 
-fn snapshot(s: &NodeState, seq: u64) -> SnapshotMsg {
+fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {
     SnapshotMsg {
         kind: "snapshot".into(),
         seq,
         boot: s.events.boot().to_string(),
         library_rev: s.events.library_rev(),
-        zones: s.zones.list(),
+        zones: visible(s, c, s.zones.list()),
     }
 }
 
-async fn event_stream(socket: WebSocket, s: Arc<NodeState>) {
+/// The zones of `zones` this caller may see.
+pub(crate) fn visible(s: &NodeState, c: &Caller, mut zones: Vec<ZoneState>) -> Vec<ZoneState> {
+    zones.retain(|z| may_use_zone(s, c, &z.id.0));
+    zones
+}
+
+/// The event as this caller may see it: `None` when it is about a zone they may not see.
+fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
+    match ev {
+        ApiEvent::Snapshot { zones } => Some(ApiEvent::Snapshot {
+            zones: visible(s, c, zones.clone()),
+        }),
+        ApiEvent::Zone { state } => may_use_zone(s, c, &state.id.0).then(|| ev.clone()),
+        ApiEvent::ZoneEvent { zone, .. } | ApiEvent::ZoneRemoved { zone } => {
+            may_use_zone(s, c, &zone.0).then(|| ev.clone())
+        }
+        ApiEvent::LibraryChanged => Some(ev.clone()),
+    }
+}
+
+async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
-    if send_json(&mut tx, &snapshot(&s, seq)).await.is_err() {
+    if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
         return;
     }
     let mut ping = tokio::time::interval(SERVER_PING);
@@ -163,7 +192,11 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>) {
         tokio::select! {
             ev = events.recv() => match ev {
                 Ok(ev) => {
-                    if send_json(&mut tx, &EventMsg { seq: ev.seq, event: &ev.event }).await.is_err() {
+                    let sent = match for_caller(&s, &c, &ev.event) {
+                        Some(event) => send_json(&mut tx, &EventMsg { seq: ev.seq, event: &event }).await,
+                        None => send_json(&mut tx, &serde_json::json!({"seq": ev.seq, "type": "hidden"})).await,
+                    };
+                    if sent.is_err() {
                         break;
                     }
                 }
@@ -171,7 +204,7 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>) {
                     tracing::debug!(n, "event stream lagged; resending snapshot");
                     let (fresh, seq) = s.events.subscribe_at();
                     events = fresh;
-                    if send_json(&mut tx, &snapshot(&s, seq)).await.is_err() {
+                    if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
                         break;
                     }
                 }
@@ -192,7 +225,7 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>) {
                         Ok(ClientMsg::Resync) => {
                             let (fresh, seq) = s.events.subscribe_at();
                             events = fresh;
-                            if send_json(&mut tx, &snapshot(&s, seq)).await.is_err() {
+                            if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
                                 break;
                             }
                         }

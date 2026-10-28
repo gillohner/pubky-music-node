@@ -17,7 +17,6 @@ use crate::playlists::{self, store};
 use crate::sources::NodeSources;
 use crate::state::NodeState;
 use crate::types::DescribedTrack;
-use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -1420,11 +1419,11 @@ async fn dispatch(
                 .expect("library poisoned")
                 .get_track(TrackId(id))?
                 .ok_or_else(|| SubErr::not_found("Song not found"))?;
-            let bytes = tokio::fs::read(&t.file.path)
-                .await
-                .map_err(|e| SubErr::not_found(format!("file: {e}")))?;
             let (mime, _) = mime_for(&t.file.container);
-            return Ok(Reply::Raw(ranged(headers, bytes, mime)));
+            let resp = crate::downloads::stream_file(s, id, &t.file, headers, mime, None)
+                .await
+                .map_err(|e| SubErr::not_found(format!("file: {}", e.message)))?;
+            return Ok(Reply::Raw(resp));
         }
         "getCoverArt" => {
             let id = want(p, "id")?;
@@ -1464,49 +1463,6 @@ async fn dispatch(
         other => return Err(SubErr::new(0, format!("Method {other} is not implemented"))),
     }
     Ok(Reply::Json(m))
-}
-
-/// Serve `bytes` honouring a single `Range: bytes=a-b` request.
-fn ranged(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -> Response {
-    let total = bytes.len() as u64;
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("bytes="))
-        .and_then(|v| {
-            let (a, b) = v.split_once('-')?;
-            let start: u64 = if a.is_empty() { 0 } else { a.parse().ok()? };
-            let end: u64 = if b.is_empty() {
-                total.saturating_sub(1)
-            } else {
-                b.parse().ok()?
-            };
-            (start <= end && start < total).then_some((start, end.min(total.saturating_sub(1))))
-        });
-    match range {
-        Some((start, end)) => {
-            let slice = bytes[start as usize..=end as usize].to_vec();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, mime.to_string()),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
-                ],
-                Body::from(slice),
-            )
-                .into_response()
-        }
-        None => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, mime.to_string()),
-                (header::ACCEPT_RANGES, "bytes".to_string()),
-            ],
-            Body::from(bytes),
-        )
-            .into_response(),
-    }
 }
 
 #[cfg(test)]
