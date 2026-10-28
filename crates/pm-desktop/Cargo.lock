@@ -4914,6 +4914,7 @@ dependencies = [
  "pm-stream",
  "pm-zones",
  "serde_json",
+ "socket2",
  "tracing",
  "tracing-subscriber",
 ]

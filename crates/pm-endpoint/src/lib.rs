@@ -16,13 +16,56 @@ use pm_zones::{AudioSink, Output, OutputId, OutputRegistry};
 use std::collections::HashSet;
 use std::io::{BufReader, BufWriter};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Sessions at once: a zone per output plus the node's short control sessions fit many times.
+pub const MAX_SESSIONS: usize = 16;
+/// How long a new connection has to say `Hello`.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a session without an open output may be silent (the node's control sessions are short).
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a write may block on a peer that does not read.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// An open output may be paused for hours, so it has no read timeout; TCP keepalive notices a peer
+/// that is gone.
+const KEEPALIVE: Duration = Duration::from_secs(60);
 
 pub struct Endpoint {
     pub name: String,
     pub outputs: OutputRegistry,
     /// Outputs with an open session; a second `Open` is refused.
     busy: Mutex<HashSet<OutputId>>,
+    sessions: Arc<AtomicUsize>,
+    limits: Limits,
+}
+
+/// How many sessions at once and how long a peer may be silent.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_sessions: usize,
+    pub hello: Duration,
+    pub idle: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_sessions: MAX_SESSIONS,
+            hello: HELLO_TIMEOUT,
+            idle: IDLE_TIMEOUT,
+        }
+    }
+}
+
+/// Counts a session while it lives.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Endpoint {
@@ -31,10 +74,23 @@ impl Endpoint {
             name: name.to_string(),
             outputs,
             busy: Mutex::new(HashSet::new()),
+            sessions: Arc::new(AtomicUsize::new(0)),
+            limits: Limits::default(),
         })
     }
 
-    /// Accept connections forever, one thread per session.
+    /// The same endpoint with other limits (tests).
+    pub fn with_limits(name: &str, outputs: OutputRegistry, limits: Limits) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            outputs,
+            busy: Mutex::new(HashSet::new()),
+            sessions: Arc::new(AtomicUsize::new(0)),
+            limits,
+        })
+    }
+
+    /// Accept connections forever, one thread per session, at most `max_sessions` at once.
     pub fn serve(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         for stream in listener.incoming() {
             let stream = match stream {
@@ -45,10 +101,25 @@ impl Endpoint {
                 }
             };
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+            let max = self.limits.max_sessions;
+            if self.sessions.fetch_add(1, Ordering::SeqCst) >= max {
+                self.sessions.fetch_sub(1, Ordering::SeqCst);
+                tracing::warn!(%peer, "refused: {max} sessions already");
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                let _ = write_frame(
+                    &mut BufWriter::new(&stream),
+                    &Frame::Error {
+                        message: "too many sessions".into(),
+                    },
+                );
+                continue;
+            }
+            let slot = Slot(self.sessions.clone());
             let ep = self.clone();
             std::thread::Builder::new()
                 .name(format!("pm-endpoint {peer}"))
                 .spawn(move || {
+                    let _slot = slot;
                     if let Err(e) = ep.session(stream) {
                         tracing::info!(%peer, "session ended: {e}");
                     }
@@ -67,6 +138,13 @@ impl Endpoint {
 
     fn session(&self, stream: TcpStream) -> Result<(), StreamError> {
         stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(self.limits.hello))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(
+            &socket2::TcpKeepalive::new()
+                .with_time(KEEPALIVE)
+                .with_interval(Duration::from_secs(10)),
+        );
         let mut r = BufReader::new(stream.try_clone()?);
         let mut w = BufWriter::new(stream);
         match expect_control(&mut r)? {
@@ -84,6 +162,7 @@ impl Endpoint {
                 return Err(StreamError::Unexpected(format!("{other:?}")));
             }
         }
+        r.get_ref().set_read_timeout(Some(self.limits.idle))?;
         loop {
             let frame = match read_frame(&mut r) {
                 Ok(Incoming::Control(f)) => f,
@@ -136,6 +215,8 @@ impl Endpoint {
                         )?;
                         continue;
                     }
+                    // A paused zone keeps its output open without a word for as long as it likes
+                    r.get_ref().set_read_timeout(None)?;
                     let result = self.run_open(&mut r, &mut w, out, format);
                     self.busy.lock().expect("busy").remove(&id);
                     match result {

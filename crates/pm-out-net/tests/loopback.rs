@@ -108,3 +108,21 @@ async fn zone_plays_bit_exact_through_an_endpoint() {
         Err(SinkError::UnsupportedFormat(..))
     ));
 }
+
+/// A block larger than one wire frame goes out in parts and arrives whole.
+#[test]
+fn a_block_larger_than_a_frame_arrives_whole() {
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    let endpoint = Endpoint::new("Big", outputs);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || endpoint.serve(listener).unwrap());
+    let out = NetOutput::connect(addr).unwrap().into_iter().next().unwrap();
+    let fmt = AudioFormat::pcm(768_000, 32, 8);
+    let mut sink = pm_stream::block_on(out.open(fmt)).unwrap();
+    let frames = (pm_stream::MAX_FRAME as usize * 5 / 2) / 32;
+    let block = pm_model::AudioBlock::pcm_i32(fmt, vec![7; frames * 8]);
+    sink.write(&block).unwrap();
+    assert_eq!(sink.frames_written(), frames as u64);
+}

@@ -27,8 +27,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// mDNS service type endpoints advertise.
 pub const SERVICE_TYPE: &str = "_pubky-music._tcp.local.";
 pub const DEFAULT_PORT: u16 = 7790;
-/// Largest frame accepted (a 1 s block of 8-channel 32-bit at 768 kHz is ~24 MB).
-pub const MAX_FRAME: u32 = 32 * 1024 * 1024;
+/// Largest audio frame sent or accepted. A decoded packet is at most a few MB (65 535 frames of
+/// 8-channel 32-bit is 2 MB); a larger block goes out in several frames ([`write_audio`]).
+pub const MAX_FRAME: u32 = 4 * 1024 * 1024;
+/// Largest control frame (JSON) accepted: a `Welcome` with every output's caps fits many times.
+pub const MAX_CONTROL_FRAME: u32 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
@@ -99,10 +102,27 @@ pub fn write_frame(w: &mut dyn Write, frame: &Frame) -> Result<(), StreamError> 
     write_raw(w, KIND_CONTROL, &body)
 }
 
-/// Write an audio frame: the block's samples in wire layout.
-pub fn write_audio(w: &mut dyn Write, block: &AudioBlock) -> Result<(), StreamError> {
+/// Write a block's samples in wire layout as audio frames: one, or several of whole sample frames
+/// when the block is larger than [`MAX_FRAME`]. Returns how many frames were sent (each is
+/// answered by its own `Ack`).
+pub fn write_audio(w: &mut dyn Write, block: &AudioBlock) -> Result<usize, StreamError> {
     let bytes = encode_samples(block);
-    write_raw(w, KIND_AUDIO, &bytes)
+    let per_frame = match block.format.kind {
+        pm_model::SampleKind::Pcm => 4 * block.format.channels as usize,
+        pm_model::SampleKind::Dsd => block.format.channels as usize,
+    }
+    .max(1);
+    let chunk = (MAX_FRAME as usize / per_frame) * per_frame;
+    if bytes.is_empty() {
+        write_raw(w, KIND_AUDIO, &bytes)?;
+        return Ok(1);
+    }
+    let mut sent = 0;
+    for part in bytes.chunks(chunk) {
+        write_raw(w, KIND_AUDIO, part)?;
+        sent += 1;
+    }
+    Ok(sent)
 }
 
 fn write_raw(w: &mut dyn Write, kind: u8, body: &[u8]) -> Result<(), StreamError> {
@@ -132,7 +152,12 @@ pub fn read_frame(r: &mut dyn Read) -> Result<Incoming, StreamError> {
     let mut head = [0u8; 5];
     r.read_exact(&mut head)?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]);
-    if len > MAX_FRAME {
+    let max = if head[0] == KIND_AUDIO {
+        MAX_FRAME
+    } else {
+        MAX_CONTROL_FRAME
+    };
+    if len > max {
         return Err(StreamError::Malformed(format!("frame of {len} bytes too large")));
     }
     let mut body = vec![0u8; len as usize];
@@ -284,5 +309,40 @@ mod tests {
         assert!(matches!(err, StreamError::Remote(m) if m == "busy"));
         let bad = [9u8, 0, 0, 0, 0];
         assert!(read_frame(&mut io::Cursor::new(bad.to_vec())).is_err());
+    }
+
+    #[test]
+    fn frame_sizes_are_bounded_and_big_blocks_split() {
+        // A control frame claiming more than MAX_CONTROL_FRAME is refused before it is read
+        let mut head = vec![KIND_CONTROL];
+        head.extend_from_slice(&(MAX_CONTROL_FRAME + 1).to_be_bytes());
+        assert!(matches!(
+            read_frame(&mut io::Cursor::new(head)),
+            Err(StreamError::Malformed(_))
+        ));
+        let mut head = vec![KIND_AUDIO];
+        head.extend_from_slice(&(MAX_FRAME + 1).to_be_bytes());
+        assert!(matches!(
+            read_frame(&mut io::Cursor::new(head)),
+            Err(StreamError::Malformed(_))
+        ));
+        const { assert!(MAX_FRAME <= 4 * 1024 * 1024) };
+        // A block of 1.5 MAX_FRAME goes out as two frames of whole sample frames, read back whole
+        let fmt = AudioFormat::pcm(768_000, 32, 6);
+        let n = (MAX_FRAME as usize * 3 / 2) / 4;
+        let n = n - n % 6;
+        let block = AudioBlock::pcm_i32(fmt, (0..n as i32).collect());
+        let mut buf = Vec::new();
+        assert_eq!(write_audio(&mut buf, &block).unwrap(), 2);
+        let mut r = io::Cursor::new(buf);
+        let mut all = Vec::new();
+        for _ in 0..2 {
+            let Incoming::Audio(b) = read_frame(&mut r).unwrap() else {
+                panic!()
+            };
+            assert!(b.len() <= MAX_FRAME as usize && b.len() % 24 == 0);
+            all.extend(b);
+        }
+        assert_eq!(decode_samples(fmt, &all).unwrap(), block);
     }
 }
