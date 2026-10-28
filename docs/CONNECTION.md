@@ -9,7 +9,8 @@ connected, and catches up after an outage. Infra brief §2.
 - **By address**: the app's connect page and the web UI take a URL.
 - **On the LAN** (`crates/pm-discovery`): the app's connect page lists the nodes it finds under "On this
   network". A node without a token connects with one click; for a node with a token, clicking fills in
-  the address and asks for the token. The web UI in a browser cannot search the LAN.
+  the address and asks for the token. A node reachable on the network always has one: without `[api]
+  token` it makes one on first start (`<data_dir>/api-token`). The web UI in a browser cannot search the LAN.
   - A node announces itself over **mDNS** as `_pubky-music._tcp`. Its TXT records are `role=node`, `id`,
     `name`, `version`, `api=v1` and `auth=token|none`. Endpoints use the same service type with
     `role=endpoint`, and the node's endpoint discovery skips `role=node`.
