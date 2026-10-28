@@ -1,5 +1,9 @@
 # Deploying the node
 
+The reference for every way to deploy the node. For step-by-step installs, start with the
+[guides](guides/): [Docker](guides/install-docker.md), [Umbrel](guides/install-umbrel.md),
+[Linux without Docker](guides/install-linux.md).
+
 One binary, three shapes. The homeserver is always a separate Pubky service the node talks to by key.
 
 ## Directly on hardware (Pi, NUC, NAS)
