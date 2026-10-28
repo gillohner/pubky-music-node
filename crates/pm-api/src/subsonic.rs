@@ -264,7 +264,7 @@ async fn rest(
 }
 
 fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
-    let Some(token) = &s.token else {
+    let Some(token) = s.token() else {
         return Ok(());
     };
     let user = p.get("u").map(String::as_str).unwrap_or("");

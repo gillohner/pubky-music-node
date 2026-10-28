@@ -264,6 +264,10 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         lib,
         registry,
     );
+    // A token the node made itself may be replaced from Settings; one from the config may not
+    if let api_token::Source::File(path) | api_token::Source::ReplacedPlaceholder(path) = &source {
+        state.set_token_file(path.clone());
+    }
     state.zones_for_all_outputs();
     {
         let st = state.clone();
@@ -317,7 +321,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             cfg.library.watch_quiet_secs.max(1),
         ));
     }
-    if cfg.remote.enabled && state.token.is_none() {
+    // The config's folders, in the background: unchanged files are skipped, so a restart stays cheap
+    state.scan_config_folders();
+    if cfg.remote.enabled && state.token().is_none() {
         // Whoever reached a tokenless node through the tunnel would be its owner
         tracing::info!("remote access off: the node has no API token");
     } else if cfg.remote.enabled {

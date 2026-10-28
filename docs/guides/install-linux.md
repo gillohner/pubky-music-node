@@ -88,7 +88,9 @@ journalctl -u pubky-music-node -f      # the log; Ctrl+C stops following it
 
 Open `http://<this machine's address>:7788` (step 2 printed it), click **Or paste the API
 token**, paste the token and press **Connect**. Then in **Settings › Library folders**, type your
-music folder's path (for example `/srv/music`) and press **Add folder**. Continue with the
+music folder's path (for example `/srv/music`) and press **Add folder**. (Or list it in the config
+before the start: `[library]` `folders = ["/srv/music"]` in `/etc/pubky-music/node.toml`; the node
+then reads it at every start.) Continue with the
 [first steps](../../README.md#first-steps-after-installing).
 
 Music inside your home folder works only if the `pubky-music` user may read it; many systems keep

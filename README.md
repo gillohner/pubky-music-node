@@ -39,16 +39,20 @@ three, then connect them to it.
    (for example `http://192.168.1.10:7788`). On Umbrel, open the app from the home screen.
 2. **Enter the access token.** Click **Or paste the API token**, paste it and press **Connect**.
    Where the token is:
-   - Docker: `docker exec pubky-music cat /data/api-token` (unless you set `PM_TOKEN`).
+   - Docker: `docker exec pubky-music cat /data/api-token`, the token the node made (unless
+     you set `PM_TOKEN`).
    - Umbrel: the password umbrelOS shows for the app.
    - Linux without Docker: the token the install printed, also in `/etc/pubky-music/node.toml`.
 
    The browser remembers it. Sign-in with Pubky Ring works once the node itself is signed in
    (step 5).
-3. **Add your music.** In **Settings › Library folders**, type the music folder's path and press
-   **Add folder** (Home's **Get started** card leads there too). With Docker and Umbrel the path
-   is `/music`. The node reads the folder, then keeps watching it: new files show up about 15
-   seconds after they land.
+   Home's **Get started** card lists what is left to do on this node, and only that. It goes
+   when those steps are done; **Hide these steps** hides it for everyone, and **Settings › Home
+   for everyone** shows it again.
+3. **Add your music.** With Docker and Umbrel, the node reads your music folder (`/music`) by
+   itself when it starts. Otherwise, in **Settings › Library folders** (or on the Get started
+   card), type the music folder's path and press **Add folder**. The node keeps watching its
+   folders: new files show up about 15 seconds after they land.
 4. **Pick a speaker.** Speakers on your network show up by themselves under **Settings › Zones and
    outputs**. Choose one with the zone button at the bottom right of the player bar (it says
    **This browser** at first, which plays in the browser you are using), then press play. If a
