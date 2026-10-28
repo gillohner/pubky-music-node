@@ -215,6 +215,9 @@ pub struct NodeState {
     scanning: Mutex<bool>,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
+    /// `public_url` was not configured: the binary picked this machine's network address for
+    /// speakers. Browser-facing addresses (sign-in callbacks) then follow the request instead.
+    public_url_guessed: std::sync::atomic::AtomicBool,
 }
 
 /// Library setting: JSON list of the source ids switched off.
@@ -428,6 +431,7 @@ impl NodeState {
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
+            public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
             bundled_homeserver: std::sync::OnceLock::new(),
@@ -1552,6 +1556,16 @@ impl NodeState {
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Whether `public_url` is the binary's guess (none configured), not the owner's.
+    pub fn public_url_guessed(&self) -> bool {
+        self.public_url_guessed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_public_url_guessed(&self, guessed: bool) {
+        self.public_url_guessed
+            .store(guessed, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_config_file(&self, path: Option<PathBuf>) {

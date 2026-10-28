@@ -5,8 +5,10 @@ Most are found by themselves: open **Settings › Zones and outputs** to see the
 the zone button in the player bar. Each speaker is a "zone" with its own queue.
 
 For speakers to be found, the node must be on the same network as them (in Docker: host
-networking) and `PM_PUBLIC_URL` (or `public_url`) must be the node's address, because speakers
-fetch the music from the node. The install guides set both.
+networking). Speakers fetch the music from the node at its address on your network, which the node
+finds by itself and writes in its log at start (`speakers fetch music from this address`). Set
+`PM_PUBLIC_URL` (or `public_url`) only when that is the wrong one, for example on a machine with
+several networks.
 
 ## What works
 

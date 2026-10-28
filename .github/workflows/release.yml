@@ -336,7 +336,7 @@ jobs:
           name="pubky-music-node-${{ matrix.platform }}"
           mkdir -p "pkg/$name" dist
           for b in ${{ matrix.bins }}; do cp "${{ matrix.dir }}/$b" "pkg/$name/"; done
-          cp README.md docs/deploy.md "pkg/$name/"
+          tools/release/node-docs.sh "pkg/$name"
           if [ "$RUNNER_OS" = Windows ]; then
             (cd pkg && 7z a -tzip "../dist/$name.zip" "$name" >/dev/null)
           else

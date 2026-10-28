@@ -306,7 +306,8 @@ pub struct ApiConfig {
     pub subsonic_user: String,
     /// How the user's devices reach this API (`https://music.example.org`, a
     /// Tailscale name, …). Published privately on the homeserver when a session
-    /// exists (ADR 0008). Empty = `http://<listen>`.
+    /// exists (ADR 0008). Empty = [`default_public_url`]: `http://<listen>`, with this
+    /// machine's network address in place of `0.0.0.0` or `[::]`.
     pub public_url: String,
     /// Announce the node on the LAN (mDNS `_pubky-music._tcp` and SSDP) so apps
     /// find it. Only when `listen` is not a loopback address.
@@ -488,6 +489,28 @@ impl NodeConfig {
     }
 }
 
+/// The address devices fetch from when `[api] public_url` is empty: `http://<listen>`, except
+/// that a `listen` on every interface (`0.0.0.0`, `[::]`), which no device can reach, gets
+/// `detected` (this machine's address on its way to the network) with the same port. Without
+/// one it stays as it is, and Settings' network check says so.
+pub fn default_public_url(listen: &str, detected: Option<std::net::IpAddr>) -> String {
+    match (listen.parse::<std::net::SocketAddr>(), detected) {
+        (Ok(a), Some(ip)) if a.ip().is_unspecified() => {
+            format!("http://{}", std::net::SocketAddr::new(ip, a.port()))
+        }
+        _ => format!("http://{listen}"),
+    }
+}
+
+/// This machine's IPv4 address on the way to the internet: the one the LAN reaches it at, in
+/// the usual home network. UDP `connect` sends nothing; it only picks the route.
+pub fn route_address() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +575,27 @@ listen = "0.0.0.0:7788"
         let text = toml::to_string(&cfg).unwrap();
         let back: NodeConfig = toml::from_str(&text).unwrap();
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn an_empty_public_url_is_one_devices_can_reach() {
+        let lan = Some("192.168.1.10".parse().unwrap());
+        // Every interface: the machine's network address, with the listen port
+        assert_eq!(
+            default_public_url("0.0.0.0:7788", lan),
+            "http://192.168.1.10:7788"
+        );
+        assert_eq!(default_public_url("[::]:8000", lan), "http://192.168.1.10:8000");
+        let v6 = Some("fd00::5".parse().unwrap());
+        assert_eq!(default_public_url("[::]:7788", v6), "http://[fd00::5]:7788");
+        // Loopback, a given address or a name stay as they are
+        assert_eq!(default_public_url("127.0.0.1:7788", lan), "http://127.0.0.1:7788");
+        assert_eq!(
+            default_public_url("192.168.1.20:7788", lan),
+            "http://192.168.1.20:7788"
+        );
+        assert_eq!(default_public_url("nas.local:7788", lan), "http://nas.local:7788");
+        // No route found: unchanged, and the network check in Settings warns
+        assert_eq!(default_public_url("0.0.0.0:7788", None), "http://0.0.0.0:7788");
     }
 }

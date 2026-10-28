@@ -180,12 +180,15 @@ fn login_base(s: &NodeState) -> String {
     endpoints(s).login_base.trim_end_matches('/').to_string()
 }
 
-/// The node's address as the browser sees it: `public_url` when it is a real
+/// The node's address as the browser sees it: `public_url` when the owner set a real
 /// address, else the origin of this request (reverse proxies set
-/// `X-Forwarded-Proto` / `X-Forwarded-Host`; plain access has `Host`).
+/// `X-Forwarded-Proto` / `X-Forwarded-Host`; plain access has `Host`). A `public_url` the node
+/// guessed for speakers (its LAN address) is not what a browser on `localhost`, behind a proxy
+/// or at `umbrel.local` used, and sign-in providers check the redirect exactly.
 pub(crate) fn external_base(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
     let configured = s.public_url.trim_end_matches('/');
-    let unusable = configured.is_empty()
+    let unusable = s.public_url_guessed()
+        || configured.is_empty()
         || ["0.0.0.0", "127.0.0.1", "localhost", "[::]"]
             .iter()
             .any(|h| configured.contains(h));
