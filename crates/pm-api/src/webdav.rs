@@ -440,13 +440,17 @@ pub(crate) fn open_blocking(
     })
 }
 
-/// A library file's bytes, local or on a share (for the browser stream).
-pub(crate) async fn read_library_file(s: &NodeState, path: &Path) -> std::io::Result<Vec<u8>> {
+/// A library file on a share or a drive, as it answers: the caller reads the body in chunks,
+/// never whole (the download cache, `downloads::local_original`). A local path is not one.
+pub(crate) async fn fetch_library_file(s: &NodeState, path: &Path) -> std::io::Result<reqwest::Response> {
     if crate::drives::is_key(path) {
-        return crate::drives::read_file(s, path).await;
+        return crate::drives::fetch_file(s, path).await;
     }
     if !is_key(path) {
-        return tokio::fs::read(path).await;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not on this machine, a share or a drive",
+        ));
     }
     let (id, rel) = split_key(path).ok_or_else(|| std::io::Error::other("bad key"))?;
     let share = find(&s.webdav, &id).ok_or_else(|| std::io::Error::other("that WebDAV share was removed"))?;
@@ -465,11 +469,7 @@ pub(crate) async fn read_library_file(s: &NodeState, path: &Path) -> std::io::Re
             resp.status()
         )));
     }
-    Ok(resp
-        .bytes()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .to_vec())
+    Ok(resp)
 }
 
 // ---- routes ----

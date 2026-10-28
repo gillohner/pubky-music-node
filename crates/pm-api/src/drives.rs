@@ -654,8 +654,8 @@ pub(crate) fn open_blocking(
         })
 }
 
-/// A library file's bytes from a drive (the browser stream).
-pub(crate) async fn read_file(s: &NodeState, key: &Path) -> std::io::Result<Vec<u8>> {
+/// A library file on a drive, as the drive answers: the caller reads the body in chunks.
+pub(crate) async fn fetch_file(s: &NodeState, key: &Path) -> std::io::Result<reqwest::Response> {
     let shared = s.drives.clone();
     let key2 = key.to_path_buf();
     let (url, token, _) = tokio::task::spawn_blocking(move || locate(&shared, &key2))
@@ -675,11 +675,7 @@ pub(crate) async fn read_file(s: &NodeState, key: &Path) -> std::io::Result<Vec<
             resp.status()
         )));
     }
-    Ok(resp
-        .bytes()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .to_vec())
+    Ok(resp)
 }
 
 // ---- signing in ----

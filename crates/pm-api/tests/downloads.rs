@@ -371,3 +371,275 @@ async fn real_ffmpeg_makes_each_format() {
         }
     }
 }
+
+/// Players seek by asking for ranges: a range of a file far bigger than memory comes back at once,
+/// from the browser stream and from Subsonic's `stream`, because the file is read from the range's
+/// start in bounded chunks, never whole (security review 2026-10-27, #8).
+#[tokio::test]
+async fn a_huge_file_streams_a_range_without_being_read_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    // A sparse terabyte: no room on disk, and no allocator would give a whole read the memory
+    let file = dir.path().join("04 Long.flac");
+    let total: u64 = 1 << 40;
+    let marker = b"the end of a very long song";
+    {
+        use std::io::{Seek, Write};
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.set_len(total).unwrap();
+        f.seek(std::io::SeekFrom::Start(total - marker.len() as u64))
+            .unwrap();
+        f.write_all(marker).unwrap();
+    }
+    let id = add_track(&s, &file, "flac");
+    let app = router(s.clone());
+    let range = format!("bytes={}-{}", total - marker.len() as u64, total - 1);
+    let within = std::time::Duration::from_secs(30);
+    for uri in [
+        format!("/v1/library/tracks/{id}/file"),
+        format!("/rest/stream?id={id}&u=pubky&p={OWNER}&v=1.16.1&c=test&f=json"),
+    ] {
+        let g = tokio::time::timeout(within, get(&app, OWNER, &uri, &[("range", &range)]))
+            .await
+            .expect("answered without reading the whole file");
+        assert_eq!(
+            g.status,
+            StatusCode::PARTIAL_CONTENT,
+            "{uri}: {}",
+            String::from_utf8_lossy(&g.body)
+        );
+        assert_eq!(g.body, marker, "{uri}");
+        assert_eq!(
+            h(&g, "content-range"),
+            format!("bytes {}-{}/{total}", total - marker.len() as u64, total - 1),
+            "{uri}"
+        );
+        assert_eq!(h(&g, "accept-ranges"), "bytes", "{uri}");
+    }
+    let g = get(
+        &app,
+        OWNER,
+        &format!("/v1/library/tracks/{id}/file"),
+        &[("range", "bytes=0-9")],
+    )
+    .await;
+    assert_eq!(
+        (g.status, g.body.as_slice()),
+        (StatusCode::PARTIAL_CONTENT, &[0u8; 10][..])
+    );
+    assert_eq!(h(&g, "content-disposition"), "inline; filename=\"04 Long.flac\"");
+}
+
+/// A song on a WebDAV share is fetched once into the download cache, in chunks, and every range
+/// after that (a seek, Subsonic) is served from there: before, each request read the whole file
+/// from the share into memory (#8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_file_is_fetched_once_and_seeks_come_from_the_cache() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let content: Vec<u8> = (0..400_000u32).map(|i| (i % 253) as u8).collect();
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (body, n) = (content.clone(), fetches.clone());
+    // The share answers the whole file whatever the range: the node never needs it to
+    let share = axum::Router::new().route(
+        "/dav/{name}",
+        axum::routing::get(move || {
+            let (body, n) = (body.clone(), n.clone());
+            async move {
+                n.fetch_add(1, Ordering::SeqCst);
+                body
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, share).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    Library::open(&db)
+        .unwrap()
+        .set_setting(
+            "webdav.shares",
+            &serde_json::json!([{"id": "nas", "name": "NAS", "url": format!("{base}/dav/")}]).to_string(),
+        )
+        .unwrap();
+    let s = node(dir.path());
+    let id = add_track(&s, std::path::Path::new("webdav://nas/05 Far.flac"), "flac");
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::downloads::CACHE_MB_SETTING, "64")
+        .unwrap();
+    let app = router(s.clone());
+    let uri = format!("/v1/library/tracks/{id}/file");
+    let full = get(&app, OWNER, &uri, &[]).await;
+    assert_eq!(
+        full.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&full.body)
+    );
+    assert_eq!(full.body, content);
+    let seek = get(&app, OWNER, &uri, &[("range", "bytes=300000-300099")]).await;
+    assert_eq!(seek.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(seek.body, content[300_000..300_100]);
+    let sub = get(
+        &app,
+        OWNER,
+        &format!("/rest/stream?id={id}&u=pubky&p={OWNER}&v=1.16.1&c=test&f=json"),
+        &[("range", "bytes=10-19")],
+    )
+    .await;
+    assert_eq!(
+        (sub.status, sub.body.as_slice()),
+        (StatusCode::PARTIAL_CONTENT, &content[10..20])
+    );
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "fetched from the share once");
+
+    // A file bigger than the cache is refused, and nothing is left behind
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::downloads::CACHE_MB_SETTING, "0")
+        .unwrap();
+    let other = add_track(&s, std::path::Path::new("webdav://nas/06 Big.flac"), "flac");
+    let big = get(&app, OWNER, &format!("/v1/library/tracks/{other}/file"), &[]).await;
+    assert_eq!(
+        big.status,
+        StatusCode::INSUFFICIENT_STORAGE,
+        "{}",
+        String::from_utf8_lossy(&big.body)
+    );
+    assert!(
+        std::fs::read_dir(dir.path().join("downloads"))
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".part")),
+        "no partial file left"
+    );
+}
+
+/// Every transcode waits for one of the node's slots (one per CPU), so a burst of requests never
+/// runs more ffmpegs than that at once (#9).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transcodes_run_at_most_one_per_cpu() {
+    use std::os::unix::fs::PermissionsExt;
+    let slots = pm_api::downloads::max_transcodes();
+    // Bitrates 64 to 320 make the distinct transcodes; with more CPUs than that the cap can't show
+    let n = slots + 3;
+    if n > 257 {
+        eprintln!("{slots} CPUs: skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let file = dir.path().join("07 Song.flac");
+    std::fs::write(&file, vec![7u8; 1000]).unwrap();
+    let id = add_track(&s, &file, "flac");
+    // A stand-in for ffmpeg that notes how many of it run at once
+    let runs = dir.path().join("runs");
+    std::fs::create_dir(&runs).unwrap();
+    let fake = dir.path().join("fake-ffmpeg");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nD='{}'\ntouch \"$D/running.$$\"\nls \"$D\" | grep -c '^running' >> \"$D/../seen\"\nsleep 1\nfor last; do :; done\nhead -c 1000 /dev/zero > \"$last\"\nrm \"$D/running.$$\"\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::downloads::FFMPEG_SETTING, fake.to_str().unwrap())
+        .unwrap();
+    let app = router(s.clone());
+    let all = (0..n).map(|i| {
+        let app = app.clone();
+        async move {
+            get(
+                &app,
+                OWNER,
+                &format!("/v1/library/tracks/{id}/download?format=mp3&bitrate={}", 64 + i),
+                &[],
+            )
+            .await
+            .status
+        }
+    });
+    let statuses = futures_util::future::join_all(all).await;
+    assert!(statuses.iter().all(|s| *s == StatusCode::OK), "{statuses:?}");
+    let seen = std::fs::read_to_string(dir.path().join("seen")).unwrap();
+    let counts: Vec<usize> = seen.lines().map(|l| l.trim().parse().unwrap()).collect();
+    assert_eq!(counts.len(), n, "{seen}");
+    let most = *counts.iter().max().unwrap();
+    assert!(most <= slots, "{most} ffmpegs at once, {slots} slots");
+}
+
+/// A transcode that runs past its time limit is stopped: ffmpeg is killed, the answer is 504 and
+/// nothing is left in the cache (#9).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_stuck_transcode_is_killed_at_its_time_limit() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let file = dir.path().join("08 Song.flac");
+    std::fs::write(&file, vec![7u8; 1000]).unwrap();
+    let id = add_track(&s, &file, "flac");
+    let pid = dir.path().join("pid");
+    let fake = dir.path().join("stuck-ffmpeg");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nfor last; do :; done\necho partial > \"$last\"\nexec sleep 60\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    {
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(pm_api::downloads::FFMPEG_SETTING, fake.to_str().unwrap())
+            .unwrap();
+        lib.set_setting(pm_api::downloads::TRANSCODE_TIMEOUT_SETTING, "1")
+            .unwrap();
+    }
+    let app = router(s.clone());
+    let g = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        get(
+            &app,
+            OWNER,
+            &format!("/v1/library/tracks/{id}/download?format=opus"),
+            &[],
+        ),
+    )
+    .await
+    .expect("stopped at its limit");
+    assert_eq!(
+        g.status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "{}",
+        String::from_utf8_lossy(&g.body)
+    );
+    assert!(String::from_utf8_lossy(&g.body).contains("original"));
+    // ffmpeg is gone (or a zombie waiting to be reaped), and so is its partial file
+    let pid = std::fs::read_to_string(&pid).unwrap().trim().to_string();
+    let mut alive = true;
+    for _ in 0..100 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if stat.is_empty() || stat.contains(") Z ") {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(!alive, "ffmpeg {pid} still runs");
+    assert!(std::fs::read_dir(dir.path().join("downloads"))
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().contains("opus")));
+}

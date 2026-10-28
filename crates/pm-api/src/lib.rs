@@ -1999,9 +1999,6 @@ async fn track_file(
         .expect("library poisoned")
         .get_track(TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-    let bytes = webdav::read_library_file(&s, &t.file.path)
-        .await
-        .map_err(|e| ApiError::not_found(format!("file for track {id}: {e}")))?;
     let mime = match t.file.container.as_str() {
         "flac" => "audio/flac",
         "wav" => "audio/wav",
@@ -2020,13 +2017,7 @@ async fn track_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("track-{id}"));
-    let mut resp = ranged_response(&headers, bytes, mime);
-    if let Ok(v) =
-        axum::http::HeaderValue::from_str(&format!("inline; filename=\"{}\"", name.replace('"', "")))
-    {
-        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-    }
-    Ok(resp)
+    downloads::stream_file(&s, id, &t.file, &headers, mime, Some(("inline", &name))).await
 }
 
 async fn search(State(s): State<Arc<NodeState>>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
