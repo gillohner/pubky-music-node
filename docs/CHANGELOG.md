@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-28
+
+- **An endpoint cannot be held by a silent peer** (security review 2026-10-27, medium 6, first part). `pm-endpoint` (and the apps' built-in player) closes a connection that does not say Hello within 10 s or stays silent 60 s before opening an output; an open output (a paused zone) keeps no read timeout but TCP keepalive; writes time out after 30 s. At most 16 sessions at once. Audio frames are at most 4 MiB (was 32) and control frames 256 KiB; the node sends a larger block in several frames.
+
 ## 2026-10-27
 
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
