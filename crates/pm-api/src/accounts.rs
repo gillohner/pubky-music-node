@@ -195,6 +195,16 @@ fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether this caller may see and play on `zone`: the owner every zone; a listener the zones
+/// the owner opened to listeners (every zone when none are chosen); a party guest none.
+pub fn may_use_zone(s: &NodeState, c: &Caller, zone: &str) -> bool {
+    match c.role {
+        Role::Owner => true,
+        Role::Listener => zone_refusal(s, zone).is_none(),
+        Role::Guest => false,
+    }
+}
+
 /// Whether a listener may make this request. `None` = yes; `Some(why)` = no.
 pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'static str> {
     // Inside the `/v1` router the prefix is gone; take either
