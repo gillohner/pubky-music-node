@@ -297,7 +297,8 @@ pub struct LibraryConfig {
 #[serde(default)]
 pub struct ApiConfig {
     pub listen: String,
-    /// Bearer token clients must send. Empty = no auth: keep `listen` on localhost then.
+    /// Bearer token clients must send. Empty on a loopback `listen` = no auth; empty on any
+    /// other address = the node makes one on first start and keeps it in `<data_dir>/api-token`.
     pub token: String,
     /// Name shown to controllers.
     pub name: String,
