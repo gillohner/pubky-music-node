@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -25,6 +26,28 @@ def base_url(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{port}"
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """`(scheme, host, port)` of an http(s) URL without user info; `None` for anything else."""
+    try:
+        u = urlsplit(url)
+        port = u.port
+    except ValueError:
+        return None
+    scheme = u.scheme.lower()
+    if scheme not in ("http", "https") or not u.hostname or "@" in u.netloc:
+        return None
+    return scheme, u.hostname.lower(), port or (443 if scheme == "https" else 80)
+
+
+def same_origin(url: str, base: str) -> bool:
+    """Whether `url` is on the node at `base`: scheme, host and port compared exactly, after
+    parsing. A prefix check let a URL through whose user info was the node's address, so the
+    host was another one (security review 2026-10-27, #4); URLs with user info never count as
+    the node's."""
+    a = _origin(url)
+    return a is not None and a == _origin(base)
 
 
 class PubkyMusicApi:
@@ -47,7 +70,7 @@ class PubkyMusicApi:
                 url,
                 json=json,
                 params=params,
-                headers=self.headers,
+                headers=self.headers if same_origin(url, self.base) else {},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status in (401, 403):
@@ -81,7 +104,7 @@ class PubkyMusicApi:
     async def image(self, path: str) -> tuple[bytes | None, str | None]:
         """An image from the node (covers need the token) or from anywhere else."""
         url = path if path.startswith("http") else f"{self.base}{path}"
-        headers = self.headers if url.startswith(self.base) else {}
+        headers = self.headers if same_origin(url, self.base) else {}
         try:
             async with self._session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status != 200:

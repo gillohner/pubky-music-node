@@ -7,7 +7,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -26,6 +26,8 @@ class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
         self._port: int = DEFAULT_PORT
         self._name: str | None = None
         self._token_required = True
+        # The entry whose node announced itself from another address (zeroconf)
+        self._moved: ConfigEntry | None = None
 
     async def _check(self, host: str, port: int, token: str) -> dict[str, Any]:
         api = PubkyMusicApi(async_get_clientsession(self.hass), base_url(host, port), token)
@@ -72,7 +74,20 @@ class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(props["id"])
         host = str(discovery_info.ip_address)
         port = discovery_info.port or DEFAULT_PORT
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_PORT: port})
+        entry = self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, props["id"])
+        if entry is not None:
+            # The node's id is announced in the clear, so anyone on the network can claim it from
+            # another address. The saved token goes there only once the person says so (security
+            # review 2026-10-27, #3); a node that still answers where it is set up is left alone.
+            same = (entry.data.get(CONF_HOST), entry.data.get(CONF_PORT)) == (host, port)
+            node = getattr(entry, "runtime_data", None)
+            if same or getattr(node, "connected", False):
+                return self.async_abort(reason="already_configured")
+            self._moved = entry
+            self._host, self._port = host, port
+            self._name = entry.title
+            self.context["title_placeholders"] = {"name": self._name}
+            return await self.async_step_zeroconf_moved()
         self._host, self._port = host, port
         self._name = props.get("name") or "Pubky Music"
         self._token_required = props.get("auth", "token") != "none"
@@ -101,6 +116,34 @@ class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="zeroconf_confirm",
             data_schema=schema,
             description_placeholders={"name": self._name, "host": f"{self._host}:{self._port}"},
+            errors=errors,
+        )
+
+    async def async_step_zeroconf_moved(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """A node set up here announced itself from another address: ask before using it."""
+        entry = self._moved
+        if entry is None:
+            return self.async_abort(reason="already_configured")
+        old = f"{entry.data.get(CONF_HOST)}:{entry.data.get(CONF_PORT)}"
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                info = await self._check(self._host, self._port, entry.data.get(CONF_TOKEN, ""))
+            except AuthError:
+                errors["base"] = "invalid_auth"
+            except NodeError:
+                errors["base"] = "cannot_connect"
+            else:
+                if info.get("id") != entry.unique_id:
+                    errors["base"] = "not_this_node"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry, data_updates={CONF_HOST: self._host, CONF_PORT: self._port}, reason="moved"
+                    )
+        return self.async_show_form(
+            step_id="zeroconf_moved",
+            data_schema=vol.Schema({}),
+            description_placeholders={"name": entry.title, "old": old, "new": f"{self._host}:{self._port}"},
             errors=errors,
         )
 
