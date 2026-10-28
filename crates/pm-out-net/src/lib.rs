@@ -185,18 +185,21 @@ impl AudioSink for NetSink {
 
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
-        write_audio(&mut self.conn.w, block).map_err(io_err)?;
-        match expect_control(&mut self.conn.r).map_err(io_err)? {
-            Frame::Ack {
-                level,
-                frames_written,
-            } => {
-                self.level = level;
-                self.written = frames_written;
-                Ok(())
+        // A block larger than a frame goes out in parts, each acknowledged
+        let parts = write_audio(&mut self.conn.w, block).map_err(io_err)?;
+        for _ in 0..parts {
+            match expect_control(&mut self.conn.r).map_err(io_err)? {
+                Frame::Ack {
+                    level,
+                    frames_written,
+                } => {
+                    self.level = level;
+                    self.written = frames_written;
+                }
+                other => return Err(SinkError::Device(format!("{}: unexpected {other:?}", self.id))),
             }
-            other => Err(SinkError::Device(format!("{}: unexpected {other:?}", self.id))),
         }
+        Ok(())
     }
 
     fn buffer_level(&self) -> BufferLevel {
