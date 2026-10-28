@@ -3719,6 +3719,7 @@ dependencies = [
  "pm-pubky",
  "pm-remote",
  "pm-renderer",
+ "pm-stream",
  "pm-zones",
  "pubky 0.16.2",
  "pubky-app-specs",
@@ -3824,7 +3825,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "mdns-sd",
  "pm-model",
  "pm-out-local",
  "pm-stream",
@@ -3988,7 +3988,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hound",
- "mdns-sd",
  "pm-audio",
  "pm-endpoint",
  "pm-model",
@@ -4099,6 +4098,7 @@ version = "0.1.0"
 dependencies = [
  "pm-model",
  "pm-zones",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

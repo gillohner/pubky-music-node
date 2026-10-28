@@ -34,8 +34,11 @@ node's developer credentials, one user signed in with OAuth for playback (stream
 FLAC where the subscription allows) and for the collection and playlists, which import as favourites
 and Pubky playlists by ISRC. Other subscription services plug in at the same point.
 
-**Outputs.** Local ALSA devices on the node, `pm-endpoint` daemons on other machines (own protocol,
-ADR 0007), UPnP/OpenHome renderers, Squeezebox/squeezelite players, Chromecast, and any browser.
+**Outputs.** Local ALSA devices on the node; squeezelite on a Raspberry Pi or another computer next
+to a DAC (Slimproto: bit-perfect PCM, groups start together and stay in time); network speakers in
+their own protocols (UPnP/OpenHome, Chromecast, AirPlay, BluOS, MPD, Snapcast, Squeezebox); the
+Pubky Music app's built-in player on the computer it runs on (own protocol, ADR 0007, paired with
+its own node); and any browser.
 
 **Controllers.** A built-in web UI at `/` (phone-friendly and installable to the home screen, keyboard
 shortcuts, media keys, Now Playing with the signal path and lyrics), the Pubky Music app (`pm-desktop`, Tauri 2: that UI in a
@@ -76,7 +79,7 @@ pending; see `docs/LAPTOP-TEST-PROMPT.md` and `docs/HARDWARE-TEST-PROMPT.md`.
 | `pm-api` | `/v1` HTTP + WebSocket API, OpenSubsonic `/rest`, the web UI, radio, sync, art fetching |
 | `pm-client` | Rust client for `/v1` |
 | `pm-desktop` | the app: the web UI in a Tauri 2 window for macOS, Windows, Linux and Android, with a built-in player on desktops (outside the workspace; ADR 0012) |
-| `pm-stream`, `pm-endpoint`, `pm-out-net` | the endpoint protocol, daemon and node-side output |
+| `pm-stream`, `pm-endpoint`, `pm-out-net` | the app's built-in player: its protocol, the player and the node-side output |
 | `pm-out-upnp`, `pm-out-slimproto`, `pm-out-cast` | UPnP/OpenHome, Squeezebox and Chromecast outputs |
 | `pm-node` | the binary: CLI plus `serve` |
 
@@ -136,7 +139,7 @@ pm-node discover trends                     # live Pinakes facets and music card
 pm-node -c node.toml serve                  # API, web UI at /, one zone per output
 pm-node -c node.toml login                  # sign in with Pubky Ring (QR), stores the session secret
 pm-node -c node.toml upload a.flac b.flac   # to the homeserver's private storage (needs a session)
-pm-endpoint --name "Kitchen Pi"            # on another machine; the node finds it over mDNS
+squeezelite -n "Kitchen" -s <node-ip>      # on a Pi next to a DAC: a zone of the node
 ```
 
 ## Upstream etiquette

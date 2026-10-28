@@ -36,7 +36,8 @@ struct AppState {
     /// Shared with the navigation guard, which runs outside commands.
     settings: Arc<Mutex<Option<Settings>>>,
     path: PathBuf,
-    player_port: Option<u16>,
+    #[cfg(any(desktop, target_os = "android"))]
+    player: Option<Arc<player::Player>>,
     /// The iroh tunnel to the node, while the node is reached through it (ADR 0013).
     tunnel: tokio::sync::Mutex<Option<pm_remote::ClientTunnel>>,
     /// Music kept on this device (`pm-offline`); `None` when its folder can't be opened.
@@ -174,9 +175,9 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
-        let port = state.player_port;
+        let player = state.player.clone();
         #[cfg(target_os = "android")]
-        if port.is_some() {
+        if player.is_some() {
             let node = if info.name.is_empty() {
                 "your node"
             } else {
@@ -186,7 +187,7 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let s = player::register(s, port).await;
+            let s = player::register(s, player).await;
             let state = app.state::<AppState>();
             if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
                 state.store(Some(s));
@@ -551,9 +552,7 @@ pub fn run() {
                 .or_else(|| settings::load(&path))
                 .or_else(|| settings::legacy_path().and_then(|p| settings::load(&p)));
             #[cfg(any(desktop, target_os = "android"))]
-            let player_port = crash::guarded("the in-app player", player::start).flatten();
-            #[cfg(not(any(desktop, target_os = "android")))]
-            let player_port = None;
+            let player = crash::guarded("the in-app player", player::start).flatten();
             let shared = Arc::new(Mutex::new(initial.clone()));
             let offline_origin: Arc<Mutex<Option<String>>> = Arc::default();
             let offline = app
@@ -564,7 +563,8 @@ pub fn run() {
             app.manage(AppState {
                 settings: shared.clone(),
                 path,
-                player_port,
+                #[cfg(any(desktop, target_os = "android"))]
+                player,
                 tunnel: Default::default(),
                 offline,
                 moved: Mutex::new(None),

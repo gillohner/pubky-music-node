@@ -591,7 +591,7 @@ pub struct DiscoveryReport {
     /// Renderer addresses added by hand (`POST /v1/outputs/upnp`).
     #[serde(default)]
     pub saved_addresses: Vec<String>,
-    /// Endpoint addresses added by hand (`POST /v1/outputs/endpoints`).
+    /// Endpoint addresses registered (`POST /v1/outputs/endpoints`); never their keys.
     #[serde(default)]
     pub saved_endpoints: Vec<String>,
     /// Which node scanned (people run more than one).
@@ -605,11 +605,17 @@ pub struct AddRenderer {
     pub address: String,
 }
 
-/// `POST /v1/outputs/endpoints`: a `pm-endpoint` (or the desktop app's
-/// player) by `host:port`.
+/// The key the desktop app's player answers to (`Debug` hides it).
+pub use pm_stream::Key as EndpointKey;
+
+/// `POST /v1/outputs/endpoints`: the desktop app's player by `host:port`, with the key it made
+/// when it started (it answers only a node that shows it). Never sent back by the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddEndpoint {
     pub address: String,
+    /// Empty only from an app older than protocol 2, which is refused with a reason.
+    #[serde(default)]
+    pub key: EndpointKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

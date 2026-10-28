@@ -336,17 +336,27 @@ Any OpenSubsonic client (Symfonium, Feishin, Amperfy, play:Sub, Supersonic) conn
 address with user `[api] subsonic_user` and the API token as password, and gets browsing, search,
 playlists, cover art and bit-exact file streaming (`docs/api.md`).
 
-## Endpoints (a Pi next to a DAC)
+## Speakers: a Pi next to a DAC, network speakers, this computer
+
+A Raspberry Pi (or any computer) next to a DAC runs **squeezelite**, with the node as its server
+(Slimproto, next section): bit-perfect PCM, and players in a group start together and stay in time.
 
 ```sh
-cargo build --release -p pm-endpoint --features alsa     # on the endpoint machine
-pm-endpoint --name "Kitchen Pi"                          # 0.0.0.0:7790, advertised over mDNS
+sudo apt install squeezelite
+squeezelite -n "Kitchen" -s <node-ip> -o hw:0,0      # `squeezelite -l` lists the devices
 ```
 
-The node lists the endpoint's outputs next to its own (`[outputs] discover = true`, or
-`endpoints = ["192.168.1.20:7790"]` where multicast does not cross). The endpoint receives the
-negotiated format and packs it for its DAC exactly as the node would locally; its DAC buffer paces
-the stream (ADR 0007). The traffic is plain TCP on the LAN; never expose the port to the internet.
+Network speakers play in their own protocols: UPnP/OpenHome renderers, Chromecast, AirPlay, BluOS,
+MPD and Snapcast (`[outputs]` and Settings › Speakers and outputs).
+
+The computer the Pubky Music app runs on is a zone through the app's **built-in player** (ADR 0007).
+It answers only its own node: each time the app starts it makes a random key and registers the
+player with the node it is connected to (`POST /v1/outputs/endpoints {address, key}`); the node
+keeps the key in `<data_dir>/endpoint-keys.json` (0600) and shows it in every connection. With the
+node on the same computer (a `localhost` or `127.0.0.1` address) the player listens on loopback
+only; otherwise the node must reach this computer on TCP 7790. The player receives the negotiated
+format and packs it for its DAC exactly as the node would locally; its DAC buffer paces the stream.
+The audio is plain TCP on the LAN; never expose the port to the internet.
 
 ## Squeezebox players and squeezelite
 

@@ -349,16 +349,13 @@ impl Default for LibraryConfig {
     }
 }
 
-/// Network endpoints (`pm-endpoint`) this node plays to.
+/// The speakers and players this node plays to.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OutputsConfig {
-    /// Endpoint addresses (`host:port`) to connect to at start, besides discovery.
+    /// No longer used (a warning at start): the desktop app registers its player with its key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
-    /// Browse mDNS for endpoints at start.
-    pub discover: bool,
-    /// How long to listen for mDNS answers.
-    pub discover_ms: u64,
     /// Discover UPnP/OpenHome renderers (SSDP) and offer them as outputs.
     pub upnp: bool,
     /// Slimproto port for Squeezebox / squeezelite players; 0 disables.
@@ -387,8 +384,6 @@ impl std::fmt::Debug for OutputsConfig {
             .collect();
         f.debug_struct("OutputsConfig")
             .field("endpoints", &self.endpoints)
-            .field("discover", &self.discover)
-            .field("discover_ms", &self.discover_ms)
             .field("upnp", &self.upnp)
             .field("slimproto_port", &self.slimproto_port)
             .field("cast", &self.cast)
@@ -404,8 +399,6 @@ impl Default for OutputsConfig {
     fn default() -> Self {
         Self {
             endpoints: Vec::new(),
-            discover: true,
-            discover_ms: 1500,
             upnp: true,
             slimproto_port: 3483,
             cast: true,
