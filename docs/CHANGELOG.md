@@ -18,6 +18,9 @@ Newest first. Dates are when the change landed on `main`.
   - **In the page:** every link and "open" taken from data goes through the same check; one that fails shows as plain text. Pubky Ring links keep their own scheme.
   - **Content-Security-Policy** on the node's pages (`index.html`, `party.html`): scripts run only from the node and the pages' own inline scripts, by hash, so a `javascript:` link or an injected script does nothing. No plugins, and `<base>` only to the node. Fetches, images and media stay open (covers and streams come from everywhere). The inline `onerror` handlers on images became one listener, so the policy needs no `unsafe-inline`.
   - **The app's settings file** (it holds the node's token) is created readable only by you under a side name and renamed into place. Before, it was written and then made private, so for a moment anyone could open it, and whoever did kept reading through that handle. A crash mid-write now leaves the old file.
+- **Speakers get an address they can reach without `public_url`.** With `[api] public_url` (`PM_PUBLIC_URL`) empty and the node listening on every interface (`0.0.0.0`, `[::]`, as in Docker and on Umbrel), the node used `http://0.0.0.0:7788`, which no speaker can fetch from. It now uses this machine's address on its way to the network with the listen port, and says which in the log; a loopback `listen` keeps `127.0.0.1`. The Docker, TrueNAS and Linux setups no longer need `PM_PUBLIC_URL`.
+- **The node download archive carries the guides.** README.md, docs/deploy.md and docs/guides/ sit at their repo paths in the archive, so the README's links to the guides work in the unpacked folder (CI checks the links between them).
+- **The TrueNAS compose file says to edit the two paths it has** (it said three; CI now checks the count).
 
 ## 2026-10-27
 

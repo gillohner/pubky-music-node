@@ -206,11 +206,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             token,
             subsonic_user: cfg.api.subsonic_user.clone(),
             pubky: cfg.pubky.clone(),
-            public_url: if cfg.api.public_url.is_empty() {
-                format!("http://{}", cfg.api.listen)
-            } else {
-                cfg.api.public_url.clone()
-            },
+            public_url: public_url(cfg),
             upnp: cfg.outputs.upnp,
             cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
@@ -489,6 +485,20 @@ fn renderers(
     }
     let addr: std::net::SocketAddr = cfg.api.listen.parse().ok()?;
     state.start_renderer(addr.port(), !addr.ip().is_loopback())
+}
+
+/// `[api] public_url`, or one devices can reach when it is empty (the log says which).
+fn public_url(cfg: &NodeConfig) -> String {
+    if !cfg.api.public_url.is_empty() {
+        return cfg.api.public_url.clone();
+    }
+    let url = config::default_public_url(&cfg.api.listen, config::route_address());
+    if url.contains("0.0.0.0") || url.contains("[::]") {
+        tracing::warn!(%url, "public_url is not set and this machine has no network route: speakers cannot fetch from the node; set [api] public_url (PM_PUBLIC_URL)");
+    } else {
+        tracing::info!(%url, "public_url is not set: speakers fetch music from this address (set [api] public_url to change it)");
+    }
+    url
 }
 
 fn session_secret_path(cfg: &NodeConfig) -> PathBuf {

@@ -64,6 +64,16 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+  # The node's download archive carries README.md, docs/deploy.md and docs/guides/ at their repo
+  # paths, so the links between them work unpacked; the TrueNAS file mounts as many paths as it
+  # says to edit. Runs on docs-only changes too.
+  deploy-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: tools/release/node-docs.sh /tmp/archive && python3 -I tools/release/node-docs-check.py /tmp/archive
+      - run: python3 -I tools/truenas-check.py deploy/truenas/docker-compose.yaml
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'

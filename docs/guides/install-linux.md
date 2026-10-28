@@ -27,6 +27,7 @@ sudo install -m 755 pubky-music-node-linux-$ARCH/pm-node /usr/local/bin/
 sudo apt install ffmpeg      # optional: smaller copies for phones to download
 ```
 
+The unpacked folder also has `README.md` and these guides (`docs/guides/`), to read offline.
 `edge` is built from the newest code. For the last numbered release, use
 `releases/latest/download/` instead of `releases/download/edge/`.
 
@@ -46,7 +47,6 @@ data_dir = "/var/lib/pubky-music"
 [api]
 listen = "0.0.0.0:7788"
 token = "$TOKEN"
-public_url = "http://$LAN_IP:7788"
 EOF
 echo "Web page: http://$LAN_IP:7788  token: $TOKEN"
 ```

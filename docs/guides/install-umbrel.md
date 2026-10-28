@@ -52,8 +52,12 @@ where some tabs have other names:
 
 ## Speakers
 
-The app runs on the host network, so speakers on your home network show up by themselves. A USB
-DAC plugged into the Umbrel box shows up as a speaker too. See [Speakers](speakers.md).
+The app runs on the host network, so speakers on your home network show up by themselves, and the
+node gives them the Umbrel box's address on your network to fetch the music from. A USB DAC
+plugged into the Umbrel box shows up as a speaker too. See [Speakers](speakers.md).
+
+In version 0.1.0 speakers show up but stay silent: that version gives them an address they can't
+reach (`0.0.0.0`). Later versions of the app use the box's own address.
 
 ## Updates
 
