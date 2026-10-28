@@ -16,6 +16,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
   await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
+  // The pages run under the node's Content-Security-Policy: anything it refuses is a bug
+  ctx.on('console', (m) => { if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) errors.push('CSP: ' + m.text()); });
   const p = await ctx.newPage();
   p.on('pageerror', (e) => errors.push('page error: ' + e.message));
   const waitPage = async () => { await p.waitForSelector('#main #iabout, #main .notice', { timeout: 30000 }).catch(() => {}); await sleep(300); };
@@ -138,6 +140,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await dp.close();
   }
 
+  // ---- links from data are web links only (security review 2026-10-27, #7) ----
+  // The node already drops a javascript: link; the page must not render one either, so the answer is
+  // changed on its way to the page.
+  {
+    const lp = await ctx.newPage();
+    let ran = false; await lp.exposeFunction('pmScriptLinkRan', () => { ran = true; });
+    await lp.route('**/v1/item/**', async (route) => {
+      const r = await route.fetch(); const j = await r.json();
+      j.about = [...(j.about || []), { label: 'Homepage', value: 'evil', href: 'javascript:window.pmScriptLinkRan()' }, { label: 'Site', value: 'band', href: 'https://band.example/' }];
+      await route.fulfill({ response: r, json: j });
+    });
+    await lp.goto(BASE + '/album/lib-1'); await lp.waitForSelector('#main #iabout', { timeout: 30000 }).catch(() => {});
+    const hrefs = await lp.$$eval('#iabout a', (as) => as.map((a) => a.getAttribute('href') || ''));
+    const bad = hrefs.filter((h) => !/^https?:/i.test(h));
+    const evil = await lp.$('#iabout a:text("evil")'); if (evil) { await evil.click({ modifiers: [] }).catch(() => {}); await sleep(300); }
+    console.log('about links:', hrefs.join(' | '), '| a script link ran:', ran);
+    if (!hrefs.includes('https://band.example/')) errors.push('a web link in About did not render');
+    if (bad.length || ran) errors.push(`About rendered a link that isn't http(s): ${bad.join(', ')}`);
+    await lp.close();
+  }
   // ---- route table ----
   const rt = await p.evaluate(() => window.pmRoutes && window.pmRoutes.check());
   console.log('route table:', rt ? rt.join(' | ') : 'not exposed');

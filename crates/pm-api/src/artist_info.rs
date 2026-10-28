@@ -150,7 +150,8 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistI
             let url = r["url"]["resource"].as_str().unwrap_or("");
             match kind {
                 "wikidata" => wikidata_id = url.rsplit('/').next().map(str::to_string),
-                "official homepage" if info.homepage.is_none() => info.homepage = Some(url.to_string()),
+                // Anyone can edit MusicBrainz: only a web link is kept
+                "official homepage" if info.homepage.is_none() => info.homepage = crate::web::web_link(url),
                 "wikipedia" if url.contains("en.wikipedia.org/wiki/") => {
                     wikipedia_title = url.rsplit('/').next().map(str::to_string)
                 }

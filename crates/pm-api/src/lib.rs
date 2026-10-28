@@ -100,6 +100,7 @@ pub mod types;
 pub mod vault;
 pub mod vault_cache;
 pub mod watch;
+mod web;
 pub mod webdav;
 pub mod youtube;
 pub mod ytdlp;
@@ -898,6 +899,7 @@ async fn party_page() -> Response {
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
         ],
         include_str!("../static/party.html"),
     )
@@ -909,6 +911,7 @@ async fn web_ui() -> Response {
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
         ],
         include_str!("../static/index.html"),
     )

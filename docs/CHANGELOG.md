@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## 2026-10-27
 
+- **Security: links from data can't run script in the node's page** (security review 2026-10-27, #7). A MusicBrainz homepage, a radio station's site or a pasted link could be a `javascript:` URL, and the page rendered it as a link.
+  - **On the node:** every About fact's link goes out only when it is http or https (one check, applied when a fact is sent, however it was built), and a MusicBrainz homepage is kept only when it is one.
+  - **In the page:** every link and "open" taken from data goes through the same check; one that fails shows as plain text. Pubky Ring links keep their own scheme.
+  - **Content-Security-Policy** on the node's pages (`index.html`, `party.html`): scripts run only from the node and the pages' own inline scripts, by hash, so a `javascript:` link or an injected script does nothing. No plugins, and `<base>` only to the node. Fetches, images and media stay open (covers and streams come from everywhere). The inline `onerror` handlers on images became one listener, so the policy needs no `unsafe-inline`.
+
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
 ## 2026-10-26

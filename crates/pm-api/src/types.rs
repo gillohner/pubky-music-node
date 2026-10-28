@@ -1066,7 +1066,13 @@ pub struct PageLink {
 pub struct Fact {
     pub label: String,
     pub value: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A link, sent only when it is http or https (`web::web_link`): a Fact's link can
+    /// come from anyone's data, and a `javascript:` one would run in the node's page.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::web::serialize_link"
+    )]
     pub href: Option<String>,
 }
 
