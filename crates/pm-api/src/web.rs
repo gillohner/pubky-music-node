@@ -27,7 +27,8 @@ pub(crate) fn serialize_link<S: serde::Serializer>(v: &Option<String>, s: S) -> 
 }
 
 /// `Content-Security-Policy` for the node's own pages (`index.html`, `party.html`). Scripts run
-/// only from the node and the pages' own inline scripts (by hash), so a `javascript:` link, an
+/// only from the node, the pages' own inline scripts (by hash) and the YouTube player
+/// ([`YOUTUBE_API`]), so a `javascript:` link, an
 /// injected handler or a `<script>` slipped into a page does nothing; no plugins; `<base>` only to
 /// the node. Fetches, images and media stay open: covers and streams come from everywhere, and the
 /// desktop app's bridge from its own scheme.
@@ -44,8 +45,13 @@ fn policy(pages: &[&str]) -> String {
         let digest = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
         hashes.push_str(&format!(" 'sha256-{digest}'"));
     }
-    format!("script-src 'self'{hashes}; object-src 'none'; base-uri 'self'")
+    format!("script-src 'self'{hashes} {YOUTUBE_API}; object-src 'none'; base-uri 'self'")
 }
+
+/// The YouTube IFrame API (videos play in "This browser" through it): its loader and the player
+/// script the loader adds. Exact paths, not the whole origin, so YouTube's other endpoints can't be
+/// used to run script on the page.
+const YOUTUBE_API: &str = "https://www.youtube.com/iframe_api https://www.youtube.com/s/player/";
 
 /// The text of every `<script>` without attributes in a page.
 fn inline_scripts(page: &str) -> impl Iterator<Item = &str> {
@@ -114,6 +120,7 @@ mod tests {
                 .to_string();
             assert!(csp.starts_with("script-src 'self' 'sha256-"), "{csp}");
             assert!(!csp.contains("unsafe-inline"), "{csp}");
+            assert!(!csp.contains("unsafe-eval"), "{csp}");
             assert!(csp.contains("object-src 'none'"), "{csp}");
             let scripts: Vec<_> = inline_scripts(html).collect();
             assert!(!scripts.is_empty());
@@ -122,6 +129,47 @@ mod tests {
                 assert!(csp.contains(&format!("'sha256-{h}'")), "{csp}");
             }
         }
+    }
+
+    /// Videos play in "This browser" through YouTube's IFrame API: the page loads
+    /// `https://www.youtube.com/iframe_api` (app.js) and it adds YouTube's widget script from
+    /// `/s/player/…`. Both are allowed in `script-src`, and nothing else of youtube.com is (its
+    /// other endpoints could run script here). The player's own scripts run in YouTube's iframe,
+    /// under YouTube's policy. CI's ui-youtube.js plays a video through it.
+    #[test]
+    fn the_youtube_player_may_load_and_nothing_else_of_youtube() {
+        let csp = PAGE_CSP.as_str();
+        let script_src: Vec<&str> = csp
+            .split(';')
+            .find_map(|d| d.trim().strip_prefix("script-src "))
+            .expect("a script-src")
+            .split_whitespace()
+            .collect();
+        let allows = |url: &str| {
+            script_src.iter().any(|src| {
+                src.starts_with("https://")
+                    && if src.ends_with('/') {
+                        url.starts_with(src)
+                    } else {
+                        url == *src
+                    }
+            })
+        };
+        assert!(allows("https://www.youtube.com/iframe_api"), "{csp}");
+        assert!(
+            allows("https://www.youtube.com/s/player/abc123/www-widgetapi.vflset/www-widgetapi.js"),
+            "{csp}"
+        );
+        for not in [
+            "https://www.youtube.com/oembed?callback=x",
+            "https://www.youtube.com/",
+            "https://youtube.com/iframe_api",
+            "https://s.ytimg.com/yts/jsbin/www-widgetapi.js",
+            "https://example.org/iframe_api",
+        ] {
+            assert!(!allows(not), "{not} in {csp}");
+        }
+        assert!(script_src.iter().all(|s| !s.contains('*')), "{csp}");
     }
 
     /// Inline event handlers would need `'unsafe-inline'` (or hashes): the page uses none.
