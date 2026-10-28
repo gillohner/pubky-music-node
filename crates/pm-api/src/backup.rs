@@ -543,7 +543,7 @@ async fn restore_locked(
                 "remote.key" => dir.join("remote.key"),
                 _ => continue,
             };
-            if write_private(&path, &bytes).is_ok() && name == "remote.key" {
+            if crate::imports::write_private(&path, &bytes).is_ok() && name == "remote.key" {
                 report
                     .notes
                     .push("Remote access keeps its old address after the node restarts.".into());
@@ -554,7 +554,7 @@ async fn restore_locked(
                 .canonicalize()
                 .unwrap_or(dir.clone())
                 .join("node.restored.toml");
-            if write_private(&path, cfg.as_bytes()).is_ok() {
+            if crate::imports::write_private(&path, cfg.as_bytes()).is_ok() {
                 report.notes.push(format!(
                     "The old node's config file is in {}: the node uses its service keys where its own config leaves them empty, from the next start.",
                     path.display()
@@ -625,20 +625,6 @@ pub fn short_key(k: &str) -> String {
     } else {
         k.to_string()
     }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path)?.write_all(bytes)
 }
 
 // ---- schedule --------------------------------------------------------------------------------

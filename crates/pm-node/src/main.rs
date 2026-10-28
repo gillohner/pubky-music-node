@@ -504,12 +504,8 @@ async fn login(cfg: &NodeConfig) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, &secret)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    // Created 0600, never written first and made private after
+    pm_api::imports::write_private(&path, secret.as_bytes())?;
     println!("signed in as {z32}");
     println!("session secret stored in {}", path.display());
     if cfg.pubky.session_secret_file.is_none() {

@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## 2026-10-28
+
+- **Three small leaks closed** (security review 2026-10-27, lows). A listener's `/v1/info` keeps the last scan's `error_count` but not the unreadable files' paths (where the owner keeps music). The Pubky session secret (Ring sign-in and `pm-node login`) and the secrets a backup restores are created 0600 as a side file and renamed into place, never written first and made private after, and an old file readable by others is replaced. `DELETE /v1/me/token` reads the token the way the API does, so a listener signed in with `?token=` signs out too.
+
 ## 2026-10-27
 
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.

@@ -772,7 +772,10 @@ async fn auth(
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).
-fn bearer(headers: &HeaderMap, query: &std::collections::HashMap<String, String>) -> Option<String> {
+pub(crate) fn bearer(
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -917,8 +920,18 @@ async fn web_ui() -> Response {
 
 // ---- handlers: node ----
 
-async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
+async fn info(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<accounts::Caller>,
+) -> ApiResult<Info> {
     let library = s.library.lock().expect("library poisoned").stats()?;
+    let mut last_scan = s.last_scan.lock().expect("last scan lock").clone();
+    // The unreadable files' paths are where the owner keeps music: a listener gets the count
+    if c.role != accounts::Role::Owner {
+        if let Some(l) = last_scan.as_mut() {
+            l.errors.clear();
+        }
+    }
     Ok(Json(Info {
         id: s.node_id.clone(),
         remote: s.remote_id.read().expect("remote id poisoned").clone(),
@@ -929,7 +942,7 @@ async fn info(State(s): State<Arc<NodeState>>) -> ApiResult<Info> {
         zones: s.zones.list().len(),
         outputs: s.outputs.len(),
         scanning: s.is_scanning(),
-        last_scan: s.last_scan.lock().expect("last scan lock").clone(),
+        last_scan,
     }))
 }
 
@@ -2751,15 +2764,9 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match std::fs::write(path, secret) {
-                    Ok(()) => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-                        }
-                    }
-                    Err(e) => tracing::warn!(path = %path.display(), "cannot store the session secret: {e}"),
+                // Created 0600, never written first and made private after
+                if let Err(e) = imports::write_private(path, secret.as_bytes()) {
+                    tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
                 }
             }
             let hs = s
