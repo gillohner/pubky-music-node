@@ -747,9 +747,36 @@ pub fn router(state: Arc<NodeState>) -> Router {
 
 /// Bind and serve until the task is cancelled.
 pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!(%listen, "API listening");
+    let listener = bind(listen).await?;
     serve_listener(state, listener).await
+}
+
+/// Bind the API's address. A port in use is the one fatal port: the error names it and the
+/// likely cause, so a restart loop says what to fix.
+pub async fn bind(listen: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => {
+            tracing::info!(%listen, "API port bound; serving once the node has started");
+            Ok(l)
+        }
+        Err(e) => Err(anyhow::anyhow!(bind_error(listen, &e))),
+    }
+}
+
+/// What to say when the API cannot listen on `listen`.
+pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "cannot listen on {listen}: the port is already in use, most likely by another Pubky Music Node \
+             on this machine (an older install, or a second container on the host network). Stop it, or set \
+             [api] listen (PM_LISTEN) to a free port"
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "cannot listen on {listen}: permission denied (ports below 1024 need root); pick a port above 1024 \
+             in [api] listen (PM_LISTEN)"
+        ),
+        _ => format!("cannot listen on {listen}: {e}"),
+    }
 }
 
 /// Serve on an already bound listener (tests bind port 0).
@@ -1042,8 +1069,6 @@ async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePul
     Ok(Json(info))
 }
 
-/// The live WAV stream of a pull output. Waits up to 15 s for a zone to
-/// start playing into it; a second listener replaces the first.
 /// `GET /v1/outputs/pull/{name}/url`: the keyed URL to give a renderer or player by hand.
 async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
     if !s.pulls.lock().expect("pulls lock").contains_key(&name) {
@@ -1052,6 +1077,8 @@ async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> 
     Ok(Json(serde_json::json!({ "url": s.pull_url(&name) })))
 }
 
+/// The live stream of a pull output. Waits up to 15 s for a zone to play into it; a listener that
+/// leaves gives it back for the next one (see `pm_zones::outputs::pull`).
 async fn pull_stream(
     State(s): State<Arc<NodeState>>,
     Path((name, file)): Path<(String, String)>,
@@ -1071,8 +1098,13 @@ async fn pull_stream(
         "stream.wav" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "audio/wav".into(),
         },
+        // OpenHome renderers (Linn): the same WAV, with the RIFF size 0 their pipeline reads as
+        // "continuous stream" (see `wav_header_continuous`).
+        "live.wav" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "audio/wav".into(),
+        },
         "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
-        // Slimproto players: the WAV's PCM without its header (squeezelite would play the header).
+        // Slimproto players: the PCM without a header (squeezelite would play the header).
         "stream.pcm" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "application/octet-stream".into(),
         },
@@ -1096,6 +1128,9 @@ async fn pull_stream(
                 (header::CONTENT_TYPE, mime),
                 (header::CACHE_CONTROL, "no-store".to_string()),
                 (header::ACCEPT_RANGES, "none".to_string()),
+                // The body ends when the connection closes: say so, so a keep-alive client
+                // (and hyper) treat this as the last answer on the connection.
+                (header::CONNECTION, "close".to_string()),
             ],
             body,
         )
@@ -1105,6 +1140,10 @@ async fn pull_stream(
                 r.headers_mut().insert(*k, v);
             }
         }
+        // An HTTP/1.0 answer: the body runs until the connection closes. HTTP/1.1 would send a
+        // live stream chunked, and a Linn DS stops at once on a chunked stream (seen on the
+        // owner's Klimax: it plays the same stream unchunked).
+        *r.version_mut() = axum::http::Version::HTTP_10;
         r
     };
     // A HEAD must not take the live stream: the GET that follows needs it.
@@ -1129,78 +1168,35 @@ async fn pull_stream(
         ));
     }
     let mime = kind.mime(fmt.rate_hz, fmt.channels);
-    let rx = tokio_stream::wrappers::ReceiverStream::new(live.rx);
-    let body = match kind {
-        pm_out_upnp::dlna::StreamKind::Wav { .. } if file == "stream.pcm" => {
-            let mut pcm = RawPcm::default();
-            axum::body::Body::from_stream(
-                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(pcm.convert(&chunk))),
-            )
-        }
-        pm_out_upnp::dlna::StreamKind::Wav { .. } => {
-            axum::body::Body::from_stream(rx.map(Ok::<_, std::convert::Infallible>))
-        }
-        pm_out_upnp::dlna::StreamKind::L16 => {
-            let mut l16 = L16::default();
-            axum::body::Body::from_stream(
-                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(l16.convert(&chunk))),
-            )
-        }
+    // Each listener gets its own header: one that leaves and comes back (OpenHome renderers do,
+    // after reading the start) decodes the stream from the top again.
+    let header = match file.as_str() {
+        "stream.wav" => Some(pm_zones::outputs::wav_header(fmt)),
+        "live.wav" => Some(pm_zones::outputs::wav_header_continuous(fmt)),
+        _ => None,
     };
-    Ok(with_headers(mime, body))
+    let to_l16 = kind == pm_out_upnp::dlna::StreamKind::L16;
+    // The live stream moves into the body; when the listener goes, it is given back
+    let chunks = futures_util::stream::unfold(live, |mut live| async move {
+        live.next_chunk().await.map(|c| (c, live))
+    });
+    let mut l16 = L16::default();
+    let body = futures_util::stream::iter(header)
+        .chain(chunks.map(move |c| if to_l16 { l16.convert(&c) } else { c }))
+        .map(Ok::<_, std::convert::Infallible>);
+    Ok(with_headers(mime, axum::body::Body::from_stream(body)))
 }
 
-/// WAV to its raw PCM: the header (any length: 24-bit streams use WAVE_FORMAT_EXTENSIBLE) is
-/// dropped up to the end of the `data` chunk header, across chunk boundaries.
-#[derive(Default)]
-struct RawPcm {
-    /// Header bytes seen so far, until the `data` chunk starts.
-    head: Vec<u8>,
-    started: bool,
-}
-
-impl RawPcm {
-    fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
-        if self.started {
-            return chunk.to_vec();
-        }
-        self.head.extend_from_slice(chunk);
-        // RIFF, size, WAVE, then chunks: id (4), size (u32 LE), body (padded to even).
-        let mut i = 12;
-        while i + 8 <= self.head.len() {
-            let size = u32::from_le_bytes([
-                self.head[i + 4],
-                self.head[i + 5],
-                self.head[i + 6],
-                self.head[i + 7],
-            ]);
-            if &self.head[i..i + 4] == b"data" {
-                self.started = true;
-                return self.head.split_off(i + 8);
-            }
-            i += 8 + size as usize + (size as usize & 1);
-        }
-        Vec::new()
-    }
-}
-
-/// WAV (44-byte header, little-endian 16-bit) to DLNA LPCM (no header, big-endian), across chunk
-/// boundaries.
+/// Little-endian 16-bit PCM to DLNA LPCM (big-endian), across chunk boundaries.
 #[derive(Default)]
 struct L16 {
-    /// Header bytes still to drop.
-    skipped: usize,
     /// A sample's first byte when a chunk ended between its two bytes.
     carry: Option<u8>,
 }
 
 impl L16 {
-    const HEADER: usize = 44;
-
     fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
-        let skip = (Self::HEADER - self.skipped).min(chunk.len());
-        self.skipped += skip;
-        let mut data = &chunk[skip..];
+        let mut data = chunk;
         let mut out = Vec::with_capacity(data.len() + 1);
         if let Some(lo) = self.carry.take() {
             match data.split_first() {
@@ -1823,7 +1819,7 @@ async fn transfer(
             loop {
                 match events.recv().await {
                     Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
-                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                    Ok(pm_zones::ZoneEvent::Error { .. }) | Err(_) => break false,
                     Ok(_) => {}
                 }
             }
@@ -2953,47 +2949,18 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
 
 #[cfg(test)]
 mod l16_tests {
-    use super::{RawPcm, L16};
+    use super::L16;
 
     #[test]
-    fn raw_pcm_drops_any_wav_header_across_any_chunking() {
-        // The pull sink's own 44-byte header, and a longer one: an extensible fmt chunk (40
-        // bytes) and an odd-sized LIST chunk with its pad byte before `data`.
-        let pcm: Vec<u8> = (1..=12).collect();
-        let mut long = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
-        long.extend_from_slice(&40u32.to_le_bytes());
-        long.extend_from_slice(&[7u8; 40]);
-        long.extend_from_slice(b"LIST");
-        long.extend_from_slice(&3u32.to_le_bytes());
-        long.extend_from_slice(&[1, 2, 3, 0]);
-        long.extend_from_slice(b"data\xff\xff\xff\xff");
-        let short = pm_zones::outputs::wav_header(pm_model::AudioFormat::pcm(96_000, 24, 2));
-        for header in [short, long] {
-            let mut wav = header;
-            wav.extend_from_slice(&pcm);
-            for cut in 1..wav.len() {
-                for cut2 in cut..wav.len() {
-                    let mut c = RawPcm::default();
-                    let mut got = c.convert(&wav[..cut]);
-                    got.extend(c.convert(&wav[cut..cut2]));
-                    got.extend(c.convert(&wav[cut2..]));
-                    assert_eq!(got, pcm, "cuts at {cut}, {cut2}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn wav_becomes_big_endian_lpcm_across_any_chunking() {
-        let mut wav = vec![0xAAu8; 44];
-        wav.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    fn pcm_becomes_big_endian_lpcm_across_any_chunking() {
+        let pcm = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06];
         let want = vec![0x02, 0x01, 0x04, 0x03, 0x06, 0x05];
-        for cut in 1..wav.len() {
-            for cut2 in cut..wav.len() {
+        for cut in 0..pcm.len() {
+            for cut2 in cut..pcm.len() {
                 let mut c = L16::default();
-                let mut got = c.convert(&wav[..cut]);
-                got.extend(c.convert(&wav[cut..cut2]));
-                got.extend(c.convert(&wav[cut2..]));
+                let mut got = c.convert(&pcm[..cut]);
+                got.extend(c.convert(&pcm[cut..cut2]));
+                got.extend(c.convert(&pcm[cut2..]));
                 assert_eq!(got, want, "cuts at {cut}, {cut2}");
             }
         }
@@ -5687,7 +5654,7 @@ mod tests {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hits2 = hits.clone();
         let mock = Router::new().route(
-            "/release-group",
+            "/ws/2/release-group",
             get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
                 let hits = hits2.clone();
                 let recent = recent.clone();
@@ -10766,7 +10733,7 @@ exec sleep 300
                     started = true;
                     assert_eq!(source_format.rate_hz, 44_100);
                 }
-                Ok(Ok(pm_zones::ZoneEvent::Error(e))) => panic!("playback error: {e}"),
+                Ok(Ok(pm_zones::ZoneEvent::Error { message })) => panic!("playback error: {message}"),
                 Ok(Ok(pm_zones::ZoneEvent::Stopped)) if started => break,
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break,

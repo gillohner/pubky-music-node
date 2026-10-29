@@ -321,7 +321,8 @@ Open Sources › TIDAL › Connect TIDAL.
   here are scrobbled; artist pages show similar artists.
 - **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
   (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
-  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
+  `PM_ACOUSTID_KEY` itself, and these override node.toml; so does `PM_MUSICBRAINZ_URL` (a MusicBrainz mirror, the
+  top-level `musicbrainz_base_url` key in node.toml). `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
   in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
   rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,

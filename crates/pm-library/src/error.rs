@@ -31,3 +31,15 @@ pub enum LibraryError {
 }
 
 pub type Result<T> = std::result::Result<T, LibraryError>;
+
+impl LibraryError {
+    /// Another connection held the database too long ("database is locked"): worth trying
+    /// again, unlike a broken file.
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            LibraryError::Db(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        )
+    }
+}
