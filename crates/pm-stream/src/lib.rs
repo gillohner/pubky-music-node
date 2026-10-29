@@ -17,15 +17,18 @@
 //!
 //! Frame: `kind: u8`, `len: u32 BE`, `payload[len]`. Control payloads are
 //! JSON; `Audio` payload is raw sample data.
+//!
+//! The endpoint is the desktop app's built-in player, paired with its own node: the app makes a
+//! random key when it starts the player and registers it with the node, which sends it in `Hello`
+//! (protocol 2). The endpoint answers nothing else to a client without that key.
 
 use pm_model::{AudioBlock, AudioFormat, Samples, Volume};
 use pm_zones::{BufferLevel, OutputInfo};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 1;
-/// mDNS service type endpoints advertise.
-pub const SERVICE_TYPE: &str = "_pubky-music._tcp.local.";
+/// 2: `Hello` carries the endpoint's key.
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 7790;
 /// Largest audio frame sent or accepted. A decoded packet is at most a few MB (65 535 frames of
 /// 8-channel 32-bit is 2 MB); a larger block goes out in several frames ([`write_audio`]).
@@ -35,10 +38,12 @@ pub const MAX_CONTROL_FRAME: u32 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
-    /// Client → endpoint, first frame.
+    /// Client → endpoint, first frame. `key` is the endpoint's (protocol 2; absent in 1).
     Hello {
         client: String,
         version: u32,
+        #[serde(default)]
+        key: Key,
     },
     /// Endpoint → client, reply to Hello.
     Welcome {
@@ -73,6 +78,60 @@ pub enum Frame {
     Error {
         message: String,
     },
+}
+
+/// The secret a node shows the endpoint in `Hello`. Never printed: `Debug` hides it, so a logged
+/// frame or error does not carry it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Key(String);
+
+impl Key {
+    /// A new key: 32 bytes from the operating system's CSPRNG, as hex.
+    pub fn random() -> Self {
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut b);
+        Key(b.iter().map(|x| format!("{x:02x}")).collect())
+    }
+
+    /// A key given by hand or read from a file: 32 to 256 visible ASCII characters.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if !(32..=256).contains(&s.len()) || !s.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err("an endpoint key is 32 to 256 visible ASCII characters".into());
+        }
+        Ok(Key(s.to_string()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The key itself, to send or store; never to log.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `other` is this key, in time that does not depend on where they differ. An empty
+    /// key matches nothing.
+    pub fn matches(&self, other: &Key) -> bool {
+        let (a, b) = (self.0.as_bytes(), other.0.as_bytes());
+        if a.is_empty() || a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+    }
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "Key(none)"
+        } else {
+            "Key(…)"
+        })
+    }
 }
 
 /// Audio bytes travel outside JSON; this placeholder keeps `Frame` one enum.
@@ -309,6 +368,34 @@ mod tests {
         assert!(matches!(err, StreamError::Remote(m) if m == "busy"));
         let bad = [9u8, 0, 0, 0, 0];
         assert!(read_frame(&mut io::Cursor::new(bad.to_vec())).is_err());
+    }
+
+    #[test]
+    fn keys_compare_whole_and_never_print() {
+        let k = Key::random();
+        assert_eq!(k.expose().len(), 64);
+        assert_ne!(k, Key::random());
+        assert!(k.matches(&k.clone()));
+        assert!(!k.matches(&Key::default()));
+        assert!(!Key::default().matches(&Key::default()), "no key is not a key");
+        let mut other = k.expose().to_string();
+        other.replace_range(63.., if other.ends_with('0') { "1" } else { "0" });
+        assert!(!k.matches(&Key::parse(&other).unwrap()));
+        assert!(!k.matches(&Key::parse(&k.expose()[..40]).unwrap()));
+        assert_eq!(Key::parse(&format!(" {} ", k.expose())).unwrap(), k);
+        assert!(Key::parse("short").is_err());
+        assert!(Key::parse(&"a b".repeat(20)).is_err());
+        let hello = Frame::Hello {
+            client: "n".into(),
+            version: PROTOCOL_VERSION,
+            key: k.clone(),
+        };
+        assert!(!format!("{hello:?}").contains(k.expose()));
+        // On the wire it is a plain string, and a protocol-1 Hello (no key) still reads
+        let json = serde_json::to_value(&hello).unwrap();
+        assert_eq!(json["Hello"]["key"], k.expose());
+        let v1: Frame = serde_json::from_str(r#"{"Hello":{"client":"old","version":1}}"#).unwrap();
+        assert!(matches!(v1, Frame::Hello { version: 1, key, .. } if key.is_empty()));
     }
 
     #[test]

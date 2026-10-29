@@ -160,6 +160,8 @@ enum DiscoverCmd {
 
 async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
+    // First, so a port in use stops the start at once and says why (another node running)
+    let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
@@ -194,6 +196,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         ),
         api_token::Source::Configured | api_token::Source::None => {}
     }
+    let (public_url, public_url_guessed) = public_url(cfg);
     let state = pm_api::NodeState::new(
         pm_api::NodeSettings {
             name: cfg.api.name.clone(),
@@ -206,11 +209,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             token,
             subsonic_user: cfg.api.subsonic_user.clone(),
             pubky: cfg.pubky.clone(),
-            public_url: if cfg.api.public_url.is_empty() {
-                format!("http://{}", cfg.api.listen)
-            } else {
-                cfg.api.public_url.clone()
-            },
+            public_url,
             upnp: cfg.outputs.upnp,
             cast: cfg.outputs.cast,
             slimproto_port: cfg.outputs.slimproto_port,
@@ -268,6 +267,16 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         lib,
         registry,
     );
+    if let Some(root) = cfg.musicbrainz_root() {
+        tracing::info!(%root, "MusicBrainz: asking this server instead of musicbrainz.org");
+        *state.mb_base.write().expect("mb lock") = format!("{root}/ws/2");
+        state.info_bases.write().expect("info bases").musicbrainz = root;
+    }
+    state.set_public_url_guessed(public_url_guessed);
+    // A token the node made itself may be replaced from Settings; one from the config may not
+    if let api_token::Source::File(path) | api_token::Source::ReplacedPlaceholder(path) = &source {
+        state.set_token_file(path.clone());
+    }
     state.zones_for_all_outputs();
     {
         let st = state.clone();
@@ -275,8 +284,17 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         let st = state.clone();
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
+    // A busy port turns Squeezebox players off; the node runs on
     if let Err(e) = state.start_slimproto() {
-        tracing::warn!("slimproto: {e}");
+        let port = cfg.outputs.slimproto_port;
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            tracing::warn!(
+                "Squeezebox players are off: port {port} is in use, most likely by another Pubky Music Node or \
+                 a Lyrion Music Server on this machine. Stop it and restart, or set [outputs] slimproto_port"
+            );
+        } else {
+            tracing::warn!("Squeezebox players are off: slimproto on port {port}: {e}");
+        }
     }
     if !cfg.outputs.snapcast.trim().is_empty() {
         state.set_snapcast(Some(cfg.outputs.snapcast.trim().to_string()));
@@ -321,7 +339,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             cfg.library.watch_quiet_secs.max(1),
         ));
     }
-    if cfg.remote.enabled && state.token.is_none() {
+    // The config's folders, in the background: unchanged files are skipped, so a restart stays cheap
+    state.scan_config_folders();
+    if cfg.remote.enabled && state.token().is_none() {
         // Whoever reached a tokenless node through the tunnel would be its owner
         tracing::info!("remote access off: the node has no API token");
     } else if cfg.remote.enabled {
@@ -432,7 +452,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::audiobookshelf::spawn_background(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
-    pm_api::serve(state, &cfg.api.listen).await
+    pm_api::serve_listener(state, listener).await
 }
 
 /// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when
@@ -489,6 +509,21 @@ fn renderers(
     }
     let addr: std::net::SocketAddr = cfg.api.listen.parse().ok()?;
     state.start_renderer(addr.port(), !addr.ip().is_loopback())
+}
+
+/// `[api] public_url`, or one devices can reach when it is empty (the log says which), and
+/// whether it was guessed.
+fn public_url(cfg: &NodeConfig) -> (String, bool) {
+    if !cfg.api.public_url.is_empty() {
+        return (cfg.api.public_url.clone(), false);
+    }
+    let url = config::default_public_url(&cfg.api.listen, config::route_address());
+    if url.contains("0.0.0.0") || url.contains("[::]") {
+        tracing::warn!(%url, "public_url is not set and this machine has no network route: speakers cannot fetch from the node; set [api] public_url (PM_PUBLIC_URL)");
+    } else {
+        tracing::info!(%url, "public_url is not set: speakers fetch music from this address (set [api] public_url to change it)");
+    }
+    (url, true)
 }
 
 fn session_secret_path(cfg: &NodeConfig) -> PathBuf {
@@ -566,8 +601,17 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     pm_out_local::quiet_alsa_lib();
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+    // Symphonia warns about harmless things in many files (junk bytes before a frame, ID3
+    // frames it skips, the MP3 bit reservoir); only its errors show unless RUST_LOG names it
+    if !std::env::var("RUST_LOG")
+        .unwrap_or_default()
+        .contains("symphonia")
+    {
+        filter = filter.add_directive("symphonia=error".parse().expect("a valid directive"));
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();

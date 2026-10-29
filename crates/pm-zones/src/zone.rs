@@ -134,8 +134,10 @@ pub enum ZoneEvent {
     StreamTitle {
         title: String,
     },
-    /// Playback stopped because of this.
-    Error(String),
+    /// Playback stopped because of this (or, for a seek, the stream carried on).
+    Error {
+        message: String,
+    },
 }
 
 /// Handle to a running zone. Cloneable through `Arc`; dropping the last

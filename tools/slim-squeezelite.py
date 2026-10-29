@@ -169,7 +169,6 @@ enabled = false
                             stdout=open(work / "node.log", "w"), stderr=subprocess.STDOUT)
     try:
         until("the node", lambda: api("GET", "/v1/info"))
-        api("POST", "/v1/library/scan", {})
         tracks = until("the scan", lambda: len(api("GET", "/v1/library/tracks")["tracks"]) == 3 and api("GET", "/v1/library/tracks")["tracks"])
         # By file name: titles of untagged files are tidied ("a-noise-16-44100" -> "A-noise-16-44100")
         ids = {Path(t["file"]["path"]).stem: t["id"] for t in tracks}
