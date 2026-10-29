@@ -2,6 +2,10 @@
 
 Newest first. Dates are when the change landed on `main`.
 
+## Unreleased
+
+- **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
+
 ## 2026-10-28
 
 - **The config's music folders are read at start and listed in Settings.** Folders in `[library] folders` (`PM_FOLDERS` in Docker, `/music` on Umbrel) are scanned in the background when the node starts (only those that exist; unchanged files are skipped, so a restart stays cheap). `GET /v1/library/folders` lists them first, with whether each is there now, and `config_folders` (in `/v1/node/settings` and the folder answers) says which they are. Settings › Library folders marks them **From config**, without Remove, and the API refuses to remove or move one (409): take it out of the config and restart, then Remove forgets its songs.

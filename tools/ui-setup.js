@@ -3,7 +3,8 @@
 //     goes when hidden, stays hidden in a new browser (kept on the node), comes back from
 //     Settings › Home for everyone, and goes by itself when only optional steps are left;
 //   * Library folders marks the config's folder and offers no Remove for it;
-//   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite), by
+//   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite, the
+//     app's players on a DAC), by
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
@@ -25,6 +26,9 @@ const OUTS = [
   { id: 'slim:00:04:20:00:00:01', name: 'Pi Bedroom', protocol: 'slim', caps: { ...rate([44100, 96000]), groupable: true } },
   { id: 'slim:00:04:20:00:00:02', name: 'Pi Hall', protocol: 'slim', caps: { ...rate([44100]), groupable: true } },
   { id: 'slim:00:04:20:00:00:03', name: 'Old Pi', protocol: 'slim', caps: { ...rate([8000]), groupable: true } },
+  { id: 'net:192.168.1.20:7790/alsa:hw:1,0', name: 'Desk · USB DAC', protocol: 'net', caps: { ...rate([44100, 96000]), groupable: true } },
+  { id: 'net:192.168.1.21:7790/alsa:hw:0,0', name: 'Studio · DAC', protocol: 'net', caps: { ...rate([44100]), groupable: true } },
+  { id: 'net:192.168.1.22:7790/cpal:Speakers', name: 'Mac · Speakers', protocol: 'net', caps: rate([44100, 48000]) },
   { id: 'upnp:streamer', name: 'Streamer', protocol: 'upnp', caps: rate([44100, 48000, 192000]) },
   { id: 'airplay:phone', name: 'Old phone', protocol: 'airplay', caps: rate([44100]) },
 ];
@@ -85,7 +89,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const offered = await p.$$eval('#groupouts input', (els) => els.map((e) => e.value));
     check(JSON.stringify(offered.slice().sort()) === JSON.stringify(GROUPABLE.slice().sort()), `the outputs that group in sync are offered, the others not (${offered.join(', ')})`);
     const kinds = await p.$$eval('#groupouts .groupkind .small', (els) => els.map((e) => e.textContent));
-    check(['Sonos', 'BluOS', 'Squeezelite'].every((k) => kinds.some((x) => x.startsWith(k))), `by kind (${kinds.join(' · ')})`);
+    check(['Sonos', 'BluOS', 'Squeezelite', 'The app'].every((k) => kinds.some((x) => x.startsWith(k))), `by kind (${kinds.join(' · ')})`);
     const box = (id) => p.locator(`#groupouts input[value="${id}"]`);
     await box('upnp:RINCON_A').check(); await box('upnp:RINCON_B').check();
     check(/Sonos groups them itself/.test(await p.textContent('#groupsync')), 'two Sonos: Sonos groups them');
@@ -97,6 +101,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await box('slim:00:04:20:00:00:01').check(); await box('slim:00:04:20:00:00:02').check();
     check(/In sync: the node keeps them in time/.test(await p.textContent('#groupsync')), 'two squeezelite players: the node keeps them in time');
     check(await box('slim:00:04:20:00:00:03').isDisabled(), 'a player that shares no sample rate with them is not offered');
+    check(await box('net:192.168.1.20:7790/alsa:hw:1,0').isDisabled(), 'the app\u2019s players are another kind');
+    await p.goto(BASE + '/settings/playback'); await p.waitForSelector('#groupouts');
+    await box('net:192.168.1.20:7790/alsa:hw:1,0').check(); await box('net:192.168.1.21:7790/alsa:hw:0,0').check();
+    check(/In sync: the node keeps them in time/.test(await p.textContent('#groupsync')), 'two of the app\u2019s players on a DAC: the node keeps them in time');
+    check(await box('slim:00:04:20:00:00:01').isDisabled(), 'squeezelite players are not offered with them');
     await c.close();
 
     // ---- About: tokens ----

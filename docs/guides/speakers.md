@@ -34,6 +34,9 @@ and outputs › Group outputs** and press **Create group**:
   HEOS, the speakers' HEOS control (TCP 1255) must answer; otherwise they play loosely synced.
 - **Squeezelite players with each other:** the node keeps them in time sample by sample. A player
   that shares no sample rate with the ones picked can't join them.
+- **The app's players with each other**, on Linux computers playing to a DAC (an output named
+  `hw:…`): the same, kept in time by the node. Through the system's sound output (macOS, Windows,
+  a phone) the delay can't be measured, so they aren't offered.
 - **Snapcast:** group the players in Snapcast; each Snapcast group is one zone.
 - **Chromecast:** a speaker group made in the Google Home app shows up as one speaker.
 

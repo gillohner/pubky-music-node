@@ -523,15 +523,15 @@
   const TOKEN_GUIDE = 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused';
   // Group outputs (POST /zones): speakers of one kind, kept in sync. Sonos, HEOS and BluOS speakers
   // become that system's own group; outputs the node keeps in time itself (caps.groupable:
-  // squeezelite) a node group, of outputs that share a sample rate. Kinds don't mix, and other
-  // outputs (which the API would only group loosely) aren't offered.
-  const GROUP_KINDS = [['sonos', 'Sonos'], ['heos', 'HEOS (Denon, Marantz)'], ['bluos', 'BluOS (Bluesound, NAD)'], ['node', 'Squeezelite players']];
-  const groupKind = (o) => o.group_by || (o.caps.groupable ? 'node' : null);
+  // squeezelite, the app's players on hw: DACs) a node group, of outputs that share a sample
+  // rate. Kinds don't mix, and other outputs (which the API would only group loosely) aren't offered.
+  const GROUP_KINDS = [['sonos', 'Sonos'], ['heos', 'HEOS (Denon, Marantz)'], ['bluos', 'BluOS (Bluesound, NAD)'], ['node', 'Squeezelite players'], ['net', 'The app\u2019s players on a DAC']];
+  const groupKind = (o) => o.group_by || (o.caps.groupable ? (/^net:/.test(o.id) ? 'net' : 'node') : null);
   const groupSync = (picked) => {
     if (picked.length < 2) return '';
     const k = groupKind(picked[0]);
     if (k === 'heos') return 'HEOS groups them itself, in sync (if HEOS doesn’t know one of them, they play loosely synced).';
-    return k === 'node' ? 'In sync: the node keeps them in time sample by sample.' : `${k === 'sonos' ? 'Sonos' : 'BluOS'} groups them itself, in sync.`;
+    return k === 'node' || k === 'net' ? 'In sync: the node keeps them in time sample by sample.' : `${k === 'sonos' ? 'Sonos' : 'BluOS'} groups them itself, in sync.`;
   };
   // Who is using the page (#46): the owner, or a listener with their own Ring sign-in, who plays
   // the shared library on the zones the owner opened and has nothing of the owner's
@@ -4258,7 +4258,7 @@
             + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Pubky Music app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
               + block('Add a renderer by address', 'For a UPnP speaker or streamer the network scan doesn’t find: its IP address or its description URL. For a Linn: its IP address, MAC address and serial number, with spaces between.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
-              + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
+              + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other, and so do the app\u2019s players on a DAC.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           // Accounts (STEWARD-BUNDLED-HOMESERVER.md §7): saving is the node's business. One status
           // line and where the music is; saving by hand, the private-file list and (with a homeserver
@@ -4374,7 +4374,7 @@
               const picked = order.map((id) => byId[id]);
               const rates = picked.length ? picked.reduce((r, o) => r.filter((x) => o.caps.pcm_rates.includes(x)), picked[0].caps.pcm_rates) : null;
               const kind = picked.length ? groupKind(picked[0]) : null;
-              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && kind === 'node' && !o.caps.pcm_rates.some((x) => rates.includes(x))); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with the ones picked' : ''; });
+              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && (kind === 'node' || kind === 'net') && !o.caps.pcm_rates.some((x) => rates.includes(x))); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with the ones picked' : ''; });
               $('#groupsync').textContent = groupSync(picked);
             };
             $$('input', groupBox).forEach((i) => i.onchange = () => { const at = order.indexOf(i.value); if (i.checked && at < 0) order.push(i.value); if (!i.checked && at >= 0) order.splice(at, 1); update(); });

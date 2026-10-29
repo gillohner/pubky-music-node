@@ -7,16 +7,21 @@
 //! so the remote DAC paces the zone exactly like a local one. Endpoints are
 //! never discovered: the app registers its player's address and key with
 //! the node, and every connection shows that key.
+//!
+//! Each `Ack` reads the endpoint's clock: what its sink has written and still holds. An output
+//! on a `hw:` DAC (ALSA) holds what the hardware has not played yet, so the node keeps such
+//! outputs in time with each other in a group ([`OutputCaps::groupable`], ADR 0009); one behind a
+//! system mixer (cpal: a phone, a Mac, a Windows PC) has latency nobody reports.
 
 use async_trait::async_trait;
-use pm_model::{AudioBlock, AudioFormat, OutputCaps, Volume};
+use pm_model::{AudioBlock, AudioFormat, OutputCaps, SampleKind, Volume};
 use pm_stream::{expect_control, write_audio, write_frame, Frame, Key, StreamError};
 use pm_zones::sink::check_block;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, OutputInfo, SinkError};
 use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -107,11 +112,15 @@ impl NetOutput {
         }
         Ok(outputs
             .into_iter()
-            .map(|remote| NetOutput {
-                addr,
-                key: key.clone(),
-                endpoint_name: name.clone(),
-                remote,
+            .map(|mut remote| {
+                // A hw: DAC reports its clock in every Ack; the node keeps it in time
+                remote.caps.groupable = remote.id.protocol() == "alsa";
+                NetOutput {
+                    addr,
+                    key: key.clone(),
+                    endpoint_name: name.clone(),
+                    remote,
+                }
             })
             .collect())
     }
@@ -164,6 +173,7 @@ impl Output for NetOutput {
                 queued_frames: 0,
                 capacity_frames: capacity,
             },
+            acked: None,
             written: 0,
         }))
     }
@@ -192,7 +202,9 @@ struct NetSink {
     id: OutputId,
     conn: Conn,
     fmt: AudioFormat,
+    /// The endpoint's level at its last `Ack`, and when that came.
     level: BufferLevel,
+    acked: Option<Instant>,
     written: u64,
 }
 
@@ -224,6 +236,7 @@ impl AudioSink for NetSink {
                     frames_written,
                 } => {
                     self.level = level;
+                    self.acked = Some(Instant::now());
                     self.written = frames_written;
                 }
                 other => return Err(SinkError::Device(format!("{}: unexpected {other:?}", self.id))),
@@ -232,19 +245,34 @@ impl AudioSink for NetSink {
         Ok(())
     }
 
+    /// What the endpoint holds now: its level at the last `Ack`, less what its device has
+    /// played since. A group compares members at one instant, and a member whose `Ack` came
+    /// later (a slower network) would otherwise seem ahead by the difference.
     fn buffer_level(&self) -> BufferLevel {
-        self.level
+        let played = self.acked.map_or(0, |at| {
+            let per_s = match self.fmt.kind {
+                SampleKind::Pcm => self.fmt.rate_hz as u128,
+                SampleKind::Dsd => self.fmt.rate_hz as u128 / 8,
+            };
+            (at.elapsed().as_micros() * per_s / 1_000_000) as u64
+        });
+        BufferLevel {
+            queued_frames: self.level.queued_frames.saturating_sub(played),
+            ..self.level
+        }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.control(Frame::Flush, |f| matches!(f, Frame::Flushed))?;
         self.level.queued_frames = 0;
+        self.acked = None;
         Ok(())
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
         self.control(Frame::Drain, |f| matches!(f, Frame::Drained))?;
         self.level.queued_frames = 0;
+        self.acked = None;
         Ok(())
     }
 

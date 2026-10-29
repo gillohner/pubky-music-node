@@ -38,7 +38,8 @@ finds it again on the network by itself.
 While connected at home, the app adds this device as a speaker on the node: "<computer name> ·
 <sound output>" on a computer, "<phone model> · Speaker or headphones" on Android. Pick it with the
 zone button in the player bar, like any other speaker. On Linux it plays bit-perfect to a DAC; on
-macOS and Windows it goes through the system's sound output.
+macOS and Windows it goes through the system's sound output. Computers that play to a DAC this way
+can be grouped in sync, like squeezelite players (Settings › Zones and outputs › Group outputs).
 
 Only the node the app is connected to can play to this device: each time the app starts it makes
 a new key and gives it to that node, with nothing for you to set up. With the node on the same

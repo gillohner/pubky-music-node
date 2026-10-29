@@ -56,8 +56,8 @@ Every zone state has `sync`:
   - Anything else becomes a node group (`group:`), tight or loose as above. Outputs that share no
     sample rate are refused (400).
   - `GET /v1/outputs` marks Sonos, HEOS and BluOS players with `group_by`. Settings › Group
-    outputs offers the outputs that group in sync (those, and `caps.groupable` ones such as
-    squeezelite), one kind at a time, and not one that shares no sample rate with the ones
+    outputs offers the outputs that group in sync (those, and `caps.groupable` ones: squeezelite,
+    and the app's players on `hw:` DACs, `net:…/alsa:hw:…`), one kind at a time, and not one that shares no sample rate with the ones
     picked. Other mixes (Home Assistant's join, the API) are node groups, loosely synced.
 - **Ungroup:** `DELETE /v1/zones/{id}` on the group zone; its members' own zones remain.
 - **Volume:**
