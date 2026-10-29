@@ -179,8 +179,12 @@ fn device_err(e: BluosError) -> SinkError {
     SinkError::Device(e.to_string())
 }
 
-/// Run a blocking API call off the async runtime.
+/// Run a blocking API call off the async runtime when there is one (API handlers), directly
+/// otherwise (a zone's audio thread opening its sink): `spawn_blocking` panics outside a runtime.
 async fn call(host: String, port: u16, path: String) -> Result<String, BluosError> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return get(&host, port, &path);
+    }
     tokio::task::spawn_blocking(move || get(&host, port, &path))
         .await
         .map_err(|e| BluosError::Http(e.to_string()))?
@@ -516,6 +520,42 @@ mod tests {
                 "/Stop".into(),
             ]
         );
+    }
+
+    /// A zone opens its sink on its own thread, outside any runtime: this panicked
+    /// (`spawn_blocking` without a runtime) and left the zone dead.
+    #[test]
+    fn opens_from_a_thread_without_a_runtime() {
+        fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+            use std::task::{Context, Poll, Wake, Waker};
+            struct W(std::thread::Thread);
+            impl Wake for W {
+                fn wake(self: Arc<Self>) {
+                    self.0.unpark();
+                }
+            }
+            let waker = Waker::from(Arc::new(W(std::thread::current())));
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = std::pin::pin!(fut);
+            loop {
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(v) => return v,
+                    Poll::Pending => std::thread::park(),
+                }
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let port = fake_player("Den", "00:11:22:33:44:66", log.clone());
+        let out = BluosOutput::new(
+            sync_status("127.0.0.1", port).unwrap(),
+            Arc::new(PullOutput::new("bluos-den2")),
+            "http://node/s".into(),
+        );
+        let opened = std::thread::spawn(move || block_on(out.open(fmt())).map(drop))
+            .join()
+            .expect("open must not panic outside a runtime");
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(log.lock().unwrap().iter().any(|p| p.starts_with("/Play?url=")));
     }
 
     #[tokio::test(flavor = "multi_thread")]

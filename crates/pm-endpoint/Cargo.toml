@@ -23,7 +23,6 @@ pm-stream = { workspace = true }
 pm-out-local = { workspace = true, optional = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-mdns-sd = { workspace = true }
 serde_json = { workspace = true }
 socket2 = { version = "0.6", features = ["all"] }
 tracing = { workspace = true }

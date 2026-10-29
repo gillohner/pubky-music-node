@@ -26,7 +26,8 @@ later. wry alone gives a window, not bundles, an Android project, signing or an 
   service's sign-in) opens in the system browser.
 * **Desktops are players too.** On macOS, Windows and Linux the app serves the machine's DACs as
   a `pm-endpoint` (bit-perfect ALSA `hw:` on Linux, the system output elsewhere) and registers
-  it with the node, as the wry shell did. Android is a controller first; the phone as an
+  it with the node, with a key it makes at start so that only this node can play to it (ADR 0007,
+  2026-10-28). Android is a controller first; the phone as an
   endpoint is a later phase.
 * **One project, every platform.** `tauri build` gives `.dmg`/`.app`, `.msi`/NSIS `.exe`,
   `.AppImage`/`.deb`; `tauri android build` gives the `.apk` and `.aab`. The release workflow
@@ -35,8 +36,8 @@ later. wry alone gives a window, not bundles, an Android project, signing or an 
 **`pm-app` (egui): retired.** The proposal was to freeze it and keep it one more release cycle as
 a fallback for machines without a usable WebView. The owner chose to retire it at once
 (2026-10-21): it left the workspace, CI and the release, and its code stays in git history. It is
-not needed headless: `pm-endpoint` is the headless player, and any browser reaches the web UI on
-machines where the app's WebView is missing.
+not needed headless: squeezelite is the headless player (Slimproto), and any browser reaches the web
+UI on machines where the app's WebView is missing.
 
 ## Consequences
 

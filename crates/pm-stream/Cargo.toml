@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
+rand = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

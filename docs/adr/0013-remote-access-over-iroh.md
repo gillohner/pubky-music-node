@@ -75,8 +75,8 @@ same token the LAN uses.**
     `EndpointId`s and refuse others before reading a byte. This is not needed for the first version,
     because the token already gates everything.
 - **Audio.** Remote listening uses the same tunnel: HLS or the pull stream to the browser zone, or a
-  zone on the phone later. `pm-endpoint` over iroh, for a speaker in a second home, is a later step;
-  the endpoint protocol (ADR 0007) is a byte stream and would pipe the same way. Nothing becomes
+  zone on the phone later. The app's built-in player over iroh is a later step; the endpoint
+  protocol (ADR 0007) is a byte stream and would pipe the same way. Nothing becomes
   public: the relay sees only encrypted QUIC (handoff §2).
 
 ## Consequences

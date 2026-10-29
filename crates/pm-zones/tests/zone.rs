@@ -319,7 +319,7 @@ fn kinds(evs: &[ZoneEvent]) -> Vec<String> {
             ZoneEvent::Stopped => "stopped".into(),
             ZoneEvent::QueueChanged => "queue".into(),
             ZoneEvent::StreamTitle { title } => format!("title:{title}"),
-            ZoneEvent::Error(e) => format!("error:{e}"),
+            ZoneEvent::Error { message } => format!("error:{message}"),
         })
         .filter(|k| k != "queue")
         .collect()
@@ -750,4 +750,81 @@ async fn the_stream_format_follows_each_track() {
         r.gate.allow(1000);
         r.zone.wait_stopped().await;
     }
+}
+
+/// An output with a bug: `open` panics the first time. Later opens use the runtime the way the
+/// BluOS and MPD outputs do (`spawn_blocking`), which needs the zone's thread inside it.
+struct PanicsOnce {
+    inner: RecOutput,
+    panicked: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Output for PanicsOnce {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        if !self.panicked.swap(true, Ordering::SeqCst) {
+            panic!("a bug in the output");
+        }
+        let answer = tokio::task::spawn_blocking(|| 42).await.expect("blocking call");
+        assert_eq!(answer, 42);
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_panic_stops_the_zone_with_an_error_and_the_zone_plays_again() {
+    let gate = Arc::new(Gate::default());
+    gate.allow(1000);
+    let factory = Factory {
+        tracks: [("a".to_string(), (AudioFormat::pcm(RATE, 16, 1), 100))]
+            .into_iter()
+            .collect(),
+        gate: gate.clone(),
+    };
+    let rec = Arc::new(Recorder::default());
+    let output = Arc::new(PanicsOnce {
+        inner: RecOutput {
+            caps: OutputCaps {
+                pcm_rates: vec![RATE],
+                ..OutputCaps::unlimited()
+            },
+            rec: rec.clone(),
+        },
+        panicked: Default::default(),
+    });
+    let zone = Zone::new(ZoneId::new("p"), "Panics", output, Arc::new(factory));
+    let mut events = zone.subscribe();
+    zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    zone.play();
+    wait_for(|| zone.state().error.is_some()).await;
+    let st = zone.state();
+    assert_eq!(st.transport, Transport::Stopped);
+    let err = st.error.unwrap();
+    assert!(err.contains("a bug in the output"), "{err}");
+    assert!(
+        kinds(&drain_events(&mut events))
+            .iter()
+            .any(|k| k.starts_with("error:") && k.contains("a bug in the output")),
+        "the error went out as an event"
+    );
+    // The thread is alive: the next play works, from the top, through the runtime.
+    zone.play();
+    let st = zone.wait_stopped().await;
+    assert_eq!(st.error, None, "{st:?}");
+    assert_eq!(*rec.samples.lock().unwrap(), frames(0, 100));
+    // The queue is usable from outside after the panic (its lock is not poisoned).
+    zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    wait_for(|| zone.state().queue.len() == 2).await;
 }

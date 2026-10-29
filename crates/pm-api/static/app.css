@@ -820,6 +820,7 @@ a.btn { text-decoration: none; }
 .setup-step.done .stepmark { background: var(--accent-soft); color: var(--accent-strong); }
 .setup-step.done .stepmark .ic { width: 16px; height: 16px; }
 .setup-suggest { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.groupkind .chips { margin: 4px 0 10px; }
 .setup-suggest .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-step .lnk { color: var(--accent-strong); text-decoration: underline; }
 .setup-card > p .lnk { color: var(--accent-strong); text-decoration: underline; }
