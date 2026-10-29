@@ -32,8 +32,9 @@ pub const LISTENER_TIMEOUT: Duration = Duration::from_secs(15);
 pub const PROBE_TIME: Duration = Duration::from_secs(3);
 /// How long a stream waits for its listener to come back before the sink fails.
 pub const REATTACH_GRACE: Duration = Duration::from_secs(5);
-/// Most a probing listener's bytes kept for the next one (a few seconds of hi-res audio).
-const PROBE_KEEP_BYTES: usize = 16 * 1024 * 1024;
+/// A listener that took more than this was playing, not probing (a Linn reads about 72 KB):
+/// what it had is not sent again.
+const PROBE_KEEP_BYTES: usize = 1024 * 1024;
 /// Chunks a listener may lag before the zone blocks (~ a few seconds).
 const CHANNEL_CHUNKS: usize = 64;
 
@@ -52,6 +53,8 @@ struct Slot {
     generation: u64,
     /// When the newest stream's listener left, while nobody has taken it again.
     left: Option<(u64, Instant)>,
+    /// A stream that cannot play (the renderer refused Play): its sink fails with this.
+    failed: Option<(u64, String)>,
 }
 
 struct Shared {
@@ -168,6 +171,20 @@ impl PullOutput {
         &self.name
     }
 
+    /// The newest sink's stream, to name it in [`Self::abort`].
+    pub fn generation(&self) -> u64 {
+        self.shared.slot.lock().expect("pull lock").generation
+    }
+
+    /// Make the sink of stream `generation` fail with `why` at its next write (a renderer that
+    /// refused Play will never fetch it). A newer stream is not touched.
+    pub fn abort(&self, generation: u64, why: String) {
+        let mut slot = self.shared.slot.lock().expect("pull lock");
+        if slot.generation == generation {
+            slot.failed = Some((generation, why));
+        }
+    }
+
     /// Take the live stream for an HTTP listener, waiting until a sink opens one (or a listener
     /// that left gives it back).
     pub async fn take_stream(&self, wait: Duration) -> Option<LiveStream> {
@@ -244,6 +261,7 @@ impl PullOutput {
                 generation: slot.generation,
             });
             slot.left = None;
+            slot.failed = None;
             slot.generation
         };
         self.shared.notify.notify_waiters();
@@ -325,6 +343,21 @@ impl PullSink {
             .is_some_and(|(g, at)| g == self.generation && at.elapsed() > REATTACH_GRACE)
     }
 
+    /// Why this stream cannot play, when someone said so ([`PullOutput::abort`]).
+    fn aborted(&self) -> Option<SinkError> {
+        let slot = self.shared.slot.lock().expect("pull lock");
+        slot.failed
+            .as_ref()
+            .filter(|(g, _)| *g == self.generation)
+            .map(|(_, why)| SinkError::Device(why.clone()))
+    }
+
+    /// The listener left (and nobody has taken the stream since).
+    fn listener_left(&self) -> bool {
+        let slot = self.shared.slot.lock().expect("pull lock");
+        slot.left.is_some_and(|(g, _)| g == self.generation)
+    }
+
     fn send(&mut self, bytes: Vec<u8>) -> Result<(), SinkError> {
         let deadline = std::time::Instant::now() + LISTENER_TIMEOUT;
         let mut payload = Some(bytes);
@@ -333,6 +366,9 @@ impl PullSink {
                 Ok(()) => return Ok(()),
                 Err(mpsc::error::TrySendError::Full(b)) => {
                     payload = Some(b);
+                    if let Some(e) = self.aborted() {
+                        return Err(e);
+                    }
                     if self.listener_gone() {
                         return Err(SinkError::Device(format!("{}: listener went away", self.id)));
                     }
@@ -356,6 +392,9 @@ impl AudioSink for PullSink {
 
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
+        if let Some(e) = self.aborted() {
+            return Err(e);
+        }
         self.send(pack_pcm(block))?;
         self.written += block.frames() as u64;
         Ok(())
@@ -378,7 +417,8 @@ impl AudioSink for PullSink {
         while self.tx.capacity() < CHANNEL_CHUNKS
             && std::time::Instant::now() < deadline
             && !self.tx.is_closed()
-            && !self.listener_gone()
+            && !self.listener_left()
+            && self.aborted().is_none()
         {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -470,7 +510,26 @@ mod tests {
         .unwrap();
         assert!(err.to_string().contains("listener went away"), "{err}");
         let took = started.elapsed();
-        assert!(took >= REATTACH_GRACE && took < LISTENER_TIMEOUT, "{took:?}");
+        assert!(
+            took >= REATTACH_GRACE - Duration::from_millis(50) && took < LISTENER_TIMEOUT,
+            "{took:?}"
+        );
+    }
+
+    /// A stream nobody will fetch (the renderer refused Play) fails its sink at once.
+    #[test]
+    fn an_aborted_stream_fails_its_sink_with_the_reason() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = PullOutput::new("a");
+        let mut sink = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        out.abort(g + 1, "not this one".into());
+        sink.write(&block(fmt, 0)).unwrap();
+        out.abort(g, "the renderer refused Play".into());
+        let started = std::time::Instant::now();
+        let e = sink.write(&block(fmt, 4)).unwrap_err();
+        assert!(e.to_string().contains("refused Play"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     /// A newer sink's stream wins over an old one a listener gives back.

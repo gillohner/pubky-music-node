@@ -115,6 +115,8 @@ struct Engine {
     /// The runtime of whoever made the zone. `Output::open` runs inside it: outputs use
     /// `spawn_blocking` and timers, which panic on a thread outside a runtime.
     runtime: Option<tokio::runtime::Handle>,
+    /// The sequence number of the command being handled (for a panic in it).
+    handling: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -149,6 +151,7 @@ pub(crate) fn spawn(
         last_position_publish: Instant::now(),
         dirty: false,
         runtime: tokio::runtime::Handle::try_current().ok(),
+        handling: 0,
     };
     std::thread::Builder::new()
         .name(name)
@@ -184,6 +187,8 @@ impl Engine {
     fn run(mut self) {
         loop {
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.serve()));
+            // The command that panicked counts as handled, so nobody waits for it
+            self.acked = self.acked.max(self.handling);
             match served {
                 Ok(()) => break,
                 Err(p) => self.recover(&panic_text(p.as_ref())),
@@ -238,6 +243,9 @@ impl Engine {
                 }
             };
             if let Some((seq, cmd)) = cmd {
+                if seq != u64::MAX {
+                    self.handling = seq;
+                }
                 let flow = self.handle(cmd);
                 if seq != u64::MAX {
                     self.acked = self.acked.max(seq);

@@ -756,7 +756,7 @@ pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
 pub async fn bind(listen: &str) -> anyhow::Result<tokio::net::TcpListener> {
     match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => {
-            tracing::info!(%listen, "API listening");
+            tracing::info!(%listen, "API port bound; serving once the node has started");
             Ok(l)
         }
         Err(e) => Err(anyhow::anyhow!(bind_error(listen, &e))),
@@ -1069,8 +1069,6 @@ async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePul
     Ok(Json(info))
 }
 
-/// The live WAV stream of a pull output. Waits up to 15 s for a zone to
-/// start playing into it; a second listener replaces the first.
 /// `GET /v1/outputs/pull/{name}/url`: the keyed URL to give a renderer or player by hand.
 async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
     if !s.pulls.lock().expect("pulls lock").contains_key(&name) {
@@ -1079,6 +1077,8 @@ async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> 
     Ok(Json(serde_json::json!({ "url": s.pull_url(&name) })))
 }
 
+/// The live stream of a pull output. Waits up to 15 s for a zone to play into it; a listener that
+/// leaves gives it back for the next one (see `pm_zones::outputs::pull`).
 async fn pull_stream(
     State(s): State<Arc<NodeState>>,
     Path((name, file)): Path<(String, String)>,

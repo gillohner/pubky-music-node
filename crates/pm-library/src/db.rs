@@ -232,7 +232,7 @@ pub fn now_unix() -> i64 {
 }
 
 /// How long a write waits for another connection's transaction before "database is locked".
-pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// SQLite's busy handler: try again every millisecond, up to [`BUSY_TIMEOUT`]. The built-in
 /// timeout sleeps up to 100 ms between tries, so a writer that commits and starts again within a
