@@ -315,16 +315,22 @@ fn the_usual_live_wav_header_ends_at_once_on_a_linn_and_the_continuous_one_plays
     assert_eq!((at, plays), (44, None), "RIFF size 0: continuous");
 }
 
-/// One HTTP/1.1 GET as Linn's pipeline sends it; returns the status line, the headers and a
-/// reader positioned at the body (de-chunked when the answer is chunked).
-fn linn_get(addr: std::net::SocketAddr, path: &str) -> (String, Vec<String>, Box<dyn std::io::Read>) {
+/// One HTTP/1.1 GET as Linn's pipeline sends it (or, with `keep_alive`, as most other clients
+/// do: no `Connection: close`); returns the status line, the headers and a reader positioned at
+/// the body (de-chunked when the answer is chunked).
+fn linn_get(
+    addr: std::net::SocketAddr,
+    path: &str,
+    keep_alive: bool,
+) -> (String, Vec<String>, Box<dyn std::io::Read>) {
     use std::io::{BufRead, BufReader, Write};
     let mut s = std::net::TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
         .unwrap();
     write!(
         s,
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: LWIP/1.4.2-linn\r\nConnection: close\r\nIcy-MetaData: 1\r\nRange: bytes=0-\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: LWIP/1.4.2-linn\r\n{}Icy-MetaData: 1\r\nRange: bytes=0-\r\n\r\n",
+        if keep_alive { "" } else { "Connection: close\r\n" }
     )
     .unwrap();
     let mut r = BufReader::new(s);
@@ -452,7 +458,7 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
     let heard = tokio::task::spawn_blocking(move || {
         let path = "/v1/outputs/pull/linn/live.wav";
         // First connection: recognise the stream from its first bytes, then hang up
-        let (status, headers, mut body) = linn_get(addr, path);
+        let (status, headers, mut body) = linn_get(addr, path, false);
         assert!(status.starts_with("HTTP/1.0 200"), "{status}");
         assert!(
             !headers.iter().any(|h| h.starts_with("content-length")),
@@ -468,11 +474,17 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
         assert_eq!(plays, None, "the Linn must see a continuous stream");
         assert_eq!(&start[at..at + 64], &pcm[..64]);
         drop(body);
-        // The pipeline is ready: open it again and play
-        let (status, _, mut body) = linn_get(addr, path);
+        // The pipeline is ready: open it again and play. This time as a keep-alive client: the
+        // answer is still HTTP/1.0, unchunked, says it closes, and ends when the zone stops.
+        let (status, headers, mut body) = linn_get(addr, path, true);
         assert!(
             status.starts_with("HTTP/1.0 200"),
             "the stream waited for the Linn: {status}"
+        );
+        assert!(
+            headers.iter().any(|h| h == "connection: close")
+                && !headers.iter().any(|h| h.starts_with("transfer-encoding")),
+            "{headers:?}"
         );
         let mut all = Vec::new();
         body.read_to_end(&mut all).unwrap();

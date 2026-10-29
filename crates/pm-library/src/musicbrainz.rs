@@ -28,22 +28,29 @@ static GATES: LazyLock<std::sync::Mutex<HashMap<String, Arc<Mutex<Gate>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// The right to send one request to a MusicBrainz host. Nobody else asks that host while it is
-/// held, and the next turn starts `min_interval` after it ends (later after [`Turn::back_off`]).
+/// held, and the next turn starts no sooner than `min_interval` after this one started (later
+/// after [`Turn::back_off`]).
 pub struct Turn {
     gate: tokio::sync::OwnedMutexGuard<Gate>,
     min_interval: Duration,
+    started: Instant,
 }
 
 impl Turn {
     /// MusicBrainz asked to slow down (503/429): nobody asks this host again before `wait`.
     pub fn back_off(&mut self, wait: Duration) {
-        self.gate.next = Some(Instant::now() + wait.clamp(self.min_interval, MAX_BACK_OFF));
+        let wait = wait
+            .max(self.min_interval)
+            .min(MAX_BACK_OFF.max(self.min_interval));
+        self.gate.next = Some(Instant::now() + wait);
     }
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        let after = Instant::now() + self.min_interval;
+        // Spaced from the start of this request, not its answer: a slow answer must not halve
+        // the rate (requests still go one at a time).
+        let after = self.started + self.min_interval;
         if self.gate.next.is_none_or(|n| n < after) {
             self.gate.next = Some(after);
         }
@@ -76,7 +83,11 @@ pub async fn take_turn(url: &str, min_interval: Duration) -> Turn {
             tokio::time::sleep(next - now).await;
         }
     }
-    Turn { gate, min_interval }
+    Turn {
+        gate,
+        min_interval,
+        started: Instant::now(),
+    }
 }
 
 /// How long a 503/429 asks to wait: its Retry-After (seconds), else `fallback`.
@@ -700,6 +711,23 @@ mod tests {
             assert!(w[1] - w[0] >= Duration::from_millis(300), "{:?}", w[1] - w[0]);
         }
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn turns_are_spaced_from_their_start_and_a_long_interval_does_not_panic() {
+        let url = "http://gate-spacing.invalid:1/ws/2/x";
+        let first = take_turn(url, Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(first);
+        let t = Instant::now();
+        let mut second = take_turn(url, Duration::from_millis(400)).await;
+        assert!(
+            t.elapsed() < Duration::from_millis(250),
+            "the gap counts from the start of the last request: {:?}",
+            t.elapsed()
+        );
+        second.min_interval = Duration::from_secs(90);
+        second.back_off(Duration::from_secs(1));
     }
 
     #[test]

@@ -1128,6 +1128,9 @@ async fn pull_stream(
                 (header::CONTENT_TYPE, mime),
                 (header::CACHE_CONTROL, "no-store".to_string()),
                 (header::ACCEPT_RANGES, "none".to_string()),
+                // The body ends when the connection closes: say so, so a keep-alive client
+                // (and hyper) treat this as the last answer on the connection.
+                (header::CONNECTION, "close".to_string()),
             ],
             body,
         )
