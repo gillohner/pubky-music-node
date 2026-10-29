@@ -340,6 +340,11 @@ fn linn_get(addr: std::net::SocketAddr, path: &str) -> (String, Vec<String>, Box
         headers.push(l.trim().to_ascii_lowercase());
     }
     let chunked = headers.iter().any(|h| h == "transfer-encoding: chunked");
+    // A Linn DS stops on a chunked live stream (the owner's Klimax DS, 0.2.0)
+    assert!(
+        !(chunked && path.ends_with("live.wav")),
+        "a Linn does not play a chunked stream: {status} {headers:?}"
+    );
     let body: Box<dyn std::io::Read> = if chunked {
         Box::new(Dechunk {
             r,
@@ -448,7 +453,7 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
         let path = "/v1/outputs/pull/linn/live.wav";
         // First connection: recognise the stream from its first bytes, then hang up
         let (status, headers, mut body) = linn_get(addr, path);
-        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert!(status.starts_with("HTTP/1.0 200"), "{status}");
         assert!(
             !headers.iter().any(|h| h.starts_with("content-length")),
             "live: no length {headers:?}"
@@ -466,7 +471,7 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
         // The pipeline is ready: open it again and play
         let (status, _, mut body) = linn_get(addr, path);
         assert!(
-            status.starts_with("HTTP/1.1 200"),
+            status.starts_with("HTTP/1.0 200"),
             "the stream waited for the Linn: {status}"
         );
         let mut all = Vec::new();

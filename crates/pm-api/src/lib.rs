@@ -1137,6 +1137,10 @@ async fn pull_stream(
                 r.headers_mut().insert(*k, v);
             }
         }
+        // An HTTP/1.0 answer: the body runs until the connection closes. HTTP/1.1 would send a
+        // live stream chunked, and a Linn DS stops at once on a chunked stream (seen on the
+        // owner's Klimax: it plays the same stream unchunked).
+        *r.version_mut() = axum::http::Version::HTTP_10;
         r
     };
     // A HEAD must not take the live stream: the GET that follows needs it.
