@@ -84,6 +84,7 @@ pub mod search;
 pub mod shared;
 pub mod signin;
 pub mod smart;
+pub mod smart_network;
 pub mod soloist;
 pub mod soundcloud;
 pub mod sources;
@@ -11988,5 +11989,240 @@ exec sleep 300
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// Smart playlists with tags from the network (TASK-pinakes-social-ux.md E2): `reach` other than
+    /// `me` asks Pinakes' generic search for music tagged with the tags in that reach, and Nexus by
+    /// URI for who tagged it (five named, the rest counted, labels in the request's order). Items
+    /// that play here come first; the answer is cached; a personal reach needs a Pubky sign-in; a
+    /// plain smart playlist is unchanged.
+    #[tokio::test]
+    async fn smart_playlists_take_tags_from_the_network() {
+        let a = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let searches = Arc::new(std::sync::Mutex::new(Vec::<
+            std::collections::HashMap<String, String>,
+        >::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let searches = searches.clone();
+            Router::new()
+                .route(
+                    "/v1/search",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let searches = searches.clone();
+                        async move {
+                            searches.lock().unwrap().push(q);
+                            Json(serde_json::json!({"items": [
+                                {"id": "c1", "uri": "https://example.org/not-music", "status": "ok", "type": "Article", "name": "Not music"},
+                                {"id": "c2", "uri": "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862", "status": "ok", "type": "MusicRecording", "name": "On MusicBrainz", "site": "musicbrainz.org"},
+                                {"id": "c3", "uri": "https://tidal.com/track/50850120", "status": "ok", "type": "MusicRecording", "name": "On TIDAL", "site": "tidal.com"}
+                            ], "cursor": null}))
+                        }
+                    }),
+                )
+                .route(
+                    "/nexus/v0/resource/by-uri",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        let taggers: Vec<String> = (0..7).map(|i| if i == 0 { a.to_string() } else { format!("tagger{i}") }).collect();
+                        Json(serde_json::json!({"resource": {"id": "r", "uri": q["uri"]}, "tags": [
+                            {"label": "house", "taggers": [a], "taggers_count": 1, "relationship": false},
+                            {"label": "techno", "taggers": taggers, "taggers_count": 7, "relationship": false},
+                            {"label": "other", "taggers": ["x"], "taggers_count": 1, "relationship": false}
+                        ]}))
+                    }),
+                )
+                .route(
+                    "/nexus/v0/stream/users/by_ids",
+                    post(move || async move { Json(serde_json::json!([{"details": {"id": a, "name": "Ann"}}])) }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let rules = serde_json::json!({"reach": "all", "tags": ["Techno", "house"], "network_limit": 5});
+        let (st, r) = call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let q = searches.lock().unwrap()[0].clone();
+        assert_eq!(
+            (q["tags"].as_str(), q.get("reach"), q.get("viewer")),
+            ("house,techno", None, None),
+            "{q:?}"
+        );
+        let net = r["network"].as_array().unwrap();
+        assert_eq!(net.len(), 2, "music cards only: {r}");
+        // Nothing is connected here: neither plays, so both are cards, in Pinakes' order
+        assert!(net.iter().all(|n| n["plays_from"].is_null()), "{r}");
+        let tidal = &net[1];
+        assert_eq!(tidal["site"], "tidal.com");
+        let by = &tidal["tagged_by"];
+        assert_eq!(by.as_array().unwrap().len(), 5);
+        assert_eq!(tidal["taggers_count"], 7);
+        assert_eq!(
+            by[0],
+            serde_json::json!({"key": a, "name": "Ann", "labels": ["house", "techno"]})
+        );
+        assert_eq!(by[1], serde_json::json!({"key": "tagger1", "labels": ["techno"]}));
+        assert_eq!(tidal["page"], "https://tidal.com/track/50850120");
+        // The same answer again comes from the cache
+        call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
+        assert_eq!(searches.lock().unwrap().len(), 1);
+        // People you follow need a Pubky sign-in: said in plain words, not an error
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"reach": "following", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            r["network_note"].as_str().unwrap().contains("Sign in with Pubky"),
+            "{r}"
+        );
+        // Refused: tags with "just me", a network reach without tags, every one of four tags
+        for bad in [
+            serde_json::json!({"reach": "me", "tags": ["techno"], "rules": [{"field": "genre", "op": "contains", "value": "x"}]}),
+            serde_json::json!({"reach": "friends"}),
+            serde_json::json!({"reach": "all", "tags": ["a", "b", "c", "d"], "match": "all"}),
+            serde_json::json!({"reach": "nearby", "tags": ["a"]}),
+        ] {
+            assert_eq!(
+                call(&app, "POST", "/v1/smart/preview", Some(bad.clone())).await.0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        // A plain smart playlist is as before: no network, nothing new in its answer
+        let (st, plain) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": [{"field": "genre", "op": "contains", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plain}");
+        assert!(
+            plain.get("network").is_none() && plain.get("network_note").is_none(),
+            "{plain}"
+        );
+        // Saving tags from the network writes a music feed: that needs a Pubky sign-in
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/smart",
+            Some(serde_json::json!({"name": "Techno", "reach": "all", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("Sign in with Pubky"), "{e}");
+    }
+
+    /// A smart playlist with tags from the network is also a music feed on the owner's homeserver
+    /// (E2): written on save, rewritten in place on an edit, gone when it goes back to "just me"
+    /// or is deleted. On a testnet only (`PM_TESTNET=1`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_network_smart_playlist_is_a_music_feed() {
+        if std::env::var("PM_TESTNET").as_deref() != Ok("1") {
+            eprintln!("PM_TESTNET not set; skipping");
+            return;
+        }
+        let pubky = pubky::Pubky::testnet().unwrap();
+        let signer = pubky.signer(pubky::Keypair::random());
+        let hs = pubky::PublicKey::try_from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        signer.signup(&hs, None).await.unwrap();
+        let session = signer
+            .signin_blocking(pubky::ClientId::new("pm-api-feeds").unwrap())
+            .await
+            .unwrap();
+        let z32 = session.public_key().to_string();
+        let homeserver = pm_pubky::homeserver::NodeHomeserver::from_pubky(pubky.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_sync(Some(Arc::new(crate::sync::PubkySync::from_session(
+            homeserver.clone(),
+            session.clone(),
+        ))));
+        let app = router(s.clone());
+        let read = |id: String| {
+            let (hs, z32, session) = (homeserver.clone(), z32.clone(), session.clone());
+            async move {
+                hs.get_bytes(
+                    &z32,
+                    &format!("/priv/music/v1/feeds/{id}.json"),
+                    pm_pubky::Visibility::Private,
+                    Some(&session),
+                )
+                .await
+                .ok()
+                .map(|b| serde_json::from_slice::<pubky_music_specs::MusicFeed>(&b).unwrap())
+            }
+        };
+        let (st, p) = call(
+            &app,
+            "POST",
+            "/v1/smart",
+            Some(serde_json::json!({"name": "Techno from friends", "reach": "friends", "tags": ["Techno"], "match": "any",
+                "rules": [{"field": "year", "op": "between", "value": 1990, "to": 1999}], "limit": 40})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        let fid = p["feed"]["id"].as_str().unwrap().to_string();
+        assert_eq!(p["feed"]["public"], false);
+        assert!(p["feed"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/priv/music/v1/feeds/{fid}.json")));
+        let f = read(fid.clone()).await.expect("the feed is on the homeserver");
+        f.validate(Some(&fid), true).unwrap();
+        assert_eq!(f.name, "Techno from friends");
+        assert_eq!(f.feed.tags.as_deref(), Some(&["techno".to_string()][..]));
+        assert_eq!(serde_json::to_value(&f.feed.reach).unwrap(), "friends");
+        assert_eq!(f.feed.rules[0].field, "year");
+        assert_eq!(f.feed.limit.as_ref().unwrap().songs, Some(40));
+        // An edit rewrites the same feed
+        let id = p["id"].as_str().unwrap().to_string();
+        let (st, p2) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Techno from everyone", "reach": "all", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p2}");
+        assert_eq!(p2["feed"]["id"], fid.as_str());
+        assert_eq!(read(fid.clone()).await.unwrap().name, "Techno from everyone");
+        // Back to "just me": the feed goes
+        let (st, p3) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Mine", "rules": [{"field": "genre", "op": "contains", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p3}");
+        assert!(p3.get("feed").is_none(), "{p3}");
+        assert!(read(fid).await.is_none());
+        // Deleting one with a feed removes the feed too
+        let (_, p4) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Again", "reach": "all", "tags": ["house"]})),
+        )
+        .await;
+        let fid4 = p4["feed"]["id"].as_str().unwrap().to_string();
+        assert!(read(fid4.clone()).await.is_some());
+        let (st, _) = call(&app, "DELETE", &format!("/v1/smart/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(read(fid4).await.is_none());
     }
 }

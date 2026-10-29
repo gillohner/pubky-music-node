@@ -88,6 +88,31 @@ pub struct Rules {
     /// At most this many songs (default 100, up to 1000).
     #[serde(default = "hundred")]
     pub limit: usize,
+    /// Whose tags count (TASK-pinakes-social-ux.md E2): `me` (the default: the library alone),
+    /// `following`, `friends` or `all`, with `tags` and `match` (smart_network.rs).
+    #[serde(default = "me", skip_serializing_if = "is_me")]
+    pub reach: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// `any` (default) or `all` of `tags`.
+    #[serde(default = "any", rename = "match", skip_serializing_if = "is_any")]
+    pub tags_match: String,
+    /// How many network items a preview lists (30 by default, up to 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_limit: Option<usize>,
+}
+
+fn me() -> String {
+    "me".into()
+}
+fn is_me(r: &str) -> bool {
+    r == "me"
+}
+fn any() -> String {
+    "any".into()
+}
+fn is_any(m: &str) -> bool {
+    m == "any"
 }
 
 fn all() -> String {
@@ -106,6 +131,9 @@ pub struct SmartPlaylist {
     pub name: String,
     #[serde(flatten)]
     pub rules: Rules,
+    /// Its music feed on the homeserver, for one with tags from the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<crate::smart_network::FeedRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +141,13 @@ pub struct SmartResult {
     /// How many songs match before the limit.
     pub matched: usize,
     pub tracks: Vec<Track>,
+    /// Music people in the reach tagged (`reach` other than `me`): playable here first, then
+    /// cards.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<crate::smart_network::NetworkItem>,
+    /// Why `network` is empty when it was asked for, in plain words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_note: Option<String>,
 }
 
 /// What each rule looks at, gathered once per evaluation.
@@ -190,7 +225,8 @@ fn matches(rule: &Rule, t: &Track, f: &Facts) -> bool {
 }
 
 fn check(r: &Rules) -> Result<(), ApiError> {
-    if r.rules.is_empty() && r.seeds.is_empty() {
+    crate::smart_network::check(r)?;
+    if r.rules.is_empty() && r.seeds.is_empty() && r.reach == "me" {
         return Err(ApiError::bad_request(
             "A smart playlist needs at least one rule or a seed",
         ));
@@ -309,6 +345,8 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
     Ok(SmartResult {
         matched,
         tracks: picked,
+        network: Vec::new(),
+        network_note: None,
     })
 }
 
@@ -421,13 +459,31 @@ pub(crate) async fn create(
     if name.is_empty() {
         return Err(ApiError::bad_request("Give it a name"));
     }
-    let p = SmartPlaylist {
+    let mut p = SmartPlaylist {
         id: crate::tidal::random_urlsafe(9),
         name,
         rules: b.rules,
+        feed: None,
     };
+    sync_feed(&s, &mut p).await?;
     store(&s, &p)?;
     Ok(Json(p))
+}
+
+/// With tags from the network the smart playlist is also a music feed on the homeserver; back to
+/// `me` its feed goes.
+async fn sync_feed(s: &Arc<NodeState>, p: &mut SmartPlaylist) -> Result<(), ApiError> {
+    if p.rules.reach != "me" {
+        let f = crate::smart_network::save_feed(s, p)
+            .await
+            .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e))?;
+        p.feed = Some(f);
+    } else if let Some(f) = p.feed.take() {
+        if let Err(e) = crate::smart_network::delete_feed(s, &f).await {
+            tracing::warn!(error = %e, "removing a smart playlist's music feed");
+        }
+    }
+    Ok(())
 }
 
 /// `PUT /v1/smart/{id}`.
@@ -440,6 +496,7 @@ pub(crate) async fn update(
     let mut p = load(&s, &id)?;
     p.name = b.name.trim().chars().take(100).collect();
     p.rules = b.rules;
+    sync_feed(&s, &mut p).await?;
     store(&s, &p)?;
     Ok(Json(p))
 }
@@ -449,7 +506,12 @@ pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    load(&s, &id)?;
+    let p = load(&s, &id)?;
+    if let Some(f) = &p.feed {
+        if let Err(e) = crate::smart_network::delete_feed(&s, f).await {
+            tracing::warn!(error = %e, "removing a smart playlist's music feed");
+        }
+    }
     s.library
         .lock()
         .expect("library poisoned")
@@ -463,16 +525,35 @@ pub(crate) async fn tracks(
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     let p = load(&s, &id)?;
-    let r = evaluate(&s, &p.rules)?;
+    let r = with_network(&s, &p.rules).await?;
     Ok(Json(
-        serde_json::json!({ "playlist": p, "matched": r.matched, "tracks": r.tracks }),
+        serde_json::json!({ "playlist": p, "matched": r.matched, "tracks": r.tracks, "network": r.network, "network_note": r.network_note }),
     ))
 }
 
 /// `POST /v1/smart/preview {rules, matches, sort, limit}`: what the rules pick, while editing.
 pub(crate) async fn preview(State(s): State<Arc<NodeState>>, Json(r): Json<Rules>) -> ApiResult<SmartResult> {
     check(&r)?;
-    Ok(Json(evaluate(&s, &r)?))
+    Ok(Json(with_network(&s, &r).await?))
+}
+
+/// The library's songs, and with a network reach what people in it tagged.
+async fn with_network(s: &Arc<NodeState>, r: &Rules) -> Result<SmartResult, ApiError> {
+    let mut out = if r.rules.is_empty() && r.seeds.is_empty() {
+        SmartResult {
+            matched: 0,
+            tracks: Vec::new(),
+            network: Vec::new(),
+            network_note: None,
+        }
+    } else {
+        evaluate(s, r)?
+    };
+    match crate::smart_network::network(s, r).await {
+        Ok(items) => out.network = items,
+        Err(note) => out.network_note = Some(note),
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
