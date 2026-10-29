@@ -1046,18 +1046,35 @@
   // and the browser stops; into it the browser takes the zone's queue and the zone empties (radio
   // is the node's: it does not come along). The node's errors (403: a zone not open to listeners;
   // 400: an empty queue) show in the menu when it is open, else as a toast.
+  let moving = false; // one move at a time (review: a second Move here sent the same queue twice)
   const moveTo = async (target) => {
     const from = state.zone;
-    if (target === from) return;
+    if (target === from || moving) return;
+    moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
+    let resume = null; // the browser, paused for the move: back on when the move fails
     try {
       if (from === BROWSER) {
-        const items = state.browserQueue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
+        let queue = state.browserQueue;
+        const cur = state.browserIndex >= 0 ? queue[state.browserIndex] : null;
+        // YouTube plays in this page: a zone takes it only with yt-dlp on (as playSourceItems)
+        const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
+        if (!ytZones && queue.some((q) => ytOf(q.uri))) {
+          if (cur && ytOf(cur.uri)) throw new Error('YouTube plays only in This browser');
+          const rest = queue.filter((q) => !ytOf(q.uri));
+          toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
+          queue = rest;
+        }
+        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
         if (!items.length) throw new Error('Nothing to move: the queue is empty');
-        const cur = state.browserIndex >= 0 ? state.browserQueue[state.browserIndex] : null;
+        const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
-        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: cur ? state.browserIndex : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
+        // Pause here first: the node may take seconds to open the track, and both would play meanwhile
+        if (transport === 'playing') { audio.pause(); resume = true; }
+        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
         state.zones[zs.id] = zs;
-        audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
+        if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
+        resume = null;
+        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
         state.browserQueue = []; state.browserIndex = -1; try { localStorage.removeItem('pm.browserAt'); } catch { /* storage unavailable */ }
       } else if (target === BROWSER) {
         const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
@@ -1069,23 +1086,26 @@
         try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
         if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
       } else {
+        const was = state.zones[from];
         const zs = await api('POST', `/zones/${encodeURIComponent(from)}/transfer`, { to: target });
         state.zones[zs.id] = zs;
         if (state.zones[from]) state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' };
+        if (was && was.transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
       }
       state.zone = target; try { localStorage.setItem('pm.zone', target); } catch { /* storage unavailable */ }
       renderZoneName(); renderBar(); refreshQueue();
       const name = (currentZone() || {}).name || target;
       if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
     } catch (e) {
+      if (resume) audio.play().catch(() => {});
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
-    }
+    } finally { moving = false; }
   };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
-        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span>
+        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
       </button>${movable && z.id !== state.zone ? `<button class="pop-item pop-act" data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
       + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')

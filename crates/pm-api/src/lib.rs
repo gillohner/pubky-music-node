@@ -1875,6 +1875,9 @@ async fn load(
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
+    if body.items.iter().any(|it| it.uri.trim().is_empty()) {
+        return Err(ApiError::bad_request("item uri is empty"));
+    }
     let to = zone_of(&s, &id)?;
     Ok(Json(
         load_zone(
@@ -11010,57 +11013,6 @@ exec sleep 300
     }
 
     #[tokio::test]
-    async fn load_fills_a_zone_at_a_position() {
-        let dir = tempfile::tempdir().unwrap();
-        let wav = dir.path().join("long.wav");
-        write_wav(&wav, 44_100 * 30);
-        let s = state(dir.path(), None).await;
-        let app = router(s.clone());
-        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
-        let zid = zones[0]["id"].as_str().unwrap().to_string();
-        let items: Vec<_> = (0..3)
-            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
-            .collect();
-        // Nothing to move
-        let (st, _) = call(
-            &app,
-            "POST",
-            &format!("/v1/zones/{zid}/load"),
-            Some(serde_json::json!({"items": []})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST);
-        // A paused browser queue: the second song at 5 s, repeat all
-        let (st, z) = call(
-            &app,
-            "POST",
-            &format!("/v1/zones/{zid}/load"),
-            Some(serde_json::json!({"items": items, "index": 1, "position_ms": 5000, "transport": "paused", "repeat": "all"})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{z}");
-        assert_eq!(z["queue"].as_array().unwrap().len(), 3);
-        assert_eq!(z["queue"][1]["title"], "t1");
-        assert_eq!(z["repeat"], "all");
-        assert_eq!(z["now_playing"]["index"], 1);
-        assert_eq!(z["transport"], "paused");
-        assert!(z["now_playing"]["position_ms"].as_u64().unwrap() >= 4_000, "{z}");
-        // Stopped: loaded, nothing plays
-        let one = vec![serde_json::json!({"uri": wav.to_string_lossy(), "title": "only"})];
-        let (st, z) = call(
-            &app,
-            "POST",
-            &format!("/v1/zones/{zid}/load"),
-            Some(serde_json::json!({"items": one})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{z}");
-        assert_eq!(z["queue"].as_array().unwrap().len(), 1);
-        assert_eq!(z["transport"], "stopped");
-        assert_eq!(z["repeat"], "off");
-    }
-
-    #[tokio::test]
     async fn shuffle_reorders_only_the_upcoming_items() {
         let dir = tempfile::tempdir().unwrap();
         let wav = dir.path().join("short.wav");
@@ -12252,5 +12204,64 @@ exec sleep 300
         assert!(!home.contains("picked"), "{home}");
         let set = notes(state_at(dir.path(), "http://172.17.0.2:7788", false).await).await;
         assert!(!set.contains("picked"), "{set}");
+    }
+
+    #[tokio::test]
+    async fn load_fills_a_zone_at_a_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("long.wav");
+        write_wav(&wav, 44_100 * 30);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..3)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        // Nothing to move
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": []})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": [{"uri": " "}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // A paused browser queue: the second song at 5 s, repeat all
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": items, "index": 1, "position_ms": 5000, "transport": "paused", "repeat": "all"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["queue"].as_array().unwrap().len(), 3);
+        assert_eq!(z["queue"][1]["title"], "t1");
+        assert_eq!(z["repeat"], "all");
+        assert_eq!(z["now_playing"]["index"], 1);
+        assert_eq!(z["transport"], "paused");
+        assert!(z["now_playing"]["position_ms"].as_u64().unwrap() >= 4_000, "{z}");
+        // Stopped: loaded, nothing plays
+        let one = vec![serde_json::json!({"uri": wav.to_string_lossy(), "title": "only"})];
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": one})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["queue"].as_array().unwrap().len(), 1);
+        assert_eq!(z["transport"], "stopped");
+        assert_eq!(z["repeat"], "off");
     }
 }
