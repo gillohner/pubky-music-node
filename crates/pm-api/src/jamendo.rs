@@ -96,7 +96,7 @@ fn endpoints(s: &NodeState) -> Result<JamendoEndpoints, ApiError> {
     if !e.creds.configured() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "Jamendo needs a developer app: [jamendo] client_id in the node config or PM_JAMENDO_CLIENT_ID",
+            "This build has no built-in Jamendo app: add one in Settings › This node › Service apps",
         ));
     }
     Ok(e)
@@ -569,7 +569,7 @@ pub(crate) async fn login(
     if e.creds.client_secret.trim().is_empty() {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "Jamendo sign-in needs the app's client_secret too ([jamendo] or PM_JAMENDO_CLIENT_SECRET)",
+            "Signing in to Jamendo needs an app with its secret: add one in Settings › This node › Service apps",
         ));
     }
     let state = crate::tidal::random_urlsafe(24);

@@ -705,7 +705,7 @@ impl StreamingService for Tidal {
         let status = if load_user(s).is_some() || crate::tidal_unofficial::streams(s) {
             "ready".to_string()
         } else if !creds(s).configured() {
-            "not configured: this build has no built-in TIDAL app; add [tidal] client_id".to_string()
+            "not configured: this build has no built-in TIDAL app; add one in Settings › This node › Service apps".to_string()
         } else {
             "needs sign-in".to_string()
         };
@@ -1365,7 +1365,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             recommended: true,
             available: c.configured(),
             reason: (!c.configured()).then(|| {
-                "This build has no built-in TIDAL app; add [tidal] client_id to the node config."
+                "This build has no built-in TIDAL app; add one in Settings › This node › Service apps."
                     .to_string()
             }),
         },
@@ -1398,7 +1398,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
         Way {
             id: WAY_OWN.into(),
             label: "Your own app".into(),
-            note: "A TIDAL device client id and secret you are allowed to use, entered here; or your own app from developer.tidal.com in the node config ([tidal] client_id and client_secret).".into(),
+            note: "A TIDAL device client id and secret you are allowed to use, entered here; An app of your own goes in Settings › This node › Service apps.".into(),
             action: "setup".into(),
             recommended: false,
             available: true,

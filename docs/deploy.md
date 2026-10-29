@@ -294,42 +294,46 @@ works until the Pubky transport exists (ADR 0008):
 
 Nothing for most services. A release build carries the project's own TIDAL, Jamendo and AcoustID apps (public ids only;
 no secrets ship), and the TIDAL sign-in goes through the project's static return page, so it works on a LAN address.
-Open Sources › TIDAL › Connect TIDAL.
+Open Sources › TIDAL › Sign in. Settings › This node › Service apps lists every service: whether this build's app is
+in use or yours, and what the service limits.
 
-- **Spotify:** Spotify allows no shared app, so you make your own free one once. Sources › Spotify walks you through
-  it and takes only the client ID.
-- **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). Under
-  Sources › Spotify › Play on this machine: save your own Soloist API key (made with a Premium account at
-  developer.spotify.com › Dashboard › Spotify Soloist API Key), press Download Soloist (from Spotify's own servers;
-  Spotify forbids us to ship it), switch it on, then pick the device in a Spotify app. It plays on the machine's
-  PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or `PM_SOLOIST`) names an install of
-  your own. In Docker it needs the host's audio socket, which the image doesn't set up.
+- **Spotify:** playing through Spotify Connect needs no app (librespot, below). Search, your library and playlist
+  import need an app of your own, because Spotify allows no shared one (an app in development mode lets in 25 people).
+  Sources › Spotify walks you through it; see [Advanced: use your own app](STREAMING-PROVIDERS.md#advanced-use-your-own-app).
+- **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). It needs a
+  Soloist API key of your own (see Advanced). Then under Sources › Spotify › Play on this machine press Download
+  Soloist (from Spotify's own servers; Spotify forbids us to ship it), switch it on, and pick the device in a Spotify
+  app. It plays on the machine's PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or
+  `PM_SOLOIST`) names an install of your own. In Docker it needs the host's audio socket, which the image doesn't set up.
 - **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
   distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
   play on the machine's sound or into one of the node's zones.
 - **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
   in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
-  entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer portal is not
+  entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer site is not
   a device client and won't work there).
 - **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
   you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
   value of your bandcamp.com `identity` cookie under Sources › Bandcamp. Purchases land in `<data_dir>/bandcamp`, a
   library folder.
-- **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
-  secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
-  here are scrobbled; artist pages show similar artists.
-- **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
-  (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
-  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
-  in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
-  rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- **Last.fm:** optional, and for now it needs an app of your own (see Advanced): enter it under Settings › Accounts ›
+  Last.fm, then Connect. Plays you make here are scrobbled; artist pages show similar artists.
+- **Google Drive and OneDrive:** Settings › Library › Cloud drives. OneDrive uses the project's app once a release
+  carries it; Google Drive needs an app of your own for now (see Advanced).
+- **node.toml and the environment:** `[tidal]`, `[jamendo]`, `[acoustid]` and `[drives]` in `node.toml` always win
+  over the built-in apps and over an app entered in Settings › Service apps (Spotify has none built in: `[spotify]` is
+  your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET`, `PM_ACOUSTID_KEY`,
+  `PM_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` and `PM_ONEDRIVE_CLIENT_ID` itself, and these override node.toml.
+  `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only in the Docker image, which writes them into node.toml on first
+  start (or with `PM_REWRITE_CONFIG=1`, which rewrites the whole file); setting them on a running install changes
+  nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
   `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one
   without `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` has no built-in TIDAL device client; add your
-  own as above.
+  own in Settings › This node › Service apps.
 
 ## Phones and desktops without the native app
 
