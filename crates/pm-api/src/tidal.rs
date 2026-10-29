@@ -1275,6 +1275,14 @@ pub(crate) async fn logout(
     Ok(Json(status_view(&s, &headers)))
 }
 
+/// The node's TIDAL app changed (Settings › Service apps): the sign-in and the app's own token
+/// belonged to the old one.
+pub(crate) fn app_changed(s: &NodeState) -> Result<(), ApiError> {
+    store_user(s, None)?;
+    *app_token_cache().lock().expect("app token") = None;
+    Ok(())
+}
+
 // ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md) ----
 
 pub(crate) const WAY_APP: &str = "app";

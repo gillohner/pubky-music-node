@@ -408,6 +408,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             client_secret: String::new(),
         },
     ));
+    // The admin's own apps from Settings › Service apps, where node.toml sets none
+    pm_api::apps::apply_own(&state);
     pm_api::drives::spawn_rescans(&state);
     state.set_config_file(config_file.and_then(|p| p.canonicalize().ok()));
     state.set_return_page(&cfg.auth.return_page);

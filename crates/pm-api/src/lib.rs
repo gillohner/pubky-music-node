@@ -200,6 +200,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/health", get(health::health))
         .route("/node", get(groups::index))
         .route("/node/apps", get(apps::get))
+        .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
         .route("/node/settings/backup", post(settings_backup_now))

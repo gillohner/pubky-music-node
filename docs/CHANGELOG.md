@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Settings › This node › Service apps can be changed** (TASK-service-apps-builtin.md). Each service says whether this build's own app is in use or yours, and what the service limits in plain words: Spotify's 25 people, TIDAL's previews, Qobuz's partner-only apps, Google's 100 people before verification. "Advanced: use your own app" takes the admin's own app, with the redirect address it lists, and "Use built-in" goes back. TIDAL, Jamendo, Google Drive and OneDrive, which only node.toml could set before, take one here too (`PUT /v1/node/apps/{id}`). It is kept like a sign-in, never answered, and node.toml still wins.
 - **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players on a DAC"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
 
 ## 0.2.0

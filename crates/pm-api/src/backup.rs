@@ -55,6 +55,10 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
     ("lastfm.app", "the Last.fm app"),
+    (
+        "apps.own",
+        "your own TIDAL, Jamendo, Google Drive and OneDrive apps",
+    ),
     ("lastfm.session", "Last.fm"),
     ("opensubsonic.server", "your Subsonic server"),
     ("jellyfin.server", "Jellyfin"),

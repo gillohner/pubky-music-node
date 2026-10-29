@@ -690,6 +690,11 @@ pub(crate) async fn logout(
     Ok(axum::Json(status_view(&s, &headers)))
 }
 
+/// The node's Jamendo app changed (Settings › Service apps): the sign-in belonged to the old one.
+pub(crate) fn app_changed(s: &NodeState) -> Result<(), ApiError> {
+    store_user(s, None)
+}
+
 /// `POST /v1/sources/jamendo/collection/import`: the tracks the user liked or added to favourites
 /// on Jamendo, as favourites on this node (by their Jamendo link).
 pub(crate) async fn import_collection(

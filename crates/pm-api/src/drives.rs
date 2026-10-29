@@ -200,10 +200,10 @@ pub fn apps_from(google: App, onedrive: App) -> HashMap<Provider, App> {
             })
         }
     };
-    if let Some(a) = pick(google, option_env!("PM_PROJECT_GOOGLE_CLIENT_ID")) {
+    if let Some(a) = pick(google, crate::project_apps::google_client_id()) {
         m.insert(Provider::Google, a);
     }
-    if let Some(a) = pick(onedrive, option_env!("PM_PROJECT_ONEDRIVE_CLIENT_ID")) {
+    if let Some(a) = pick(onedrive, crate::project_apps::onedrive_client_id()) {
         m.insert(Provider::Onedrive, a);
     }
     m
@@ -700,9 +700,8 @@ pub(crate) async fn login(
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             format!(
-                "{} is not set up on this node: add [drives] {}_client_id",
-                p.name(),
-                p.id()
+                "{} is not set up on this node: add an app in Settings › This node › Service apps",
+                p.name()
             ),
         )
     })?;
