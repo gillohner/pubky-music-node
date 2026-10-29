@@ -2,7 +2,9 @@
 
 Newest first. Dates are when the change landed on `main`.
 
-## 2026-10-28
+## 0.2.0
+
+### 2026-10-28
 
 - **The config's music folders are read at start and listed in Settings.** Folders in `[library] folders` (`PM_FOLDERS` in Docker, `/music` on Umbrel) are scanned in the background when the node starts (only those that exist; unchanged files are skipped, so a restart stays cheap). `GET /v1/library/folders` lists them first, with whether each is there now, and `config_folders` (in `/v1/node/settings` and the folder answers) says which they are. Settings › Library folders marks them **From config**, without Remove, and the API refuses to remove or move one (409): take it out of the config and restart, then Remove forgets its songs.
 - **The login dialog says where the token is:** the `api-token` file the node makes in its data folder (with the Docker command), `[api] token` or `PM_TOKEN` when set, the app's password on Umbrel, and a link to the troubleshooting guide.
@@ -28,12 +30,12 @@ Newest first. Dates are when the change landed on `main`.
 - **The node download archive carries the guides.** README.md, docs/deploy.md and docs/guides/ sit at their repo paths in the archive, so the README's links to the guides work in the unpacked folder (CI checks the links between them).
 - **The TrueNAS compose file says to edit the two paths it has** (it said three; CI now checks the count).
 
-## 2026-10-27
+### 2026-10-27
 
 - **A node on the network never runs an open admin API** (security review 2026-10-27, high). Without `[api] token` (or `PM_TOKEN`) and listening beyond localhost, `pm-node` makes a token on first start and keeps it in `<data_dir>/api-token` (0600), the same one on every start; the log names the file, never the token. The file is written whole and linked into place, so a crash never leaves it empty; an emptied file stops the start, and one readable by others is made 0600. A documented placeholder (`change-me`, `change-me-to-a-long-random-secret`) is never used: those installs get a made token and a warning. The encrypted backup carries the made token. Only a loopback `listen` still runs without a token. The Docker entrypoint, the TrueNAS compose file (no more `change-me` token) and `docs/deploy.md` say where to find it; Umbrel and the bundle already set one.
 - **CI's connection check no longer fails when the controller reconnects by itself.** `tools/ui-reconnect.js` clicked "Retry now" after the node restart and waited for the button to be visible, but a retry the controller had due (1–4 s apart past the fast phase) could land first and hide the bar while the node was starting (#95, #125). The step now measures from the node answering: it clicks Retry now through the DOM without a visibility wait, or, when the controller is already back, only confirms that. The 2 s bound stays.
 
-## 2026-10-26
+### 2026-10-26
 
 - **Settings › This node › Home for everyone**: the node's default Home, which Edit Home no longer writes since it saves your own layout (#123 follow-up). It shows how many rows the default has, and "Make my Home the default for everyone" copies your rows and order to the node (`PUT /v1/home/layout`); your own layout stays yours.
 
