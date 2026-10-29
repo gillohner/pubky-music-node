@@ -1442,6 +1442,8 @@
   };
   const renderQPanel = () => {
     const z = currentZone(); if (!z) return; const np = z.now_playing; const cfg = (state.dspCfg || {})[state.zone];
+    // A re-render (the outputs arrived, a switch answered) keeps the keyboard where it was
+    const ae = document.activeElement; const had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
     const svc = np && npSvc(np);
     const row = (id, label, on, disabled, note) => `<label class="qp-row${disabled ? ' off' : ''}"><span class="grow"><span class="name">${label}</span>${note ? `<span class="sub">${esc(note)}</span>` : ''}</span><input type="checkbox" class="switch" data-dsp="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"></label>`;
     let dsp;
@@ -1477,6 +1479,7 @@
     const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
     const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
     const v = $('#qpvol', qPanel); setFill(v);
+    if (had) { const back = $(had, qPanel); if (back) back.focus(); }
     v.oninput = () => setFill(v);
     v.onchange = () => { bar.value = v.value; setFill(bar); if (isBrowser()) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); };
   };
