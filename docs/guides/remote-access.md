@@ -56,8 +56,8 @@ managed by Cloudflare.
    Under the tunnel's public hostnames, add two:
    - one for the music, for example `music.example.com`, to `http://localhost:7788`;
    - one for the homeserver, for example `pubky.example.com`, to `http://localhost:6286`.
-2. In the node: **Settings › Domain and tunnel** (under **This homeserver · admin**; called
-   **Remote access** in version 0.1.0), paste the token and the two hostnames, and save.
+2. In the node: **Settings › Domain and tunnel** (under **This homeserver · admin**), paste the
+   token and the two hostnames, and save.
 3. Restart once, as Settings tells you: on Umbrel, right-click the app and choose **Restart**.
    With the bundle, run these in the `deploy/bundle` folder:
 
