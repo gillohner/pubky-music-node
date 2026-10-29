@@ -75,7 +75,7 @@ elif mode == "snap":
     print(json.dumps(s))
 elif mode == "compare":
     before = json.loads(Path(sys.argv[3]).read_text())
-    after = snap()
+    after = json.loads(json.dumps(snap()))  # as the saved one reads back (tuples become lists)
     # The token from .env still opens the node, and nothing opens it without one
     try:
         api("/v1/info", token=False)
