@@ -535,6 +535,9 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
+      - name: collections with web links and posts show their cards in order (desktop and phone)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788

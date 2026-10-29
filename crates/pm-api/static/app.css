@@ -714,6 +714,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .srcchip.pinned .ic { width: 12px; height: 12px; color: var(--accent-strong); }
 .srcchip.none { color: var(--muted); border-style: dashed; padding-left: 8px; }
 .list-row.unavail .grow, .list-row.unavail .thumb, .list-row.unavail [data-splay] { opacity: 0.45; }
+/* A collection item that doesn't play (a web page, a post): its card in the list (B3) */
+.card-row .card-thumb { display: grid; place-items: center; color: var(--muted); }
+.card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row.filtered { display: none; }
 .plsummary { margin-bottom: 12px; }
 .chip.warnchip { border-color: rgba(232, 178, 74, 0.4); }
