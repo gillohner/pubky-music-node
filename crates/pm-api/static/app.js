@@ -1407,7 +1407,7 @@
     setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
     renderBar();
   };
-  const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); };
+  const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
   const startFail = (msg, quiet) => {
     const s = state.starting; if (!s) return; startDone(true);
     state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now() };
@@ -1415,7 +1415,7 @@
     renderBar(); setTimeout(renderBar, 10500);
   };
   // The browser's own player: it starts (or fails) by itself
-  audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
+  audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
@@ -1424,7 +1424,7 @@
   // Zone and device, the source, the signal path, this zone's DSP with quick switches, volume.
   const qPanel = $('#qpanel');
   let qPanelKey = null;
-  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); if (fromBack !== true) popTransient(); };
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $('#quality').focus(); if (fromBack !== true) popTransient(); };
   const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
@@ -1437,6 +1437,7 @@
     if (what === 'loudness') { if (!on && cfg.loudness && cfg.loudness !== 'off') state.loudnessLast = cfg.loudness; cfg.loudness = on ? (state.loudnessLast || 'album') : 'off'; }
     if (what === 'crossfeed') { if (!on && cfg.crossfeed) state.crossfeedLast = cfg.crossfeed; cfg.crossfeed = on ? { ...(state.crossfeedLast || { level_db: -6, cutoff_hz: 700, delay_us: 300 }), enabled: true } : null; }
     try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
+    qPanelKey = null; // re-render whatever the node says now (a refused change too)
     await loadDsp();
   };
   const renderQPanel = () => {
@@ -1484,6 +1485,7 @@
     closePop(); closeJobPop();
     renderQPanel();
     qPanel.hidden = false; $('#scrim').hidden = false; $('#quality').setAttribute('aria-expanded', 'true'); pushTransient();
+    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
     loadDsp();
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
   };
@@ -2091,7 +2093,7 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); return; }
+    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
@@ -5153,8 +5155,10 @@
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
         if (state.starting && ev.state.id === state.starting.zone) {
           if (ev.state.transport === 'playing' || (state.starting.what === 'move' && ev.state.transport !== 'stopped')) startDone(true);
-          else if (ev.state.transport === 'stopped' && ev.state.error) startFail(ev.state.error);
+          // Only an error that is new fails the start: the engine keeps the last error until a track starts
+          else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
+        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();

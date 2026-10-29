@@ -247,7 +247,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
       check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpvol').count() === 1, 'no signal path claim for the browser; volume is there');
       check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
-      await p.click('#scrim'); check(await gone(p, '#qpanel:not([hidden])'), 'the scrim closes it');
+      check(await p.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement)), 'focus moved into the panel');
+      await p.keyboard.press('Escape'); check(await gone(p, '#qpanel:not([hidden])'), 'Escape closes it');
+      check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'quality'), 'and focus is back on the pill');
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      await p.click('#scrim'); check(await gone(p, '#qpanel:not([hidden])'), 'the scrim closes it too');
       // On a node zone (paused there, moved from the browser): the path in short, the panel in full
       await p.evaluate(() => document.querySelector('audio').pause()); await p.waitForTimeout(300);
       await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-move]');
