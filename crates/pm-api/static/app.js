@@ -281,6 +281,14 @@
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
   const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
   const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm" disabled>Post</button></form>`;
+  // "Post about this" (B2): a public social v1 note with the item as its embed, so any Pubky app
+  // (pubky.app among them) shows it with the item's card.
+  const postAbout = async (uri, title) => {
+    const r = await choiceDialog({ title: 'Post about this', text: `A public post on your homeserver with ${title ? `“${title}”` : 'this'} attached; Pubky apps show it with its card.`, field: { label: 'What you want to say', value: '' }, choices: [{ label: 'Post', value: true, primary: true }] });
+    if (!r || !r.value) return;
+    if (!r.text) { toast('Write something to post', 'error'); return; }
+    try { await api('POST', '/posts', { uri, content: r.text }); toast('Posted'); } catch (e) { toast(e.message, 'error'); }
+  };
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
     const show = async () => {
@@ -310,7 +318,7 @@
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
-        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true }, { label: 'Keep', value: false }] });
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true }] });
         if (!go) return;
         d.disabled = true;
         try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
@@ -2192,7 +2200,7 @@
   }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
-  const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
     if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
@@ -3971,7 +3979,7 @@
           // Corrections live in ⋯: link a source the automatic matching missed, unlink a wrong one
           const manual = pg.also_on.filter((v) => /matched by you/.test(v.label || ''));
           const matchRef = { ...(pg.uri && !String(pg.id || id).startsWith('lib-') ? { uri: pg.uri } : {}), ...(pg.uri && String(pg.id || id).startsWith('lib-') && kind === 'song' ? { uri: pg.uri } : {}), kind, id: pg.id || id };
-          const extra = [{ label: 'Link another source…', icon: 'plus', run: () => linkSourceDialog(pg, kind, id, matchRef) }, ...(manual.length ? [{ label: 'Wrong match…', icon: 'close', run: () => showMenu($('#imore'), [{ title: 'Unlink a source you linked' }, ...manual.map((v) => ({ label: `Unlink ${instName(v)}`, icon: 'close', run: async () => { try { await api('DELETE', '/item/matches', { ...matchRef, url: v.url }); toast(`Unlinked ${instName(v)}`); render(); } catch (er) { toast(er.message, 'error'); } } }))]) }] : [])];
+          const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : []), { label: 'Link another source…', icon: 'plus', run: () => linkSourceDialog(pg, kind, id, matchRef) }, ...(manual.length ? [{ label: 'Wrong match…', icon: 'close', run: () => showMenu($('#imore'), [{ title: 'Unlink a source you linked' }, ...manual.map((v) => ({ label: `Unlink ${instName(v)}`, icon: 'close', run: async () => { try { await api('DELETE', '/item/matches', { ...matchRef, url: v.url }); toast(`Unlinked ${instName(v)}`); render(); } catch (er) { toast(er.message, 'error'); } } }))]) }] : [])];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
