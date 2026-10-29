@@ -1077,6 +1077,7 @@ pub(crate) async fn import_playlist(
     let mut uris = Vec::new();
     let mut sources = Vec::new();
     let mut skipped = 0usize;
+    let mut kept = 0usize;
     for it in &items {
         match canonical_track(&it["track"]) {
             Some(u) => {
@@ -1088,7 +1089,18 @@ pub(crate) async fn import_playlist(
                     }
                 }));
             }
-            None => skipped += 1,
+            // A local file in the playlist (no Spotify id): kept as a search for its words
+            None => match crate::activity::search_link(
+                it["track"]["artists"][0]["name"].as_str(),
+                it["track"]["name"].as_str(),
+            ) {
+                Some(link) => {
+                    uris.push(link);
+                    sources.push(None);
+                    kept += 1;
+                }
+                None => skipped += 1,
+            },
         }
     }
     if uris.is_empty() {
@@ -1097,7 +1109,7 @@ pub(crate) async fn import_playlist(
             "none of the playlist's items could be identified",
         ));
     }
-    let imported = uris.len();
+    let imported = uris.len() - kept;
     let Json(detail) = crate::playlists::create(
         State(s.clone()),
         Json(CreatePlaylist {
@@ -1114,6 +1126,7 @@ pub(crate) async fn import_playlist(
     Ok(Json(ImportReport {
         imported,
         skipped,
+        kept,
         playlist: Some(detail),
     }))
 }

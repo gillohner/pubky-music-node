@@ -177,24 +177,22 @@ fn import_described(
     let parsed = tracks.len();
     let mut items = Vec::new();
     let mut unresolved = Vec::new();
+    let mut kept = 0;
     for d in &tracks {
-        let uri = match resolve_described(&lib, d)? {
-            Some(t) => t.publishable_uri().cloned(),
-            None => d
-                .uri
-                .as_deref()
-                .filter(|u| !u.trim().is_empty())
-                .and_then(|u| MusicUri::parse(u).ok()),
-        };
-        match uri {
-            Some(u) => items.push(PlaylistItem::new(&u)),
-            None => unresolved.push(d.clone()),
+        match bridge(&lib, d)? {
+            Bridged::Identified(u) => items.push(PlaylistItem::of(u)),
+            Bridged::Kept(u) => {
+                items.push(PlaylistItem::of(u));
+                kept += 1;
+                unresolved.push(d.clone());
+            }
+            Bridged::Empty => unresolved.push(d.clone()),
         }
     }
     if items.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "none of the tracks resolved to a canonical identity",
+            "none of the lines names a song",
         ));
     }
     let playlist = Playlist::new(name.clone(), description, None, items);
@@ -212,5 +210,99 @@ fn import_described(
         parsed,
         imported,
         unresolved,
+        kept,
     })
+}
+
+/// What an import line became (TASK-pinakes-social-ux.md B4).
+enum Bridged {
+    /// Its canonical identity: the library song's, a MusicBrainz recording, an ISRC, a service link.
+    Identified(String),
+    /// Unmatched, kept as a link: the web address the line named, else a MusicBrainz search for
+    /// its words, so the line is never lost and can be matched by hand later.
+    Kept(String),
+    /// Nothing to keep (no words, no address).
+    Empty,
+}
+
+/// One import line to a collection item, the same matching for every format (M3U, PLS, CSV, the
+/// Roon export, a service playlist): the library first, then the MusicBrainz id, the ISRC, a
+/// music link, then the line kept as a link.
+fn bridge(lib: &pm_library::Library, d: &DescribedTrack) -> Result<Bridged, ApiError> {
+    // A line's address may sit in `uri` or, in a playlist file, in its path
+    let addresses: Vec<&str> = [d.uri.as_deref(), d.path.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .collect();
+    let music = addresses.iter().find_map(|a| MusicUri::parse(a).ok());
+    let lookup = DescribedTrack {
+        uri: music.as_ref().map(MusicUri::to_url),
+        ..d.clone()
+    };
+    if let Some(u) = resolve_described(lib, &lookup)?.and_then(|t| t.publishable_uri().cloned()) {
+        return Ok(Bridged::Identified(u.to_url()));
+    }
+    let named = d
+        .mbid
+        .as_deref()
+        .and_then(|m| pm_model::ids::Mbid::parse(m.trim()).ok())
+        .map(MusicUri::recording)
+        .or_else(|| {
+            d.isrc
+                .as_deref()
+                .and_then(|i| pm_model::ids::Isrc::parse(i.trim()).ok())
+                .map(|isrc| MusicUri::Isrc { isrc })
+        })
+        .or(music);
+    if let Some(u) = named {
+        return Ok(Bridged::Identified(u.to_url()));
+    }
+    if let Some(link) = addresses.iter().find_map(|a| pm_pubky::schemas::web_link(a)) {
+        return Ok(Bridged::Kept(link));
+    }
+    let stem = d.path.as_deref().map(|p| {
+        let file = p.rsplit(['/', '\\']).next().unwrap_or(p);
+        file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_string()
+    });
+    let title = Some(d.title.trim())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or(stem);
+    Ok(search_link(d.artist.as_deref(), title.as_deref()).map_or(Bridged::Empty, Bridged::Kept))
+}
+
+/// A MusicBrainz recording search for an unmatched song's words, kept as a collection link so
+/// the line isn't lost; `None` without any words.
+pub(crate) fn search_link(artist: Option<&str>, title: Option<&str>) -> Option<String> {
+    let words = [artist.map(str::trim), title.map(str::trim)]
+        .into_iter()
+        .flatten()
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if words.is_empty() {
+        return None;
+    }
+    let query: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
+    Some(format!(
+        "https://musicbrainz.org/search?type=recording&query={query}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_unmatched_song_is_kept_as_a_musicbrainz_search() {
+        assert_eq!(
+            super::search_link(Some(" Nobody "), Some("Mystery & Song")).as_deref(),
+            Some("https://musicbrainz.org/search?type=recording&query=Nobody+Mystery+%26+Song")
+        );
+        assert_eq!(
+            super::search_link(None, Some("Only a title")).as_deref(),
+            Some("https://musicbrainz.org/search?type=recording&query=Only+a+title")
+        );
+        assert_eq!(super::search_link(Some("  "), None), None);
+    }
 }

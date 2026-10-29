@@ -909,6 +909,12 @@ pub struct DescribedTrack {
     /// A file path as another player knew it; matched exactly, then by file name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The song's ISRC, when the other app knows it (a service playlist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    /// The song's MusicBrainz recording id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbid: Option<String>,
 }
 
 impl From<pm_library::ImportedTrack> for DescribedTrack {
@@ -919,6 +925,8 @@ impl From<pm_library::ImportedTrack> for DescribedTrack {
             album: t.album,
             uri: None,
             path: t.path,
+            isrc: None,
+            mbid: None,
         }
     }
 }
@@ -1128,7 +1136,12 @@ pub struct ImportedPlaylist {
     /// Entries found in the file (or sent).
     pub parsed: usize,
     pub imported: usize,
+    /// The lines no song, ISRC, MusicBrainz id or service link was found for.
     pub unresolved: Vec<DescribedTrack>,
+    /// How many of those are in the collection anyway, as links: the web address the line named,
+    /// else a MusicBrainz search for its words.
+    #[serde(default)]
+    pub kept: usize,
 }
 
 // ---- private files on the homeserver ----
