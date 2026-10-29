@@ -21,6 +21,8 @@
 //     (and a link to all of it) and volume;
 //   * pressing play answers at once: the pressed button spins and the bar says "Starting on
 //     <device>…" until it plays, or shows the zone's error; Move to says "Moving to …" too.
+//   * search: results grouped (songs, albums, playlists, people, posts…), facet chips that narrow
+//     them, `tag:` like `#`, and the keyboard: ↑/↓ walk the results, Enter opens.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -303,6 +305,60 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
+    // ---- Search: groups, facets, tag:, keyboard ----
+    // A mocked /v1/search stream (the real sources are pm-api's tests): the page groups, narrows
+    // by facets, sends tag: as the node expects, and walks the results from the keyboard.
+    c = await ctx(); p = await c.newPage();
+    const KEY = 'k'.repeat(52);
+    const ndjson = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+    const seen = [];
+    await p.route(/\/v1\/search\?/, (r) => {
+      const u = new URL(r.request().url()); seen.push(u.searchParams.get('q'));
+      const body = ndjson([
+        { source: 'library', status: 'ok', ms: 3, hits: [
+          { kind: 'song', title: 'Old Song', subtitle: 'Band', id: 'lib-5', track_id: 5, year: 1999, format: 'FLAC 16/44.1', quality: 'lossless', keys: [] },
+          { kind: 'song', title: 'New Song', subtitle: 'Band', id: 'lib-6', track_id: 6, year: 2015, format: 'MP3', quality: 'lossy', keys: [] },
+          { kind: 'album', title: 'Old Album', subtitle: 'Band', id: 'lib-1', year: 1999, keys: [] },
+          { kind: 'playlist', title: 'Saturday chill', subtitle: '3 songs · your playlist', id: 'pl1', keys: [] }] },
+        { source: 'pubky', status: 'ok', ms: 40, hits: [{ kind: 'song', title: 'Shared Song', subtitle: 'Someone', id: 'tidal-9', uri: 'tidal:track:9', page: 'https://tidal.com/track/9', site: 'tidal.com', year: 2015, keys: [] }] },
+        { source: 'people', status: 'ok', ms: 50, hits: [{ kind: 'person', title: 'Sat', subtitle: 'plays bass', id: KEY, page: `https://pubky.app/profile/${KEY}`, keys: [] }] },
+        { source: 'posts', status: 'ok', ms: 60, hits: [{ kind: 'post', title: 'Great music tonight', subtitle: 'Author One', id: 'post-a:1', page: 'https://pubky.app/post/a/1', keys: [] }] },
+      ]);
+      return r.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson', 'x-pm-sources': 'library,pubky,people,posts' }, body });
+    });
+    await p.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [], others: [] } }));
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'sat'); await p.press('#search', 'Enter');
+    await p.waitForSelector('#sresults [data-skind="post"]');
+    const heads = await p.$$eval('#sresults .section h3', (els) => els.map((e) => e.textContent.trim()));
+    check(['Albums', 'Songs', 'Playlists', 'People', 'Posts'].every((h) => heads.includes(h)), `results come grouped (${heads.join(', ')})`);
+    check((await p.locator('#sresults [data-skind="person"] .list-row').count()) === 1 && (await p.locator('#sresults [data-skind="playlist"] .list-row').count()) === 1, 'a person and your playlist are rows of their own');
+    const facetText = await p.textContent('#sresults .facets');
+    check(/Quality/.test(facetText) && /Lossless/.test(facetText) && /Years/.test(facetText) && /1990s/.test(facetText) && /2010s/.test(facetText), `facets are counted from the results (${facetText.replace(/\s+/g, ' ').trim().slice(0, 120)})`);
+    check((await p.locator('#sresults .facets [data-facet^="service:pubky"]').count()) === 1 && (await p.locator('#sresults .facets [data-facet="service:people"], #sresults .facets [data-facet="service:posts"]').count()) === 0, 'people and posts count as Pubky: one Source chip for the three');
+    await p.click('#sresults [data-facet="decade:2010s"]'); await p.waitForTimeout(200);
+    const songsNow = await p.$$eval('#sresults [data-skind="song"] .srow .name', (els) => els.map((e) => e.textContent.trim()));
+    check(songsNow.includes('New Song') && songsNow.includes('Shared Song') && !songsNow.includes('Old Song') && (await p.locator('#sresults [data-skind="album"]').count()) === 0, `a facet narrows every group (${songsNow.join(', ')})`);
+    await p.click('#sresults [data-facet=""]'); await p.waitForTimeout(200);
+    check((await p.$$eval('#sresults [data-skind="song"] .srow', (els) => els.length)) === 3, 'Clear brings them all back');
+    // the keyboard: ↓ ↓ walk the results, the box says where it is, Enter opens the person's page
+    await p.focus('#search');
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
+    const k = await p.evaluate(() => { const el = document.querySelector('#sresults .kfocus'); return { has: !!el, id: el && el.id, active: document.querySelector('#search').getAttribute('aria-activedescendant'), focusStays: document.activeElement && document.activeElement.id === 'search' }; });
+    check(k.has && k.id && k.active === k.id && k.focusStays, `↓ walks the results while the box keeps focus (${k.id})`);
+    const n = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => e.classList.contains('kfocus')));
+    const total = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.length);
+    const personAt = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => (e.dataset.sother || '').startsWith('person:')));
+    for (let i = n; i < personAt; i++) await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('Enter');
+    const path = await (async () => { const end = Date.now() + 5000; for (;;) { const v = await p.evaluate(() => location.pathname); if (v.startsWith('/person/')) return v; if (Date.now() > end) return v; await p.waitForTimeout(100); } })();
+    check(path === `/person/${KEY}`, `Enter opens the row in focus (${path}; ${total} results)`);
+    // tag: goes to the node as it is (the node reads it like #)
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'tag:chill'); await p.press('#search', 'Enter'); await p.waitForSelector('#sresults [data-skind="song"]');
+    check(seen.includes('tag:chill'), `tag:chill is sent as typed (${seen.join(' | ')})`);
+    await p.unroute(/\/v1\/search\?/); await p.unroute(/\/v1\/search\/tags\?/);
+    await c.close();
 
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();

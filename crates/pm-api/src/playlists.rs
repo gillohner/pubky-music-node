@@ -266,16 +266,21 @@ fn save_edit(
 
 pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<PlaylistSummary>> {
     let lib = s.library.lock().expect("library poisoned");
+    Ok(Json(summaries(&lib)?))
+}
+
+/// Every playlist of the node's, as the list shows them (search lists them too).
+pub(crate) fn summaries(lib: &Library) -> Result<Vec<PlaylistSummary>, ApiError> {
     let mut out = Vec::new();
     for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
-        if let Ok((row, p)) = load(&lib, &row.id) {
+        if let Ok((row, p)) = load(lib, &row.id) {
             let mut sm = summary(&row, &p);
-            sm.items += local_ids(&lib, &row.id).len();
-            sm.covers = covers(&lib, &row.id, &p);
+            sm.items += local_ids(lib, &row.id).len();
+            sm.covers = covers(lib, &row.id, &p);
             out.push(sm);
         }
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 pub(crate) async fn create(

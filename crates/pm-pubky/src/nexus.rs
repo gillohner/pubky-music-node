@@ -140,6 +140,24 @@ pub struct Relationship {
     pub followed_by: bool,
 }
 
+/// A post as Nexus lists it; only what search shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostView {
+    pub details: PostDetails,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostDetails {
+    pub id: String,
+    pub author: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub uri: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct UserView {
     pub details: UserDetails,
@@ -261,6 +279,67 @@ impl NexusClient {
             .http
             .post(self.url("/stream/users/by_ids"))
             .json(&body)
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
+    /// People whose name starts with `username` (`GET /v0/stream/users/username`), as profiles.
+    pub async fn users_by_name(&self, username: &str, limit: u32) -> Result<Vec<UserView>, NexusError> {
+        let resp = self
+            .http
+            .get(self.url("/stream/users/username"))
+            .query(&[("username", username), ("limit", &limit.to_string())])
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
+    /// Posts whose text matches `q` (`GET /v0/search/posts/by_content`): their keys, best first.
+    pub async fn posts_by_content(&self, q: &str, limit: u32) -> Result<Vec<String>, NexusError> {
+        #[derive(Deserialize)]
+        struct Hit {
+            post_key: String,
+        }
+        let resp = self
+            .http
+            .get(self.url("/search/posts/by_content"))
+            .query(&[("q", q), ("limit", &limit.to_string())])
+            .send()
+            .await?;
+        let hits: Vec<Hit> = Self::json(resp).await?;
+        Ok(hits.into_iter().map(|h| h.post_key).collect())
+    }
+
+    /// Posts carrying a tag (`GET /v0/search/posts/by_tag/{label}`): their keys. Nexus answers
+    /// either keys or `{post_key, …}` objects, depending on its version.
+    pub async fn posts_by_tag(&self, label: &str, limit: u32) -> Result<Vec<String>, NexusError> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/search/posts/by_tag/{label}")))
+            .query(&[("limit", &limit.to_string())])
+            .send()
+            .await?;
+        let raw: Vec<Value> = Self::json(resp).await?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s),
+                Value::Object(o) => o.get("post_key").and_then(|k| k.as_str()).map(str::to_string),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Posts by key (`author:id`), in one call (`POST /v0/stream/posts/by_ids`).
+    pub async fn posts_by_ids(&self, keys: &[String]) -> Result<Vec<PostView>, NexusError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .http
+            .post(self.url("/stream/posts/by_ids"))
+            .json(&serde_json::json!({ "post_ids": keys }))
             .send()
             .await?;
         Self::json(resp).await

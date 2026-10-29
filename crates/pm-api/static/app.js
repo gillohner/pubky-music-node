@@ -2044,7 +2044,7 @@
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
     searchRuns.set(key, run);
     // Tag labels as you type (yours first), beside the results: STEWARD-FIX-search-tags.md
-    const word = (/#(\S+)$/.exec(q.trim()) || [])[1] || (q.includes('#') ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
+    const word = (/(?:#|\btag:)(\S+)$/.exec(q.trim()) || [])[1] || (/#|\btag:/.test(q) ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
     if (word && word.length <= 20) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
     (async () => {
       try {
@@ -2077,6 +2077,32 @@
     if (prog) { prog.hidden = !run.pending; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
     if (state.view === 'search' && state.viewArg && state.viewArg.q === run.q && (state.viewArg.in || 'everywhere') === run.scope) renderSearchBody(run);
   };
+  // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
+  // groups, Enter opens the one in focus, Shift+Enter plays it; the box keeps the focus and says
+  // which row is active (aria-activedescendant).
+  const searchKeys = {
+    at: -1,
+    items: () => $$('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow'),
+    reset() { this.at = -1; search.removeAttribute('aria-activedescendant'); },
+    move(d) {
+      const items = this.items(); if (!items.length) return;
+      items.forEach((el) => el.classList.remove('kfocus'));
+      this.at = Math.max(0, Math.min(items.length - 1, this.at + d));
+      const el = items[this.at]; el.classList.add('kfocus'); if (!el.id) el.id = `sres-${this.at}`; search.setAttribute('aria-activedescendant', el.id);
+      el.scrollIntoView({ block: 'nearest' });
+    },
+    act(play) {
+      const el = this.items()[this.at]; if (!el) return false;
+      const target = play ? $('[data-splay], [data-tileplay], [data-splaytop]', el) : ($('.name .lnk, [data-sopen]', el) || el);
+      if (target) target.click(); else if (play) return false;
+      return true;
+    },
+  };
+  search.addEventListener('keydown', (e) => {
+    if (state.view !== 'search') return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); searchKeys.move(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter' && searchKeys.at >= 0) { if (searchKeys.act(e.shiftKey)) { e.preventDefault(); e.stopImmediatePropagation(); } }
+  }, true);
   const isLink = (q) => /^https?:\/\/\S+$/i.test(q);
   const linkKind = (u) => (/\/(artist|artists)\//.test(u) ? 'artist' : /\/(album|albums|release|release-group)\//.test(u) ? 'album' : 'song');
   const runSearch = async (how) => {
@@ -2769,7 +2795,16 @@
 
   const SOURCE_RANK = ['library', 'tidal', 'deezer', 'spotify', 'archive', 'audius', 'pubky'];
   // Groups in the order people scan them: who, then what (UX review #4)
-  const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
+  const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['person', 'People'], ['post', 'Posts'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
+  // Facets (TASK-pinakes-social-ux A2): chips under the scope chips, counted from the merged
+  // results in hand; each facet keeps at most one value on, and the rows and tiles filter by them.
+  const SEARCH_FACETS = [['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
+  const QUALITY_WORDS = { hi_res: 'Hi-res', lossless: 'Lossless', lossy: 'Lossy' };
+  // People and posts are Pubky's too: one Source chip for the three
+  const facetValues = (h) => ({ service: [...new Set((h.sources || []).map((x) => (x === 'people' || x === 'posts' ? 'pubky' : x)))], quality: h.quality ? [h.quality] : [], decade: h.year ? [`${Math.floor(h.year / 10) * 10}s`] : [], site: h.site ? [h.site] : [] });
+  const facetWord = (facet, v) => (facet === 'service' ? (v === 'library' ? 'Your library' : v === 'pubky' ? 'Pubky' : srcName(v)) : facet === 'quality' ? QUALITY_WORDS[v] || v : v);
+  const facetsOf = (byKind) => { const counts = Object.fromEntries(SEARCH_FACETS.map(([f]) => [f, new Map()])); for (const list of Object.values(byKind)) for (const h of list) { const fv = facetValues(h); for (const [f] of SEARCH_FACETS) for (const v of fv[f]) counts[f].set(v, (counts[f].get(v) || 0) + 1); } return counts; };
+  const passesFacets = (h, on) => SEARCH_FACETS.every(([f]) => !on[f] || facetValues(h)[f].includes(on[f]));
   // A hit "matches" when every word of the query is in its title or subtitle
   const searchWords = (x) => String(x || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const closeMatch = (h, q) => { const want = searchWords(q); const have = new Set(searchWords(`${h.title} ${h.subtitle || ''}`)); return want.length > 0 && want.every((w) => have.has(w) || [...have].some((x) => x.startsWith(w))); };
@@ -2844,7 +2879,12 @@
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
     $$('[data-scope-in]', chips).forEach((b) => b.onclick = () => { state.searchScope = b.dataset.scopeIn; startSearch(run.q, b.dataset.scopeIn); setView('search', { q: run.q, in: b.dataset.scopeIn }, 'replace'); });
-    const byKind = mergeSearch(run);
+    const allKinds = mergeSearch(run);
+    run.facets = run.facets || {};
+    const facetCounts = facetsOf(allKinds);
+    const byKind = Object.fromEntries(Object.entries(allKinds).map(([k, list]) => [k, list.filter((h) => passesFacets(h, run.facets))]));
+    const facetChips = SEARCH_FACETS.map(([f, label]) => { const vals = [...facetCounts[f].entries()].sort((a, b) => b[1] - a[1]); if (vals.length < 2 && !run.facets[f]) return ''; return `<span class="facet" data-facet-group="${f}"><span class="muted small">${label}</span>${vals.slice(0, 6).map(([v, n]) => `<button class="chip sm ${run.facets[f] === v ? 'on' : ''}" data-facet="${f}:${esc(v)}" aria-pressed="${run.facets[f] === v}">${esc(facetWord(f, v))} <span class="muted">${n}</span></button>`).join('')}</span>`; }).filter(Boolean).join('');
+    const facetBar = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${Object.values(run.facets).some(Boolean) ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
     const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.answers[src] && run.slow.has(src)));
     const pendingAny = run.pending && run.sources.some((src) => !run.answers[src]);
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
@@ -2865,7 +2905,8 @@
       if (!items.length) body = skel(kind === 'song' ? 4 : 1, kind === 'album' || kind === 'artist');
       else if (kind === 'song') body = songRows(items.slice(0, songCap).map((h) => ({ ...h, artist: h.subtitle, id: h.id })), { showAlbum: true, numbers: 'index', extra: (t) => `${t.tagged ? `<span class="muted small tagged-by">tagged ${esc(t.tagged)}</span>` : ''}<span class="src-badges">${t.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span>` });
       else if (kind === 'album' || kind === 'artist') body = itemTileGrid(items.slice(0, 12).map((h) => ({ ...h, year: h.year || h.subtitle })), kind);
-      else body = `<div class="list">${items.slice(0, 10).map((h, k) => `<div class="list-row clickable" data-sother="${kind}:${k}">${svcBadge(h.sources[0])}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${icon('external')}</div>`).join('')}</div>`;
+      // People open their page; your playlists open here; posts and the rest open on their site
+      else body = `<div class="list">${items.slice(0, 10).map((h, k) => { const own = kind === 'playlist' && h.sources.includes('library'); const lead = kind === 'person' ? (h.image ? `<img class="thumb round" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : `<div class="avatar">${esc(initials(h.title || 'P'))}</div>`) : own ? icon('playlist') : svcBadge(h.sources[0]); return `<div class="list-row clickable" data-sother="${kind}:${k}">${lead}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${kind === 'person' || own ? icon('chevron', 'ic right') : icon('external')}</div>`; }).join('')}</div>`;
       const more = kind === 'song' && items.length > songCap ? `<button class="btn ghost sm" data-sallsongs>See all ${items.length} songs</button>` : '';
       sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}${more}</section>`);
     }
@@ -2873,14 +2914,16 @@
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error, src))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
-    box.innerHTML = notes + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    box.innerHTML = notes + facetBar + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    $$('[data-facet]', box).forEach((b) => b.onclick = () => { const [f, ...rest] = b.dataset.facet.split(':'); const v = rest.join(':'); if (!f) run.facets = {}; else run.facets[f] = run.facets[f] === v ? null : v; renderSearchBody(run); });
+    searchKeys.reset();
     $$('[data-stag]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.stag }));
     const sa = $('[data-sallsongs]', box); if (sa) sa.onclick = () => { run.allSongs = true; renderSearchBody(run); };
     // Bind: rows and tiles use the shared components.
     const songsSec = $('[data-skind="song"]', box);
     if (songsSec && byKind.song.length) { const ss = byKind.song.slice(0, run.allSongs ? 50 : 6).map((h) => ({ ...h, artist: h.subtitle })); bindSongRows(songsSec, ss, {}); enableSelect(songsSec, ss); }
     for (const kind of ['album', 'artist']) { const sec = $(`[data-skind="${kind}"]`, box); if (sec && byKind[kind].length) bindItemTiles(sec, byKind[kind].slice(0, 12), kind); }
-    $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (h.page) openWeb(h.page); });
+    $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (k === 'person') setView('person', h.id); else if (k === 'playlist' && h.sources.includes('library')) setView('playlist', h.id); else if (h.page) openWeb(h.page); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); });
