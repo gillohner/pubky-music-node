@@ -11,6 +11,9 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     /// Contact address for outbound User-Agent strings (MusicBrainz requires one).
     pub contact: String,
+    /// A MusicBrainz mirror to ask instead of musicbrainz.org (`https://mb.example.org`, with or
+    /// without `/ws/2`); `PM_MUSICBRAINZ_URL` overrides. Empty = musicbrainz.org.
+    pub musicbrainz_base_url: String,
     pub library: LibraryConfig,
     /// Pinakes, Nexus and network settings (see `pm_pubky::PmPubkyConfig`).
     pub pubky: PmPubkyConfig,
@@ -314,11 +317,31 @@ pub struct ApiConfig {
     pub announce: bool,
 }
 
+impl NodeConfig {
+    /// The MusicBrainz server's root (no `/ws/2`): `PM_MUSICBRAINZ_URL`, else the config's
+    /// `musicbrainz_base_url`, else `None` (musicbrainz.org).
+    pub fn musicbrainz_root(&self) -> Option<String> {
+        let v = std::env::var("PM_MUSICBRAINZ_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| self.musicbrainz_base_url.clone());
+        musicbrainz_root(&v)
+    }
+}
+
+/// `https://mb.example.org/ws/2/` → `https://mb.example.org`; blank → `None`.
+pub fn musicbrainz_root(v: &str) -> Option<String> {
+    let v = v.trim().trim_end_matches('/');
+    let v = v.strip_suffix("/ws/2").unwrap_or(v).trim_end_matches('/');
+    (!v.is_empty()).then(|| v.to_string())
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
             contact: String::new(),
+            musicbrainz_base_url: String::new(),
             library: LibraryConfig::default(),
             pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
@@ -513,6 +536,19 @@ pub fn route_address() -> Option<std::net::IpAddr> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_musicbrainz_mirror_with_or_without_ws2() {
+        assert_eq!(super::musicbrainz_root(""), None);
+        assert_eq!(
+            super::musicbrainz_root(" https://mb.lan/ws/2/ ").as_deref(),
+            Some("https://mb.lan")
+        );
+        assert_eq!(
+            super::musicbrainz_root("http://10.0.0.5:5000/").as_deref(),
+            Some("http://10.0.0.5:5000")
+        );
+    }
+
     use super::*;
 
     #[test]

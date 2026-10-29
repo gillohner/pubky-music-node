@@ -267,6 +267,11 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         lib,
         registry,
     );
+    if let Some(root) = cfg.musicbrainz_root() {
+        tracing::info!(%root, "MusicBrainz: asking this server instead of musicbrainz.org");
+        *state.mb_base.write().expect("mb lock") = format!("{root}/ws/2");
+        state.info_bases.write().expect("info bases").musicbrainz = root;
+    }
     state.set_public_url_guessed(public_url_guessed);
     // A token the node made itself may be replaced from Settings; one from the config may not
     if let api_token::Source::File(path) | api_token::Source::ReplacedPlaceholder(path) = &source {

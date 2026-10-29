@@ -188,9 +188,11 @@ pub async fn resolve(cfg: &NodeConfig, input: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let contact = cfg.pubky_config()?.user_agent_contact;
-    let mb = pm_library::musicbrainz::MusicBrainzClient::new(
-        pm_library::musicbrainz::MusicBrainzConfig::new(contact),
-    )?;
+    let mut mb_cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
+    if let Some(root) = cfg.musicbrainz_root() {
+        mb_cfg.base_url = format!("{root}/ws/2");
+    }
+    let mb = pm_library::musicbrainz::MusicBrainzClient::new(mb_cfg)?;
     match mb.canonicalize(&uri).await? {
         Some(c) => println!("{} -> {}", uri.to_url(), c.to_url()),
         None => println!("{}: MusicBrainz has no link for this URL yet", uri.to_url()),

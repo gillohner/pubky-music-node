@@ -5651,7 +5651,7 @@ mod tests {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hits2 = hits.clone();
         let mock = Router::new().route(
-            "/release-group",
+            "/ws/2/release-group",
             get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
                 let hits = hits2.clone();
                 let recent = recent.clone();

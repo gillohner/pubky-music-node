@@ -8,9 +8,87 @@
 use crate::error::{LibraryError, Result};
 use pm_model::{Isrc, Mbid, MusicEntity, MusicUri};
 use serde_json::Value;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// The longest a 503's Retry-After holds every caller back.
+const MAX_BACK_OFF: Duration = Duration::from_secs(60);
+
+/// When the next request to a MusicBrainz host may go out.
+struct Gate {
+    next: Option<Instant>,
+}
+
+/// One gate per host (and port) for the whole process: MusicBrainz counts requests per IP, and
+/// the node asks it from many places (identify, discovery, artist pages, new releases, the
+/// proxy), each with its own client.
+static GATES: LazyLock<std::sync::Mutex<HashMap<String, Arc<Mutex<Gate>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The right to send one request to a MusicBrainz host. Nobody else asks that host while it is
+/// held, and the next turn starts `min_interval` after it ends (later after [`Turn::back_off`]).
+pub struct Turn {
+    gate: tokio::sync::OwnedMutexGuard<Gate>,
+    min_interval: Duration,
+}
+
+impl Turn {
+    /// MusicBrainz asked to slow down (503/429): nobody asks this host again before `wait`.
+    pub fn back_off(&mut self, wait: Duration) {
+        self.gate.next = Some(Instant::now() + wait.clamp(self.min_interval, MAX_BACK_OFF));
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let after = Instant::now() + self.min_interval;
+        if self.gate.next.is_none_or(|n| n < after) {
+            self.gate.next = Some(after);
+        }
+    }
+}
+
+/// Wait for the turn to ask `url`'s host: one request at a time, `min_interval` apart, for
+/// every caller in the process. Hold the turn until the answer is in.
+pub async fn take_turn(url: &str, min_interval: Duration) -> Turn {
+    let host = url::Url::parse(url)
+        .ok()
+        .map(|u| {
+            format!(
+                "{}:{}",
+                u.host_str().unwrap_or_default(),
+                u.port_or_known_default().unwrap_or(0)
+            )
+        })
+        .unwrap_or_default();
+    let gate = GATES
+        .lock()
+        .expect("musicbrainz gates")
+        .entry(host)
+        .or_insert_with(|| Arc::new(Mutex::new(Gate { next: None })))
+        .clone();
+    let gate = gate.lock_owned().await;
+    if let Some(next) = gate.next {
+        let now = Instant::now();
+        if next > now {
+            tokio::time::sleep(next - now).await;
+        }
+    }
+    Turn { gate, min_interval }
+}
+
+/// How long a 503/429 asks to wait: its Retry-After (seconds), else `fallback`.
+pub fn retry_after(headers: &reqwest::header::HeaderMap, fallback: Duration) -> Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(fallback)
+        .min(MAX_BACK_OFF)
+}
 
 pub const DEFAULT_BASE: &str = "https://musicbrainz.org/ws/2";
 
@@ -46,7 +124,6 @@ impl MusicBrainzConfig {
 pub struct MusicBrainzClient {
     http: reqwest::Client,
     config: MusicBrainzConfig,
-    last_request: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,22 +156,7 @@ impl MusicBrainzClient {
             .timeout(config.timeout)
             .build()
             .map_err(|e| LibraryError::MusicBrainz(e.to_string()))?;
-        Ok(Self {
-            http,
-            config,
-            last_request: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    async fn throttle(&self) {
-        let mut last = self.last_request.lock().await;
-        if let Some(t) = *last {
-            let elapsed = t.elapsed();
-            if elapsed < self.config.min_interval {
-                tokio::time::sleep(self.config.min_interval - elapsed).await;
-            }
-        }
-        *last = Some(Instant::now());
+        Ok(Self { http, config })
     }
 
     /// GET a ws/2 path with query pairs. `Ok(None)` on 404.
@@ -115,7 +177,7 @@ impl MusicBrainzClient {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            self.throttle().await;
+            let mut turn = take_turn(url.as_str(), self.config.min_interval).await;
             let resp = self
                 .http
                 .get(url.clone())
@@ -129,20 +191,16 @@ impl MusicBrainzClient {
             if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS
             {
+                // Everyone in the process waits, not only this caller
+                let wait = retry_after(resp.headers(), Duration::from_secs(2 * attempt as u64));
+                turn.back_off(wait);
                 if attempt >= 3 {
                     return Err(LibraryError::MusicBrainz(format!(
                         "{url}: {status} after {attempt} attempts"
                     )));
                 }
-                let wait = resp
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or(Duration::from_secs(2 * attempt as u64));
                 tracing::warn!(%url, %status, ?wait, "musicbrainz asked us to back off");
-                tokio::time::sleep(wait).await;
+                drop(turn);
                 continue;
             }
             if !status.is_success() {
@@ -573,6 +631,75 @@ mod tests {
             parse_search(&v),
             vec![(Mbid::parse(MB).unwrap(), 100), (Mbid::parse(MB2).unwrap(), 87)]
         );
+    }
+
+    /// Two clients (as the node's call sites are) still ask one at a time, a second apart, and a
+    /// 503 holds back both.
+    #[tokio::test]
+    async fn every_client_shares_one_gate_per_host_and_a_503_holds_back_all() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log: Arc<std::sync::Mutex<Vec<Instant>>> = Arc::default();
+        let busy = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicUsize::new(0));
+        let served = Arc::new(AtomicUsize::new(0));
+        {
+            let (log, busy, overlapped, served) =
+                (log.clone(), busy.clone(), overlapped.clone(), served.clone());
+            tokio::spawn(async move {
+                loop {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let (log, busy, overlapped, served) =
+                        (log.clone(), busy.clone(), overlapped.clone(), served.clone());
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = [0u8; 2048];
+                        let _ = sock.read(&mut buf).await;
+                        if busy.fetch_add(1, Ordering::SeqCst) > 0 {
+                            overlapped.fetch_add(1, Ordering::SeqCst);
+                        }
+                        log.lock().unwrap().push(Instant::now());
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let n = served.fetch_add(1, Ordering::SeqCst);
+                        let reply = if n == 0 {
+                            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                        } else {
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
+                        };
+                        busy.fetch_sub(1, Ordering::SeqCst);
+                        let _ = sock.write_all(reply.as_bytes()).await;
+                    });
+                }
+            });
+        }
+        let client = || {
+            let mut c = MusicBrainzConfig::new("tests@example.org");
+            c.base_url = format!("http://{addr}/ws/2");
+            c.min_interval = Duration::from_millis(300);
+            MusicBrainzClient::new(c).unwrap()
+        };
+        let (a, b) = (client(), client());
+        let started = Instant::now();
+        let (x, y, z) = tokio::join!(
+            a.get_json("recording/x", &[]),
+            b.get_json("recording/y", &[]),
+            b.get_json("recording/z", &[])
+        );
+        assert!(x.is_ok() && y.is_ok() && z.is_ok(), "{x:?} {y:?} {z:?}");
+        assert_eq!(overlapped.load(Ordering::SeqCst), 0, "requests ran in parallel");
+        let at = log.lock().unwrap().clone();
+        assert_eq!(at.len(), 4, "one 503, then three answers");
+        // The first answer was a 503 asking for 2 s: nobody asked before it was over
+        assert!(
+            at[1] - at[0] >= Duration::from_millis(1_950),
+            "{:?}",
+            at[1] - at[0]
+        );
+        for w in at[1..].windows(2) {
+            assert!(w[1] - w[0] >= Duration::from_millis(300), "{:?}", w[1] - w[0]);
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
