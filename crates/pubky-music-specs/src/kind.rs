@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::content;
 
-/// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`, `"listening"`,
-/// `"session"`); a spelling this version does not know reads as [`MusicPostKind::Unknown`] and
-/// fails validation.
+/// What a music post is. The wire spelling is lowercase (`"review"`, `"listen"`, `"listening"`); a
+/// spelling this version does not know reads as [`MusicPostKind::Unknown`] and fails validation.
+/// `"session"` of the earlier drafts is retired (listening together, 2026-10-29: a `listening`
+/// covers now playing, listening along and parties) and reads as unknown.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(from = "String", into = "String")]
 #[non_exhaustive]
@@ -22,10 +23,9 @@ pub enum MusicPostKind {
     /// One play of the music at `embed`. The path decides who sees it: `/priv/` for a private
     /// history, `/pub/` for a public one.
     Listen,
-    /// Now playing the music at `embed`, until `expires_at`.
+    /// Someone listening now: the song at `embed`, one post per session with a version per song;
+    /// others listen along from their own source.
     Listening,
-    /// A listening session others can join, hosted by `host`, playing the music at `embed` now.
-    Session,
     /// A kind a newer writer used, kept with its spelling.
     Unknown(String),
 }
@@ -37,7 +37,6 @@ impl MusicPostKind {
             MusicPostKind::Review => "review",
             MusicPostKind::Listen => "listen",
             MusicPostKind::Listening => "listening",
-            MusicPostKind::Session => "session",
             MusicPostKind::Unknown(name) => name,
         }
     }
@@ -49,7 +48,6 @@ impl From<String> for MusicPostKind {
             "review" => MusicPostKind::Review,
             "listen" => MusicPostKind::Listen,
             "listening" => MusicPostKind::Listening,
-            "session" => MusicPostKind::Session,
             _ => MusicPostKind::Unknown(s),
         }
     }
@@ -73,8 +71,8 @@ impl PostKind for MusicPostKind {
     }
 
     fn validate_content(&self, post: &PostEnvelope<Self>, _ctx: &ValidationCtx) -> Result<(), String> {
-        // Every kind is about one piece of music, named by `embed` (for `listening` and `session`
-        // the music playing now; never a URI inside the content). A reply to a review is a social
+        // Every kind is about one piece of music, named by `embed` (for `listening` the song
+        // playing now; never a URI inside the content). A reply to a review is a social
         // post with `parent` set to the review, not another review.
         if post.embed.is_none() {
             return Err(format!(
@@ -88,7 +86,7 @@ impl PostKind for MusicPostKind {
             MusicPostKind::Review => content::parse_review(&post.content).map(|_| ()),
             // Either root: the path decides who sees it. A public post's references pass the gate
             // under the public root, so they never point at a private object.
-            MusicPostKind::Listen | MusicPostKind::Listening | MusicPostKind::Session => {
+            MusicPostKind::Listen | MusicPostKind::Listening => {
                 if !post.attachments.is_empty() || post.lock.is_some() {
                     return Err(format!(
                         "Validation Error: a {self} has no attachments and no lock"
@@ -96,8 +94,7 @@ impl PostKind for MusicPostKind {
                 }
                 match self {
                     MusicPostKind::Listen => content::parse_listen(&post.content).map(|_| ()),
-                    MusicPostKind::Listening => content::parse_listening(&post.content).map(|_| ()),
-                    _ => content::parse_session(&post.content).map(|_| ()),
+                    _ => content::parse_listening(&post.content).map(|_| ()),
                 }
             }
             // The envelope refuses Unknown before it asks the kind
@@ -105,14 +102,11 @@ impl PostKind for MusicPostKind {
         }
     }
 
-    /// A `source.uri` (listen, listening, session): http(s) or pubky only; a session's `host`:
-    /// pubky only. Checked by the envelope's gate with the author in scope.
+    /// A `source.uri` (listen, listening): http(s) or pubky only. Checked by the envelope's gate
+    /// with the author in scope.
     fn content_references(&self, post: &PostEnvelope<Self>) -> Vec<ContentReference> {
         let mut out = Vec::new();
-        if matches!(
-            self,
-            MusicPostKind::Listen | MusicPostKind::Listening | MusicPostKind::Session
-        ) {
+        if matches!(self, MusicPostKind::Listen | MusicPostKind::Listening) {
             out.extend(
                 content::listen_source_uri(&post.content).map(|uri| ContentReference {
                     field: "content.source.uri".into(),
@@ -121,14 +115,6 @@ impl PostKind for MusicPostKind {
                     max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
                 }),
             );
-        }
-        if *self == MusicPostKind::Session {
-            out.extend(content::session_host(&post.content).map(|uri| ContentReference {
-                field: "content.host".into(),
-                uri,
-                schemes: AllowedSchemes::PubkyOnly,
-                max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
-            }));
         }
         out
     }
