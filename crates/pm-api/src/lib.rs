@@ -12041,6 +12041,12 @@ exec sleep 300
             homeserver.clone(),
             session,
         ))));
+        // The tunnel is what reaches a party from the internet (with an API token, below)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("tunnel.music_hostname", "music.example.org")
+            .unwrap();
         let app = router(s.clone());
         let (st, p) = call(
             &app,
@@ -12097,8 +12103,16 @@ exec sleep 300
         let content: serde_json::Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["host"], format!("pubky://{key}"));
         assert_eq!(content["name"], "Friday night");
-        assert!(content["join"].as_str().unwrap().contains("/party/"), "{content}");
-        assert!(content["expires_at"].as_i64().unwrap() > content["started_at"].as_i64().unwrap());
+        // `state()` has no API token, so the node answers only directly: no join link in public
+        assert!(content.get("join").is_none(), "{content}");
+        let (started, expires) = (
+            content["started_at"].as_i64().unwrap(),
+            content["expires_at"].as_i64().unwrap(),
+        );
+        assert!(
+            expires > started && expires <= started + 3_600_000_000,
+            "an hour ahead: {content}"
+        );
         // The same song again changes nothing; another song is a new version of the same post
         crate::party::publish(&s, &party, a).await.unwrap();
         assert_eq!(versions().await.len(), 1);
@@ -12111,5 +12125,75 @@ exec sleep 300
         let (st, _) = call(&app, "DELETE", &format!("/v1/party/{party}"), None).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert!(versions().await.is_empty());
+        // A party that ran out (the node was off, say) has its post cleaned up
+        let (_, p2) = call(
+            &app,
+            "POST",
+            "/v1/party",
+            Some(serde_json::json!({"zone": "null-output", "share": true})),
+        )
+        .await;
+        let party2 = p2["id"].as_str().unwrap().to_string();
+        crate::party::publish(&s, &party2, a).await.unwrap();
+        let (_, list) = call(&app, "GET", "/v1/party", None).await;
+        let id2 = list[0]["post"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            list[0]["join_public"], false,
+            "no API token: only this network can join"
+        );
+        {
+            let lib = s.library.lock().unwrap();
+            let mut all: serde_json::Value =
+                serde_json::from_str(&lib.get_setting("party.parties").unwrap().unwrap()).unwrap();
+            all[0]["expires_at"] = serde_json::json!(1);
+            lib.set_setting("party.parties", &all.to_string()).unwrap();
+        }
+        crate::party::clean_up(&s).await;
+        assert!(homeserver
+            .public_paths(&z32, &format!("/pub/music/v1/posts/{id2}/"))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The session post names the party link only where the internet reaches it (D1): through
+    /// the tunnel, with an API token; never a LAN address, never on a tokenless node.
+    #[tokio::test]
+    async fn a_shared_party_joins_through_the_tunnel_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("tok")).await;
+        assert_eq!(
+            crate::party::join_base_for_tests(&s),
+            None,
+            "a LAN public_url is not for a public post"
+        );
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("tunnel.music_hostname", "music.example.org")
+            .unwrap();
+        assert_eq!(
+            crate::party::join_base_for_tests(&s).as_deref(),
+            Some("https://music.example.org")
+        );
+        let other = tempfile::tempdir().unwrap();
+        let tokenless = state(other.path(), None).await;
+        tokenless
+            .library
+            .lock()
+            .unwrap()
+            .set_setting("tunnel.music_hostname", "music.example.org")
+            .unwrap();
+        assert_eq!(
+            crate::party::join_base_for_tests(&tokenless),
+            None,
+            "a tokenless node answers only directly"
+        );
     }
 }

@@ -14,10 +14,13 @@
 //!   else: no transport, no volume, no other zone.
 //! - **Shared on Pubky** (`share`, TASK-pinakes-social-ux.md D1): the party is one public music
 //!   `session` post on the owner's homeserver (`/pub/music/v1/posts/{id}/{editId}.json`). It embeds
-//!   the song playing, names the owner as `host` and the party link as `join`, and gets a new
-//!   version when the song changes, never a post per song. It ends when the party does (deleted),
-//!   or at its `expires_at`. A session lasts at most a day, so a longer party starts a fresh post
-//!   once a day.
+//!   the song playing, names the owner as `host` and, when the internet reaches the party (the
+//!   tunnel, a public address), the party link as `join`; a LAN address never goes into a public
+//!   post. A song change is a new version, never a post per song. `expires_at` is an hour ahead,
+//!   renewed with each song, so a node that stops leaves nothing showing for long; the post is
+//!   deleted when the party ends, and a session lasts a day at most, so a longer party starts a
+//!   fresh post once a day. Writes for one party take turns and show the newest song; a refusal
+//!   (a full homeserver) stops sharing that party instead of retrying.
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -81,6 +84,9 @@ pub struct SharedPost {
     pub edit: String,
     /// The post's `started_at`, Unix microseconds.
     pub started_at: i64,
+    /// The newest version's `expires_at`, Unix microseconds.
+    #[serde(default)]
+    pub expires_at: i64,
     /// The song it embeds now.
     pub song: String,
 }
@@ -188,6 +194,8 @@ pub struct PartyView {
     pub qr_svg: Option<String>,
     /// Shared on Pubky.
     pub shared: bool,
+    /// Whether people on the internet can join from the post (else only this network can).
+    pub join_public: bool,
     /// The session post's `pubky://` link, once written (the first song after sharing writes it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post: Option<String>,
@@ -209,6 +217,7 @@ fn view(s: &NodeState, p: &Party) -> PartyView {
         qr_svg: crate::qr_svg(&url),
         url,
         shared: p.share,
+        join_public: public_join_base(s).is_some(),
         post: p
             .post
             .as_ref()
@@ -300,7 +309,7 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(b): Json<NewPar
             .and_then(|z| z.state().now_playing.map(|n| n.item.uri));
         if let Some(uri) = playing {
             if let Err(e) = publish(&s, &p.id, &uri).await {
-                tracing::warn!(error = %e, "sharing the party on Pubky");
+                stop_sharing(&s, &p.id, &e);
             }
         }
     }
@@ -326,8 +335,10 @@ pub(crate) async fn end(
         store(&s, &all)?;
         p
     };
-    // Its session post goes with it
+    // Its session post goes with it, after any write still running
     if let Some(post) = ended.post {
+        let w = writer(&ended.id);
+        let _turn = w.lock().await;
         if let Err(e) = unpublish(&s, &post.id).await {
             tracing::warn!(error = %e, "removing the party's session post");
         }
@@ -340,6 +351,60 @@ pub(crate) async fn end(
 fn raw_key(z32: &str) -> &str {
     z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
 }
+
+/// Where people on the internet reach this node's party pages: the tunnel's music hostname, else
+/// a configured public address that is not a private one. None for a node without an API token
+/// (it answers only directly) or one its LAN reaches only: a LAN address never goes into a
+/// public post.
+fn public_join_base(s: &NodeState) -> Option<String> {
+    // A node without an API token answers only directly
+    s.token.as_ref()?;
+    let tunnel = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting("tunnel.music_hostname")
+        .ok()
+        .flatten()
+        .filter(|h| !h.trim().is_empty());
+    if let Some(h) = tunnel {
+        return Some(format!("https://{}", h.trim().trim_end_matches('/')));
+    }
+    let url = url::Url::parse(&s.public_url).ok()?;
+    let public = match url.host()? {
+        url::Host::Ipv4(ip) => {
+            !(ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified())
+        }
+        url::Host::Ipv6(ip) => {
+            let first = ip.segments()[0];
+            !(ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80)
+        }
+        url::Host::Domain(d) => {
+            d.contains('.') && !d.ends_with(".local") && !d.ends_with(".lan") && !d.ends_with(".home.arpa")
+        }
+    };
+    public.then(|| s.public_url.trim_end_matches('/').to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn join_base_for_tests(s: &NodeState) -> Option<String> {
+    public_join_base(s)
+}
+
+type Writers = Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One writer per party: its post's writes and its delete take turns.
+fn writer(party_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static W: std::sync::OnceLock<Writers> = std::sync::OnceLock::new();
+    W.get_or_init(Default::default)
+        .lock()
+        .expect("party writers")
+        .entry(party_id.to_string())
+        .or_default()
+        .clone()
+}
+
+const HOUR_MICROS: i64 = 3_600_000_000;
 
 /// The canonical URI of what a zone plays: the library song's, or the music link itself.
 fn canonical_song(s: &NodeState, uri: &str) -> Option<String> {
@@ -356,40 +421,90 @@ fn canonical_song(s: &NodeState, uri: &str) -> Option<String> {
     }
 }
 
-/// A song started on `zone`: a shared party there shows it (a new version of its post).
+/// A song started on `zone`: a shared party there shows it (a new version of its post). Session
+/// posts of parties that ended meanwhile are cleaned up on the way.
 pub(crate) fn track_started(s: &Arc<NodeState>, zone: &str, uri: &str) {
     let shared = {
         let _g = LOCK.lock().expect("party lock");
         load(s).into_iter().find(|p| p.zone == zone && p.share)
     };
-    let Some(p) = shared else { return };
     let s = s.clone();
     let uri = uri.to_string();
     tokio::spawn(async move {
+        clean_up(&s).await;
+        let Some(p) = shared else { return };
         if let Err(e) = publish(&s, &p.id, &uri).await {
-            tracing::warn!(error = %e, "updating the party's session post");
+            stop_sharing(&s, &p.id, &e);
         }
     });
 }
 
-/// Write the party's session post for the song at `uri` (a zone's item URI): its first version,
-/// a new version when the song changed, or a fresh post once a day.
+/// Session posts of parties that no longer run (they expired, perhaps while the node was off):
+/// deleted, and the parties forgotten.
+pub(crate) async fn clean_up(s: &Arc<NodeState>) {
+    let gone: Vec<(String, String)> = {
+        let _g = LOCK.lock().expect("party lock");
+        let all: Vec<Party> = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(PARTIES)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+        let t = now();
+        let gone: Vec<(String, String)> = all
+            .iter()
+            .filter(|p| p.expires_at <= t)
+            .filter_map(|p| Some((p.id.clone(), p.post.as_ref()?.id.clone())))
+            .collect();
+        if !gone.is_empty() {
+            let running: Vec<Party> = all.into_iter().filter(|p| p.expires_at > t).collect();
+            if let Err(e) = store(s, &running) {
+                tracing::warn!(error = %e.message, "forgetting ended parties");
+            }
+        }
+        gone
+    };
+    for (party, post) in gone {
+        let w = writer(&party);
+        let _turn = w.lock().await;
+        if let Err(e) = unpublish(s, &post).await {
+            tracing::warn!(error = %e, "removing an ended party's session post");
+        }
+    }
+}
+
+/// Write the party's session post for what its zone plays (`uri` when the zone says nothing): its
+/// first version, a new version when the song changed or its hour runs out, or a fresh post once
+/// a day. Writes take turns per party, and one that waited shows the song playing now.
 pub(crate) async fn publish(s: &Arc<NodeState>, party_id: &str, uri: &str) -> Result<(), String> {
     use pubky_music_specs::{MusicPost, Root, LIVE_WINDOW_MAX_MICROS, MUSIC_NAMESPACE};
-    let Some(song) = canonical_song(s, uri) else {
-        return Ok(()); // nothing a post can name (a file with no identity, a radio stream)
-    };
-    let sync = s.sync_handle().ok_or("not signed in with Pubky")?;
+    let w = writer(party_id);
+    let _turn = w.lock().await;
     let p = {
         let _g = LOCK.lock().expect("party lock");
         load(s).into_iter().find(|p| p.id == party_id)
     };
     let Some(p) = p else { return Ok(()) };
+    if !p.share {
+        return Ok(());
+    }
+    let playing = s
+        .zones
+        .get(&ZoneId::new(&p.zone))
+        .and_then(|z| z.state().now_playing.map(|n| n.item.uri));
+    let Some(song) = canonical_song(s, playing.as_deref().unwrap_or(uri)) else {
+        return Ok(()); // nothing a post can name (a file with no identity, a radio stream)
+    };
+    let sync = s.sync_handle().ok_or("not signed in with Pubky")?;
     let micros = pm_pubky::ids::now_micros();
-    // Same song: nothing to change
+    let fresh_day = |x: &SharedPost| micros < x.started_at + LIVE_WINDOW_MAX_MICROS - HOUR_MICROS;
+    // The same song, well inside its hour: nothing to change
     if p.post
         .as_ref()
-        .is_some_and(|x| x.song == song && micros < x.started_at + LIVE_WINDOW_MAX_MICROS - 3_600_000_000)
+        .is_some_and(|x| x.song == song && fresh_day(x) && micros < x.expires_at - HOUR_MICROS / 4)
     {
         return Ok(());
     }
@@ -397,13 +512,15 @@ pub(crate) async fn publish(s: &Arc<NodeState>, party_id: &str, uri: &str) -> Re
     let owner = pubky_music_specs::PubkyId::try_from(key.as_str()).map_err(|e| e.to_string())?;
     // A day at most per post: past 23 hours a fresh post takes over
     let (keep, stale) = match &p.post {
-        Some(x) if micros < x.started_at + LIVE_WINDOW_MAX_MICROS - 3_600_000_000 => (Some(x.clone()), None),
+        Some(x) if fresh_day(x) => (Some(x.clone()), None),
         Some(x) => (None, Some(x.id.clone())),
         None => (None, None),
     };
     let started_at = keep.as_ref().map(|x| x.started_at).unwrap_or(micros);
-    let expires_at = (p.expires_at * 1_000_000).min(started_at + LIVE_WINDOW_MAX_MICROS);
-    let join = party_url(s, &p.code);
+    // An hour ahead, renewed with each song: a node that stops leaves nothing showing for long
+    let expires_at = (p.expires_at * 1_000_000)
+        .min(started_at + LIVE_WINDOW_MAX_MICROS)
+        .min(micros + HOUR_MICROS);
     let post = pubky_music_specs::session(
         started_at,
         Some(expires_at),
@@ -412,10 +529,8 @@ pub(crate) async fn publish(s: &Arc<NodeState>, party_id: &str, uri: &str) -> Re
         None,
         song.clone(),
     );
-    let post = pubky_music_specs::session_joined_at(
-        &post,
-        (join.starts_with("https://") || join.starts_with("http://")).then_some(join),
-    );
+    let join = public_join_base(s).map(|b| format!("{b}/party/{}", p.code));
+    let post = pubky_music_specs::session_joined_at(&post, join);
     let ctx = pubky_music_specs::ValidationCtx { root: Root::Pub };
     let (id, edit, path) = match &keep {
         Some(x) => {
@@ -438,18 +553,42 @@ pub(crate) async fn publish(s: &Arc<NodeState>, party_id: &str, uri: &str) -> Re
     if let Some(old) = stale {
         unpublish(s, &old).await?;
     }
+    let ended = {
+        let _g = LOCK.lock().expect("party lock");
+        let mut all = load(s);
+        match all.iter_mut().find(|x| x.id == party_id) {
+            Some(x) => {
+                x.post = Some(SharedPost {
+                    id: id.clone(),
+                    edit,
+                    started_at,
+                    expires_at,
+                    song,
+                });
+                store(s, &all).map_err(|e| e.message)?;
+                false
+            }
+            None => true,
+        }
+    };
+    // The party ended while this was written: the post goes too
+    if ended {
+        unpublish(s, &id).await?;
+    }
+    Ok(())
+}
+
+/// A write the homeserver refused (full, say): stop sharing that party, once, instead of retrying.
+fn stop_sharing(s: &NodeState, party_id: &str, why: &str) {
+    tracing::warn!(error = %why, "the party's session post could not be written; sharing it stops");
     let _g = LOCK.lock().expect("party lock");
     let mut all = load(s);
     if let Some(x) = all.iter_mut().find(|x| x.id == party_id) {
-        x.post = Some(SharedPost {
-            id,
-            edit,
-            started_at,
-            song,
-        });
-        store(s, &all).map_err(|e| e.message)?;
+        x.share = false;
+        if let Err(e) = store(s, &all) {
+            tracing::warn!(error = %e.message, "storing the party");
+        }
     }
-    Ok(())
 }
 
 /// Delete every version of a session post.
