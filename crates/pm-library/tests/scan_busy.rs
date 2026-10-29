@@ -20,6 +20,8 @@ fn a_scan_loses_no_file_while_another_connection_writes() {
     for i in 0..FILES {
         std::fs::write(music.join(format!("{i:02} song.flac")), &flac).unwrap();
     }
+    // A Mac's resource fork next to a song (AppleDouble): not audio, not an error
+    std::fs::write(music.join("._00 song.flac"), [0u8; 4096]).unwrap();
     let db = dir.path().join("lib.sqlite");
     let lib = Library::open(&db).unwrap();
 

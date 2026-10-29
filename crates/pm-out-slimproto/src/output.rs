@@ -155,7 +155,7 @@ impl SlimOutput {
             link: Arc::new(Link::default()),
             server_port,
             stream_path,
-            pull: Arc::new(PullOutput::new(&name)),
+            pull: Arc::new(PullOutput::unpaced(&name)),
             caps,
         }
     }

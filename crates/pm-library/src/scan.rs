@@ -195,7 +195,10 @@ impl<'a> Scanner<'a> {
                     continue;
                 }
             };
-            if !entry.file_type().is_file() || !tags::is_supported(entry.path()) {
+            if !entry.file_type().is_file()
+                || !tags::is_supported(entry.path())
+                || is_apple_double(entry.path())
+            {
                 continue;
             }
             report.files_seen += 1;
@@ -427,6 +430,14 @@ struct Batch<'a> {
     lib: &'a Library,
     files: std::cell::Cell<u32>,
     since: std::cell::Cell<std::time::Instant>,
+}
+
+/// `._name.flac`: the resource fork a Mac writes next to each file on a share (AppleDouble), not
+/// audio. Reading them failed every one and filled the scan's errors.
+fn is_apple_double(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("._"))
 }
 
 /// How often a file (or a batch) is tried again while another connection keeps the database

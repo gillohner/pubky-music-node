@@ -145,6 +145,16 @@ impl Rtsp {
             {
                 return Err(AirPlayError::Closed(format!("{method}: {e}")))
             }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(AirPlayError::Protocol(format!(
+                    "the receiver did not answer {method}"
+                )))
+            }
             Err(e) => return Err(e.into()),
             Ok(_) => {}
         }
@@ -264,6 +274,58 @@ impl Session {
         let audio = bind(local)?;
         let control = bind(local)?;
         let timing = bind(local)?;
+        // The time is answered from the start: AirPlay 2 receivers ask for it during SETUP and
+        // RECORD and wait for the answer (the RTP head is set once RECORD names it)
+        let shared = Arc::new(Shared {
+            stop: AtomicBool::new(false),
+            head: AtomicU32::new(0),
+            sent: Mutex::new(VecDeque::new()),
+        });
+        let timing_thread = spawn_timing(timing.try_clone()?, shared.clone());
+        let started = Self::handshake(&mut rtsp, addr, auth_setup, sid, &host, local, &control, &timing);
+        let (server_port, their_control, seq, head) = match started {
+            Ok(v) => v,
+            Err(e) => {
+                shared.stop.store(true, Ordering::Relaxed);
+                let _ = timing_thread.join();
+                return Err(e);
+            }
+        };
+        shared.head.store(head, Ordering::Relaxed);
+        let audio_to = SocketAddr::new(addr.ip(), server_port);
+        let control_to = SocketAddr::new(addr.ip(), their_control);
+        let threads = vec![
+            timing_thread,
+            spawn_resend(control.try_clone()?, control_to, shared.clone()),
+        ];
+        Ok(Self {
+            rtsp,
+            audio,
+            audio_to,
+            control,
+            control_to,
+            seq,
+            ssrc: rand::random(),
+            first: true,
+            shared,
+            threads,
+            pending: Vec::with_capacity(FRAMES_PER_PACKET * 2),
+        })
+    }
+
+    /// OPTIONS, auth-setup when asked, ANNOUNCE, SETUP and RECORD. Returns the receiver's audio and
+    /// control ports and the first sequence number and RTP time.
+    #[allow(clippy::too_many_arguments)]
+    fn handshake(
+        rtsp: &mut Rtsp,
+        addr: SocketAddr,
+        auth_setup: bool,
+        sid: u32,
+        host: &str,
+        local: IpAddr,
+        control: &UdpSocket,
+        timing: &UdpSocket,
+    ) -> Result<(u16, u16, u16, u32), AirPlayError> {
         rtsp.request("OPTIONS", &[], None)?;
         let ip_kind = if local.is_ipv4() { "IP4" } else { "IP6" };
         let sdp = format!(
@@ -323,30 +385,7 @@ impl Session {
             ],
             None,
         )?;
-        let shared = Arc::new(Shared {
-            stop: AtomicBool::new(false),
-            head: AtomicU32::new(head),
-            sent: Mutex::new(VecDeque::new()),
-        });
-        let audio_to = SocketAddr::new(addr.ip(), server_port);
-        let control_to = SocketAddr::new(addr.ip(), their_control);
-        let threads = vec![
-            spawn_timing(timing, shared.clone()),
-            spawn_resend(control.try_clone()?, control_to, shared.clone()),
-        ];
-        Ok(Self {
-            rtsp,
-            audio,
-            audio_to,
-            control,
-            control_to,
-            seq,
-            ssrc: rand::random(),
-            first: true,
-            shared,
-            threads,
-            pending: Vec::with_capacity(FRAMES_PER_PACKET * 2),
-        })
+        Ok((server_port, their_control, seq, head))
     }
 
     /// Queue interleaved stereo samples; full packets go out at once. Returns frames sent.

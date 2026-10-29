@@ -37,6 +37,12 @@ pub const REATTACH_GRACE: Duration = Duration::from_secs(5);
 const PROBE_KEEP_BYTES: usize = 1024 * 1024;
 /// Chunks a listener may lag before the zone blocks (~ a few seconds).
 const CHANNEL_CHUNKS: usize = 64;
+/// How far ahead of real time a sink may write. A renderer that buffers fast (a BluOS player
+/// takes 40 s in a second) would otherwise have the whole queue before it played any of it,
+/// and the zone would stop it at "the end".
+pub const PACE_AHEAD: Duration = Duration::from_secs(5);
+/// What a renderer still plays after the last byte reached it, at most (its own buffer).
+const PLAYOUT_MARGIN: Duration = Duration::from_secs(2);
 
 /// A stream no listener holds: opened by a sink, or given back by a listener that left.
 struct Parked {
@@ -146,6 +152,8 @@ pub struct PullOutput {
     name: String,
     caps: OutputCaps,
     shared: Arc<Shared>,
+    /// Sinks keep to real time ([`PACE_AHEAD`]); off for players paced by their own buffer.
+    paced: bool,
 }
 
 impl PullOutput {
@@ -164,6 +172,16 @@ impl PullOutput {
                 slot: Mutex::new(Slot::default()),
                 notify: tokio::sync::Notify::new(),
             }),
+            paced: true,
+        }
+    }
+
+    /// A pull output whose fetcher paces the zone by itself (a Squeezebox player reads only as
+    /// its buffer frees, and synced groups rely on that buffer).
+    pub fn unpaced(name: &str) -> Self {
+        Self {
+            paced: false,
+            ..Self::new(name)
         }
     }
 
@@ -272,6 +290,8 @@ impl PullOutput {
             written: 0,
             generation,
             shared: self.shared.clone(),
+            clock: None,
+            paced: self.paced,
         }))
     }
 }
@@ -283,6 +303,9 @@ struct PullSink {
     written: u64,
     generation: u64,
     shared: Arc<Shared>,
+    /// When the current run started (first write after open or a flush), and `written` then.
+    clock: Option<(Instant, u64)>,
+    paced: bool,
 }
 
 /// A WAV header for a stream of unknown length: RIFF and data sizes set to the maximum, as
@@ -352,6 +375,15 @@ impl PullSink {
             .map(|(_, why)| SinkError::Device(why.clone()))
     }
 
+    /// How far the audio sent is ahead of real time since the run started.
+    fn ahead(&self) -> Duration {
+        let Some((at, from)) = self.clock else {
+            return Duration::ZERO;
+        };
+        let sent = Duration::from_secs_f64((self.written - from) as f64 / f64::from(self.fmt.rate_hz.max(1)));
+        sent.saturating_sub(at.elapsed())
+    }
+
     /// The listener left (and nobody has taken the stream since).
     fn listener_left(&self) -> bool {
         let slot = self.shared.slot.lock().expect("pull lock");
@@ -396,7 +428,13 @@ impl AudioSink for PullSink {
             return Err(e);
         }
         self.send(pack_pcm(block))?;
+        self.clock.get_or_insert((Instant::now(), self.written));
         self.written += block.frames() as u64;
+        // Never more than PACE_AHEAD ahead of the clock (the listener's own pace when slower)
+        let ahead = self.ahead();
+        if self.paced && ahead > PACE_AHEAD {
+            std::thread::sleep(ahead - PACE_AHEAD);
+        }
         Ok(())
     }
 
@@ -408,6 +446,7 @@ impl AudioSink for PullSink {
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
+        self.clock = None;
         Ok(())
     }
 
@@ -422,6 +461,12 @@ impl AudioSink for PullSink {
         {
             std::thread::sleep(Duration::from_millis(5));
         }
+        // The renderer has the audio; give it the time to play it before the zone moves on (or
+        // stops it at the end of the queue)
+        if self.paced && !self.tx.is_closed() && !self.listener_left() && self.aborted().is_none() {
+            std::thread::sleep((self.ahead() + PLAYOUT_MARGIN).min(PACE_AHEAD + PLAYOUT_MARGIN));
+        }
+        self.clock = None;
         Ok(())
     }
 
@@ -530,6 +575,35 @@ mod tests {
         let e = sink.write(&block(fmt, 4)).unwrap_err();
         assert!(e.to_string().contains("refused Play"), "{e}");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A listener that takes everything at once still gets it at about real time (5 s ahead at
+    /// most), and drain waits until it could have played it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fast_listener_is_paced_to_real_time() {
+        let fmt = AudioFormat::pcm(44_100, 16, 1); // 44 100 frames = 1 s
+        let out = PullOutput::new("fast");
+        let mut sink = out.open_now(fmt).unwrap();
+        let mut live = out.take_stream(Duration::from_secs(2)).await.unwrap();
+        let reader = tokio::spawn(async move { while live.next_chunk().await.is_some() {} });
+        let started = std::time::Instant::now();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..7 {
+                sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 44_100])).unwrap();
+            }
+            let written = started.elapsed();
+            sink.drain().unwrap();
+            (written, started.elapsed())
+        });
+        let (written, drained) = writer.join().unwrap();
+        // 7 s of audio: the writes may run 5 s ahead, so they take about 2 s
+        assert!(
+            written >= Duration::from_millis(1_800) && written < Duration::from_secs(4),
+            "{written:?}"
+        );
+        // drain: until the 7 s could have played, plus the margin
+        assert!(drained >= Duration::from_millis(6_800), "{drained:?}");
+        reader.abort();
     }
 
     /// A newer sink's stream wins over an old one a listener gives back.
