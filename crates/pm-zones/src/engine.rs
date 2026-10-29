@@ -112,6 +112,11 @@ struct Engine {
     /// A transition happened inside `step` (track change, stop, error): publish before
     /// the next block instead of waiting for the position tick.
     dirty: bool,
+    /// The runtime of whoever made the zone. `Output::open` runs inside it: outputs use
+    /// `spawn_blocking` and timers, which panic on a thread outside a runtime.
+    runtime: Option<tokio::runtime::Handle>,
+    /// The sequence number of the command being handled (for a panic in it).
+    handling: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,6 +150,8 @@ pub(crate) fn spawn(
         acked: 0,
         last_position_publish: Instant::now(),
         dirty: false,
+        runtime: tokio::runtime::Handle::try_current().ok(),
+        handling: 0,
     };
     std::thread::Builder::new()
         .name(name)
@@ -166,8 +173,62 @@ enum Flow {
     Exit,
 }
 
+/// What a caught panic said.
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
 impl Engine {
+    /// Serve commands until the zone goes away. A panic (a bug in an output, a source or the
+    /// engine) does not leave a dead zone: the zone stops, says why, and takes commands again.
     fn run(mut self) {
+        loop {
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.serve()));
+            // The command that panicked counts as handled, so nobody waits for it
+            self.acked = self.acked.max(self.handling);
+            match served {
+                Ok(()) => break,
+                Err(p) => self.recover(&panic_text(p.as_ref())),
+            }
+        }
+        self.teardown();
+    }
+
+    /// After a panic: drop the track and the sink, stop, and report it as the zone's error.
+    fn recover(&mut self, why: &str) {
+        tracing::error!(zone = %self.id, "the zone's audio thread panicked; the zone stopped and starts again: {why}");
+        // The queue lock may have been held by the code that panicked; its data is still whole
+        self.queue.clear_poison();
+        let (current, prefetch, incoming, sink) = (
+            self.current.take(),
+            self.prefetch.take(),
+            self.incoming.take(),
+            self.sink.take(),
+        );
+        // A sink or source that panics again while closing must not take the thread down
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop((current, prefetch, incoming, sink));
+        }))
+        .is_err()
+        {
+            tracing::warn!(zone = %self.id, "closing the sink after the panic panicked too");
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.output.now_playing(None)));
+        let message = format!("the zone stopped on an internal error ({why}); press play to try again");
+        self.error = Some(message.clone());
+        self.emit(ZoneEvent::Error { message });
+        if self.transport != Transport::Stopped {
+            self.transport = Transport::Stopped;
+            self.emit(ZoneEvent::Stopped);
+        }
+        self.dirty = true;
+        self.publish();
+    }
+
+    fn serve(&mut self) {
         loop {
             let cmd = if self.transport == Transport::Playing {
                 match self.cmds.try_recv() {
@@ -182,6 +243,9 @@ impl Engine {
                 }
             };
             if let Some((seq, cmd)) = cmd {
+                if seq != u64::MAX {
+                    self.handling = seq;
+                }
                 let flow = self.handle(cmd);
                 if seq != u64::MAX {
                     self.acked = self.acked.max(seq);
@@ -199,7 +263,6 @@ impl Engine {
                 }
             }
         }
-        self.teardown();
     }
 
     fn teardown(&mut self) {
@@ -391,7 +454,9 @@ impl Engine {
             c.base_ms = before;
             c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
             self.dirty = true;
-            self.emit(ZoneEvent::Error(format!("this stream cannot seek ({e})")));
+            self.emit(ZoneEvent::Error {
+                message: format!("this stream cannot seek ({e})"),
+            });
             return;
         }
         c.base_ms = ms;
@@ -422,7 +487,7 @@ impl Engine {
         tracing::error!(zone = %self.id, "{msg}");
         self.error = Some(msg.clone());
         self.dirty = true;
-        self.emit(ZoneEvent::Error(msg));
+        self.emit(ZoneEvent::Error { message: msg });
         self.stop();
     }
 
@@ -458,6 +523,7 @@ impl Engine {
                 tracing::warn!(zone = %self.id, "closing sink: {e}");
             }
         }
+        let _runtime = self.runtime.as_ref().map(|h| h.enter());
         match block_on(self.output.open(fmt)) {
             Ok(s) => {
                 self.sink = Some(s);
@@ -559,7 +625,9 @@ impl Engine {
             Ok(None) => self.end_of_track(),
             Err(e) => {
                 tracing::warn!(zone = %self.id, "decode error, ending track: {e}");
-                self.emit(ZoneEvent::Error(format!("decode: {e}")));
+                self.emit(ZoneEvent::Error {
+                    message: format!("decode: {e}"),
+                });
                 self.end_of_track();
             }
         }
@@ -902,8 +970,8 @@ impl Engine {
     }
 }
 
-/// Run a future to completion on this thread. The futures here (`Output::open`)
-/// are short and do their blocking work synchronously, so no runtime is needed.
+/// Run a future to completion on this thread. The futures here (`Output::open`) are short;
+/// the caller enters the zone's runtime first, for the ones that use it.
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     use std::pin::pin;
     use std::sync::Arc as StdArc;

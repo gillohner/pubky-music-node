@@ -1,28 +1,34 @@
-//! The endpoint daemon ("our RoonBridge", handoff M2): exposes this
-//! machine's outputs over the `pm-stream` protocol. One TCP session per
-//! open sink; the session thread blocks on the local sink's `write`, so a
-//! full DAC buffer holds back the node through the `Ack` handshake.
+//! The desktop app's built-in player: this machine's outputs over the `pm-stream` protocol, for
+//! the one node the app is connected to. One TCP session per open sink; the session thread blocks
+//! on the local sink's `write`, so a full DAC buffer holds back the node through the `Ack`
+//! handshake.
 //!
-//! The endpoint never decodes or converts: it receives the negotiated
-//! format and packs it exactly as a local output would. Discovery is mDNS
-//! (`pm_stream::SERVICE_TYPE`), done by the binary; this library is the
-//! session logic, so tests can run it on a loopback listener.
+//! The endpoint never decodes or converts: it receives the negotiated format and packs it exactly
+//! as a local output would. It answers only a client that shows its [`Key`] in `Hello`: the app
+//! makes one each time it starts the player and registers it with its node, which stores it with
+//! the address. A connection without the key is closed within the `Hello` deadline and never holds
+//! a session slot.
 
 use pm_model::AudioFormat;
-use pm_stream::{
-    block_on, decode_samples, expect_control, read_frame, write_frame, Frame, Incoming, StreamError,
-};
-use pm_zones::{AudioSink, Output, OutputId, OutputRegistry};
-use std::collections::HashSet;
-use std::io::{BufReader, BufWriter};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use pm_stream::{block_on, decode_samples, read_frame, write_frame, Frame, Incoming, Key, StreamError};
+/// The outputs an endpoint offers (for the app, which has no other use for `pm-zones`).
+pub use pm_zones::OutputRegistry;
+use pm_zones::{AudioSink, Output, OutputId};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufReader, BufWriter, Read};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Sessions at once: a zone per output plus the node's short control sessions fit many times.
 pub const MAX_SESSIONS: usize = 16;
-/// How long a new connection has to say `Hello`.
+/// Connections at once that have not shown the key yet; each is closed by the `Hello` deadline.
+/// Addresses that have shown it (the node) wait apart, with room of the same size.
+pub const MAX_PENDING: usize = 8;
+/// Of those, from one address: one LAN host cannot take the whole waiting room.
+pub const MAX_PENDING_PER_PEER: usize = 2;
+/// How long a new connection has to say `Hello` with the key, all of it.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a session without an open output may be silent (the node's control sessions are short).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -35,16 +41,25 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 pub struct Endpoint {
     pub name: String,
     pub outputs: OutputRegistry,
+    key: Key,
     /// Outputs with an open session; a second `Open` is refused.
     busy: Mutex<HashSet<OutputId>>,
     sessions: Arc<AtomicUsize>,
+    waiting: Arc<Mutex<Waiting>>,
+    /// Addresses that showed the key, or where the app expects its node: they wait apart.
+    known: Mutex<HashSet<IpAddr>>,
     limits: Limits,
 }
 
-/// How many sessions at once and how long a peer may be silent.
+/// How many connections at once and how long a peer may be silent.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Sessions of clients that showed the key.
     pub max_sessions: usize,
+    /// Connections that have not shown it yet (and, apart, as many from known addresses).
+    pub max_pending: usize,
+    /// Of those, from one address that is not known.
+    pub max_pending_per_peer: usize,
     pub hello: Duration,
     pub idle: Duration,
 }
@@ -53,14 +68,26 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_sessions: MAX_SESSIONS,
+            max_pending: MAX_PENDING,
+            max_pending_per_peer: MAX_PENDING_PER_PEER,
             hello: HELLO_TIMEOUT,
             idle: IDLE_TIMEOUT,
         }
     }
 }
 
-/// Counts a session while it lives.
+/// Counts a connection while it lives.
 struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    fn take(count: &Arc<AtomicUsize>, max: usize) -> Option<Slot> {
+        if count.fetch_add(1, Ordering::SeqCst) >= max {
+            count.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot(count.clone()))
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -68,31 +95,178 @@ impl Drop for Slot {
     }
 }
 
+/// Connections waiting for their `Hello`: from known addresses, from others, and per address.
+#[derive(Default)]
+struct Waiting {
+    known: usize,
+    strangers: usize,
+    by_peer: HashMap<IpAddr, usize>,
+}
+
+/// A connection's place in the waiting room, until it has shown the key.
+struct Pending {
+    waiting: Arc<Mutex<Waiting>>,
+    ip: IpAddr,
+    known: bool,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut w = self.waiting.lock().expect("waiting room");
+        if self.known {
+            w.known -= 1;
+            return;
+        }
+        w.strangers -= 1;
+        if let Some(n) = w.by_peer.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                w.by_peer.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Reads that all end by one deadline: a peer sending a byte now and then cannot stretch it.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "no Hello in time",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        (&mut &*self.stream).read(buf)
+    }
+}
+
+/// A listener served on its own thread; dropping it stops taking connections (sessions already
+/// open carry on), so the app can listen elsewhere when its node changes.
+pub struct Serving {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Serving {
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake the accept so the thread sees the flag and the port is free again
+        let mut wake = self.addr;
+        if wake.ip().is_unspecified() {
+            wake.set_ip(match wake {
+                SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+                SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+            });
+        }
+        if TcpStream::connect_timeout(&wake, Duration::from_secs(1)).is_ok() {
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+}
+
 impl Endpoint {
-    pub fn new(name: &str, outputs: OutputRegistry) -> Arc<Self> {
-        Arc::new(Self {
-            name: name.to_string(),
-            outputs,
-            busy: Mutex::new(HashSet::new()),
-            sessions: Arc::new(AtomicUsize::new(0)),
-            limits: Limits::default(),
-        })
+    /// An endpoint that answers only clients showing `key`.
+    pub fn new(name: &str, outputs: OutputRegistry, key: Key) -> Arc<Self> {
+        Self::with_limits(name, outputs, key, Limits::default())
     }
 
     /// The same endpoint with other limits (tests).
-    pub fn with_limits(name: &str, outputs: OutputRegistry, limits: Limits) -> Arc<Self> {
+    pub fn with_limits(name: &str, outputs: OutputRegistry, key: Key, limits: Limits) -> Arc<Self> {
         Arc::new(Self {
             name: name.to_string(),
             outputs,
+            key,
             busy: Mutex::new(HashSet::new()),
             sessions: Arc::new(AtomicUsize::new(0)),
+            waiting: Arc::default(),
+            known: Mutex::default(),
             limits,
         })
     }
 
-    /// Accept connections forever, one thread per session, at most `max_sessions` at once.
+    /// Give `ip` (where the app expects its node) room of its own before `Hello`, as an address
+    /// that has shown the key gets, so others filling the waiting room cannot lock the node out.
+    /// It still has to show the key.
+    pub fn expect_peer(&self, ip: IpAddr) {
+        self.known.lock().expect("known peers").insert(ip.to_canonical());
+    }
+
+    /// Whether `ip` waits apart (it showed the key, or the app expects its node there).
+    pub fn expects(&self, ip: IpAddr) -> bool {
+        self.known
+            .lock()
+            .expect("known peers")
+            .contains(&ip.to_canonical())
+    }
+
+    /// A place in the waiting room for a new connection from `ip`, or why there is none.
+    fn admit(&self, ip: IpAddr) -> Result<Pending, &'static str> {
+        let known = self.expects(ip);
+        let mut w = self.waiting.lock().expect("waiting room");
+        if known {
+            if w.known >= self.limits.max_pending {
+                return Err("too many connections");
+            }
+            w.known += 1;
+        } else {
+            if w.by_peer.get(&ip).copied().unwrap_or(0) >= self.limits.max_pending_per_peer {
+                return Err("too many connections from this address");
+            }
+            if w.strangers >= self.limits.max_pending {
+                return Err("too many connections");
+            }
+            w.strangers += 1;
+            *w.by_peer.entry(ip).or_default() += 1;
+        }
+        Ok(Pending {
+            waiting: self.waiting.clone(),
+            ip,
+            known,
+        })
+    }
+
+    /// Accept connections forever, one thread each.
     pub fn serve(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+        self.serve_until(listener, &AtomicBool::new(false));
+        Ok(())
+    }
+
+    /// Serve `listener` on a thread of its own until the returned handle is dropped.
+    pub fn spawn(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<Serving> {
+        let addr = listener.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ep, flag) = (self.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name(format!("pm-endpoint {addr}"))
+            .spawn(move || ep.serve_until(listener, &flag))?;
+        Ok(Serving {
+            addr,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn serve_until(self: &Arc<Self>, listener: TcpListener, stop: &AtomicBool) {
         for stream in listener.incoming() {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
@@ -101,31 +275,29 @@ impl Endpoint {
                 }
             };
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-            let max = self.limits.max_sessions;
-            if self.sessions.fetch_add(1, Ordering::SeqCst) >= max {
-                self.sessions.fetch_sub(1, Ordering::SeqCst);
-                tracing::warn!(%peer, "refused: {max} sessions already");
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                let _ = write_frame(
-                    &mut BufWriter::new(&stream),
-                    &Frame::Error {
-                        message: "too many sessions".into(),
-                    },
-                );
-                continue;
-            }
-            let slot = Slot(self.sessions.clone());
+            let ip = stream
+                .peer_addr()
+                .map_or(IpAddr::from([0, 0, 0, 0]), |a| a.ip().to_canonical());
+            let pending = match self.admit(ip) {
+                Ok(p) => p,
+                Err(why) => {
+                    tracing::warn!(%peer, "refused: {why} waiting for Hello");
+                    refuse(&stream, why);
+                    continue;
+                }
+            };
             let ep = self.clone();
-            std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name(format!("pm-endpoint {peer}"))
                 .spawn(move || {
-                    let _slot = slot;
-                    if let Err(e) = ep.session(stream) {
+                    if let Err(e) = ep.connection(stream, pending) {
                         tracing::info!(%peer, "session ended: {e}");
                     }
-                })?;
+                });
+            if let Err(e) = spawned {
+                tracing::warn!("no thread for a connection: {e}");
+            }
         }
-        Ok(())
     }
 
     fn welcome(&self) -> Frame {
@@ -136,9 +308,56 @@ impl Endpoint {
         }
     }
 
-    fn session(&self, stream: TcpStream) -> Result<(), StreamError> {
+    /// A new connection: `Hello` with the key by the deadline, then a session slot.
+    fn connection(&self, stream: TcpStream, pending: Pending) -> Result<(), StreamError> {
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(self.limits.hello))?;
+        // Until the key is shown nothing may hold the thread past the Hello deadline
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        let hello = read_frame(&mut Deadline {
+            stream: &stream,
+            until: Instant::now() + self.limits.hello,
+        });
+        let client = match hello {
+            Ok(Incoming::Control(Frame::Hello { client, version, key })) => {
+                if version != pm_stream::PROTOCOL_VERSION {
+                    let update = if version < pm_stream::PROTOCOL_VERSION {
+                        "update the node"
+                    } else {
+                        "update the Pubky Music app"
+                    };
+                    let msg = format!(
+                        "endpoint speaks protocol {}, this node {version}; {update}",
+                        pm_stream::PROTOCOL_VERSION
+                    );
+                    refuse(&stream, &msg);
+                    return Err(StreamError::Remote(msg));
+                }
+                if !self.key.matches(&key) {
+                    let msg = if key.is_empty() {
+                        "no key: this player answers only the node it registered with"
+                    } else {
+                        "wrong key: this player answers only the node it registered with"
+                    };
+                    refuse(&stream, msg);
+                    return Err(StreamError::Remote(msg.into()));
+                }
+                // The node's address: from now on it waits apart
+                self.expect_peer(pending.ip);
+                client
+            }
+            Ok(_) => {
+                refuse(&stream, "expected Hello");
+                return Err(StreamError::Unexpected("not Hello".into()));
+            }
+            Err(e) => return Err(e),
+        };
+        let max = self.limits.max_sessions;
+        let Some(_slot) = Slot::take(&self.sessions, max) else {
+            refuse(&stream, "too many sessions");
+            return Err(StreamError::Remote(format!("refused: {max} sessions already")));
+        };
+        drop(pending);
+        tracing::debug!(%client, "hello");
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(
             &socket2::TcpKeepalive::new()
@@ -147,28 +366,19 @@ impl Endpoint {
         );
         let mut r = BufReader::new(stream.try_clone()?);
         let mut w = BufWriter::new(stream);
-        match expect_control(&mut r)? {
-            Frame::Hello { client, version } => {
-                tracing::debug!(%client, version, "hello");
-                write_frame(&mut w, &self.welcome())?;
-            }
-            other => {
-                write_frame(
-                    &mut w,
-                    &Frame::Error {
-                        message: "expected Hello".into(),
-                    },
-                )?;
-                return Err(StreamError::Unexpected(format!("{other:?}")));
-            }
-        }
+        write_frame(&mut w, &self.welcome())?;
+        self.session(&mut r, &mut w)
+    }
+
+    /// A client that showed the key: control frames until `Open`, then audio.
+    fn session(&self, r: &mut BufReader<TcpStream>, w: &mut BufWriter<TcpStream>) -> Result<(), StreamError> {
         r.get_ref().set_read_timeout(Some(self.limits.idle))?;
         loop {
-            let frame = match read_frame(&mut r) {
+            let frame = match read_frame(r) {
                 Ok(Incoming::Control(f)) => f,
                 Ok(Incoming::Audio(_)) => {
                     write_frame(
-                        &mut w,
+                        w,
                         &Frame::Error {
                             message: "no output open".into(),
                         },
@@ -180,7 +390,7 @@ impl Endpoint {
             };
             match frame {
                 Frame::Close => return Ok(()),
-                Frame::Hello { .. } => write_frame(&mut w, &self.welcome())?,
+                Frame::Hello { .. } => write_frame(w, &self.welcome())?,
                 Frame::SetVolume { output, volume } => {
                     let reply = match self.outputs.get(&OutputId(output.clone())) {
                         Some(o) => match block_on(o.set_volume(volume)) {
@@ -193,13 +403,13 @@ impl Endpoint {
                             message: format!("no output {output}"),
                         },
                     };
-                    write_frame(&mut w, &reply)?;
+                    write_frame(w, &reply)?;
                 }
                 Frame::Open { output, format } => {
                     let id = OutputId(output.clone());
                     let Some(out) = self.outputs.get(&id) else {
                         write_frame(
-                            &mut w,
+                            w,
                             &Frame::Error {
                                 message: format!("no output {output}"),
                             },
@@ -208,7 +418,7 @@ impl Endpoint {
                     };
                     if !self.busy.lock().expect("busy").insert(id.clone()) {
                         write_frame(
-                            &mut w,
+                            w,
                             &Frame::Error {
                                 message: format!("{output} is in use"),
                             },
@@ -217,13 +427,13 @@ impl Endpoint {
                     }
                     // A paused zone keeps its output open without a word for as long as it likes
                     r.get_ref().set_read_timeout(None)?;
-                    let result = self.run_open(&mut r, &mut w, out, format);
+                    let result = self.run_open(r, w, out, format);
                     self.busy.lock().expect("busy").remove(&id);
                     match result {
                         Ok(()) => return Ok(()),
                         Err(e) => {
                             let _ = write_frame(
-                                &mut w,
+                                w,
                                 &Frame::Error {
                                     message: e.to_string(),
                                 },
@@ -234,7 +444,7 @@ impl Endpoint {
                 }
                 other => {
                     write_frame(
-                        &mut w,
+                        w,
                         &Frame::Error {
                             message: format!("unexpected {other:?}"),
                         },
@@ -313,6 +523,17 @@ impl Endpoint {
             }
         }
     }
+}
+
+/// Tell a peer why it is turned away (best effort: it may not read).
+fn refuse(stream: &TcpStream, message: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = write_frame(
+        &mut BufWriter::new(stream),
+        &Frame::Error {
+            message: message.into(),
+        },
+    );
 }
 
 /// The outputs this machine offers: the null output always, ALSA `hw:`

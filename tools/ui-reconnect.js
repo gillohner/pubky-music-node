@@ -34,7 +34,7 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   let tracks = [];
   for (let i = 0; i < 40 && !tracks.length; i++) {
     tracks = (await api('GET', '/library/tracks')).tracks.filter((t) => t.duration_ms > 60000);
-    if (!tracks.length) { if (i === 0) await api('POST', '/library/scan', {}); await sleep(500); }
+    if (!tracks.length) await sleep(500); // the node scans its config folder at start
   }
   if (!tracks.length) throw new Error('needs a track longer than a minute');
   await api('POST', `/zones/${ZONE}/queue`, { track_ids: [tracks[0].id], replace: true, play: true });

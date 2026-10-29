@@ -201,7 +201,7 @@ impl PubkySync {
         self.publish_node(
             &s.name,
             &s.public_url,
-            s.token.as_deref(),
+            s.token().as_deref(),
             &s.version,
             iroh.as_deref(),
         )
