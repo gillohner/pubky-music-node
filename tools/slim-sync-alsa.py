@@ -126,7 +126,6 @@ enabled = false
                                 stdout=open(work / "node.log", "w"), stderr=subprocess.STDOUT)
         procs.append(node)
         until("the node", lambda: api("GET", "/v1/info"))
-        api("POST", "/v1/library/scan", {})
         track = until("the scan", lambda: api("GET", "/v1/library/tracks")["tracks"])[0]["id"]
         for i, (mac, pcm) in enumerate(zip(MACS, ["player_a", "player_b"])):
             procs.append(subprocess.Popen(

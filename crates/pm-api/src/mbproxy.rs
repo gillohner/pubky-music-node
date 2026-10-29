@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const UPSTREAM: &str = "https://musicbrainz.org/ws/2";
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const MAX_ENTRIES: usize = 20_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -28,15 +27,12 @@ struct Cached {
 
 struct Proxy {
     cache: tokio::sync::Mutex<HashMap<String, Cached>>,
-    /// MusicBrainz allows one request per second per IP.
-    gate: tokio::sync::Mutex<Instant>,
 }
 
 fn proxy() -> &'static Proxy {
     static P: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
     P.get_or_init(|| Proxy {
         cache: tokio::sync::Mutex::new(HashMap::new()),
-        gate: tokio::sync::Mutex::new(Instant::now() - Duration::from_secs(2)),
     })
 }
 
@@ -68,9 +64,15 @@ pub(crate) async fn forward(
     if !q.iter().any(|(k, _)| k == "fmt") {
         q.push(("fmt".into(), "json".into()));
     }
-    let url = url::Url::parse_with_params(&format!("{UPSTREAM}/{path}"), &q)
-        .map(|u| u.to_string())
-        .unwrap_or_default();
+    let url = url::Url::parse_with_params(
+        &format!(
+            "{}/{path}",
+            s.mb_base.read().expect("mb lock").trim_end_matches('/')
+        ),
+        &q,
+    )
+    .map(|u| u.to_string())
+    .unwrap_or_default();
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "bad query").into_response();
     }
@@ -80,14 +82,6 @@ pub(crate) async fn forward(
             return cached_response(&c, true);
         }
     }
-    {
-        let mut last = p.gate.lock().await;
-        let wait = Duration::from_millis(1050).saturating_sub(last.elapsed());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        *last = Instant::now();
-    }
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -96,9 +90,11 @@ pub(crate) async fn forward(
         .unwrap_or("application/json");
     // MusicBrainz answers 503 when the IP goes over its rate; wait as it asks
     // (Retry-After, else two seconds) and try once more before passing it on.
+    // One request at a time with the rest of the node (pm_library::musicbrainz::take_turn)
     let mut attempt = 0;
     let resp = loop {
         attempt += 1;
+        let mut turn = pm_library::musicbrainz::take_turn(&url, Duration::from_secs(1)).await;
         let r = match s
             .http_client()
             .get(&url)
@@ -109,18 +105,14 @@ pub(crate) async fn forward(
             Ok(r) => r,
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("musicbrainz: {e}")).into_response(),
         };
-        if r.status().as_u16() == 503 && attempt < 2 {
-            let wait = r
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(2)
-                .min(10);
-            tracing::debug!(%url, wait, "musicbrainz asked to slow down");
-            tokio::time::sleep(Duration::from_secs(wait)).await;
-            *p.gate.lock().await = Instant::now();
-            continue;
+        if matches!(r.status().as_u16(), 503 | 429) {
+            let wait = pm_library::musicbrainz::retry_after(r.headers(), Duration::from_secs(2));
+            turn.back_off(wait);
+            if attempt < 2 {
+                tracing::debug!(%url, ?wait, "musicbrainz asked to slow down");
+                drop(turn);
+                continue;
+            }
         }
         break r;
     };

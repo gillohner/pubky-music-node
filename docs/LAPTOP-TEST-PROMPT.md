@@ -66,13 +66,14 @@ C5. Deezer (no credentials): search any well-known artist in the main search of 
 C6. Network scan: Settings → Outputs → "Scan the network". Report the list (every UPnP device,
    whether it is a renderer, Cast devices) and any notes. If a renderer you own is missing, say
    what the notes said.
-D. Endpoint: in a second terminal `./target/release/pm-endpoint --name Laptop --listen
-   127.0.0.1:7790`; restart `pm-node serve` with `[outputs] endpoints = ["127.0.0.1:7790"]`.
+D. Endpoint (the app's player, headless): in a second terminal `./target/release/pm-endpoint
+   --name Laptop --listen 127.0.0.1:7790 --key-file /tmp/ep.key`, then register it:
+   `curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' -d "{\"address\":
+   \"127.0.0.1:7790\",\"key\":\"$(cat /tmp/ep.key)\"}" http://127.0.0.1:7788/v1/outputs/endpoints`.
    `/v1/outputs` must show `net:127.0.0.1:7790/alsa:hw:N,0`. Play the same 16/44.1 and 24/96
    files to that zone and repeat the hw_params and byte-identical loopback checks from
    docs/HARDWARE-TEST-PROMPT.md check C via `snd-aloop` (the endpoint's ALSA output is the same code,
-   only reached over TCP). Also test mDNS: start the endpoint without `--listen` and with
-   `discover = true` on the node; say whether it was found.
+   only reached over TCP). Registering with another key must fail with "wrong key".
 E. Playlists: create one in the app, add tracks via the ⋯ menu (tracks without MusicBrainz ids
    must be refused with the explanatory message), play it on both zones, delete it.
 F. Subsonic: install Symfonium or Feishin on a phone/desktop in the same network; server

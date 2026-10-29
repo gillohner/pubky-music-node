@@ -27,6 +27,7 @@ pm-out-airplay = { workspace = true }
 pm-out-bluos = { workspace = true }
 pm-out-mpd = { workspace = true }
 pm-out-net = { workspace = true }
+pm-stream = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
 pubky-music-specs = { workspace = true }
