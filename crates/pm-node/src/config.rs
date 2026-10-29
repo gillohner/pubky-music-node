@@ -11,6 +11,9 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     /// Contact address for outbound User-Agent strings (MusicBrainz requires one).
     pub contact: String,
+    /// A MusicBrainz mirror to ask instead of musicbrainz.org (`https://mb.example.org`, with or
+    /// without `/ws/2`); `PM_MUSICBRAINZ_URL` overrides. Empty = musicbrainz.org.
+    pub musicbrainz_base_url: String,
     pub library: LibraryConfig,
     /// Pinakes, Nexus and network settings (see `pm_pubky::PmPubkyConfig`).
     pub pubky: PmPubkyConfig,
@@ -306,11 +309,31 @@ pub struct ApiConfig {
     pub subsonic_user: String,
     /// How the user's devices reach this API (`https://music.example.org`, a
     /// Tailscale name, …). Published privately on the homeserver when a session
-    /// exists (ADR 0008). Empty = `http://<listen>`.
+    /// exists (ADR 0008). Empty = [`default_public_url`]: `http://<listen>`, with this
+    /// machine's network address in place of `0.0.0.0` or `[::]`.
     pub public_url: String,
     /// Announce the node on the LAN (mDNS `_pubky-music._tcp` and SSDP) so apps
     /// find it. Only when `listen` is not a loopback address.
     pub announce: bool,
+}
+
+impl NodeConfig {
+    /// The MusicBrainz server's root (no `/ws/2`): `PM_MUSICBRAINZ_URL`, else the config's
+    /// `musicbrainz_base_url`, else `None` (musicbrainz.org).
+    pub fn musicbrainz_root(&self) -> Option<String> {
+        let v = std::env::var("PM_MUSICBRAINZ_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| self.musicbrainz_base_url.clone());
+        musicbrainz_root(&v)
+    }
+}
+
+/// `https://mb.example.org/ws/2/` → `https://mb.example.org`; blank → `None`.
+pub fn musicbrainz_root(v: &str) -> Option<String> {
+    let v = v.trim().trim_end_matches('/');
+    let v = v.strip_suffix("/ws/2").unwrap_or(v).trim_end_matches('/');
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 impl Default for NodeConfig {
@@ -318,6 +341,7 @@ impl Default for NodeConfig {
         Self {
             data_dir: PathBuf::from("./data"),
             contact: String::new(),
+            musicbrainz_base_url: String::new(),
             library: LibraryConfig::default(),
             pubky: PmPubkyConfig::default(),
             api: ApiConfig::default(),
@@ -349,16 +373,13 @@ impl Default for LibraryConfig {
     }
 }
 
-/// Network endpoints (`pm-endpoint`) this node plays to.
+/// The speakers and players this node plays to.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OutputsConfig {
-    /// Endpoint addresses (`host:port`) to connect to at start, besides discovery.
+    /// No longer used (a warning at start): the desktop app registers its player with its key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
-    /// Browse mDNS for endpoints at start.
-    pub discover: bool,
-    /// How long to listen for mDNS answers.
-    pub discover_ms: u64,
     /// Discover UPnP/OpenHome renderers (SSDP) and offer them as outputs.
     pub upnp: bool,
     /// Slimproto port for Squeezebox / squeezelite players; 0 disables.
@@ -387,8 +408,6 @@ impl std::fmt::Debug for OutputsConfig {
             .collect();
         f.debug_struct("OutputsConfig")
             .field("endpoints", &self.endpoints)
-            .field("discover", &self.discover)
-            .field("discover_ms", &self.discover_ms)
             .field("upnp", &self.upnp)
             .field("slimproto_port", &self.slimproto_port)
             .field("cast", &self.cast)
@@ -404,8 +423,6 @@ impl Default for OutputsConfig {
     fn default() -> Self {
         Self {
             endpoints: Vec::new(),
-            discover: true,
-            discover_ms: 1500,
             upnp: true,
             slimproto_port: 3483,
             cast: true,
@@ -495,8 +512,43 @@ impl NodeConfig {
     }
 }
 
+/// The address devices fetch from when `[api] public_url` is empty: `http://<listen>`, except
+/// that a `listen` on every interface (`0.0.0.0`, `[::]`), which no device can reach, gets
+/// `detected` (this machine's address on its way to the network) with the same port. Without
+/// one it stays as it is, and Settings' network check says so.
+pub fn default_public_url(listen: &str, detected: Option<std::net::IpAddr>) -> String {
+    match (listen.parse::<std::net::SocketAddr>(), detected) {
+        (Ok(a), Some(ip)) if a.ip().is_unspecified() => {
+            format!("http://{}", std::net::SocketAddr::new(ip, a.port()))
+        }
+        _ => format!("http://{listen}"),
+    }
+}
+
+/// This machine's IPv4 address on the way to the internet: the one the LAN reaches it at, in
+/// the usual home network. UDP `connect` sends nothing; it only picks the route.
+pub fn route_address() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_musicbrainz_mirror_with_or_without_ws2() {
+        assert_eq!(super::musicbrainz_root(""), None);
+        assert_eq!(
+            super::musicbrainz_root(" https://mb.lan/ws/2/ ").as_deref(),
+            Some("https://mb.lan")
+        );
+        assert_eq!(
+            super::musicbrainz_root("http://10.0.0.5:5000/").as_deref(),
+            Some("http://10.0.0.5:5000")
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -559,5 +611,27 @@ listen = "0.0.0.0:7788"
         let text = toml::to_string(&cfg).unwrap();
         let back: NodeConfig = toml::from_str(&text).unwrap();
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn an_empty_public_url_is_one_devices_can_reach() {
+        let lan = Some("192.168.1.10".parse().unwrap());
+        // Every interface: the machine's network address, with the listen port
+        assert_eq!(
+            default_public_url("0.0.0.0:7788", lan),
+            "http://192.168.1.10:7788"
+        );
+        assert_eq!(default_public_url("[::]:8000", lan), "http://192.168.1.10:8000");
+        let v6 = Some("fd00::5".parse().unwrap());
+        assert_eq!(default_public_url("[::]:7788", v6), "http://[fd00::5]:7788");
+        // Loopback, a given address or a name stay as they are
+        assert_eq!(default_public_url("127.0.0.1:7788", lan), "http://127.0.0.1:7788");
+        assert_eq!(
+            default_public_url("192.168.1.20:7788", lan),
+            "http://192.168.1.20:7788"
+        );
+        assert_eq!(default_public_url("nas.local:7788", lan), "http://nas.local:7788");
+        // No route found: unchanged, and the network check in Settings warns
+        assert_eq!(default_public_url("0.0.0.0:7788", None), "http://0.0.0.0:7788");
     }
 }

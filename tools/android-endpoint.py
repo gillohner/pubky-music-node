@@ -211,7 +211,6 @@ enabled = false
 
 def run(node):
     until("the node", lambda: api("GET", "/v1/info"))
-    api("POST", "/v1/library/scan", {})
 
     def tracks():
         t = api("GET", "/v1/library/tracks")
