@@ -280,7 +280,7 @@
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
   const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
-  const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm">Post</button></form>`;
+  const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm" disabled>Post</button></form>`;
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
     const show = async () => {
@@ -292,6 +292,8 @@
       let t; try { t = await api('GET', `/comments?post=${encodeURIComponent(post)}`); } catch (e) { toast(e.message, 'error'); return; }
       $('.comment-sub', li).innerHTML = t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : '<p class="muted small">No replies yet.</p>';
     };
+    // Post wakes up once there is something to post
+    sec.addEventListener('input', (e) => { const f = e.target.closest('form.comment-form'); if (f) f.querySelector('button').disabled = !f.elements.content.value.trim(); });
     sec.addEventListener('submit', async (e) => {
       const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
       const content = f.elements.content.value.trim(); if (!content) return;
