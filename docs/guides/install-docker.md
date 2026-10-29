@@ -5,10 +5,7 @@ minutes. You need Docker with Docker Compose, and to know where your music folde
 
 The image is `ghcr.io/gillohner/pubky-music-node`, for amd64 (most NAS and PCs) and arm64
 (Raspberry Pi 4 and 5 with a 64-bit system). Use the `edge` tag, built from the newest code;
-`latest` is the last numbered release. Version 0.1.0 makes no token of its own: with that
-version, an empty `PM_TOKEN` leaves the node without a password, so set one. It also needs
-`PM_PUBLIC_URL: "http://<this machine's address>:7788"`, or speakers get an address they can't
-fetch from.
+`latest` is the last numbered release.
 
 ## 1. Write the compose file
 

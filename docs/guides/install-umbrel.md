@@ -24,27 +24,10 @@ Install this app or Pubky's own "Pubky Homeserver" app, not both: both use port 
 The same address (`http://umbrel.local:7788` or the box's IP with `:7788`) and token work in the
 Pubky Music app and in Subsonic apps (user `pubky`).
 
-## Settings names in version 0.1.0
-
-The guides use the Settings names of the current version. The Umbrel app may still run 0.1.0,
-where some tabs have other names:
-
-| In the guides | In 0.1.0 |
-| :-- | :-- |
-| Library folders | Library |
-| Zones and outputs | Playback |
-| My accounts | Accounts |
-| Domain and tunnel | Remote access |
-| Display | Appearance |
-| About and updates | About this node |
-
-**Settings › About** shows which version runs.
-
 ## Where the music comes from
 
 - **Umbrel's shared storage** (the Files app, downloads from other Umbrel apps) is visible to the
-  node, read-only, as `/music`, and the node reads it by itself when it starts (in version 0.1.0:
-  in **Settings › Library**, type `/music` and press **Add folder**). New files are picked up
+  node, read-only, as `/music`, and the node reads it by itself when it starts. New files are picked up
   about 15 seconds after they land.
 - **Add music**, a button on the Albums and Tracks pages, uploads files from your browser, or
   copies a folder, into your homeserver's private storage. The node plays them from there without
@@ -55,9 +38,6 @@ where some tabs have other names:
 The app runs on the host network, so speakers on your home network show up by themselves, and the
 node gives them the Umbrel box's address on your network to fetch the music from. A USB DAC
 plugged into the Umbrel box shows up as a speaker too. See [Speakers](speakers.md).
-
-In version 0.1.0 speakers show up but stay silent: that version gives them an address they can't
-reach (`0.0.0.0`). Later versions of the app use the box's own address.
 
 ## Updates
 
