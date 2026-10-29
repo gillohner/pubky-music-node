@@ -19,6 +19,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const SAMPLE_RATE: u32 = 44_100;
+/// The Curve25519 public key sent in `auth-setup`: a fixed one, since the receiver checks nothing.
+const AUTH_SETUP_KEY: [u8; 32] = [
+    0x59, 0x02, 0xed, 0xe9, 0x0d, 0x4e, 0xf2, 0xbd, 0x4c, 0xb6, 0x8a, 0x63, 0x30, 0x03, 0x82, 0x07, 0xa9,
+    0x4d, 0xbd, 0x50, 0xd8, 0xaa, 0x46, 0x5b, 0x5d, 0x8c, 0x01, 0x2a, 0x0c, 0x7e, 0x1d, 0x4e,
+];
 /// The receiver's playout delay, in frames (two seconds, the AirPlay 1 default).
 pub const LATENCY_FRAMES: u32 = 88_200;
 /// Packets kept for resend requests (about four seconds).
@@ -50,7 +55,13 @@ struct Rtsp {
     url: String,
     session: Option<String>,
     instance: String,
+    /// When the last request went out: receivers close an RTSP connection that stays quiet.
+    last: std::time::Instant,
 }
+
+/// An OPTIONS this often while playing keeps the RTSP connection open (receivers such as a
+/// Linn's close one that is quiet for about a minute).
+const KEEP_ALIVE: Duration = Duration::from_secs(25);
 
 struct Reply {
     status: u16,
@@ -73,8 +84,22 @@ impl Rtsp {
         extra: &[(&str, String)],
         body: Option<(&str, &[u8])>,
     ) -> Result<Reply, AirPlayError> {
+        self.request_to(method, None, extra, body)
+    }
+
+    /// A request to `uri` (default: the session's URL, `*` for OPTIONS).
+    fn request_to(
+        &mut self,
+        method: &str,
+        uri: Option<&str>,
+        extra: &[(&str, String)],
+        body: Option<(&str, &[u8])>,
+    ) -> Result<Reply, AirPlayError> {
         self.cseq += 1;
-        let uri = if method == "OPTIONS" {
+        self.last = std::time::Instant::now();
+        let uri = if let Some(u) = uri {
+            u.to_string()
+        } else if method == "OPTIONS" {
             "*".to_string()
         } else {
             self.url.clone()
@@ -93,12 +118,36 @@ impl Rtsp {
             req.push_str(&format!("Content-Type: {ct}\r\nContent-Length: {}\r\n", b.len()));
         }
         req.push_str("\r\n");
-        self.conn.write_all(req.as_bytes())?;
-        if let Some((_, b)) = body {
-            self.conn.write_all(b)?;
+        let sent = self.conn.write_all(req.as_bytes()).and_then(|()| match body {
+            Some((_, b)) => self.conn.write_all(b),
+            None => Ok(()),
+        });
+        if let Err(e) = sent {
+            return Err(match e.kind() {
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => {
+                    AirPlayError::Closed(format!("{method}: {e}"))
+                }
+                _ => e.into(),
+            });
         }
         let mut status_line = String::new();
-        self.reader.read_line(&mut status_line)?;
+        let read = self.reader.read_line(&mut status_line);
+        // No answer at all: the receiver hung up (a reset reads as an error, a close as nothing)
+        match read {
+            Ok(0) => return Err(AirPlayError::Closed(format!("no answer to {method}"))),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Err(AirPlayError::Closed(format!("{method}: {e}")))
+            }
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
+        }
         let status = status_line
             .split_whitespace()
             .nth(1)
@@ -189,8 +238,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// Connect to `addr`, announce, set up and start recording.
-    pub fn start(addr: SocketAddr) -> Result<Self, AirPlayError> {
+    /// Connect to `addr`, announce, set up and start recording. `auth_setup`: send
+    /// `POST /auth-setup` first ([`crate::Device::needs_auth_setup`]).
+    pub fn start(addr: SocketAddr, auth_setup: bool) -> Result<Self, AirPlayError> {
         let conn = TcpStream::connect_timeout(&addr, Duration::from_secs(4))?;
         conn.set_read_timeout(Some(Duration::from_secs(8)))?;
         conn.set_nodelay(true)?;
@@ -208,6 +258,7 @@ impl Session {
             url: format!("rtsp://{host}/{sid}"),
             session: None,
             instance,
+            last: std::time::Instant::now(),
         };
         let bind = |ip: IpAddr| UdpSocket::bind(SocketAddr::new(ip, 0));
         let audio = bind(local)?;
@@ -219,7 +270,30 @@ impl Session {
             "v=0\r\no=iTunes {sid} 0 IN {ip_kind} {host}\r\ns=iTunes\r\nc=IN {ip_kind} {}\r\nt=0 0\r\nm=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\na=fmtp:96 {FRAMES_PER_PACKET} 0 16 40 10 14 2 255 0 0 {SAMPLE_RATE}\r\n",
             addr.ip()
         );
-        rtsp.request("ANNOUNCE", &[], Some(("application/sdp", sdp.as_bytes())))?;
+        if auth_setup {
+            // 0x01 (no encryption) and a Curve25519 public key; the receiver's answer (its key and
+            // MFi signature) is read and not checked
+            let mut body = vec![0x01u8];
+            body.extend_from_slice(&AUTH_SETUP_KEY);
+            if let Err(e) = rtsp.request_to(
+                "POST",
+                Some("/auth-setup"),
+                &[],
+                Some(("application/octet-stream", &body)),
+            ) {
+                tracing::debug!("AirPlay auth-setup: {e}");
+            }
+        }
+        match rtsp.request("ANNOUNCE", &[], Some(("application/sdp", sdp.as_bytes()))) {
+            Err(AirPlayError::Refused(_, 403)) => return Err(AirPlayError::Unsupported(
+                "this AirPlay speaker refused the stream (403): it wants AirPlay 2 pairing, which the node \
+                     does not do yet. Play to it over its other protocol (BluOS, UPnP) if it has one"
+                    .into(),
+            )),
+            r => {
+                r?;
+            }
+        }
         let reply = rtsp.request(
             "SETUP",
             &[(
@@ -277,6 +351,9 @@ impl Session {
 
     /// Queue interleaved stereo samples; full packets go out at once. Returns frames sent.
     pub fn push(&mut self, samples: &[i16]) -> Result<usize, AirPlayError> {
+        if self.rtsp.last.elapsed() >= KEEP_ALIVE {
+            self.rtsp.request("OPTIONS", &[], None)?;
+        }
         self.pending.extend_from_slice(samples);
         let mut sent = 0;
         while self.pending.len() >= FRAMES_PER_PACKET * 2 {
@@ -436,6 +513,84 @@ fn spawn_resend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A receiver that says nothing more than RTSP needs: 403 on ANNOUNCE unless auth-setup came
+    /// first (an AirPlay 2 speaker), and it hangs up on FLUSH (a Linn after a pause).
+    fn fake_receiver(log: Arc<Mutex<Vec<String>>>) -> SocketAddr {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(conn) = conn else { break };
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    let mut r = BufReader::new(conn.try_clone().unwrap());
+                    let mut w = conn;
+                    let mut authed = false;
+                    loop {
+                        let mut first = String::new();
+                        if r.read_line(&mut first).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        let (mut len, mut cseq) = (0usize, String::new());
+                        loop {
+                            let mut h = String::new();
+                            r.read_line(&mut h).unwrap();
+                            let h = h.trim_end().to_string();
+                            if h.is_empty() {
+                                break;
+                            }
+                            if let Some(v) = h.strip_prefix("Content-Length: ") {
+                                len = v.parse().unwrap();
+                            }
+                            if let Some(v) = h.strip_prefix("CSeq: ") {
+                                cseq = v.to_string();
+                            }
+                        }
+                        let mut body = vec![0u8; len];
+                        r.read_exact(&mut body).unwrap();
+                        let method = first.split_whitespace().next().unwrap_or("").to_string();
+                        let target = first.split_whitespace().nth(1).unwrap_or("").to_string();
+                        log.lock().unwrap().push(format!("{method} {target}"));
+                        let (status, extra) = match method.as_str() {
+                            "POST" if target == "/auth-setup" => {
+                                authed = body.len() == 33 && body[0] == 1;
+                                ("200 OK", String::new())
+                            }
+                            "ANNOUNCE" if !authed => ("403 Forbidden", String::new()),
+                            "SETUP" => (
+                                "200 OK",
+                                "Transport: RTP/AVP/UDP;unicast;mode=record;server_port=6000;control_port=6001;timing_port=6002\r\nSession: 1\r\n".to_string(),
+                            ),
+                            "FLUSH" => return, // hangs up
+                            _ => ("200 OK", String::new()),
+                        };
+                        write!(w, "RTSP/1.0 {status}\r\nCSeq: {cseq}\r\n{extra}\r\n").unwrap();
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn an_airplay_2_speaker_takes_the_stream_after_auth_setup_and_a_hang_up_is_said_plainly() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let addr = fake_receiver(log.clone());
+        // Without auth-setup: the zone's error says what is missing
+        let e = Session::start(addr, false).err().expect("refused");
+        assert!(e.to_string().contains("AirPlay 2 pairing"), "{e}");
+        // With it: the session starts
+        let mut s = Session::start(addr, true).expect("auth-setup, then ANNOUNCE");
+        let calls = log.lock().unwrap().clone();
+        let at = calls
+            .iter()
+            .position(|c| c == "POST /auth-setup")
+            .expect("auth-setup sent");
+        assert!(calls[at + 1].starts_with("ANNOUNCE"), "{calls:?}");
+        // The receiver hangs up on FLUSH: a plain "closed", not a protocol error
+        assert!(matches!(s.flush(), Err(AirPlayError::Closed(_))));
+    }
 
     #[test]
     fn transport_and_dmap() {
