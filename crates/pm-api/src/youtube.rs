@@ -107,6 +107,111 @@ fn iso_duration_ms(d: &str) -> Option<u64> {
     Some(total * 1000)
 }
 
+// ---- without a key: yt-dlp (TASK-service-apps-builtin.md) ----
+
+/// yt-dlp to search with, or why there is none. yt-dlp is the unofficial way the owner switches
+/// on (Sources › YouTube, warned), so searching through it waits for that too.
+fn ytdlp_bin(s: &NodeState) -> Result<std::path::PathBuf, ApiError> {
+    crate::ytdlp::binary()
+        .filter(|_| crate::ytdlp::zones_on(s))
+        .map(|(b, _)| b)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::PRECONDITION_FAILED,
+                "YouTube search without a key uses yt-dlp: switch it on under Sources › YouTube (unofficial), or add your own YouTube Data API key there (Advanced)",
+            )
+        })
+}
+
+fn ytdlp_err(e: String) -> ApiError {
+    ApiError::new(StatusCode::BAD_GATEWAY, e)
+}
+
+/// A yt-dlp entry's channel, "Artist - Topic" read as the artist.
+fn ytdlp_channel(v: &Value) -> Option<String> {
+    v["channel"]
+        .as_str()
+        .or(v["uploader"].as_str())
+        .map(|c| c.trim_end_matches(" - Topic").to_string())
+        .filter(|c| !c.is_empty())
+}
+
+fn ytdlp_thumb(v: &Value, id: &str) -> Option<String> {
+    v["thumbnail"]
+        .as_str()
+        .or_else(|| v["thumbnails"].as_array()?.last()?["url"].as_str())
+        .filter(|u| u.starts_with("https://"))
+        .map(str::to_string)
+        .or_else(|| Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")))
+}
+
+fn ytdlp_duration_ms(v: &Value) -> Option<u64> {
+    v["duration"]
+        .as_f64()
+        .filter(|d| *d > 0.0)
+        .map(|d| (d * 1000.0) as u64)
+}
+
+/// Search without a key: YouTube's own search through yt-dlp (no daily quota; every video, not
+/// only the Music category).
+async fn ytdlp_search(s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError> {
+    let bin = ytdlp_bin(s)?;
+    let entries = crate::ytdlp::search(&bin, term, limit).await.map_err(ytdlp_err)?;
+    Ok(entries
+        .iter()
+        .filter_map(|e| {
+            let id = valid_video(e["id"].as_str()?).ok()?;
+            Some(SourceHit {
+                id: format!("video:{id}"),
+                title: e["title"].as_str()?.to_string(),
+                creator: ytdlp_channel(e),
+                year: None,
+                downloads: None,
+                image: ytdlp_thumb(e, id),
+                kind: "track".into(),
+                duration_ms: ytdlp_duration_ms(e),
+                library_artist_id: None,
+                isrc: None,
+                upc: None,
+                library_track_id: None,
+                library_album_id: None,
+                uri: Some(video_uri(id)),
+                url: watch_url(id),
+            })
+        })
+        .collect())
+}
+
+/// A video's page without a key, from yt-dlp.
+async fn ytdlp_item(s: &NodeState, vid: &str) -> Result<SourceItem, ApiError> {
+    let bin = ytdlp_bin(s)?;
+    let v = crate::ytdlp::video(&bin, vid).await.map_err(ytdlp_err)?;
+    let title = v["title"]
+        .as_str()
+        .ok_or_else(|| ApiError::not_found("YouTube has no such video"))?
+        .to_string();
+    Ok(SourceItem {
+        source: SOURCE_ID.into(),
+        id: format!("video:{vid}"),
+        title: title.clone(),
+        creator: ytdlp_channel(&v),
+        year: v["upload_date"].as_str().and_then(|d| d.get(..4)?.parse().ok()),
+        description: None,
+        licence: None,
+        image: ytdlp_thumb(&v, vid),
+        url: watch_url(vid),
+        tracks: vec![SourceTrack {
+            title,
+            track_no: None,
+            duration_ms: ytdlp_duration_ms(&v),
+            format: "YouTube (in This browser)".into(),
+            url: video_uri(vid),
+            artist: ytdlp_channel(&v),
+        }],
+        library_album_id: None,
+    })
+}
+
 /// "Artist - Topic" channels are YouTube Music's auto-generated artist channels.
 fn channel_artist(v: &Value) -> Option<String> {
     v["snippet"]["channelTitle"]
@@ -210,16 +315,19 @@ impl StreamingService for YouTube {
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "YouTube".into(),
-            description: "YouTube and YouTube Music play in This browser, in YouTube's own player; its ads and terms apply. Search with your own YouTube Data API key".into(),
+            description: "YouTube and YouTube Music play in This browser, in YouTube's own player; its ads and terms apply. Search works through yt-dlp, or your own YouTube Data API key".into(),
             status: format!(
                 "browser{}{}",
-                if api_key(s).is_some() { " + search" } else { "" },
+                if api_key(s).is_some() || crate::ytdlp::zones_on(s) { " + search" } else { "" },
                 if crate::ytdlp::zones_on(s) { " + zones" } else { "" }
             ),
         }
     }
 
     async fn search(&self, s: &NodeState, term: &str, limit: u32) -> Result<Vec<SourceHit>, ApiError> {
+        if api_key(s).is_none() {
+            return ytdlp_search(s, term, limit).await;
+        }
         let v = get(
             s,
             "search",
@@ -268,6 +376,9 @@ impl StreamingService for YouTube {
 
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
         let vid = valid_video(id.strip_prefix("video:").unwrap_or(id))?;
+        if api_key(s).is_none() {
+            return ytdlp_item(s, vid).await;
+        }
         let v = get(
             s,
             "videos",
@@ -401,7 +512,7 @@ impl crate::signin::SignInSource for YouTubeSignIn {
             Way {
                 id: WAY_KEY.into(),
                 label: "Your YouTube Data API key".into(),
-                note: "Optional, for searching YouTube here: a free key from the Google Cloud console with the YouTube Data API v3 turned on. Song pages play YouTube links without it.".into(),
+                note: "Optional: with yt-dlp switched on (below), search works without it. Advanced: a key of your own (the Google Cloud console, YouTube Data API v3) searches YouTube's Music category, about 100 searches a day. Song pages play YouTube links either way.".into(),
                 action: "setup".into(),
                 recommended: true,
                 available: true,

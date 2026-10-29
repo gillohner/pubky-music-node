@@ -370,8 +370,9 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             status: Some("GET /v1/sources/youtube/key"),
             get_one: Some("https://console.cloud.google.com/apis/library/youtube.googleapis.com"),
             limits: Some(
-                "Only search needs a key; playing doesn't. One key allows about 100 searches a day. \
-                 It is checked with YouTube when it is saved.",
+                "Not needed with yt-dlp switched on (Sources › YouTube): it searches too. A key of your own searches \
+                 YouTube's Music category, about 100 searches a day; it is checked with YouTube when \
+                 it is saved.",
             ),
             ..app(
                 "youtube",

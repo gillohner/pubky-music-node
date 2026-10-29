@@ -10300,7 +10300,8 @@ exec sleep 300
             .find(|x| x["id"] == "youtube")
             .unwrap()
             .clone();
-        assert_eq!(yt["status"], "browser + zones");
+        // yt-dlp on also searches without a key (TASK-service-apps-builtin.md)
+        assert_eq!(yt["status"], "browser + search + zones");
         let src = s.sources.clone();
         let it = item.clone();
         let r = tokio::task::spawn_blocking(move || src.open(&it).map(|_| ()).map_err(|e| e.to_string()))

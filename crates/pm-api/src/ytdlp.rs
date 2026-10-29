@@ -153,6 +153,69 @@ fn version_of(bin: &Path) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+// ---- search and video facts without an API key (TASK-service-apps-builtin.md) --------------------
+
+/// How long a search or a video's facts may take.
+const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Runs yt-dlp for its JSON answer (`-J`), never another app's config, killed past the timeout.
+async fn json(bin: &Path, args: &[String]) -> Result<serde_json::Value, String> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args([
+        "--ignore-config",
+        "--no-warnings",
+        "--quiet",
+        "--skip-download",
+        "-J",
+    ])
+    .args(args)
+    .stdin(std::process::Stdio::null())
+    .kill_on_drop(true);
+    let out = tokio::time::timeout(LOOKUP_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| "yt-dlp took too long".to_string())?
+        .map_err(|e| format!("yt-dlp did not start: {e}"))?;
+    if !out.status.success() {
+        return Err(
+            "yt-dlp could not read YouTube's answer; updating yt-dlp usually fixes it (Sources › YouTube)"
+                .into(),
+        );
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("yt-dlp's answer: {e}"))
+}
+
+/// YouTube's search through yt-dlp (`ytsearchN:<words>`): no API key and no daily quota. Each
+/// entry has `id`, `title`, `channel` or `uploader`, `duration` (seconds) and `thumbnails`.
+pub(crate) async fn search(bin: &Path, term: &str, limit: u32) -> Result<Vec<serde_json::Value>, String> {
+    let term = term.trim();
+    if term.is_empty() {
+        return Ok(Vec::new());
+    }
+    let v = json(
+        bin,
+        &[
+            "--flat-playlist".into(),
+            "--".into(),
+            format!("ytsearch{}:{term}", limit.clamp(1, 25)),
+        ],
+    )
+    .await?;
+    Ok(v["entries"].as_array().cloned().unwrap_or_default())
+}
+
+/// One video's facts through yt-dlp: `title`, `channel`, `upload_date`, `duration`, `thumbnail`.
+pub(crate) async fn video(bin: &Path, id: &str) -> Result<serde_json::Value, String> {
+    json(
+        bin,
+        &[
+            "--no-playlist".into(),
+            "--".into(),
+            format!("https://www.youtube.com/watch?v={id}"),
+        ],
+    )
+    .await
+}
+
 // ---- playback -------------------------------------------------------------------------------------
 
 struct CookieCopy(PathBuf);
