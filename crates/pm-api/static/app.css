@@ -974,11 +974,6 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .transport .mode-btn:hover { color: var(--fg); }
 .transport .mode-btn.on { color: var(--accent-strong); }
 /* "Find on other services": same-named candidates told apart */
-.cand .cand-img { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; flex: none; }
-.cand .cand-img.round { border-radius: 50%; }
-.cand.likely { border-color: var(--accent); }
-.cand .evidence { color: var(--ok, var(--accent-strong)); }
-.cand .evidence .ic { width: 12px; height: 12px; vertical-align: -1px; }
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
 .tag-wait { padding: 0 6px 0 2px; font-style: italic; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }

@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### Removed
+
+- **"Link another source…" and "Wrong match…"** (the item page's hand-made source links: the dialog, the menu entries, `GET /v1/item/candidates`, `POST`/`DELETE /v1/item/matches`), per the owner's decision of 2026-10-29: the node matches by the identifiers in files and services, with no hand tooling. Links made before stay in the database unused; nothing reads or writes them.
+
 - **Back up and restore the node with its own homeserver in one command.** `deploy/bundle/backup.sh` writes a folder (yours only, the newest 7 kept, `KEEP=`) with the backup file from Settings (sign-ins locked under a passphrase it makes, or `PM_BACKUP_PASSPHRASE`), a snapshot of the library, the node's data folder and tunnel settings, the homeserver's PostgreSQL dump and data (its key and the users' files), `.env`, the compose files and the network-share volumes the node mounts (`config/recreate-volumes.sh`, with the share's address and options); never the music. `deploy/bundle/restore.sh <folder>` checks the checksums and puts it all back into an empty install, then the sign-ins through the node's own restore; it refuses a bundle that already has containers or data. CI backs up the bundle, removes it with its volumes and restores it. The backup guide covers shares, a nightly cron line, updating with `PM_TAG` and going back.
 - **A backup counts every favourite.** Hearts on songs, albums and artists without a MusicBrainz id (kept on the node only) were missing from the counts a backup and its restore show ("0 favourites"); they were always restored.
 - **An older node refuses a library a newer one changed.** Going back to an earlier version after an update that changed the library's database stopped working quietly; the node now stops with "this library was opened by a newer version of Pubky Music" and the guide says how to put back the library from before the update.

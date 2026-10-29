@@ -2061,24 +2061,6 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     $('#wdurl', d).focus();
   });
-  // "Link another source…": candidates with what tells them apart and the evidence (same
-  // length, ISRC, your album); a different artist's recording is never offered as the same.
-  const linkSourceDialog = (pg, kind, id, matchRef) => new Promise((resolve) => {
-    const d = document.createElement('dialog'); d.className = 'dialog wide';
-    d.innerHTML = `<h2>Link another source</h2><p class="muted">The same ${kind} on your other services. Link the one that is; this stays on your node.</p><div id="lsbox"><p class="muted small"><span class="spin"></span> Searching your services…</p></div><div class="dialog-actions"><button class="btn ghost" data-lsclose>Close</button></div>`;
-    document.body.appendChild(d);
-    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
-    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
-    transients.push(tr); pushTransient();
-    $('[data-lsclose]', d).onclick = () => done();
-    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    const box = $('#lsbox', d);
-    api('GET', `/item/candidates?${new URLSearchParams({ uri: pg.uri || '', kind, title: pg.title || '', artist: (pg.artist && pg.artist.name) || '', ...(String(pg.id || id).startsWith('lib-') ? { item: pg.id || id } : {}) })}`).then((c) => {
-      box.innerHTML = c.length ? `<div class="list">${c.map((v, k) => `<div class="list-row cand${v.likely ? ' likely' : ''}">${v.image ? `<img class="cand-img${kind === 'artist' ? ' round' : ''}" src="${esc(imgSrc(v.image))}" alt="" data-err="remove">` : svcBadge(v.source)}<div class="grow"><div class="name">${esc(v.label)}${v.likely ? ' <span class="pill ok">likely</span>' : ''}</div><div class="sub">${[v.detail ? esc(v.detail) : '', ...(v.evidence || []).map((e) => `<span class="evidence">${icon('check')} ${esc(e)}</span>`), `<a href="${esc(webUrl(v.url))}" target="_blank" rel="noopener">open on ${esc(srcName(v.source))}</a>`].filter(Boolean).join(' · ')}</div></div><button class="btn sm ${v.likely ? 'primary' : 'ghost'}" data-same="${k}">Link</button></div>`).join('')}</div>` : '<p class="muted small">Nothing with this name on your services.</p>';
-      $$('[data-same]', box).forEach((b) => b.onclick = async () => { const v = c[Number(b.dataset.same)]; b.disabled = true; try { await api('POST', '/item/matches', { ...matchRef, version: { source: v.source, id: v.id, label: v.label, url: v.url, uri: v.uri || null }, image: v.image || null }); toast(`Linked ${srcName(v.source)}`); done(); render(); } catch (e) { toast(/understand/.test(e.message) ? "Couldn't save the link. Try again." : e.message, 'error'); b.disabled = false; } });
-    }).catch((e) => { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; });
-  });
   // An item page's own tags: on the song (every source) or only on this source's link; each
   // shows its scope and can move to the other one.
   const scopedTagRow = (songTags, linkTags, linkName, kind, others = []) => {
@@ -3959,10 +3941,7 @@
             // A file not matched yet: "Which song is this?" first, then the heart
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
-          // Corrections live in ⋯: link a source the automatic matching missed, unlink a wrong one
-          const manual = pg.also_on.filter((v) => /matched by you/.test(v.label || ''));
-          const matchRef = { ...(pg.uri && !String(pg.id || id).startsWith('lib-') ? { uri: pg.uri } : {}), ...(pg.uri && String(pg.id || id).startsWith('lib-') && kind === 'song' ? { uri: pg.uri } : {}), kind, id: pg.id || id };
-          const extra = [{ label: 'Link another source…', icon: 'plus', run: () => linkSourceDialog(pg, kind, id, matchRef) }, ...(manual.length ? [{ label: 'Wrong match…', icon: 'close', run: () => showMenu($('#imore'), [{ title: 'Unlink a source you linked' }, ...manual.map((v) => ({ label: `Unlink ${instName(v)}`, icon: 'close', run: async () => { try { await api('DELETE', '/item/matches', { ...matchRef, url: v.url }); toast(`Unlinked ${instName(v)}`); render(); } catch (er) { toast(er.message, 'error'); } } }))]) }] : [])];
+          const extra = [];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));

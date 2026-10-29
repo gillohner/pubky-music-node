@@ -336,11 +336,6 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/smart/{id}/tracks", get(smart::tracks))
         .route("/home/{section}", get(home::section))
-        .route("/item/candidates", get(item::candidates))
-        .route(
-            "/item/matches",
-            post(item::confirm_match).delete(item::unlink_match),
-        )
         .route("/item/{kind}/{id}", get(item::page))
         .route("/item/{kind}/{id}/extras", get(item::page_extras))
         .route(
@@ -6856,70 +6851,17 @@ mod tests {
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
-    /// "Same artist" on a library artist, album and song (no canonical URL): the match is kept
-    /// by kind and id and shows on the page as "also on"; a body that doesn't fit answers in
-    /// plain words (STEWARD-FIX-same-artist.md).
+    /// A body that doesn't fit answers in plain words, with the detail apart.
     #[tokio::test]
-    async fn library_items_take_matches_and_bad_bodies_answer_plainly() {
+    async fn bad_bodies_answer_plainly() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (tid, artist, album) = {
-            let lib = s.library.lock().unwrap();
-            let mut tr = untagged_track(dir.path().join("01.flac"), "Trip to Serbia", "Sefa");
-            tr.album = Some(pm_model::Album {
-                id: None,
-                title: "Trip To Bangladesh".into(),
-                album_artist: Some("Sefa".into()),
-                release_mbid: None,
-                release_group_mbid: None,
-                year: Some(2024),
-                upc: None,
-                total_discs: None,
-            });
-            let tid = lib.upsert_track(&tr).unwrap();
-            let t = lib.get_track(tid).unwrap().unwrap();
-            (tid.0, t.artists[0].id.unwrap(), t.album.unwrap().id.unwrap())
-        };
         let app = router(s.clone());
-        for (kind, id, url) in [
-            ("artist", artist, "https://www.deezer.com/artist/123"),
-            ("album", album, "https://www.deezer.com/album/456"),
-            ("song", tid, "https://www.deezer.com/track/789"),
-        ] {
-            let (st, v) = call(
-                &app,
-                "POST",
-                "/v1/item/matches",
-                Some(serde_json::json!({"kind": kind, "id": format!("lib-{id}"), "image": "https://cdn.example/p.jpg",
-                    "version": {"source": "deezer", "id": "x", "label": "Deezer · Sefa", "url": url}})),
-            )
-            .await;
-            assert_eq!(st, StatusCode::OK, "{kind}: {v}");
-            let (st, pg) = call(&app, "GET", &format!("/v1/item/{kind}/lib-{id}"), None).await;
-            assert_eq!(st, StatusCode::OK, "{pg}");
-            assert!(
-                pg["also_on"].as_array().unwrap().iter().any(|v| v["url"] == url),
-                "{kind}: {pg}"
-            );
-        }
-        // The artist page now has a picture (the match's)
-        let (_, pg) = call(&app, "GET", &format!("/v1/item/artist/lib-{artist}"), None).await;
-        assert_eq!(pg["image"], format!("/v1/library/artists/{artist}/image"));
-        // The owner's case: no uri, no kind; and a body that is not a match at all
         let (st, e) = call(
             &app,
             "POST",
-            "/v1/item/matches",
-            Some(serde_json::json!({"version": {"source": "deezer", "id": "x", "label": "x", "url": "u"}})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
-        assert!(!e["error"].as_str().unwrap().contains("deserialize"), "{e}");
-        let (st, e) = call(
-            &app,
-            "POST",
-            "/v1/item/matches",
-            Some(serde_json::json!({"uri": "x"})),
+            "/v1/playlists",
+            Some(serde_json::json!({"uris": "not a list"})),
         )
         .await;
         assert!(st.is_client_error(), "{st}");
@@ -6927,7 +6869,7 @@ mod tests {
             e["error"], "The node didn't understand that request. Reload the page and try again.",
             "{e}"
         );
-        assert!(e["detail"].as_str().unwrap().contains("version"), "{e}");
+        assert!(e["detail"].as_str().is_some_and(|d| !d.is_empty()), "{e}");
     }
 
     /// Library tags are Pubky tags (STEWARD-UX-INSTANCES item 6): an unmatched file takes a tag
