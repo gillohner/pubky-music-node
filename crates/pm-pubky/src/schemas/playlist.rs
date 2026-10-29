@@ -14,10 +14,13 @@ pub enum ItemKind {
     Artist,
     /// A public Pubky post (a review, a note, someone's collection).
     Post,
+    /// A web page (an article, a video, a shop): shown as its card, never played.
+    Link,
 }
 
 impl ItemKind {
-    /// The kind of an item URI, `None` when it is neither a music URL nor a public Pubky post.
+    /// The kind of an item URI, `None` when it is neither a music URL, a public Pubky post nor a
+    /// web link.
     pub fn of(uri: &str) -> Option<Self> {
         if let Ok(m) = MusicUri::parse(uri) {
             return Some(match m {
@@ -31,8 +34,18 @@ impl ItemKind {
                 },
             });
         }
-        post_uri(uri).map(|_| ItemKind::Post)
+        if post_uri(uri).is_some() {
+            return Some(ItemKind::Post);
+        }
+        web_link(uri).map(|_| ItemKind::Link)
     }
+}
+
+/// A web page as a collection item, in its canonical form: an `http(s)` URL that is no music
+/// URL (those are songs, albums and artists). `None` for any other scheme.
+pub fn web_link(raw: &str) -> Option<String> {
+    let u = pubky_social_specs::canonicalize_web_uri(raw.trim()).ok()?;
+    (u.starts_with("https://") || u.starts_with("http://")).then_some(u)
 }
 
 /// A public Pubky post as a collection item, in its canonical `pubky://` form: any social v1
@@ -56,11 +69,15 @@ pub fn post_uri(raw: &str) -> Option<String> {
     is_post.then_some(uri)
 }
 
-/// An item URI in its stored form: the canonical music URL, or the canonical post URI.
+/// An item URI in its stored form: the canonical music URL, the canonical post URI, or the
+/// canonical web link.
 pub fn item_uri(raw: &str) -> Result<String, SchemaError> {
     match canonical_uri(raw) {
         Ok(u) => Ok(u),
-        Err(e) => post_uri(raw).filter(|u| chars(u) <= limits::URI_MAX).ok_or(e),
+        Err(e) => post_uri(raw)
+            .or_else(|| web_link(raw))
+            .filter(|u| chars(u) <= limits::URI_MAX)
+            .ok_or(e),
     }
 }
 
@@ -465,11 +482,27 @@ mod tests {
             format!("pubky://{KEY}/pub/social/v1/profile.json"),
             format!("pubky://{KEY}/pub/social/v1/tags/ES26HNPH6M0CYFFW65PCRC107W.json"),
             format!("pubky://{KEY}/pub/music/v1/posts/nope"),
-            "https://example.com/a".to_string(),
+            "ftp://example.com/a".to_string(),
+            "not a link".to_string(),
         ] {
             assert_eq!(kind(&bad), None, "{bad}");
             assert!(item_uri(&bad).is_err(), "{bad}");
         }
+        // Web pages are links (TASK-pinakes-social-ux.md B3), in their canonical form
+        for (raw, want) in [
+            ("https://example.com/a", "https://example.com/a"),
+            (" https://example.com/a ", "https://example.com/a"),
+            (
+                "http://blog.example.org/post?id=3",
+                "http://blog.example.org/post?id=3",
+            ),
+        ] {
+            let got = item_uri(raw).unwrap();
+            assert_eq!(kind(&got), Some(ItemKind::Link), "{raw}");
+            assert_eq!(got, want, "{raw}");
+        }
+        // A music URL stays music, never a link
+        assert_eq!(kind("https://tidal.com/track/50850120"), Some(ItemKind::Track));
     }
 
     #[test]

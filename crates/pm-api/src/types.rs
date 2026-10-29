@@ -596,7 +596,7 @@ fn list_layout() -> String {
 pub struct CollectionEntry {
     pub index: usize,
     pub uri: String,
-    /// `track`, `album`, `artist` or `post`.
+    /// `track`, `album`, `artist`, `post` or `link` (a web page: `GET /v1/cards` has its card).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<pm_pubky::ItemKind>,
     /// Microseconds.

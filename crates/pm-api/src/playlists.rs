@@ -141,7 +141,8 @@ pub(crate) fn entries(lib: &Library, p: &Playlist) -> Vec<CollectionEntry> {
                 Some(ItemKind::Post) => {
                     e.post = crate::shared::parse_post(&it.uri).map(|(user, id)| PostRef { user, id })
                 }
-                None => {}
+                // A web page: the client shows its card (`GET /v1/cards`)
+                Some(ItemKind::Link) | None => {}
             }
             e
         })
@@ -270,12 +271,14 @@ fn local_tracks(lib: &Library, id: &str) -> Vec<Track> {
         .collect()
 }
 
-/// Items from URIs: music URLs, or links to public Pubky posts.
+/// Items from URIs: music URLs, links to public Pubky posts, or web links.
 fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
     uris.iter()
         .map(|u| {
             let uri = pm_pubky::schemas::item_uri(u).map_err(|e| {
-                ApiError::bad_request(format!("{u}: not a music link or a public Pubky post ({e})"))
+                ApiError::bad_request(format!(
+                    "{u}: not a music link, a public Pubky post or a web link ({e})"
+                ))
             })?;
             Ok(PlaylistItem::of(uri))
         })

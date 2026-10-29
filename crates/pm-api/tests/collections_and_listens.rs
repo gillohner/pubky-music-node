@@ -155,12 +155,12 @@ async fn a_collection_mixes_items_has_a_layout_and_a_switch() {
     let artist = "https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56";
     let post = format!("pubky://{KEY}/pub/social/v1/posts/0033SCZXVEPNG");
 
-    // Refused: a link that is neither music nor a public post, a layout nobody draws
+    // Refused: a link that is neither music, a public post nor a web page, a layout nobody draws
     let (st, _) = call(
         &app,
         "POST",
         "/v1/collections",
-        Some(serde_json::json!({"name": "x", "uris": ["https://example.com/a"]})),
+        Some(serde_json::json!({"name": "x", "uris": ["ftp://example.com/a"]})),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
@@ -179,7 +179,7 @@ async fn a_collection_mixes_items_has_a_layout_and_a_switch() {
         "/v1/collections",
         Some(serde_json::json!({
             "name": "Mixed",
-            "uris": [song, album, artist, format!("pubky{KEY}/pub/social/v1/posts/0033SCZXVEPNG")],
+            "uris": [song, album, artist, format!("pubky{KEY}/pub/social/v1/posts/0033SCZXVEPNG"), "https://example.com/liner-notes"],
             "layout": "Grid",
             "public": true
         })),
@@ -196,7 +196,8 @@ async fn a_collection_mixes_items_has_a_layout_and_a_switch() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["track", "album", "artist", "post"]);
+    assert_eq!(kinds, ["track", "album", "artist", "post", "link"]);
+    assert_eq!(c["entries"][4]["uri"], "https://example.com/liner-notes");
     assert_eq!(c["entries"][0]["track"]["id"], track_id);
     assert_eq!(c["entries"][1]["album"]["release_mbid"], RELEASE);
     assert_eq!(c["entries"][3]["uri"], post, "stored in the canonical form");
@@ -230,7 +231,7 @@ async fn a_collection_mixes_items_has_a_layout_and_a_switch() {
     .await;
     assert_eq!(c3["summary"]["visibility"], "private");
 
-    // Playing: the song and the album's songs queue; an artist and a post don't play
+    // Playing: the song and the album's songs queue; an artist, a post and a web page don't play
     let (st, played) = call(
         &app,
         "POST",
@@ -240,7 +241,10 @@ async fn a_collection_mixes_items_has_a_layout_and_a_switch() {
     .await;
     assert_eq!(st, StatusCode::OK, "{played}");
     assert_eq!(played["queued"], 2);
-    assert_eq!(played["missing"], serde_json::json!([artist, post]));
+    assert_eq!(
+        played["missing"],
+        serde_json::json!([artist, post, "https://example.com/liner-notes"])
+    );
 
     let (_, songs) = call(
         &app,
