@@ -905,6 +905,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 /* Settings › Service apps: the admin's own app, under Advanced */
 .app-adv { margin-top: 6px; max-width: 64ch; }
 .app-adv > .toolbar { margin-top: 6px; }
+.app-redirects { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 4px; }
+.app-redirects code { overflow-wrap: anywhere; }
 .reading .spin { display: inline-block; vertical-align: -1px; margin-right: 6px; }
 /* Sources: the Settings layout, one tab per service with its on/off switch (STEWARD-UX-SOURCES.md) */
 .src-tabrow { display: flex; align-items: center; gap: 6px; min-width: 0; }
