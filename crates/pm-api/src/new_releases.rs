@@ -179,16 +179,26 @@ async fn fetch_groups(http: &reqwest::Client, base: &str, artist: Mbid) -> Resul
     let mut out = Vec::new();
     let mut offset = 0usize;
     for _ in 0..3 {
+        // The ws/2 API: without it this asked MusicBrainz's website and never had an answer
         let url = format!(
-            "{}/release-group?artist={artist}&limit=100&offset={offset}&fmt=json",
+            "{}/ws/2/release-group?artist={artist}&limit=100&offset={offset}&fmt=json",
             base.trim_end_matches('/')
         );
-        let v: serde_json::Value = http
+        let mut turn = pm_library::musicbrainz::take_turn(&url, std::time::Duration::from_secs(1)).await;
+        let resp = http
             .get(&url)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if matches!(resp.status().as_u16(), 503 | 429) {
+            turn.back_off(pm_library::musicbrainz::retry_after(
+                resp.headers(),
+                std::time::Duration::from_secs(2),
+            ));
+        }
+        drop(turn);
+        let v: serde_json::Value = resp
             .error_for_status()
             .map_err(|e| e.to_string())?
             .json()

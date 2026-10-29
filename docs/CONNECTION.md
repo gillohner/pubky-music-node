@@ -99,7 +99,10 @@ Today a node is reached outside the LAN over HTTPS (the address it publishes on 
   each connection one iroh stream.
   - The webview shows the node through it. The web UI, the token, the event socket and its resync work
     unchanged, and every request still needs the token.
-  - The built-in player is not registered while remote, because the node cannot reach it.
+  - The built-in player is not registered while remote, because the node cannot reach it. At home
+    the app registers it with the node together with a key it made at start; the player answers
+    only a node that shows that key, and listens on loopback only when the node is on the same
+    computer (`docs/deploy.md`).
 - **Away and back.** The app picks the way at connect time: a laptop that leaves home with the app
   open shows "Node offline" until the app reconnects. Switching paths while open is a later step.
 

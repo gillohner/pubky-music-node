@@ -2,7 +2,7 @@ manifestVersion: 1
 id: pubky-music-node
 category: media
 name: Pubky Music Node
-version: "0.1.0"
+version: "0.2.0"
 tagline: Bit-perfect music server and zones, built on Pubky
 icon: https://raw.githubusercontent.com/gillohner/pubky-music-node/main/deploy/umbrel/pubky-music-node/icon.svg
 description: >-
@@ -16,8 +16,9 @@ description: >-
   Internet radio with live titles. Playlists, favourites, reviews and tags live
   on your Pubky homeserver as v1 objects; discovery comes from Pinakes.
 
-  Open the app for the built-in web controller (enter the API token once, then
-  add a library folder and the upstream contact from Settings), or point the
+  Open the app for the built-in web controller (enter the app password Umbrel
+  shows once; your Umbrel storage is already a library folder; set the upstream
+  contact in Settings), or point the
   native Pubky Music app or any OpenSubsonic client (Symfonium, Feishin,
   Amperfy) at this node's address with that token.
 developer: Pubky Music
@@ -33,14 +34,11 @@ defaultPassword: ""
 # APP_PASSWORD (shown by umbrelOS): the token for the web UI, the apps and Subsonic clients.
 deterministicPassword: true
 releaseNotes: >-
-  v0.1.0, the first versioned release. New since the last build: a bundled
-  Pubky homeserver on the box with a Cloudflare tunnel from Settings › Remote
-  access; people on the node, each signing in with their own Pubky Ring key;
-  party mode with a guest link; crossfade per zone; Library › Add music
-  (uploads and copies to your homeserver); downloads for phones (the originals;
-  smaller copies need ffmpeg, which the next image brings);
-  more ways to sign in to TIDAL, including imports from other apps on the box;
-  and better song matches. Earlier: zones, queue tools, lyrics, backups,
-  Subsonic jukebox control and an installable web UI.
+  v0.2.0. Your Umbrel storage is read at start and listed in Settings › Library folders, with
+  no folder to add. Sonos and UPnP/Cast speakers get the box's network address without any
+  setting. Settings now has four groups (You, This device, This node, This homeserver), matching
+  the guides. Group Sonos, HEOS and BluOS speakers from Settings. Get started shows only what is
+  left and can be hidden. Security fixes from the October review; offline downloads in the
+  phone and desktop app; the player shows what it is streaming.
 submitter: Pubky Music
 submission: https://github.com/gillohner/pubky-music-node

@@ -16,6 +16,10 @@ pub enum LibraryError {
     Probe { path: PathBuf, reason: String },
     #[error("track {0} not found")]
     TrackNotFound(i64),
+    #[error(
+        "this library was opened by a newer version of Pubky Music (library schema {found}, this version knows {known}): update the node, or restore a backup made before the update"
+    )]
+    NewerSchema { found: i64, known: i64 },
     #[error("invalid stored value in column {column}: {value}")]
     Corrupt { column: &'static str, value: String },
     #[cfg(feature = "musicbrainz")]
@@ -27,3 +31,15 @@ pub enum LibraryError {
 }
 
 pub type Result<T> = std::result::Result<T, LibraryError>;
+
+impl LibraryError {
+    /// Another connection held the database too long ("database is locked"): worth trying
+    /// again, unlike a broken file.
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            LibraryError::Db(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        )
+    }
+}

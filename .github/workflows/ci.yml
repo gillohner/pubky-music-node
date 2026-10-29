@@ -64,6 +64,16 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+  # The node's download archive carries README.md, docs/deploy.md and docs/guides/ at their repo
+  # paths, so the links between them work unpacked; the TrueNAS file mounts as many paths as it
+  # says to edit. Runs on docs-only changes too.
+  deploy-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: tools/release/node-docs.sh /tmp/archive && python3 -I tools/release/node-docs-check.py /tmp/archive
+      - run: python3 -I tools/truenas-check.py deploy/truenas/docker-compose.yaml
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -264,6 +274,25 @@ jobs:
           # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
           cargo test -p pm-pubky --test vault_homeserver
           cargo test -p pm-api --test vault_api
+      - name: backup.sh, then restore.sh into a fresh install (as on a new disk)
+        working-directory: deploy/bundle
+        run: |
+          python3 -I ../../tools/bundle-backup-check.py seed .
+          python3 -I ../../tools/bundle-backup-check.py snap . $RUNNER_TEMP/before.json
+          KEEP=1 ./backup.sh $RUNNER_TEMP/backups
+          sleep 1
+          KEEP=1 ./backup.sh $RUNNER_TEMP/backups
+          # Only the newest is kept, and every file is the user's alone
+          test "$(ls -d $RUNNER_TEMP/backups/2*/ | wc -l)" = 1
+          B=$(ls -d $RUNNER_TEMP/backups/2*/)
+          test -z "$(find $RUNNER_TEMP/backups -perm /077 | head -n 1)"
+          # It never restores over a bundle that has containers or data
+          if ./restore.sh "$B" 2> $RUNNER_TEMP/refused.log; then echo "restore.sh ran over a running bundle"; exit 1; fi
+          grep -q 'already has containers' $RUNNER_TEMP/refused.log
+          docker compose down -v && sudo rm -rf hsdata
+          ./restore.sh "$B"
+          python3 -I ../../tools/bundle-backup-check.py compare . $RUNNER_TEMP/before.json
+      - run: python3 -I tools/bundle-check.py deploy/bundle
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)
@@ -380,8 +409,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: headless smoke test of every view
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
@@ -484,8 +513,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: every visible control does something (real browser)
         timeout-minutes: 45
         run: |
@@ -527,8 +556,8 @@ jobs:
           TOML
           nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
-          curl -sf -X POST -H 'Authorization: Bearer ci-token' -H 'content-type: application/json' -d '{}' http://127.0.0.1:7788/v1/library/scan
-          sleep 5
+          # The node scans its config folders at start
+          for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: Playwright and Chromium
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
@@ -549,6 +578,9 @@ jobs:
       - name: no overlap on any screen (1440, 1024, 390 px; light and dark)
         timeout-minutes: 20
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-overlap.js ci-token http://127.0.0.1:7788
+      - name: setting a node up (Get started, config folders, grouping every kind of output, tokens)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-setup.js ci-token http://127.0.0.1:7788
       - name: first run from zero (a new node, no folders, contact or Pubky identity, until music plays)
         timeout-minutes: 10
         run: |

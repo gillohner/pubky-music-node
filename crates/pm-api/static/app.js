@@ -520,6 +520,19 @@
   // The Null output is for developers: hidden unless switched on in About this node (it stays
   // listed while it is the zone in use)
   const devOutput = (id) => /^null/.test(String(id || ''));
+  const TOKEN_GUIDE = 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused';
+  // Group outputs (POST /zones): speakers of one kind, kept in sync. Sonos, HEOS and BluOS speakers
+  // become that system's own group; outputs the node keeps in time itself (caps.groupable:
+  // squeezelite, the app's players on hw: DACs) a node group, of outputs that share a sample
+  // rate. Kinds don't mix, and other outputs (which the API would only group loosely) aren't offered.
+  const GROUP_KINDS = [['sonos', 'Sonos'], ['heos', 'HEOS (Denon, Marantz)'], ['bluos', 'BluOS (Bluesound, NAD)'], ['node', 'Squeezelite players'], ['net', 'The app\u2019s players on a DAC']];
+  const groupKind = (o) => o.group_by || (o.caps.groupable ? (/^net:/.test(o.id) ? 'net' : 'node') : null);
+  const groupSync = (picked) => {
+    if (picked.length < 2) return '';
+    const k = groupKind(picked[0]);
+    if (k === 'heos') return 'HEOS groups them itself, in sync (if HEOS doesn’t know one of them, they play loosely synced).';
+    return k === 'node' || k === 'net' ? 'In sync: the node keeps them in time sample by sample.' : `${k === 'sonos' ? 'Sonos' : 'BluOS'} groups them itself, in sync.`;
+  };
   // Who is using the page (#46): the owner, or a listener with their own Ring sign-in, who plays
   // the shared library on the zones the owner opened and has nothing of the owner's
   const isListener = () => !!(state.me && state.me.role === 'listener');
@@ -1208,7 +1221,9 @@
     $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
     const q = $('#quality');
     if (!np) {
-      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">Nothing playing</div><div class="np-sub">${esc(z ? z.name : '')}</div></div>`;
+      // A zone that stopped on an error says so here, until the next track starts (the node clears it)
+      const err = z && z.transport === 'stopped' && z.error;
+      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
       $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
       q.className = 'quality'; $('.qtext', q).textContent = '—'; q.title = 'Signal path';
       return;
@@ -2831,41 +2846,55 @@
   const focusChips = (albums) => `<div class="chips" role="tablist" aria-label="Focus">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" role="tab" aria-selected="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
 
   // ---- first run (steward next-3, item 2) ------------------------------------
-  // Home's "Get started" card: add music (suggested folders, or a path), play something, the
-  // contact Discover needs, and Pubky sign-in. It stays until done or hidden.
-  const setupHidden = () => { try { return localStorage.getItem('pm.setupHidden') === '1'; } catch { return false; } };
+  // Home's "Get started" card: only the steps that matter on this node and to this person
+  // (GET /v1/me/first-steps): add music, play something, the contact Discover needs, speakers and
+  // Pubky sign-in. It goes once every step that isn't optional is done, or when hidden: by the
+  // owner for everyone (kept on the node; Settings › Home for everyone shows it again), by a
+  // listener in their browser.
+  const setupHiddenHere = () => { try { return localStorage.getItem('pm.setupHidden') === '1'; } catch { return false; } };
   const renderSetup = async () => {
     const box = $('#h-setup'); if (!box) return;
-    const [info, ns, hist, user, bundled] = await Promise.all([
-      api('GET', '/info'), api('GET', '/node/settings').catch(() => ({ contact: '' })),
-      api('GET', '/library/history?limit=1').catch(() => ({ plays: [] })), pubkyUser(),
-      api('GET', '/homeserver/bundled').catch(() => null),
+    const owner = isOwner();
+    const [info, fs, user, bundled] = await Promise.all([
+      api('GET', '/info'), api('GET', '/me/first-steps'), owner ? pubkyUser() : null,
+      owner ? api('GET', '/homeserver/bundled').catch(() => null) : null,
     ]).catch(() => [null]);
-    const hsHere = !!(bundled && bundled.configured && bundled.reachable);
-    if (!info || state.view !== 'home' || !box.isConnected) return;
+    if (!info || !fs || state.view !== 'home' || !box.isConnected) return;
     state.info = info;
-    const has = { music: info.library.tracks > 0, played: (hist.plays || []).length > 0, contact: !!(ns.contact || '').trim(), pubky: !!user };
-    const done = Object.values(has).filter(Boolean).length;
-    state.setupShown = !(done === 4 || (has.music && setupHidden()));
+    // Hidden in this browser before the node kept it: the owner's choice moves to the node
+    if (owner && setupHiddenHere() && !fs.hidden) { try { localStorage.removeItem('pm.setupHidden'); } catch { /* no storage */ } api('PUT', '/node/settings', { first_steps_hidden: true }).catch(() => {}); fs.show = false; }
+    state.setupShown = fs.show && (owner || !setupHiddenHere());
     if (!state.setupShown) { box.innerHTML = ''; return; }
+    // A folder added from the card makes its step needless; it stays, ticked, until the page reloads
+    if (fs.steps.some((x) => x.id === 'music')) state.setupMusic = true;
+    else if (state.setupMusic && owner) fs.steps.unshift({ id: 'music', done: info.library.tracks > 0, optional: false });
+    const hsHere = !!(bundled && bundled.configured && bundled.reachable);
+    const tracks = info.library.tracks > 0;
+    const has = Object.fromEntries(fs.steps.map((x) => [x.id, x.done]));
+    const musicTodo = fs.steps.some((x) => x.id === 'music' && !x.done);
     let suggestions = [];
     if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch { state.sources = []; } }
-    if (!has.music && !info.scanning) suggestions = await api('GET', '/library/folders/suggest').catch(() => []);
+    if (musicTodo && !info.scanning) suggestions = await api('GET', '/library/folders/suggest').catch(() => []);
     if (state.view !== 'home' || !box.isConnected) return;
     const n = (x) => Number(x).toLocaleString();
-    const step = (k, no, title, sub, body = '') => `<li class="setup-step ${has[k] ? 'done' : ''}"><span class="stepmark" aria-hidden="true">${has[k] ? icon('check') : no}</span><div class="grow"><div class="name">${title}${has[k] ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${has[k] ? '' : body}</div></li>`;
     const musicBody = info.scanning
       ? `<p class="small" role="status">Reading your files… ${countOf(n(info.library.tracks), 'tracks')} so far.</p>`
       : `${suggestions.length ? `<div class="setup-suggest">${suggestions.map((f) => `<button class="btn sm" data-addfolder="${esc(f.path)}">${icon('plus')} ${esc(f.path)} <span class="muted">${f.more ? 'over ' : ''}${n(f.audio_files)} audio files</span></button>`).join('')}</div>` : ''}
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
-    box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of 4 done</span>${has.music ? '<button class="link" id="setuphide">Hide</button>' : ''}</div>${has.music ? '' : '<p class="muted small">Moving from another node? <a class="lnk" href="/settings" id="setuprestore">Restore it from a backup</a> instead.</p>'}<ol class="setup-steps">`
-      + step('music', 1, 'Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody)
-      + step('played', 2, 'Play something', has.music ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : 'Once your music is in.', has.music ? '<button class="btn sm primary" id="setupplay">' + icon('play') + ' Shuffle my music</button>' : '')
-      + step('contact', 3, 'See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>')
-      + (hsHere && !has.pubky
-        ? step('pubky', 4, 'Create your Pubky account here (optional)', 'This node has its own Pubky homeserver. Create your account on it with the Pubky Ring app: your playlists, favourites, tags and files stay on this machine. Or sign in to a homeserver you already use.', '<button class="btn sm primary" id="setupcreate">Create account here</button> <button class="btn sm" id="setupsignin">Use an existing homeserver</button>')
-        : step('pubky', 4, 'Keep your playlists on Pubky (optional)', has.pubky ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>'))
+    const text = {
+      music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
+      play: () => ['Play something', tracks ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : musicTodo ? 'Once your music is in.' : 'Search for a song, or browse your services on Sources. It plays in this browser, or on a speaker from the zone button.', tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
+      contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
+      speakers: () => ['Play on your speakers (optional)', 'No speaker found yet. Speakers and streamers on your network show up by themselves; Snapcast and MPD need a line in the node’s config.', `<button class="btn sm" id="setupspeakers">Look for speakers</button> <a class="lnk small" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md" target="_blank" rel="noopener">Which speakers work</a>`],
+      pubky: () => (hsHere && !has.pubky
+        ? ['Create your Pubky account here (optional)', 'This node has its own Pubky homeserver. Create your account on it with the Pubky Ring app: your playlists, favourites, tags and files stay on this machine. Or sign in to a homeserver you already use.', '<button class="btn sm primary" id="setupcreate">Create account here</button> <button class="btn sm" id="setupsignin">Use an existing homeserver</button>']
+        : ['Keep your playlists on Pubky (optional)', has.pubky || user ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>']),
+    };
+    const step = (x, no) => { const [title, sub, body] = text[x.id](); return `<li class="setup-step ${x.done ? 'done' : ''}" data-step="${x.id}"><span class="stepmark" aria-hidden="true">${x.done ? icon('check') : no}</span><div class="grow"><div class="name">${title}${x.done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${x.done ? '' : body}</div></li>`; };
+    const done = fs.steps.filter((x) => x.done).length;
+    box.innerHTML = `<section class="section fadein" aria-labelledby="setuph"><div class="card setup-card"><div class="section-head"><h3 id="setuph">Get started</h3><span class="muted small">${done} of ${fs.steps.length} done</span><button class="link" id="setuphide">Hide these steps</button></div>${musicTodo ? '<p class="muted small">Moving from another node? <a class="lnk" href="/settings" id="setuprestore">Restore it from a backup</a> instead.</p>' : ''}<ol class="setup-steps">`
+      + fs.steps.filter((x) => text[x.id]).map((x, i) => step(x, i + 1)).join('')
       + '</ol></div></section>';
     const again = () => setTimeout(() => { if (state.view === 'home') renderSetup(); }, 1500);
     const addFolder = async (path) => {
@@ -2874,7 +2903,7 @@
     };
     $$('[data-addfolder]', box).forEach((b) => b.onclick = () => addFolder(b.dataset.addfolder));
     const fi = $('#setupfolder'); if (fi) { $('#setupadd').onclick = () => addFolder(fi.value.trim()); fi.onkeydown = (e) => { if (e.key === 'Enter') addFolder(fi.value.trim()); }; }
-    const so = $('[data-setup-sources]', box); if (so) so.onclick = (e) => { e.preventDefault(); setView('sources'); };
+    $$('[data-setup-sources]', box).forEach((so) => so.onclick = (e) => { e.preventDefault(); setView('sources'); });
     // While the files are read the card counts them; when done, Home shows the albums once
     if (info.scanning) { state.setupScanning = true; again(); } else if (state.setupScanning) { state.setupScanning = false; render(); }
     const pb = $('#setupplay'); if (pb) pb.onclick = async () => {
@@ -2885,10 +2914,16 @@
       const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
       $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') save(); };
     }
+    const sp = $('#setupspeakers'); if (sp) sp.onclick = () => setView('settings', 'playback');
     const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); state.focusRestore = true; setView('settings', 'backup'); };
     const si = $('#setupsignin'); if (si) si.onclick = () => { state.autoResign = true; setView('settings', 'accounts'); };
     const sc = $('#setupcreate'); if (sc) sc.onclick = () => { state.autoCreate = true; setView('settings', 'accounts'); };
-    const hide = $('#setuphide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } state.setupShown = false; box.innerHTML = ''; };
+    $('#setuphide').onclick = async () => {
+      if (owner) {
+        try { await api('PUT', '/node/settings', { first_steps_hidden: true }); toast('Hidden for everyone on this node. Settings › Home for everyone shows them again.'); } catch (e) { toast(e.message, 'error'); return; }
+      } else { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } }
+      state.setupShown = false; box.innerHTML = '';
+    };
   };
 
   // ---- render --------------------------------------------------------------
@@ -4056,8 +4091,8 @@
             const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${esc(z.name)}</h3>${members}<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span></div>
-              <div class="zc-now">${it ? itemArt(it, 'sm') : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</div></div></div>
+              <div class="zc-head">${icon('zone')}<h3>${esc(z.name)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              <div class="zc-now">${it ? itemArt(it, 'sm') : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
@@ -4230,7 +4265,7 @@
           const panel = (k, html) => tabs.panel(k, html);
           const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
           const library = group('Music folders',
-            (folders.length ? folders.map(([fp, present]) => row(`<code class="path">${esc(fp)}</code>`, present ? '' : 'Not found on this computer', `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`)).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
+            (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker), read at every start. To remove it, take it out there and restart the node; then Remove here forgets its songs.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
             + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
             + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
             + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
@@ -4245,10 +4280,10 @@
           const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
           const playback = group('Play from', block('Where songs play from', 'The first source here that has a song plays it. A playlist can have its own order; a pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>')
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
-            + group('Speakers and outputs', block('', 'What this node can play to, found on your network.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
+            + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Pubky Music app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
               + block('Add a renderer by address', 'For a UPnP speaker or streamer the network scan doesn’t find: its IP address or its description URL. For a Linn: its IP address, MAC address and serial number, with spaces between.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
-              + block('Group outputs', 'Pick two or more outputs to play as one zone; the first one checked leads. They are kept in time sample by sample.', `<div class="chips" id="groupouts">${outs.filter((o) => o.caps.groupable !== false).map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>`))
+              + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other, and so do the app\u2019s players on a DAC.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           // Accounts (STEWARD-BUNDLED-HOMESERVER.md §7): saving is the node's business. One status
           // line and where the music is; saving by hand, the private-file list and (with a homeserver
@@ -4289,7 +4324,10 @@
           const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
-            + group('Access', row('Access token', 'The password apps and this page use to reach the node.', '<button class="btn ghost" id="logout">Change access token</button>'))
+            + group('Access', row('This browser', 'Changes only the token this browser uses to reach the node; the node’s token stays as it is.', '<button class="btn ghost" id="logout">Use a different token in this browser</button>')
+              + (ns.token_replaceable
+                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app, browser and Subsonic app needs the new one. People you invited keep their own sign-ins.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
+                : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker, the app password on Umbrel): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
           // You › Home: whose layout applies; edit it on Home itself
@@ -4306,7 +4344,8 @@
           const canSetDefault = !!mine && (!homeL || homeL.applies === 'yours') && !same(mine, nodeHome); // only a layout of your own; a copy of the default may be old
           const whyDefault = !mine ? 'Your Home couldn’t be read.' : canSetDefault ? 'Copies your Home’s rows and order to the node; your own stays yours.' : homeL && homeL.applies !== 'yours' ? 'You haven’t arranged your own Home yet; use Edit Home on Home first.' : 'Your Home already is the default.';
           const nodeHomeTab = group('The default Home', row('Rows on Home for everyone', `${rowsOf(nodeHome)}. What Home shows to everyone who hasn’t arranged their own.`, '')
-            + row('Make yours the default', `<span id="sethomedefault-why">${whyDefault}</span>`, `<button class="btn ghost" id="sethomedefault" aria-describedby="sethomedefault-why" ${canSetDefault ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`));
+            + row('Make yours the default', `<span id="sethomedefault-why">${whyDefault}</span>`, `<button class="btn ghost" id="sethomedefault" aria-describedby="sethomedefault-why" ${canSetDefault ? '' : 'disabled'}>${icon('home')} Make my Home the default for everyone</button>`))
+            + group('Get started', row('First steps on Home', ns.first_steps_hidden ? 'Hidden for everyone on this node.' : 'Shown on Home until its steps are done or you hide them.', `<label><input type="checkbox" id="firststeps" ${ns.first_steps_hidden ? '' : 'checked'}> Show</label>`));
           // You › Playback quality: your choice per service over the node's
           const qEntries = Object.entries((prefs && prefs.quality) || {});
           const qualityTab = group('Per service', qEntries.length
@@ -4341,6 +4380,7 @@
           };
           const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
+          const fst = $('#firststeps'); if (fst) fst.onchange = async () => { try { await api('PUT', '/node/settings', { first_steps_hidden: !fst.checked }); toast(fst.checked ? 'First steps show on Home again' : 'First steps are hidden for everyone'); render(); } catch (e) { toast(e.message, 'error'); fst.checked = !fst.checked; } };
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
           const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
           const sts = $('#stsave'); if (sts) sts.onclick = async () => { sts.disabled = true; try { await api('POST', '/storage/save'); toast('Saving to your homeserver'); } catch (e) { toast(e.message, 'error'); } render(); };
@@ -4350,7 +4390,21 @@
           if (pk && pk.sync && pk.sync.running) { clearTimeout(state.syncPoll); state.syncPoll = setTimeout(() => { if (state.view === 'settings' && state.settingsTab === 'accounts') render(); }, 2000); }
           $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) state.zone = BROWSER; render(); } catch (e) { toast(e.message, 'error'); } });
-          $('#groupmake').onclick = async () => { const ids = $$('#groupouts input:checked').map((i) => i.value); const name = $('#groupname').value.trim() || 'Group'; if (ids.length < 2) { toast('Pick at least two outputs', 'error'); return; } try { const z = await api('POST', '/zones', { name, outputs: ids }); state.zones[z.id] = z; toast(`Group “${name}” created`); render(); } catch (e) { toast(e.message, 'error'); } };
+          // What the outputs picked become, and which can't join them (no sample rate in common)
+          const groupBox = $('#groupouts');
+          const order = []; // the order they were checked in: the first leads
+          if (groupBox) {
+            const byId = Object.fromEntries(shownOuts.map((o) => [o.id, o]));
+            const update = () => {
+              const picked = order.map((id) => byId[id]);
+              const rates = picked.length ? picked.reduce((r, o) => r.filter((x) => o.caps.pcm_rates.includes(x)), picked[0].caps.pcm_rates) : null;
+              const kind = picked.length ? groupKind(picked[0]) : null;
+              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && (kind === 'node' || kind === 'net') && !o.caps.pcm_rates.some((x) => rates.includes(x))); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with the ones picked' : ''; });
+              $('#groupsync').textContent = groupSync(picked);
+            };
+            $$('input', groupBox).forEach((i) => i.onchange = () => { const at = order.indexOf(i.value); if (i.checked && at < 0) order.push(i.value); if (!i.checked && at >= 0) order.splice(at, 1); update(); });
+          }
+          const gm = $('#groupmake'); if (gm) gm.onclick = async () => { const ids = [...order]; const name = $('#groupname').value.trim() || 'Group'; if (ids.length < 2) { toast('Pick at least two outputs', 'error'); return; } try { const z = await api('POST', '/zones', { name, outputs: ids }); state.zones[z.id] = z; toast(`Group “${name}” created`); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-dsp]', main).forEach((b) => b.onclick = () => { state.dspOpen = state.dspOpen === b.dataset.dsp ? null : b.dataset.dsp; render(); });
           if (state.dspOpen && state.zones[state.dspOpen]) {
             try { const cfg = await api('GET', `/zones/${encodeURIComponent(state.dspOpen)}/dsp`); $('#dspbox').innerHTML = dspEditor(state.zones[state.dspOpen], cfg); bindDspEditor(state.dspOpen, cfg); } catch (e) { $('#dspbox').innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
@@ -4399,6 +4453,18 @@
             sc.disabled = false;
           };
           $('#logout').onclick = () => login();
+          const tn = $('#tokennew'); if (tn) tn.onclick = async () => {
+            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app, browser and Subsonic app then needs the new one; this browser switches to it now.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
+            if (!go) return;
+            tn.disabled = true;
+            try {
+              const r = await api('POST', '/node/token');
+              // Every later call (and a reconnect of the event socket) uses it
+              state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
+              $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
+              $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
+            } catch (e) { toast(e.message, 'error'); tn.disabled = false; }
+          };
           const pkf = $('#pkfiles'); if (pkf) {
             try {
               drawHomeFiles(pkf, await api('GET', '/pubky/files'));
@@ -4841,7 +4907,11 @@
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
-        if (state.view === 'zones' && (!old || old.transport !== ev.state.transport || (old.now_playing && old.now_playing.item.id) !== (ev.state.now_playing && ev.state.now_playing.item.id))) render();
+        if (state.view === 'zones' && (!old || old.transport !== ev.state.transport || old.error !== ev.state.error || (old.now_playing && old.now_playing.item.id) !== (ev.state.now_playing && ev.state.now_playing.item.id))) render();
+      }
+      // A zone that could not play (or seek) says why, once, for the zone this page plays to
+      else if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && ev.zone === state.zone) {
+        const zn = state.zones[ev.zone]; toast(`${zn ? zn.name : 'This zone'}: ${ev.event.message || 'something went wrong'}`, 'error');
       }
       else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }

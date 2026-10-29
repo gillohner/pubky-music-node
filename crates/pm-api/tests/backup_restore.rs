@@ -457,3 +457,50 @@ async fn music_that_moved_keeps_its_matches() {
 fn contains(hay: &[u8], needle: &str) -> bool {
     hay.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
+
+#[tokio::test]
+async fn hearts_on_songs_without_an_identity_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("01 untagged.wav"), "Untagged song", None);
+    let a = node(dir.path(), "a", Some(music.clone()));
+    let app_a = router(a.clone());
+    let (st, _) = json(&app_a, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    scanned(&a).await;
+    let id = a.library.lock().unwrap().search_tracks("untagged", 5).unwrap()[0]
+        .id
+        .unwrap()
+        .0;
+    let (st, v) = json(
+        &app_a,
+        "PUT",
+        "/v1/favourites",
+        Some(serde_json::json!({"track_id": id})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let (st, file) = send(
+        &app_a,
+        Request::builder().uri("/v1/backup").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let check = Request::builder()
+        .method("POST")
+        .uri("/v1/restore?check=true")
+        .body(Body::from(file.clone()))
+        .unwrap();
+    let (st, info) = send(&app_a, check).await;
+    assert_eq!(st, StatusCode::OK);
+    let info: serde_json::Value = serde_json::from_slice(&info).unwrap();
+    assert_eq!(info["counts"]["favourites"], 1, "{info}");
+
+    let b = node(dir.path(), "b", Some(music));
+    let (st, report) = restore(&router(b.clone()), &file, None).await;
+    assert_eq!(st, StatusCode::OK, "{report}");
+    assert_eq!(report["expected"]["favourites"], 1, "{report}");
+    assert_eq!(report["restored"]["favourites"], 1, "{report}");
+}
