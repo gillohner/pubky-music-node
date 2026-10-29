@@ -263,7 +263,15 @@ async fn send_json<T: Serialize>(
     tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     v: &T,
 ) -> Result<(), axum::Error> {
-    let text = serde_json::to_string(v).expect("event serializes");
+    // An event that does not serialize is a bug: log it and keep the socket, so the controller
+    // still hears the zone's next state instead of losing its connection.
+    let text = match serde_json::to_string(v) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("event not sent, it does not serialize: {e}");
+            return Ok(());
+        }
+    };
     tx.send(Message::Text(text.into())).await
 }
 
@@ -313,5 +321,88 @@ mod tests {
             .map(|t| serde_json::from_str(&t).unwrap())
             .unwrap();
         assert!(matches!(back, ApiEvent::ZoneRemoved { .. }));
+    }
+
+    /// One of each `ZoneEvent`. The match has no wildcard, so a new variant does not compile
+    /// until it is listed here (and so tested below).
+    fn every_zone_event() -> Vec<pm_zones::ZoneEvent> {
+        use pm_model::{AudioFormat, SignalPath};
+        use pm_zones::{QueueItem, ZoneEvent};
+        let item = QueueItem::new("track:1");
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let all = vec![
+            ZoneEvent::TrackStarted {
+                item: item.clone(),
+                index: 0,
+                source_format: fmt,
+                output_format: fmt,
+                signal_path: SignalPath::new(),
+                gapless: false,
+            },
+            ZoneEvent::TrackEnded {
+                item: item.clone(),
+                verify_ok: Some(true),
+            },
+            ZoneEvent::Skipped {
+                item,
+                reason: "unreadable".into(),
+            },
+            ZoneEvent::Paused { position_ms: 1 },
+            ZoneEvent::Resumed,
+            ZoneEvent::Seeked { position_ms: 2 },
+            ZoneEvent::Stopped,
+            ZoneEvent::QueueChanged,
+            ZoneEvent::StreamTitle { title: "t".into() },
+            ZoneEvent::Error {
+                message: "device error: listener went away".into(),
+            },
+        ];
+        for ev in &all {
+            match ev {
+                ZoneEvent::TrackStarted { .. }
+                | ZoneEvent::TrackEnded { .. }
+                | ZoneEvent::Skipped { .. }
+                | ZoneEvent::Paused { .. }
+                | ZoneEvent::Resumed
+                | ZoneEvent::Seeked { .. }
+                | ZoneEvent::Stopped
+                | ZoneEvent::QueueChanged
+                | ZoneEvent::StreamTitle { .. }
+                | ZoneEvent::Error { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_zone_event_goes_out_on_the_socket_and_reads_back() {
+        for event in every_zone_event() {
+            let ev = ApiEvent::ZoneEvent {
+                zone: pm_zones::ZoneId("z".into()),
+                event: event.clone(),
+            };
+            let text = serde_json::to_string(&EventMsg { seq: 1, event: &ev })
+                .unwrap_or_else(|e| panic!("{event:?} does not serialize: {e}"));
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], "zone_event");
+            assert!(v["event"]["type"].is_string(), "{text}");
+            let back: ApiEvent = serde_json::from_str(&text).unwrap();
+            match back {
+                ApiEvent::ZoneEvent { event: b, .. } => assert_eq!(b, event),
+                other => panic!("read back as {other:?}"),
+            }
+        }
+        // The error's wire shape, which controllers read.
+        let ev = ApiEvent::ZoneEvent {
+            zone: pm_zones::ZoneId("z".into()),
+            event: pm_zones::ZoneEvent::Error {
+                message: "boom".into(),
+            },
+        };
+        let v = serde_json::to_value(EventMsg { seq: 2, event: &ev }).unwrap();
+        assert_eq!(
+            v["event"],
+            serde_json::json!({"type": "error", "message": "boom"})
+        );
     }
 }

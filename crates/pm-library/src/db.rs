@@ -231,6 +231,20 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long a write waits for another connection's transaction before "database is locked".
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// SQLite's busy handler: try again every millisecond, up to [`BUSY_TIMEOUT`]. The built-in
+/// timeout sleeps up to 100 ms between tries, so a writer that commits and starts again within a
+/// few milliseconds (a scan's batches) kept everyone else out until they gave up.
+fn wait_for_writer(tries: i32) -> bool {
+    if (tries as u128) >= BUSY_TIMEOUT.as_millis() {
+        return false;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    true
+}
+
 impl Library {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -242,9 +256,10 @@ impl Library {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        // A scan writes from its own connection in batches of a few hundred files; a write from
-        // the API meanwhile waits for the batch instead of failing with "database is locked".
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // A scan writes from its own connection in batches of a few hundred files (and two scans
+        // of large shares may run with the API writing too); a writer waits for the others instead
+        // of failing with "database is locked".
+        conn.busy_handler(Some(wait_for_writer))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;",
         )?;
@@ -412,10 +427,15 @@ impl Library {
     /// file made a first scan of 50,000 tracks wait on the disk for most of its time). Writes
     /// made meanwhile, by the scan or anything else, land in the batch; [`Self::commit_batch`]
     /// commits them. Keep a batch short: commit every few hundred files.
+    ///
+    /// The batch takes the write lock when it starts (`BEGIN IMMEDIATE`), waiting for other
+    /// writers. A plain `BEGIN` reads first and asks for the lock at its first write; in WAL mode
+    /// that write fails at once with "database is locked" when another connection committed
+    /// since the read, without waiting, and the scan skipped the file.
     pub fn begin_batch(&self) -> Result<()> {
         let conn = self.lock();
         if conn.is_autocommit() {
-            conn.execute_batch("BEGIN")?;
+            conn.execute_batch("BEGIN IMMEDIATE")?;
         }
         Ok(())
     }

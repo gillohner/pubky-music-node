@@ -160,6 +160,8 @@ enum DiscoverCmd {
 
 async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
+    // First, so a port in use stops the start at once and says why (another node running)
+    let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
@@ -277,8 +279,17 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         let st = state.clone();
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
+    // A busy port turns Squeezebox players off; the node runs on
     if let Err(e) = state.start_slimproto() {
-        tracing::warn!("slimproto: {e}");
+        let port = cfg.outputs.slimproto_port;
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            tracing::warn!(
+                "Squeezebox players are off: port {port} is in use, most likely by another Pubky Music Node or \
+                 a Lyrion Music Server on this machine. Stop it and restart, or set [outputs] slimproto_port"
+            );
+        } else {
+            tracing::warn!("Squeezebox players are off: slimproto on port {port}: {e}");
+        }
     }
     if !cfg.outputs.snapcast.trim().is_empty() {
         state.set_snapcast(Some(cfg.outputs.snapcast.trim().to_string()));
@@ -436,7 +447,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::audiobookshelf::spawn_background(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
-    pm_api::serve(state, &cfg.api.listen).await
+    pm_api::serve_listener(state, listener).await
 }
 
 /// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when
@@ -585,8 +596,17 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     pm_out_local::quiet_alsa_lib();
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+    // Symphonia warns about harmless things in many files (junk bytes before a frame, ID3
+    // frames it skips, the MP3 bit reservoir); only its errors show unless RUST_LOG names it
+    if !std::env::var("RUST_LOG")
+        .unwrap_or_default()
+        .contains("symphonia")
+    {
+        filter = filter.add_directive("symphonia=error".parse().expect("a valid directive"));
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
