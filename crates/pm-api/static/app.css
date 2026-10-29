@@ -604,7 +604,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .hero .art .src-badge.ico.cover svg { width: 16px; height: 16px; }
 .np-big .src-badge.ico.cover { left: 12px; bottom: 12px; width: 32px; height: 32px; }
 .np-big .src-badge.ico.cover svg { width: 18px; height: 18px; }
-.list-row .thumbwrap { position: relative; width: 44px; height: 44px; flex: none; margin-right: 10px; }
+.list-row .thumbwrap { position: relative; display: block; flex: none; margin-right: 10px; line-height: 0; }
 .list-row .thumbwrap .thumb { margin-right: 0; display: block; }
 .chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
 
@@ -750,7 +750,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .q-actions .icon-btn { width: 30px; height: 30px; }
 .q-actions .icon-btn .ic { width: 16px; height: 16px; }
 @media (hover: hover) { .srow .q-actions { opacity: 0; transition: opacity 0.12s; } .srow:hover .q-actions, .srow:focus-within .q-actions { opacity: 1; } }
-@media (max-width: 600px) { #plsongs .srow .thumb { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions { display: none; } }
+@media (max-width: 600px) { #plsongs .srow .thumb, #plsongs .srow .thumbwrap { display: none; } #plsongs .srow { gap: 6px; } #plsongs .srow .q-actions { display: none; } }
 .porder-row .grow { flex: 1; min-width: 0; }
 /* Choice dialog (playlist import) */
 .choices { display: flex; flex-direction: column; gap: 8px; }
@@ -850,6 +850,7 @@ a.btn { text-decoration: none; }
   .srow { gap: 8px; padding: 10px 8px; }
   .srow .num { display: none; }
   .srow .thumb { width: 36px; height: 36px; margin-right: 0; }
+  .srow .thumbwrap { margin-right: 0; }
   .srow .src-badges { display: none; }
   .srow .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search kbd, .search .kbd { display: none; }

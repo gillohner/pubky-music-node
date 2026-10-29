@@ -142,17 +142,18 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       if (kind === 'artist') return r.fulfill({ json: pageJson('artist', id, { songs: SONGS, albums: ALBUMS }) });
       return r.fulfill({ json: pageJson('album', id, id.startsWith('lib-') ? { source: 'Your library', source_id: 'library', songs: [SONGS[1]] } : { songs: [SONGS[0]] }) });
     });
-    const badge = async (sel) => p.$eval(sel, (el) => { const b = el.querySelector('.src-badge.cover'); if (!b) return null; const cs = getComputedStyle(b); const art = b.closest('.art, .thumbwrap'); const ab = art.getBoundingClientRect(); const bb = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), role: b.getAttribute('role'), color: cs.color, bg: cs.backgroundColor, ring: cs.boxShadow, absolute: cs.position === 'absolute', inside: bb.left >= ab.left && bb.bottom <= ab.bottom + 0.5 && bb.left - ab.left < ab.width / 3 && ab.bottom - bb.bottom < ab.height / 3, square: Math.abs(ab.width - ab.height) < 1.5 }; }).catch(() => null);
+    // A badge in a button (a tile) is decoration with the words at the end of the button's name; elsewhere it is named itself
+    const badge = async (sel) => p.$eval(sel, (el) => { const b = el.querySelector('.src-badge.cover'); if (!b) return null; const cs = getComputedStyle(b); const art = b.closest('.art, .thumbwrap'); const ab = art.getBoundingClientRect(); const bb = b.getBoundingClientRect(); const btn = b.closest('button'); const sr = btn && btn.querySelector('.sr-only'); return { label: b.getAttribute('aria-label') || (sr ? sr.textContent.replace(/^, from /, 'From ') : null), role: b.getAttribute('role'), hidden: b.getAttribute('aria-hidden') === 'true', color: cs.color, bg: cs.backgroundColor, ring: cs.boxShadow, absolute: cs.position === 'absolute', inside: bb.left >= ab.left && bb.bottom <= ab.bottom + 0.5 && bb.left - ab.left < ab.width / 3 && ab.bottom - bb.bottom < ab.height / 3, square: Math.abs(ab.width - ab.height) < 1.5 }; }).catch(() => null);
     await p.goto(BASE + '/artist/tidal-77');
     await p.waitForSelector('#ialbums [data-tile="1"]');
     const t0 = await badge('#ialbums [data-tile="0"]'); const t1 = await badge('#ialbums [data-tile="1"]');
-    check(t0 && t0.label === 'From TIDAL' && t0.role === 'img', `a TIDAL album tile says where it is from (${t0 && t0.label})`);
+    check(t0 && t0.label === 'From TIDAL' && t0.hidden && !t0.role, `a TIDAL album tile says where it is from, at the end of its name, the badge itself decoration (${t0 && t0.label})`);
     check(t1 && t1.label === 'From your library', `a library album tile too (${t1 && t1.label})`);
     check(t0 && t0.absolute && t0.inside && t0.square, 'in the cover’s bottom corner, over it (the cover stays square)');
     check(t0 && t0.color === 'rgb(51, 232, 224)' && t1 && t1.color === 'rgb(255, 255, 255)', `the service’s colour, white for the library (${t0 && t0.color}, ${t1 && t1.color})`);
     check(t0 && /rgba\(12, 12, 14, 0\.88\)/.test(t0.bg) && /rgba\(255, 255, 255, 0\.3\)/.test(t0.ring), 'a dark disc with a light ring, for light and dark covers');
     const r0 = await badge('#isongs [data-srow="0"]'); const r1 = await badge('#isongs [data-srow="1"]');
-    check(r0 && r0.label === 'From TIDAL' && r0.inside && r1 && r1.label === 'From your library' && r1.inside, `song rows with a cover carry it too (${r0 && r0.label}, ${r1 && r1.label})`);
+    check(r0 && r0.label === 'From TIDAL' && r0.role === 'img' && r0.inside && r1 && r1.label === 'From your library' && r1.inside, `song rows with a cover carry it too, named (${r0 && r0.label}, ${r1 && r1.label})`);
     check(!(await p.$('.hero .src-badge.cover')), 'an artist has no cover, so no badge');
     await p.goto(BASE + '/album/tidal-5'); await p.waitForSelector('.hero .art');
     const h0 = await badge('.hero .art');
@@ -163,7 +164,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
     // Now playing: the first library track plays in This browser; the bar's art and the big cover
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
-    check(await visible(p, '#npart .src-badge.cover[aria-label="From your library"]'), 'the player bar’s cover says where it plays from');
+    check(await visible(p, '#npart .src-badge.cover[title="From your library"][aria-hidden="true"]'), 'the player bar’s cover says where it plays from (decoration in its button)');
     await p.click('#npart');
     check(await visible(p, '.np-big .src-badge.cover[aria-label="From your library"]'), 'and so does the Now playing cover');
     const big = await badge('.np-big .art');
