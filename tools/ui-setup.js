@@ -8,7 +8,9 @@
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
-//     replaced and shown once; the login dialog says where the token is.
+//     replaced and shown once; the login dialog says where the token is;
+//   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
+//     song rows, the album page and Now playing, in the corner, named, in the service's colour.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -124,6 +126,48 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => localStorage.getItem('pm.token')) === 'f'.repeat(64), 'this browser uses it');
     await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
+    await c.close();
+
+    // ---- Provider badges on covers ----
+    // A mocked TIDAL artist page: a TIDAL album and a library album as tiles, a streamed and a
+    // library song as rows; then album pages from TIDAL and from the library.
+    c = await ctx(); p = await c.newPage();
+    const IMG = BASE + '/icon.svg';
+    const pageJson = (kind, id, extra) => ({ kind, id, uri: null, target: {}, title: 'Mock ' + kind, artist: kind === 'artist' ? null : { id: 'tidal-77', name: 'Mock Artist' }, album: null, year: 2020, image: kind === 'artist' ? null : IMG, source: 'TIDAL', source_id: 'tidal', section: 'home', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, song_uri: null, link: null, on_pubky: null, ...extra });
+    const SONGS = [{ no: 1, title: 'Streamed song', artist: 'Mock Artist', duration_ms: 1000, uri: 'tidal:1', track_id: null, page: null, image: IMG, id: 'tidal-1', artist_id: 'tidal-77', album: 'Mock album', album_id: 'tidal-5' }, { no: 2, title: 'Local song', artist: 'Mock Artist', duration_ms: 1000, uri: 'track:5', track_id: 5, page: null, image: IMG, id: 'lib-5', artist_id: null, album: 'Local album', album_id: 'lib-1' }];
+    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }];
+    await p.route(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/, (r) => {
+      const u = new URL(r.request().url()); if (u.pathname.endsWith('/extras')) return r.fulfill({ json: {} });
+      const [, , kind, id] = u.pathname.replace('/v1/', '/').split('/');
+      if (kind === 'artist') return r.fulfill({ json: pageJson('artist', id, { songs: SONGS, albums: ALBUMS }) });
+      return r.fulfill({ json: pageJson('album', id, id.startsWith('lib-') ? { source: 'Your library', source_id: 'library', songs: [SONGS[1]] } : { songs: [SONGS[0]] }) });
+    });
+    const badge = async (sel) => p.$eval(sel, (el) => { const b = el.querySelector('.src-badge.cover'); if (!b) return null; const cs = getComputedStyle(b); const art = b.closest('.art, .thumbwrap'); const ab = art.getBoundingClientRect(); const bb = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), role: b.getAttribute('role'), color: cs.color, bg: cs.backgroundColor, ring: cs.boxShadow, absolute: cs.position === 'absolute', inside: bb.left >= ab.left && bb.bottom <= ab.bottom + 0.5 && bb.left - ab.left < ab.width / 3 && ab.bottom - bb.bottom < ab.height / 3, square: Math.abs(ab.width - ab.height) < 1.5 }; }).catch(() => null);
+    await p.goto(BASE + '/artist/tidal-77');
+    await p.waitForSelector('#ialbums [data-tile="1"]');
+    const t0 = await badge('#ialbums [data-tile="0"]'); const t1 = await badge('#ialbums [data-tile="1"]');
+    check(t0 && t0.label === 'From TIDAL' && t0.role === 'img', `a TIDAL album tile says where it is from (${t0 && t0.label})`);
+    check(t1 && t1.label === 'From your library', `a library album tile too (${t1 && t1.label})`);
+    check(t0 && t0.absolute && t0.inside && t0.square, 'in the cover’s bottom corner, over it (the cover stays square)');
+    check(t0 && t0.color === 'rgb(51, 232, 224)' && t1 && t1.color === 'rgb(255, 255, 255)', `the service’s colour, white for the library (${t0 && t0.color}, ${t1 && t1.color})`);
+    check(t0 && /rgba\(12, 12, 14, 0\.88\)/.test(t0.bg) && /rgba\(255, 255, 255, 0\.3\)/.test(t0.ring), 'a dark disc with a light ring, for light and dark covers');
+    const r0 = await badge('#isongs [data-srow="0"]'); const r1 = await badge('#isongs [data-srow="1"]');
+    check(r0 && r0.label === 'From TIDAL' && r0.inside && r1 && r1.label === 'From your library' && r1.inside, `song rows with a cover carry it too (${r0 && r0.label}, ${r1 && r1.label})`);
+    check(!(await p.$('.hero .src-badge.cover')), 'an artist has no cover, so no badge');
+    await p.goto(BASE + '/album/tidal-5'); await p.waitForSelector('.hero .art');
+    const h0 = await badge('.hero .art');
+    check(h0 && h0.label === 'From TIDAL' && h0.inside, `the album page’s cover says where it is from (${h0 && h0.label})`);
+    await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('.hero .art');
+    const h1 = await badge('.hero .art');
+    check(h1 && h1.label === 'From your library', `a library album’s cover too (${h1 && h1.label})`);
+    await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
+    // Now playing: the first library track plays in This browser; the bar's art and the big cover
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
+    check(await visible(p, '#npart .src-badge.cover[aria-label="From your library"]'), 'the player bar’s cover says where it plays from');
+    await p.click('#npart');
+    check(await visible(p, '.np-big .src-badge.cover[aria-label="From your library"]'), 'and so does the Now playing cover');
+    const big = await badge('.np-big .art');
+    check(big && big.inside && big.absolute, 'in its corner, over the cover');
     await c.close();
 
     // ---- The login dialog ----

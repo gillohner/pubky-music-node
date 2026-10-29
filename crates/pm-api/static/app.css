@@ -594,6 +594,18 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .src-badges { display: inline-flex; gap: 4px; align-items: center; }
 .tile .art .src-badges { position: absolute; left: 8px; bottom: 8px; }
 .src-badges .src-badge.ico { position: static; margin: 0; }
+/* The provider badge on covers: the service's glyph in its own colour (--svc, the dark-theme accent)
+   on a dark disc with a light ring, so it reads on light and dark covers; over the cover, no layout shift */
+.src-badge.ico.cover { position: absolute; left: 8px; bottom: 8px; width: 22px; height: 22px; margin: 0; background: rgba(12, 12, 14, 0.88); color: var(--svc, #fff); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3), 0 1px 4px rgba(0, 0, 0, 0.45); pointer-events: none; z-index: 1; }
+.src-badge.ico.cover svg { width: 13px; height: 13px; }
+.art.sm .src-badge.ico.cover, .thumbwrap .src-badge.ico.cover { left: 3px; bottom: 3px; width: 16px; height: 16px; }
+.art.sm .src-badge.ico.cover svg, .thumbwrap .src-badge.ico.cover svg { width: 10px; height: 10px; }
+.hero .art .src-badge.ico.cover { left: 10px; bottom: 10px; width: 28px; height: 28px; }
+.hero .art .src-badge.ico.cover svg { width: 16px; height: 16px; }
+.np-big .src-badge.ico.cover { left: 12px; bottom: 12px; width: 32px; height: 32px; }
+.np-big .src-badge.ico.cover svg { width: 18px; height: 18px; }
+.list-row .thumbwrap { position: relative; width: 44px; height: 44px; flex: none; margin-right: 10px; }
+.list-row .thumbwrap .thumb { margin-right: 0; display: block; }
 .chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
 
 /* Pubky Ring sign-in: a QR tile next to the instructions. */

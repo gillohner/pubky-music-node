@@ -95,11 +95,12 @@
     return out === 'II' ? w[0].slice(0, 2).toUpperCase() : out;
   };
   const tokenQ = () => (state.token ? '?token=' + encodeURIComponent(state.token) : '');
-  const art = (albumId, title, cls = '') => {
+  // `svc`: where it plays from, as a badge in the cover's corner (coverBadge); none when null.
+  const art = (albumId, title, cls = '', svc = null) => {
     const h = hue(title);
     const bg = `background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))`;
     const img = albumId ? `<img loading="lazy" alt="" src="/v1/library/albums/${albumId}/cover${tokenQ()}" data-err="remove">` : '';
-    return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}</div>`;
+    return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}${coverBadge(svc)}</div>`;
   };
   // A playlist's art (UX review #8): four album covers as a 2×2 mosaic, one cover, or its initials
   // on a gradient; never an empty square.
@@ -131,10 +132,11 @@
     return `<div class="smrule" data-smrule="${i}"><select class="input sm" data-k="field" aria-label="What">${Object.entries(SMART_FIELDS).map(([k, x]) => `<option value="${k}" ${r.field === k ? 'selected' : ''}>${x.label}</option>`).join('')}</select><select class="input sm" data-k="op" aria-label="How">${f.ops.map(([k, l]) => `<option value="${k}" ${r.op === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${input}<button class="icon-btn" data-smrm="${i}" aria-label="Remove this rule" title="Remove this rule">${icon('close')}</button></div>`;
   };
   const smartSummary = (x) => { const seeds = (x.seeds || []).map((sd) => sd.label || sd.kind); const rs = [...(seeds.length ? [`like ${seeds.join(', ')}`] : []), ...(x.rules || []).map((r) => { const f = SMART_FIELDS[r.field]; if (!f) return r.field; const op = (f.ops.find(([k]) => k === r.op) || f.ops[0])[1]; if (r.field === 'favourite') return r.value === false ? 'not a favourite' : 'a favourite'; if (r.field === 'year') return `year ${r.value || '…'}–${r.to || '…'}`; return `${f.label.toLowerCase()} ${op} ${r.value}${r.field === 'last_played' ? ' days' : ''}`; })]; return rs.join(x.matches === 'any' ? ' or ' : ' and ') + (x.minutes ? ` · ${x.minutes} min` : ''); };
-  // Art for a queue item: a streaming source's image, else the library album cover.
-  const itemArt = (it, cls = '') => {
-    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove"></div>`; }
-    return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls);
+  // Art for a queue item: a streaming source's image, else the library album cover; a badge for
+  // where it plays from (`svc`, else read off the item).
+  const itemArt = (it, cls = '', svc = coverSvc(it)) => {
+    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">${coverBadge(svc)}</div>`; }
+    return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc);
   };
   const toast = (msg, kind = '') => {
     const t = $('#toast');
@@ -1231,7 +1233,7 @@
     const it = np.item;
     const live = np.stream_title;
     const links = npLinksHtml(it, live);
-    $('#np').innerHTML = `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm')}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
+    $('#np').innerHTML = `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np))}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
     bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
@@ -1381,7 +1383,7 @@
         <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
         <div class="np-body">
           <section class="np-player" aria-label="Now playing">
-            <div class="np-big">${itemArt(it)}</div>
+            <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
@@ -1971,7 +1973,7 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div></button>`;
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library')}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div></button>`;
   const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow" title="Public on Pubky">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"></div>`;
   const bindTagRow = (ref) => {
     const add = $('#tagadd'); if (!add) return;
@@ -2312,7 +2314,35 @@
   const serviceKey = (site) => String(site || '').toLowerCase().replace(/[^a-z]/g, '').replace(/^youtubemusic$/, 'youtube').replace(/^internetarchive$/, 'archive');
   const svcIcon = (site) => { const g = SERVICE_GLYPHS[serviceKey(site)]; return `<svg viewBox="0 0 24 24" aria-hidden="true">${g || '<path d="M9 3v12.3A3.5 3.5 0 1 0 11 18.5V7h6V3z"/>'}</svg>`; };
   const svcBadge = (site, extra = '') => site ? `<span class="src-badge ico${extra ? ' ' + extra : ''}" title="${esc(site)}">${svcIcon(site)}</span>` : '';
-  const discoverTiles = (items) => `<div class="grid">${items.map((it, i) => { const h = hue(it.title || it.uri); const playable = true; return `<button class="tile" data-ditem="${i}" title="${esc(itemName(it))}"><div class="art" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))"><span>${esc(initials(it.title || 'M'))}</span>${it.image ? `<img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">` : ''}${svcBadge(it.site)}${playable ? `<span class="tile-play" data-dplay="${i}" role="button" title="Play">${icon('play')}</span>` : ''}</div><div class="t">${esc(itemName(it))}${it.in_library ? ' <span class="pill ok">owned</span>' : ''}</div><div class="a">${esc([it.artist, it.group_size ? `${it.group_size} services` : null].filter(Boolean).join(' · '))}</div></button>`; }).join('')}</div>`;
+  // A service we can name on a cover: the library, or one with an accent or a glyph. Not a
+  // MusicBrainz or Pubky page (nothing plays from those) and not a plain link.
+  const knownSvc = (k) => (k && k !== 'musicbrainz' && (k === 'library' || SRC_ACCENT[k] || SERVICE_GLYPHS[k]) ? k : null);
+  // The provider badge on a cover (owner, 2026-10-29): where this plays from, in the cover's bottom
+  // left corner. The service's glyph in its own colour on a dark disc with a light ring, so it reads
+  // on light and dark covers; our own files get a white glyph. Absolute over the cover (no layout
+  // shift) and named for screen readers: "From TIDAL".
+  const coverBadge = (svc) => {
+    const k = knownSvc(svc === 'library' ? 'library' : srcSvc(svc)); if (!k) return '';
+    const name = k === 'library' ? 'your library' : srcName(k); const a = SRC_ACCENT[k];
+    return `<span class="src-badge ico cover" role="img" aria-label="From ${esc(name)}" title="From ${esc(name)}"${a ? ` style="--svc:${a[1]}"` : ''}>${svcIcon(k)}</span>`;
+  };
+  // Where a row, tile or queue item plays from: what it says itself (a service, a source, a site, a
+  // "plays from" answer), else its library id, else the service in its id or uri.
+  const coverSvc = (x) => {
+    if (!x) return null;
+    const said = x.service || x.site || (typeof x.source === 'string' ? x.source : null) || (x.plays && x.plays.service);
+    const k = said && knownSvc(srcSvc(said)); if (k) return k;
+    if (x.track_id != null) return 'library';
+    const id = String(x.id || ''); if (/^lib-/.test(id)) return 'library';
+    let m = /^([a-z]+)-/.exec(id); if (m && knownSvc(m[1])) return m[1];
+    const u = String(x.uri || x.page || ''); if (/^track:\d+$/.test(u)) return 'library';
+    m = /^([a-z]+):/.exec(u); if (m && !/^https?$/.test(m[1])) return knownSvc(m[1]);
+    if (/^https?:/.test(u)) { try { return knownSvc(srcSvc(new URL(u).hostname)); } catch { return null; } }
+    return null;
+  };
+  // Now playing: the node's own word on the service once it carries it (#94), else the item.
+  const npSvc = (np) => (np && np.format && np.format.service ? srcSvc(np.format.service) : coverSvc(np && np.item));
+  const discoverTiles = (items) => `<div class="grid">${items.map((it, i) => { const h = hue(it.title || it.uri); const playable = true; return `<button class="tile" data-ditem="${i}" title="${esc(itemName(it))}"><div class="art" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))"><span>${esc(initials(it.title || 'M'))}</span>${it.image ? `<img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">` : ''}${coverBadge(it.site)}${playable ? `<span class="tile-play" data-dplay="${i}" role="button" title="Play">${icon('play')}</span>` : ''}</div><div class="t">${esc(itemName(it))}${it.in_library ? ' <span class="pill ok">owned</span>' : ''}</div><div class="a">${esc([it.artist, it.group_size ? `${it.group_size} services` : null].filter(Boolean).join(' · '))}</div></button>`; }).join('')}</div>`;
   // A row's name: the title, never a URL ("Untitled on TIDAL" when unknown).
   const itemName = (it) => it.title || `Untitled on ${it.site || 'another service'}`;
   // Describe music URLs that are not in the library (favourites, playlists, history).
@@ -2443,7 +2473,7 @@
     ]);
   };
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
-  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -2505,7 +2535,7 @@
     $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
-  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div></button>`).join('')}</div>`;
+  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a))}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div></button>`).join('')}</div>`;
   const bindItemTiles = (box, tiles, kind) => {
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
     $$('[data-tileplay]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { const pg = await api('GET', `/item/${kind}/${tiles[Number(b.dataset.tileplay)].id}`); playSongs(pg.songs, 0, 'replace', pg.plays_from, b, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } });
@@ -3787,7 +3817,7 @@
           const { source, id } = state.viewArg;
           const a = await api('GET', `/sources/${encodeURIComponent(source)}/artists/${encodeURIComponent(id)}`);
           if (state.view !== 'source-artist') return;
-          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" data-err="remove">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${countOf(a.albums.length, 'albums')} · <a href="${esc(webUrl(a.url))}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
+          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" data-err="remove">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${countOf(a.albums.length, 'albums')} · <a href="${esc(webUrl(a.url))}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${coverBadge(source)}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div></button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source, id: b.dataset.sitem }));
           $$('[data-artist]', main).forEach((b) => b.onclick = () => setView('artist', Number(b.dataset.artist)));
           break;
@@ -3879,6 +3909,8 @@
           const ownSvc = pg.source_id || (kind && String(id).startsWith('lib-') ? 'library' : 'link');
           const isGlobal = ownSvc === 'global';
           const ownName = ownSvc === 'library' ? 'Your library' : pg.source;
+          // The cover's badge: an album or song page says where it is from; an artist has no cover
+          const heroBadge = kind === 'artist' ? '' : coverBadge(ownSvc);
           // What Play will do, from the node's one decision (plays_from + plays_note)
           const playsHere = !pf ? (pg.connect.length ? `plays on ${pg.connect.map((c) => SERVICE_NAMES[c] || c).join(', ')}` : '') : pf.service === ownSvc ? (pf.mode === 'preview' ? '30 s preview' : '') : pf.mode === 'connect' ? `plays on your ${SERVICE_NAMES[pf.service] || pf.service} device` : `plays from ${where}${isGlobal ? '' : ' here'}`;
           const eyebrow = [`${{ song: 'Song', album: 'Album', artist: 'Artist' }[kind]}${isGlobal ? '' : ownSvc === 'library' ? ' in your library' : ` on ${pg.source}`}`, pg.plays_note && !isGlobal ? `${pg.plays_note.charAt(0).toLowerCase()}${pg.plays_note.slice(1)}` : '', playsHere].filter(Boolean).join(' · ');
@@ -3908,7 +3940,7 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}" aria-hidden="true">${esc(initials(state.itemTitle))}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
+            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}" aria-hidden="true">${esc(initials(state.itemTitle))}${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button></div>
               </div></div>`
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
@@ -4158,7 +4190,7 @@
           if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
           const lists = {};
           const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
-          const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div></button>`;
+          const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library')}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div></button>`;
           let html = head;
           if (albumOpen) {
             lists.album = songsOf(albumOpen.track_ids);
