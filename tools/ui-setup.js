@@ -11,6 +11,10 @@
 //     replaced and shown once; the login dialog says where the token is;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
+//   * Play to: while something plays or is queued, every other device gets Move here (This zone
+//     gets Move to…): the song at its position, the queue and repeat move, paused stays paused,
+//     out of and into This browser too, and the menu follows; the node's errors show in the menu;
+//     the device line says the protocol and model in words, with the id as a tooltip.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -19,6 +23,8 @@ const problems = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) problems.push(what); };
 const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' + path, { method, headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }); if (!r.ok) throw new Error(`${method} ${path}: ${r.status}`); return r.status === 204 ? null : r.json(); };
 const visible = (p, sel, ms = 8000) => p.locator(sel).first().waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
+// Waits until the element's text is `text` (polling: the CSP forbids waitForFunction's eval).
+const waitText = async (p, sel, text, ms = 10000) => { const end = Date.now() + ms; for (;;) { const v = await p.textContent(sel).catch(() => null); if (v != null && v.trim() === text) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } };
 const gone = (p, sel, ms = 8000) => p.locator(sel).first().waitFor({ state: 'detached', timeout: ms }).then(() => true).catch(() => false);
 const rate = (r) => ({ pcm_rates: r, max_pcm_bits: 24, max_channels: 2, dsd: null, hw_volume: null, standby: false, source_switch: false, gapless: true, groupable: false, fixed_latency_ms: null, quality_ceiling: 'bit_perfect' });
 const OUTS = [
@@ -170,6 +176,56 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const big = await badge('.np-big .art');
     check(big && big.inside && big.absolute, 'in its corner, over the cover');
     await c.close();
+    // ---- Move to, in the Play to menu ----
+    // A paused library song in This browser moves to the Null output zone (a developer output,
+    // switched on for this) at its position, paused, and back; the device line is in words; the
+    // node's errors show in the menu; the Queue page has the same Move to.
+    const devBefore = (await api('GET', '/node/settings')).dev_outputs;
+    await api('PUT', '/node/settings', { dev_outputs: true });
+    const nz = (await api('GET', '/zones')).find((z) => String(z.output).startsWith('null'));
+    if (nz) {
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
+      c = await ctx(); p = await c.newPage();
+      // The node knows no model for the Null output; say one, as AirPlay or UPnP would
+      await p.route(/\/v1\/outputs$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: j.map((o) => (o.id === nz.output ? { ...o, model: 'HomePod mini' } : o)) }); });
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
+      check(await visible(p, '#npart'), 'a library song plays in This browser');
+      await p.waitForTimeout(1200);
+      await p.evaluate(() => document.querySelector('audio').pause()); await p.waitForTimeout(300);
+      await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-zone]');
+      const row = (id) => p.locator(`#zonepop .pop-row:has([data-zone="${id}"])`);
+      check(await row(nz.id).locator('[data-move]').count() === 1 && await row('browser').locator('[data-move]').count() === 0, 'every other device gets Move here while something is queued');
+      await p.waitForTimeout(800); // the outputs arrive and the device lines re-render
+      const sub = row(nz.id).locator('.sub').first();
+      const subText = await sub.textContent();
+      check(subText === 'Null output, for developers · HomePod mini' && (await sub.getAttribute('title')) === nz.output, `the device line is in words, the id a tooltip (${subText})`);
+      check(await p.locator('#zpmove').count() === 1, 'and This zone has Move to…');
+      await row(nz.id).locator('[data-move]').click();
+      check(await waitText(p, '#zonename', nz.name), 'Move here: the zone in use is the new one');
+      const zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`);
+      check(zs.queue.length >= 1 && zs.transport === 'paused' && zs.now_playing && zs.now_playing.index === 0, `the queue and the song moved to the zone, paused (${zs.transport}, ${zs.queue.length} items, index ${zs.now_playing && zs.now_playing.index})`);
+      check(await p.evaluate(() => !document.querySelector('audio').getAttribute('src')), 'the browser stopped');
+      check(!(await p.$('#zonepop[hidden]')) && await row(nz.id).locator('.pop-item.on').count() === 1 && await row('browser').locator('[data-move]').count() === 1, 'the menu follows the new zone, with Move here on This browser');
+      await row('browser').locator('[data-move]').click();
+      check(await waitText(p, '#zonename', 'This browser'), 'Move here on This browser: the browser is the zone in use again');
+      await p.waitForTimeout(800);
+      const back = await p.evaluate(() => { const a = document.querySelector('audio'); return { src: !!a.getAttribute('src'), paused: a.paused }; });
+      const zs2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`);
+      check(back.src && back.paused && zs2.queue.length === 0, `the song is back in the browser, still paused; the zone is empty (${JSON.stringify(back)}, ${zs2.queue.length} items)`);
+      // The node's errors show in the menu
+      await p.route(/\/v1\/zones\/[^/]+\/load$/, (r) => r.fulfill({ status: 403, json: { error: 'the owner has not opened that zone to listeners' } }));
+      await row(nz.id).locator('[data-move]').click();
+      check(await visible(p, '#zonepop .pop-err'), 'an error from the node shows in the menu');
+      check(/not opened that zone to listeners/.test((await p.textContent('#zonepop .pop-err')) || ''), 'in the node’s words');
+      await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
+      // The Queue page's Move to
+      await p.goto(BASE + '/queue'); await p.waitForSelector('#main .list, #main .empty', { state: 'attached' }).catch(() => {});
+      await p.waitForTimeout(1500); await p.click('.nav-item[data-view="queue"]'); // the developer zone shows once the settings arrived
+      await p.waitForSelector('#qtransfer');
+      check((await p.textContent('#qtransfer')).trim() === 'Move to…', 'the Queue page offers Move to… for This browser too');
+      await c.close();
+    } else check(false, 'the node should have a Null output zone for this');
+    await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
 
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();

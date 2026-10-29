@@ -118,6 +118,26 @@ pub struct TransferRequest {
     pub to: String,
 }
 
+/// `POST /v1/zones/{id}/load`: the queue of a player the node does not run (This browser) moves
+/// into the zone, which stops and empties first; `index` plays from `position_ms`, paused when
+/// the player was paused (`transport`), and nothing starts when it was stopped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadRequest {
+    pub items: Vec<QueueItem>,
+    /// The item that was playing or paused, if any.
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub position_ms: u64,
+    /// `playing`, `paused` or `stopped` (the default).
+    #[serde(default)]
+    pub transport: pm_zones::Transport,
+    #[serde(default)]
+    pub repeat: pm_zones::Repeat,
+    #[serde(default)]
+    pub radio: bool,
+}
+
 /// Sleep timer: pause the zone after `seconds`; `null` cancels.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SetSleep {

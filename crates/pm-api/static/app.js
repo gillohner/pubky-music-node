@@ -1017,22 +1017,97 @@
   // Zone picker.
   const zonePop = $('#zonepop');
   const closePop = (fromBack) => { if (zonePop.hidden) return; zonePop.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
-  $('#zonebtn').onclick = () => {
-    if (!zonePop.hidden) { closePop(); return; }
-    closeJobPop();
+  // What a device is, in words (owner, 2026-10-29: the line showed raw ids like airplay:9056…):
+  // the protocol of its output id, and the device's maker and model when the node knows them
+  // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
+  const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', browser: 'This browser' };
+  const deviceWords = (z) => {
+    if (z.id === BROWSER) return 'Streams the files to this browser';
+    const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
+    return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
+  };
+  // Something to move: the zone's queue, or the browser's.
+  const hasQueue = (z) => !!z && (z.id === BROWSER ? state.browserQueue.length > 0 : !!(z.queue && z.queue.length));
+  const otherZones = () => zoneList().filter((z) => z.id !== state.zone);
+  // The browser takes over a queue at a song and a position; paused stays paused.
+  const browserResumeAt = (index, posMs, paused) => {
+    const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
+    if (ytOf(it.uri)) { browserPlay(index); return; } // YouTube's player starts from the top
+    if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
+    state.browserIndex = index;
+    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    audio.addEventListener('loadedmetadata', () => { try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (paused) { audio.preload = 'metadata'; audio.load(); } else audio.play().catch(() => {});
+    mediaSessionUpdate(it); renderBar();
+  };
+  // Move what plays to another device (owner, 2026-10-29): the song at its position, the queue,
+  // repeat and radio; paused stays paused. Zone to zone is the node's transfer. This browser is no
+  // zone of the node's, so out of it the target loads the browser's queue (POST /zones/{id}/load)
+  // and the browser stops; into it the browser takes the zone's queue and the zone empties (radio
+  // is the node's: it does not come along). The node's errors (403: a zone not open to listeners;
+  // 400: an empty queue) show in the menu when it is open, else as a toast.
+  const moveTo = async (target) => {
+    const from = state.zone;
+    if (target === from) return;
+    try {
+      if (from === BROWSER) {
+        const items = state.browserQueue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
+        if (!items.length) throw new Error('Nothing to move: the queue is empty');
+        const cur = state.browserIndex >= 0 ? state.browserQueue[state.browserIndex] : null;
+        const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
+        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: cur ? state.browserIndex : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
+        state.zones[zs.id] = zs;
+        audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
+        state.browserQueue = []; state.browserIndex = -1; try { localStorage.removeItem('pm.browserAt'); } catch { /* storage unavailable */ }
+      } else if (target === BROWSER) {
+        const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
+        if (!z.queue || !z.queue.length) throw new Error('Nothing to move: the queue is empty');
+        const np = z.now_playing; const index = np ? np.index : (z.queue_index != null ? z.queue_index : -1); const pos = np ? np.position_ms || 0 : 0;
+        await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
+        if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
+        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
+        try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
+        if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
+      } else {
+        const zs = await api('POST', `/zones/${encodeURIComponent(from)}/transfer`, { to: target });
+        state.zones[zs.id] = zs;
+        if (state.zones[from]) state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' };
+      }
+      state.zone = target; try { localStorage.setItem('pm.zone', target); } catch { /* storage unavailable */ }
+      renderZoneName(); renderBar(); refreshQueue();
+      const name = (currentZone() || {}).name || target;
+      if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
+    } catch (e) {
+      if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
+    }
+  };
+  const renderZonePop = (err) => {
+    const movable = hasQueue(currentZone());
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
-      <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
-        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
+      <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
+        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>`).join('')
+      </button>${movable && z.id !== state.zone ? `<button class="pop-item pop-act" data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
+      + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
-      + `<div class="pop-title">This zone</div><button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+      + `<div class="pop-title">This zone</div>`
+      + (movable && otherZones().length ? `<button class="pop-item" id="zpmove">${icon('zone')}<span><span class="name">Move to…</span><span class="sub">the song where it is, the queue, repeat and radio</span></span></button>` : '')
+      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
+    const zm = $('#zpmove', zonePop); if (zm) zm.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Move to' }, ...otherZones().map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]); };
+    $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
+  };
+  $('#zonebtn').onclick = () => {
+    if (!zonePop.hidden) { closePop(); return; }
+    closeJobPop();
+    renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
+    // The devices' models: the owner's output list, fetched once
+    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
   $('#me').onclick = () => setView('settings');
@@ -4015,7 +4090,7 @@
           await refreshQueue(false);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && !isBrowser() && zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).length ? `<button class="btn" id="qtransfer" title="Move this queue and position to another zone">${icon('zone')} Transfer…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
@@ -4085,9 +4160,7 @@
             }
             try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/shuffle`); toast('Upcoming tracks shuffled'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
           };
-          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Transfer to' }, ...zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).map((o) => ({ label: o.name, icon: 'zone', run: async () => {
-            try { const zs = await api('POST', `/zones/${encodeURIComponent(state.zone)}/transfer`, { to: o.id }); state.zones[zs.id] = zs; state.zone = zs.id; localStorage.setItem('pm.zone', state.zone); toast(`Moved playback to ${zs.name}`); renderZoneName(); renderBar(); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
-          } }))]);
+          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: 'Queue · this browser' } : { zone: state.zone };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
