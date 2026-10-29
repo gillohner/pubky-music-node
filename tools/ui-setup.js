@@ -14,7 +14,13 @@
 //   * Play to: while something plays or is queued, every other device gets Move here (This zone
 //     gets Move to…): the song at its position, the queue and repeat move, paused stays paused,
 //     out of and into This browser too, and the menu follows; the node's errors show in the menu;
-//     the device line says the protocol and model in words, with the id as a tooltip.
+//     the device line says the protocol and model in words, with the id as a tooltip;
+//   * the sound pill in the player bar says where it plays from (the provider's mark), the path in
+//     short and whether DSP is on (on phones: the device and a quality badge), and opens a panel
+//     with the zone and device, the source, the signal path, this zone's DSP with quick switches
+//     (and a link to all of it) and volume;
+//   * pressing play answers at once: the pressed button spins and the bar says "Starting on
+//     <device>…" until it plays, or shows the zone's error; Move to says "Moving to …" too.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -226,6 +232,73 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await c.close();
     } else check(false, 'the node should have a Null output zone for this');
     await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
+
+    // ---- The sound pill and its panel; immediate feedback on play ----
+    if (nz) {
+      await api('PUT', '/node/settings', { dev_outputs: true });
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
+      c = await ctx(); p = await c.newPage();
+      // In This browser: the pill names the source, the panel says the browser decodes the file
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
+      check(await visible(p, '#quality .qsrc svg'), 'the pill carries the provider’s mark');
+      check(await waitText(p, '#quality .qtext', 'Played by this browser'), 'and says the browser plays it');
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
+      check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpvol').count() === 1, 'no signal path claim for the browser; volume is there');
+      check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
+      await p.click('#scrim'); check(await gone(p, '#qpanel:not([hidden])'), 'the scrim closes it');
+      // On a node zone (paused there, moved from the browser): the path in short, the panel in full
+      await p.evaluate(() => document.querySelector('audio').pause()); await p.waitForTimeout(300);
+      await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-move]');
+      await p.locator(`#zonepop .pop-row:has([data-zone="${nz.id}"]) [data-move]`).click();
+      check(await waitText(p, '#zonename', nz.name), 'moved to the Null output zone');
+      await p.click('#scrim'); await gone(p, '#zonepop:not([hidden])'); // the menu followed the move; close it
+      const pill = async () => p.$eval('#quality', (q) => ({ cls: q.className, text: q.querySelector('.qtext').textContent, dsp: !q.querySelector('.qdsp').hidden, src: !!q.querySelector('.qsrc svg'), dev: q.querySelector('.qshort .qdev') && q.querySelector('.qshort .qdev').textContent, badge: q.querySelector('.qshort .qbadge') && q.querySelector('.qshort .qbadge').textContent }));
+      let pl = await pill();
+      check(/^FLAC \d+\/[\d.]+ → \d+\/[\d.]+ · Bit-perfect$/.test(pl.text) && /q-bit_perfect/.test(pl.cls), `the pill: format and rate in, out, and the verdict (${pl.text})`);
+      check(pl.src && !pl.dsp, 'the provider’s mark, and no DSP badge while no DSP stage is in the path');
+      check(pl.dev === nz.name && /^\d+\/[\d.]+$/.test(pl.badge || ''), `the phone form is ready: the device and a quality badge (${pl.dev} · ${pl.badge})`);
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp]');
+      check((await p.textContent('#qpanel .qp-zone .name')).trim() === nz.name && (await p.textContent('#qpanel .qp-zone .sub')).startsWith('Null output'), 'the panel: zone and device in words');
+      check(await p.locator('#qpanel .path-row').count() >= 2, 'the full signal path, stage by stage');
+      check(await p.locator('#qpanel [data-dsp]').count() === 4 && await p.locator('#qpanel [data-dsp="eq"]').isDisabled() && !(await p.locator('#qpanel [data-dsp="loudness"]').isDisabled()), 'four DSP switches; EQ is off-limits with no bands set');
+      await p.locator('#qpanel [data-dsp="loudness"]').check({ force: true }); await p.waitForTimeout(800);
+      const dsp1 = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);
+      check(dsp1.loudness && dsp1.loudness !== 'off' && await p.locator('#qpanel [data-dsp="loudness"]').isChecked(), `a switch sets this zone’s DSP (loudness ${dsp1.loudness})`);
+      await p.locator('#qpanel [data-dsp="loudness"]').uncheck({ force: true }); await p.waitForTimeout(800);
+      check((await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).loudness === 'off', 'and back off');
+      await p.click('#qpdsp'); await p.waitForSelector('#dspbox .card.dsp', { timeout: 10000 }).catch(() => {});
+      check(await p.locator('#dspbox .card.dsp').count() === 1, 'All DSP settings opens this zone’s DSP editor');
+      // Phones: the pill shows the device and the badge, not the words
+      await p.setViewportSize({ width: 390, height: 844 }); await p.waitForTimeout(300);
+      const phone = await p.$eval('#quality', (q) => ({ shown: q.offsetWidth > 0 && getComputedStyle(q).display !== 'none', text: getComputedStyle(q.querySelector('.qtext')).display, short: getComputedStyle(q.querySelector('.qshort')).display, mark: !!q.querySelector('.qsrc svg'), width: q.offsetWidth }));
+      check(phone.shown && phone.text === 'none' && phone.short !== 'none' && phone.mark && phone.width <= 150, `on a phone the pill stays, short: the mark, the device and a badge (${phone.width}px)`);
+      await p.setViewportSize({ width: 1280, height: 900 });
+      // Pressing play answers at once: a slow node, then a node that refuses
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
+      await p.route(/\/v1\/zones\/[^/]+\/queue$/, async (r) => { if (r.request().method() !== 'POST') return r.continue(); await new Promise((res) => setTimeout(res, 1500)); return r.continue(); });
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');
+      // the browser context resets the zone to This browser on every page: pick the node zone again
+      await p.click('#zonebtn'); await p.waitForSelector(`#zonepop:not([hidden]) [data-zone="${nz.id}"]`); await p.click(`#zonepop [data-zone="${nz.id}"]`);
+      check(await waitText(p, '#zonename', nz.name), 'playing to the Null output zone');
+      await p.hover('.track'); await p.click('.track [data-act="play"]');
+      const early = await p.$eval('#np', (n) => ({ text: n.textContent, spin: !!n.querySelector('.spin') }));
+      check(/Starting on Null output/.test(early.text) && early.spin, `the bar says it is starting, at once (${early.text.trim().replace(/\s+/g, ' ')})`);
+      check(await p.locator('.track .rowplay.starting').count() === 1, 'the pressed play button spins');
+      const okStart = await (async () => { const end = Date.now() + 15000; for (;;) { const t2 = await p.textContent('#np'); if (!/Starting on/.test(t2)) return t2; if (Date.now() > end) return null; await p.waitForTimeout(200); } })();
+      check(okStart != null && !/Couldn’t start/.test(okStart) && await p.locator('.track .rowplay.starting').count() === 0, 'then the song, once the zone plays');
+      await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      await p.route(/\/v1\/zones\/[^/]+\/queue$/, (r) => (r.request().method() === 'POST' ? r.fulfill({ status: 500, json: { error: 'the output refused the stream' } }) : r.continue()));
+      await p.hover('.track'); await p.click('.track [data-act="play"]');
+      check(await visible(p, '#np .warn-text'), 'a node that refuses: the bar says so');
+      check(/refused the stream/.test(await p.textContent('#np')), 'in the node’s words');
+      await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      await c.close();
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
+      await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
+      await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
+    }
 
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();

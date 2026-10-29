@@ -1046,7 +1046,12 @@ html[data-shell="phone"] .player { grid-template-columns: minmax(0, 1fr) auto au
 html[data-shell="phone"] .player-right { order: 1; gap: 6px; }
 html[data-shell="phone"] .player-center { order: 2; grid-column: auto; }
 html[data-shell="phone"] .player-center .seek, html[data-shell="phone"] .player-center .transport > :not(#toggle) { display: none; }
-html[data-shell="phone"] .player-right .quality, html[data-shell="phone"] .player-right .jobchip .jc-text, html[data-shell="phone"] .volume { display: none; }
+html[data-shell="phone"] .player-right .jobchip .jc-text, html[data-shell="phone"] .volume { display: none; }
+/* The phone bar keeps the sound pill, short: the provider's mark, the device and a quality badge (owner, 2026-10-29) */
+html[data-shell="phone"] .quality { padding: 4px 8px; gap: 5px; max-width: 150px; min-height: 44px; }
+html[data-shell="phone"] .quality .qdot, html[data-shell="phone"] .quality .qtext, html[data-shell="phone"] .quality .qdsp { display: none; }
+html[data-shell="phone"] .quality .qshort { display: inline-flex; }
+html[data-shell="phone"] .quality .qshort .qdev { max-width: 72px; }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
@@ -1167,6 +1172,43 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .qsheet .set-rows { border: 1px solid var(--line); border-radius: 12px; margin: 12px 0; }
 .qsheet .chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The pill's parts: the provider's mark, "DSP" when a DSP stage is in the path, and the phone form
+   (device and a quality badge; .qtext is hidden there) */
+.quality .qsrc { display: inline-flex; align-items: center; }
+.quality .qsrc:empty { display: none; }
+.quality .qsrc svg { width: 14px; height: 14px; fill: currentColor; display: block; }
+.quality .qdsp { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 1px 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-strong); }
+.quality .qshort { display: none; align-items: center; gap: 6px; }
+.quality .qshort .qdev { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quality .qshort .qbadge { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; background: var(--surface-3); color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.quality .qshort:empty { display: none; }
+@media (max-width: 720px) { .quality .qdsp { display: none; } .quality .qshort { display: inline-flex; } }
+/* The sound panel: the pill in full */
+.qpanel { width: 340px; max-height: 72vh; }
+.qp-zone, .qp-src { display: flex; align-items: center; gap: 10px; padding: 6px 10px 8px; }
+.qp-zone .grow, .qp-src .grow { flex: 1; min-width: 0; }
+.qp-zone .name, .qp-src .name { display: block; font-weight: 600; }
+.qp-zone .sub, .qp-src .sub { display: block; font-size: 12px; color: var(--muted); }
+.qp-zone .state { margin-left: auto; font-size: 11px; color: var(--muted); }
+.qp-src .src-badge.ico { flex: none; }
+.qpanel .path { margin: 0 4px 4px; }
+.path.compact .path-head { padding: 8px 10px; font-size: 13px; }
+.path.compact .path-row { grid-template-columns: 10px 92px 1fr; gap: 8px; padding: 6px 10px; font-size: 12px; }
+.qp-note { font-size: 12px; color: var(--muted); padding: 2px 10px 8px; }
+.qp-dsp { padding: 0 4px 6px; }
+.qp-row { display: flex; align-items: center; gap: 10px; padding: 6px 6px; font-size: 13px; color: var(--fg); }
+.qp-row .grow { flex: 1; min-width: 0; }
+.qp-row .name { display: block; }
+.qp-row .sub { display: block; font-size: 11px; color: var(--muted); }
+.qp-row.off { color: var(--muted); }
+.qp-dsp .btn { margin: 4px 6px 2px; }
+.qp-vol { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
+.qp-vol input[type="range"] { flex: 1; }
+.qp-foot { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+/* Pressing play answers at once: the pressed control spins, the bar says "Starting on …" */
+.starting .ic { display: none; }
+.starting::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+.np-title.np-wait { display: flex; align-items: center; gap: 6px; }
 .npqual .qtext-long { font-weight: 550; }
 .qsheet .qnote { display: block; margin-top: 6px; }
 .qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
