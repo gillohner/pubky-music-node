@@ -508,6 +508,7 @@ impl NodeState {
                             if let Some(n) = node.upgrade() {
                                 crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
                                 crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                crate::party::track_started(&n, &id.0, &item.uri);
                             }
                         }
                         if let pm_zones::ZoneEvent::TrackEnded { item, .. } = &event {

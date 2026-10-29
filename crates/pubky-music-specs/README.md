@@ -13,7 +13,7 @@ microseconds; durations (`*_ms`) are milliseconds. Unknown members are kept on a
 | `review` | `{rating: 1–10, text?}` |
 | `listen` | one play: `{played_at, duration_ms?, source?}` |
 | `listening` | now playing: `{started_at, expires_at, name?, duration_ms?, source?}` |
-| `session` | a listening session others join: `{started_at, expires_at?, host: "pubky://<key>", name?, source?}` |
+| `session` | a listening session others join: `{started_at, expires_at?, host: "pubky://<key>", name?, source?, join?}` (`join`: an http(s) address others join it at) |
 
 `listening` and `session` are ordinary kinds: a reader stops showing one once its `expires_at` has
 passed, at most 24 hours after `started_at`.

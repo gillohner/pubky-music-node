@@ -114,6 +114,8 @@ pub fn listening(
 /// A listening session hosted by `host` (`pubky://<key>`), playing the music at `embed` now,
 /// called `name`. Trims the name; a blank one becomes absent. With no name from the person, pass
 /// [`generic_session_name`]. Infallible; validate before writing.
+///
+/// To say where others join, set [`MusicSessionContent::join`] with [`session_joined_at`].
 pub fn session(
     started_at: i64,
     expires_at: Option<i64>,
@@ -128,10 +130,30 @@ pub fn session(
         host,
         name: content::trimmed_name(name),
         source,
+        join: None,
         extra: Default::default(),
     };
     let content = serde_json::to_string(&content).expect("a session always serializes");
     PostEnvelope::new(content, MusicPostKind::Session, None, Some(embed), Vec::new())
+}
+
+/// The session `post` with `join` (an `http(s)` address others join it at) set, its other members
+/// kept. Infallible; validate before writing.
+pub fn session_joined_at(post: &MusicPost, join: Option<String>) -> MusicPost {
+    let mut value: serde_json::Value = serde_json::from_str(&post.content).unwrap_or_default();
+    if let Some(o) = value.as_object_mut() {
+        match join {
+            Some(j) => {
+                o.insert("join".into(), serde_json::Value::String(j));
+            }
+            None => {
+                o.remove("join");
+            }
+        }
+    }
+    let mut out = post.clone();
+    out.content = value.to_string();
+    out
 }
 
 /// The review inside a `kind = review` post, checked against the review rules.

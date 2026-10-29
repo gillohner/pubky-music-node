@@ -1,5 +1,5 @@
 {
-  "description": "pubky-music-specs `listening` and `session` contents (music v1). Each post is the v1 envelope with this kind and content, `embed` a music URL, no parent, attachments or lock, validated under /pub. `valid` cases give what a reader shows for the person `display_name`: the `name`, or the generic name when it is absent. `invalid` cases are refused with an error naming `error`. `generic_names` are what a client writes when the person gave no name, and what a reader shows. Times are Unix microseconds.",
+  "description": "pubky-music-specs `listening` and `session` contents (music v1). Each post is the v1 envelope with this kind and content, `embed` a music URL, no parent, attachments or lock, validated under /pub. `valid` cases give what a reader shows for the person `display_name`: the `name`, or the generic name when it is absent. `invalid` cases are refused with an error naming `error`. `generic_names` are what a client writes when the person gave no name, and what a reader shows. A session's optional `join` is an http(s) address others join it at. Times are Unix microseconds.",
   "author": "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
   "embed": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
   "valid": [
@@ -75,6 +75,18 @@
         "expires_at": 1792541013000000
       },
       "shown_as": "Someone is listening"
+    },
+    {
+      "kind": "session",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792544400000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "Friday night",
+        "join": "https://music.example.org/party/Vh3kQ9xZ"
+      },
+      "shown_as": "Friday night"
     }
   ],
   "invalid": [
@@ -131,6 +143,24 @@
         "name": 7
       },
       "error": "content"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "join": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/x"
+      },
+      "error": "join"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "join": "javascript:alert(1)"
+      },
+      "error": "join"
     }
   ],
   "generic_names": [

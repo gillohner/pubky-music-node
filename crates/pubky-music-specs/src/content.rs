@@ -168,6 +168,10 @@ pub struct MusicSessionContent {
     /// Where it plays from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<MusicSource>,
+    /// Where others join it: an `http(s)` address the host gives out (a party link). Absent: the
+    /// host shares how to join some other way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
     /// Unknown members, preserved on rewrite.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -371,7 +375,10 @@ pub(crate) fn parse_listening(content: &str) -> Result<MusicListeningContent, St
 
 pub(crate) fn parse_session(content: &str) -> Result<MusicSessionContent, String> {
     let s: MusicSessionContent = parse(content, "session")?;
-    check_extra(&s.extra, &["started_at", "expires_at", "host", "name", "source"])?;
+    check_extra(
+        &s.extra,
+        &["started_at", "expires_at", "host", "name", "source", "join"],
+    )?;
     name(s.name.as_deref())?;
     let started = time("started_at", s.started_at)?;
     if let Some(e) = s.expires_at {
@@ -390,6 +397,12 @@ pub(crate) fn parse_session(content: &str) -> Result<MusicSessionContent, String
 pub(crate) fn listen_source_uri(content: &str) -> Option<String> {
     let value: Value = serde_json::from_str(content).ok()?;
     Some(value.get("source")?.get("uri")?.as_str()?.to_string())
+}
+
+/// A session's `join`, read the same way.
+pub(crate) fn session_join(content: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(content).ok()?;
+    Some(value.get("join")?.as_str()?.to_string())
 }
 
 /// A session's `host`, read the same way.

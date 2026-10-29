@@ -12,6 +12,12 @@
 //!   there only.)
 //! - **What a guest token opens:** `/v1/party/guest…` and the covers of what it shows. Nothing
 //!   else: no transport, no volume, no other zone.
+//! - **Shared on Pubky** (`share`, TASK-pinakes-social-ux.md D1): the party is one public music
+//!   `session` post on the owner's homeserver (`/pub/music/v1/posts/{id}/{editId}.json`). It embeds
+//!   the song playing, names the owner as `host` and the party link as `join`, and gets a new
+//!   version when the song changes, never a post per song. It ends when the party does (deleted),
+//!   or at its `expires_at`. A session lasts at most a day, so a longer party starts a fresh post
+//!   once a day.
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -59,6 +65,24 @@ pub struct Party {
     pub waiting_per_guest: u32,
     #[serde(default)]
     pub guests: Vec<Guest>,
+    /// Shared on Pubky as a `session` post.
+    #[serde(default)]
+    pub share: bool,
+    /// The session post, once written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<SharedPost>,
+}
+
+/// The session post a shared party is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedPost {
+    pub id: String,
+    /// The newest version's edit id.
+    pub edit: String,
+    /// The post's `started_at`, Unix microseconds.
+    pub started_at: i64,
+    /// The song it embeds now.
+    pub song: String,
 }
 
 fn now() -> i64 {
@@ -162,6 +186,11 @@ pub struct PartyView {
     pub added: usize,
     pub url: String,
     pub qr_svg: Option<String>,
+    /// Shared on Pubky.
+    pub shared: bool,
+    /// The session post's `pubky://` link, once written (the first song after sharing writes it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post: Option<String>,
 }
 
 fn view(s: &NodeState, p: &Party) -> PartyView {
@@ -179,6 +208,12 @@ fn view(s: &NodeState, p: &Party) -> PartyView {
         added: p.guests.iter().map(|g| g.items.len()).sum(),
         qr_svg: crate::qr_svg(&url),
         url,
+        shared: p.share,
+        post: p
+            .post
+            .as_ref()
+            .zip(s.sync_handle())
+            .map(|(post, sync)| format!("pubky://{}/pub/music/v1/posts/{}", raw_key(sync.z32()), post.id)),
     }
 }
 
@@ -205,9 +240,12 @@ pub struct NewParty {
     /// Songs one guest may have waiting at once (3 by default, 1 to 50).
     #[serde(default)]
     pub waiting_per_guest: Option<u32>,
+    /// Share it on Pubky as a listening session (needs a Pubky sign-in).
+    #[serde(default)]
+    pub share: bool,
 }
 
-/// `POST /v1/party {zone, name?, hours?, adds_per_hour?, waiting_per_guest?}`.
+/// `POST /v1/party {zone, name?, hours?, adds_per_hour?, waiting_per_guest?, share?}`.
 pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(b): Json<NewParty>) -> ApiResult<PartyView> {
     let Some(zname) = zone_name(&s, &b.zone) else {
         return Err(ApiError::not_found(format!("no zone {}", b.zone)));
@@ -215,6 +253,12 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(b): Json<NewPar
     let hours = b.hours.unwrap_or(6);
     if !(1..=72).contains(&hours) {
         return Err(ApiError::bad_request("a party lasts 1 to 72 hours"));
+    }
+    if b.share && s.sync_handle().is_none() {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "Sign in with Pubky to share a party: it is a post on your homeserver",
+        ));
     }
     let adds = b.adds_per_hour.unwrap_or(5);
     let waiting = b.waiting_per_guest.unwrap_or(3);
@@ -239,6 +283,8 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(b): Json<NewPar
         adds_per_hour: adds,
         waiting_per_guest: waiting,
         guests: Vec::new(),
+        share: b.share,
+        post: None,
     };
     {
         let _g = LOCK.lock().expect("party lock");
@@ -246,6 +292,22 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(b): Json<NewPar
         all.push(p.clone());
         store(&s, &all)?;
     }
+    // A song already playing is the first one the post shows
+    if p.share {
+        let playing = s
+            .zones
+            .get(&ZoneId::new(&p.zone))
+            .and_then(|z| z.state().now_playing.map(|n| n.item.uri));
+        if let Some(uri) = playing {
+            if let Err(e) = publish(&s, &p.id, &uri).await {
+                tracing::warn!(error = %e, "sharing the party on Pubky");
+            }
+        }
+    }
+    let p = {
+        let _g = LOCK.lock().expect("party lock");
+        load(&s).into_iter().find(|x| x.id == p.id).unwrap_or(p)
+    };
     Ok(Json(view(&s, &p)))
 }
 
@@ -254,15 +316,164 @@ pub(crate) async fn end(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let _g = LOCK.lock().expect("party lock");
-    let mut all = load(&s);
-    let before = all.len();
-    all.retain(|p| p.id != id);
-    if all.len() == before {
-        return Err(ApiError::not_found("no such party"));
+    let ended = {
+        let _g = LOCK.lock().expect("party lock");
+        let mut all = load(&s);
+        let Some(i) = all.iter().position(|p| p.id == id) else {
+            return Err(ApiError::not_found("no such party"));
+        };
+        let p = all.remove(i);
+        store(&s, &all)?;
+        p
+    };
+    // Its session post goes with it
+    if let Some(post) = ended.post {
+        if let Err(e) = unpublish(&s, &post.id).await {
+            tracing::warn!(error = %e, "removing the party's session post");
+        }
     }
-    store(&s, &all)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- shared on Pubky (D1) ----
+
+fn raw_key(z32: &str) -> &str {
+    z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
+}
+
+/// The canonical URI of what a zone plays: the library song's, or the music link itself.
+fn canonical_song(s: &NodeState, uri: &str) -> Option<String> {
+    match uri
+        .strip_prefix(crate::sources::TRACK_SCHEME)
+        .and_then(|r| r.parse::<i64>().ok())
+    {
+        Some(id) => {
+            let lib = s.library.lock().expect("library poisoned");
+            let t = lib.get_track(TrackId(id)).ok().flatten()?;
+            t.publishable_uri().map(|u| u.to_url())
+        }
+        None => pm_model::MusicUri::parse(uri).ok().map(|u| u.to_url()),
+    }
+}
+
+/// A song started on `zone`: a shared party there shows it (a new version of its post).
+pub(crate) fn track_started(s: &Arc<NodeState>, zone: &str, uri: &str) {
+    let shared = {
+        let _g = LOCK.lock().expect("party lock");
+        load(s).into_iter().find(|p| p.zone == zone && p.share)
+    };
+    let Some(p) = shared else { return };
+    let s = s.clone();
+    let uri = uri.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = publish(&s, &p.id, &uri).await {
+            tracing::warn!(error = %e, "updating the party's session post");
+        }
+    });
+}
+
+/// Write the party's session post for the song at `uri` (a zone's item URI): its first version,
+/// a new version when the song changed, or a fresh post once a day.
+pub(crate) async fn publish(s: &Arc<NodeState>, party_id: &str, uri: &str) -> Result<(), String> {
+    use pubky_music_specs::{MusicPost, Root, LIVE_WINDOW_MAX_MICROS, MUSIC_NAMESPACE};
+    let Some(song) = canonical_song(s, uri) else {
+        return Ok(()); // nothing a post can name (a file with no identity, a radio stream)
+    };
+    let sync = s.sync_handle().ok_or("not signed in with Pubky")?;
+    let p = {
+        let _g = LOCK.lock().expect("party lock");
+        load(s).into_iter().find(|p| p.id == party_id)
+    };
+    let Some(p) = p else { return Ok(()) };
+    let micros = pm_pubky::ids::now_micros();
+    // Same song: nothing to change
+    if p.post
+        .as_ref()
+        .is_some_and(|x| x.song == song && micros < x.started_at + LIVE_WINDOW_MAX_MICROS - 3_600_000_000)
+    {
+        return Ok(());
+    }
+    let key = raw_key(sync.z32()).to_string();
+    let owner = pubky_music_specs::PubkyId::try_from(key.as_str()).map_err(|e| e.to_string())?;
+    // A day at most per post: past 23 hours a fresh post takes over
+    let (keep, stale) = match &p.post {
+        Some(x) if micros < x.started_at + LIVE_WINDOW_MAX_MICROS - 3_600_000_000 => (Some(x.clone()), None),
+        Some(x) => (None, Some(x.id.clone())),
+        None => (None, None),
+    };
+    let started_at = keep.as_ref().map(|x| x.started_at).unwrap_or(micros);
+    let expires_at = (p.expires_at * 1_000_000).min(started_at + LIVE_WINDOW_MAX_MICROS);
+    let join = party_url(s, &p.code);
+    let post = pubky_music_specs::session(
+        started_at,
+        Some(expires_at),
+        format!("pubky://{key}"),
+        Some(p.name.clone()),
+        None,
+        song.clone(),
+    );
+    let post = pubky_music_specs::session_joined_at(
+        &post,
+        (join.starts_with("https://") || join.starts_with("http://")).then_some(join),
+    );
+    let ctx = pubky_music_specs::ValidationCtx { root: Root::Pub };
+    let (id, edit, path) = match &keep {
+        Some(x) => {
+            let v = pubky_music_specs::edit_version(&post, &x.id, &x.edit, Root::Pub, &owner)?;
+            (v.id, v.edit_id, v.path)
+        }
+        None => {
+            let id = pm_pubky::v1::id_of(micros);
+            pubky_social_specs::traits::Validatable::validate(&post, Some(&id), &ctx)
+                .map_err(|e| e.to_string())?;
+            post.check_references(&ctx, Some(&owner))?;
+            let path = MusicPost::version_path(MUSIC_NAMESPACE, Root::Pub, &id, &id, None);
+            (id.clone(), id, path)
+        }
+    };
+    sync.homeserver()
+        .write_object(sync.session(), &path, &post)
+        .await
+        .map_err(|e| format!("your homeserver: {e}"))?;
+    if let Some(old) = stale {
+        unpublish(s, &old).await?;
+    }
+    let _g = LOCK.lock().expect("party lock");
+    let mut all = load(s);
+    if let Some(x) = all.iter_mut().find(|x| x.id == party_id) {
+        x.post = Some(SharedPost {
+            id,
+            edit,
+            started_at,
+            song,
+        });
+        store(s, &all).map_err(|e| e.message)?;
+    }
+    Ok(())
+}
+
+/// Delete every version of a session post.
+async fn unpublish(s: &NodeState, id: &str) -> Result<(), String> {
+    let sync = s.sync_handle().ok_or("not signed in with Pubky")?;
+    let dir = format!("/pub/music/v1/posts/{id}/");
+    let paths = sync
+        .homeserver()
+        .public_paths(sync.z32(), &dir)
+        .await
+        .map_err(|e| format!("your homeserver: {e}"))?;
+    for p in paths {
+        let p = if p.starts_with('/') {
+            p
+        } else {
+            format!("{dir}{p}")
+        };
+        if let Err(e) = sync.homeserver().delete(sync.session(), &p).await {
+            if !e.to_string().contains("404") {
+                return Err(format!("your homeserver: {e}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---- joining (no token) ----

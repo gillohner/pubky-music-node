@@ -11989,4 +11989,127 @@ exec sleep 300
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
+
+    /// A party shared on Pubky (TASK-pinakes-social-ux.md D1) needs a Pubky sign-in.
+    #[tokio::test]
+    async fn sharing_a_party_needs_a_pubky_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/party",
+            Some(serde_json::json!({"zone": "null-output", "share": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        let (st, p) = call(
+            &app,
+            "POST",
+            "/v1/party",
+            Some(serde_json::json!({"zone": "null-output"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(p["shared"], false);
+    }
+
+    /// A shared party is one public music `session` post (D1): the song playing as its embed, the
+    /// owner as host, the party link as `join`; a new version when the song changes (never a post
+    /// per song, nothing for the same song again); gone when the party ends. On a testnet only
+    /// (`PM_TESTNET=1`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_party_is_one_session_post() {
+        if std::env::var("PM_TESTNET").as_deref() != Ok("1") {
+            eprintln!("PM_TESTNET not set; skipping");
+            return;
+        }
+        let pubky = pubky::Pubky::testnet().unwrap();
+        let signer = pubky.signer(pubky::Keypair::random());
+        let hs = pubky::PublicKey::try_from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        signer.signup(&hs, None).await.unwrap();
+        let session = signer
+            .signin_blocking(pubky::ClientId::new("pm-api-party").unwrap())
+            .await
+            .unwrap();
+        let z32 = session.public_key().to_string();
+        let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
+        let homeserver = pm_pubky::homeserver::NodeHomeserver::from_pubky(pubky.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_sync(Some(Arc::new(crate::sync::PubkySync::from_session(
+            homeserver.clone(),
+            session,
+        ))));
+        let app = router(s.clone());
+        let (st, p) = call(
+            &app,
+            "POST",
+            "/v1/party",
+            Some(serde_json::json!({"zone": "null-output", "name": "Friday night", "share": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(
+            (p["shared"].as_bool(), p["post"].is_null()),
+            (Some(true), true),
+            "nothing plays yet: {p}"
+        );
+        let party = p["id"].as_str().unwrap().to_string();
+        let a = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let b = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+        crate::party::publish(&s, &party, a).await.unwrap();
+        let (_, list) = call(&app, "GET", "/v1/party", None).await;
+        let link = list[0]["post"].as_str().unwrap().to_string();
+        let id = link.rsplit('/').next().unwrap().to_string();
+        assert_eq!(link, format!("pubky://{key}/pub/music/v1/posts/{id}"));
+        let versions = || {
+            let (hs, z32, id) = (homeserver.clone(), z32.clone(), id.clone());
+            async move {
+                let mut v = hs
+                    .public_paths(&z32, &format!("/pub/music/v1/posts/{id}/"))
+                    .await
+                    .unwrap();
+                v.sort();
+                v
+            }
+        };
+        let read = |path: String| {
+            let (hs, z32) = (homeserver.clone(), z32.clone());
+            async move {
+                let path = if path.starts_with('/') {
+                    path
+                } else {
+                    format!("/pub/music/v1/posts/{path}")
+                };
+                serde_json::from_slice::<serde_json::Value>(
+                    &hs.get_bytes(&z32, &path, pm_pubky::Visibility::Public, None)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap()
+            }
+        };
+        let first = versions().await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        let body = read(first[0].clone()).await;
+        assert_eq!((&body["kind"], &body["embed"]), (&"session".into(), &a.into()));
+        let content: serde_json::Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["host"], format!("pubky://{key}"));
+        assert_eq!(content["name"], "Friday night");
+        assert!(content["join"].as_str().unwrap().contains("/party/"), "{content}");
+        assert!(content["expires_at"].as_i64().unwrap() > content["started_at"].as_i64().unwrap());
+        // The same song again changes nothing; another song is a new version of the same post
+        crate::party::publish(&s, &party, a).await.unwrap();
+        assert_eq!(versions().await.len(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        crate::party::publish(&s, &party, b).await.unwrap();
+        let both = versions().await;
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert_eq!(read(both[1].clone()).await["embed"], b);
+        // Ending the party deletes the post
+        let (st, _) = call(&app, "DELETE", &format!("/v1/party/{party}"), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert!(versions().await.is_empty());
+    }
 }

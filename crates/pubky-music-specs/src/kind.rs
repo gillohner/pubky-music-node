@@ -106,7 +106,8 @@ impl PostKind for MusicPostKind {
     }
 
     /// A `source.uri` (listen, listening, session): http(s) or pubky only; a session's `host`:
-    /// pubky only. Checked by the envelope's gate with the author in scope.
+    /// pubky only, its `join`: http(s) only. Checked by the envelope's gate with the author in
+    /// scope.
     fn content_references(&self, post: &PostEnvelope<Self>) -> Vec<ContentReference> {
         let mut out = Vec::new();
         if matches!(
@@ -127,6 +128,12 @@ impl PostKind for MusicPostKind {
                 field: "content.host".into(),
                 uri,
                 schemes: AllowedSchemes::PubkyOnly,
+                max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
+            }));
+            out.extend(content::session_join(&post.content).map(|uri| ContentReference {
+                field: "content.join".into(),
+                uri,
+                schemes: AllowedSchemes::HttpHttps,
                 max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
             }));
         }
