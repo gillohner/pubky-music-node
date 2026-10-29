@@ -6869,7 +6869,7 @@ mod tests {
             e["error"], "The node didn't understand that request. Reload the page and try again.",
             "{e}"
         );
-        assert!(e["detail"].as_str().is_some_and(|d| !d.is_empty()), "{e}");
+        assert!(e["detail"].as_str().unwrap().contains("uris"), "{e}");
     }
 
     /// Library tags are Pubky tags (STEWARD-UX-INSTANCES item 6): an unmatched file takes a tag

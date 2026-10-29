@@ -973,7 +973,6 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
 .transport .mode-btn:hover { color: var(--fg); }
 .transport .mode-btn.on { color: var(--accent-strong); }
-/* "Find on other services": same-named candidates told apart */
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
 .tag-wait { padding: 0 6px 0 2px; font-style: italic; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }

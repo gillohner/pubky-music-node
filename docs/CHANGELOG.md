@@ -4,10 +4,6 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
-### Removed
-
-- **"Link another source…" and "Wrong match…"** (the item page's hand-made source links: the dialog, the menu entries, `GET /v1/item/candidates`, `POST`/`DELETE /v1/item/matches`), per the owner's decision of 2026-10-29: the node matches by the identifiers in files and services, with no hand tooling. Links made before stay in the database unused; nothing reads or writes them.
-
 - **Back up and restore the node with its own homeserver in one command.** `deploy/bundle/backup.sh` writes a folder (yours only, the newest 7 kept, `KEEP=`) with the backup file from Settings (sign-ins locked under a passphrase it makes, or `PM_BACKUP_PASSPHRASE`), a snapshot of the library, the node's data folder and tunnel settings, the homeserver's PostgreSQL dump and data (its key and the users' files), `.env`, the compose files and the network-share volumes the node mounts (`config/recreate-volumes.sh`, with the share's address and options); never the music. `deploy/bundle/restore.sh <folder>` checks the checksums and puts it all back into an empty install, then the sign-ins through the node's own restore; it refuses a bundle that already has containers or data. CI backs up the bundle, removes it with its volumes and restores it. The backup guide covers shares, a nightly cron line, updating with `PM_TAG` and going back.
 - **A backup counts every favourite.** Hearts on songs, albums and artists without a MusicBrainz id (kept on the node only) were missing from the counts a backup and its restore show ("0 favourites"); they were always restored.
 - **An older node refuses a library a newer one changed.** Going back to an earlier version after an update that changed the library's database stopped working quietly; the node now stops with "this library was opened by a newer version of Pubky Music" and the guide says how to put back the library from before the update.
@@ -24,6 +20,10 @@ Newest first. Dates are when the change landed on `main`.
 - **A scan no longer skips files with "database is locked"** (and saving a queue during a scan no longer fails with it). During a large first scan of two shares, files were skipped whenever another connection (the other scan, the API) had written since the batch began: the scan batch read first and asked for the write lock at its first write, which SQLite refuses at once in WAL mode. Batches now take the write lock when they start (`BEGIN IMMEDIATE`) and wait for other writers, who in turn get the lock between batches (a waiting connection now tries every millisecond for up to 10 s, where SQLite's own timeout slept up to 100 ms between tries and lost the race to a busy scan); a file still turned away by a busy database is tried again after the walk, before files not seen count as removed. A rescan picks up the files skipped before (they are new to the library).
 - **Symphonia's warnings about harmless things in files** (junk bytes before a frame, ID3 frames it skips, the MP3 bit reservoir) no longer show at the default log level; `RUST_LOG` that names `symphonia` shows them.
 - **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players on a DAC"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
+
+### Removed
+
+- **"Link another source…" and "Wrong match…"** (the item page's hand-made source links: the dialog, the menu entries, `GET /v1/item/candidates`, `POST`/`DELETE /v1/item/matches`), per the owner's decision of 2026-10-29: the node matches by the identifiers in files and services, with no hand tooling. Links made before stay in the database unused; an artist picture taken from one still shows.
 
 ## 0.2.0
 
