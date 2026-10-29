@@ -197,7 +197,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await row(nz.id).locator('[data-move]').count() === 1 && await row('browser').locator('[data-move]').count() === 0, 'every other device gets Move here while something is queued');
       await p.waitForTimeout(800); // the outputs arrive and the device lines re-render
       const sub = row(nz.id).locator('.sub').first();
-      const subText = await sub.textContent();
+      const subText = await sub.evaluate((e) => { const c = e.cloneNode(true); c.querySelectorAll('.sr-only').forEach((x) => x.remove()); return c.textContent; }); // the id is there too, for screen readers only
       check(subText === 'Null output, for developers · HomePod mini' && (await sub.getAttribute('title')) === nz.output, `the device line is in words, the id a tooltip (${subText})`);
       check(await p.locator('#zpmove').count() === 1, 'and This zone has Move to…');
       await row(nz.id).locator('[data-move]').click();
