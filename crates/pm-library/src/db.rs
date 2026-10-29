@@ -381,6 +381,15 @@ impl Library {
         } else {
             0
         };
+        // An older node on a library a newer one has migrated (a rollback) would run on tables
+        // it doesn't know: stop instead, and the owner updates or restores the backup from before
+        let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
+        if current > known {
+            return Err(LibraryError::NewerSchema {
+                found: current,
+                known,
+            });
+        }
         for (version, sql) in MIGRATIONS {
             if *version > current {
                 let tx = conn.transaction()?;
@@ -2826,6 +2835,29 @@ mod tests {
         );
         assert_eq!(lib.split_artist_credits().unwrap(), 0, "once is enough");
         assert_eq!(lib.search_tracks("peacock", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_library_from_a_newer_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let known = {
+            let lib = Library::open(&path).unwrap();
+            let v = lib.schema_version().unwrap();
+            lib.lock()
+                .execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                    params![v + 1],
+                )
+                .unwrap();
+            v
+        };
+        match Library::open(&path) {
+            Err(LibraryError::NewerSchema { found, known: k }) => {
+                assert_eq!((found, k), (known + 1, known));
+            }
+            other => panic!("expected NewerSchema, got {:?}", other.map(|_| ())),
+        }
     }
 
     #[test]

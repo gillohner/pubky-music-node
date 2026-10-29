@@ -79,6 +79,8 @@ Cloudflare Tunnel. See [Remote access](docs/guides/remote-access.md).
   Store. The desktop app asks when a new version is out (a `.deb` is updated by installing the new one).
 - **Back up:** **Settings › Backup** makes one file with your library, playlists, favourites,
   history and settings (never your music files), and can do it every day or week to a folder.
+  With the node's own homeserver, `deploy/bundle/backup.sh` backs up the node and the homeserver
+  together, and `restore.sh` puts them back.
 
 Details: [Backups and updates](docs/guides/backup-and-update.md).
 

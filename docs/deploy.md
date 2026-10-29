@@ -421,6 +421,15 @@ and history (`POST /v1/library/folders/move`). Covers taken from the files are r
 config file is kept as `<data_dir>/node.restored.toml`; from the next start its service keys fill
 whatever this node's own config leaves empty.
 
+**The bundle (node and homeserver):** `deploy/bundle/backup.sh` backs up everything while it runs:
+the backup file above with the sign-ins locked, a snapshot of the library database, the rest of the
+node's data folder, the tunnel settings, the homeserver's PostgreSQL dump and data volume (its key,
+config and users' files), `.env`, the compose files and the definitions of the network-share
+volumes the node mounts (`config/recreate-volumes.sh`). Each run is a folder readable by its owner
+only, the newest `KEEP` (7) kept. `deploy/bundle/restore.sh <folder>` puts it back into an empty
+install and refuses to touch one that has containers or data. Details:
+[guides/backup-and-update.md](guides/backup-and-update.md).
+
 From the command line: `pm-node -c node.toml backup <file>` writes a database snapshot (without
 sign-ins) while the node runs. `pm-node -c node.toml restore <file>`, with the node stopped, takes
 that snapshot or a `.pmbackup` file (its library only; the previous database is kept as

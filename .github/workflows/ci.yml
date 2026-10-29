@@ -274,6 +274,24 @@ jobs:
           # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
           cargo test -p pm-pubky --test vault_homeserver
           cargo test -p pm-api --test vault_api
+      - name: backup.sh, then restore.sh into a fresh install (as on a new disk)
+        working-directory: deploy/bundle
+        run: |
+          python3 -I ../../tools/bundle-backup-check.py seed .
+          python3 -I ../../tools/bundle-backup-check.py snap . $RUNNER_TEMP/before.json
+          KEEP=1 ./backup.sh $RUNNER_TEMP/backups
+          sleep 1
+          KEEP=1 ./backup.sh $RUNNER_TEMP/backups
+          # Only the newest is kept, and every file is the user's alone
+          test "$(ls -d $RUNNER_TEMP/backups/2*/ | wc -l)" = 1
+          B=$(ls -d $RUNNER_TEMP/backups/2*/)
+          test -z "$(find $RUNNER_TEMP/backups -perm /077 | head -n 1)"
+          # It never restores over a bundle that has containers or data
+          if ./restore.sh "$B"; then echo "restore.sh overwrote a running bundle"; exit 1; fi
+          docker compose down -v && sudo rm -rf hsdata
+          ./restore.sh "$B"
+          python3 -I ../../tools/bundle-backup-check.py compare . $RUNNER_TEMP/before.json
+      - run: python3 -I tools/bundle-check.py deploy/bundle
       - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
         run: |
           (cd deploy/bundle && docker compose down)

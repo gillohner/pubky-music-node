@@ -16,6 +16,10 @@ pub enum LibraryError {
     Probe { path: PathBuf, reason: String },
     #[error("track {0} not found")]
     TrackNotFound(i64),
+    #[error(
+        "this library was opened by a newer version of Pubky Music (library schema {found}, this version knows {known}): update the node, or restore a backup made before the update"
+    )]
+    NewerSchema { found: i64, known: i64 },
     #[error("invalid stored value in column {column}: {value}")]
     Corrupt { column: &'static str, value: String },
     #[cfg(feature = "musicbrainz")]
