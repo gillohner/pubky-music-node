@@ -169,23 +169,28 @@ fn group(dacs: &[Arc<Dac>], correct: bool) -> (Vec<Serving>, Box<dyn AudioSink>,
 fn players_on_hw_dacs_are_groupable_and_others_not() {
     let (_serving, outs) = endpoint(vec![
         Dac::new("hw:1,0", Clock::Real { late: Duration::ZERO }),
+        Dac::new("default", Clock::Real { late: Duration::ZERO }),
+        Dac::new("plughw:1,0", Clock::Real { late: Duration::ZERO }),
         Arc::new(NullOutput::new()),
     ]);
     let groupable = |remote: &str| {
         outs.iter()
-            .find(|o| o.remote_id().protocol() == remote)
+            .find(|o| o.remote_id().0 == remote)
             .unwrap()
             .caps()
             .groupable
     };
-    assert!(groupable("alsa"), "a hw: DAC reports its clock");
+    assert!(groupable("alsa:hw:1,0"), "a hw: DAC reports its clock");
+    // ALSA devices that are not the hardware itself (a mixer, a converter) are not
+    assert!(!groupable("alsa:default"));
+    assert!(!groupable("alsa:plughw:1,0"));
     assert!(!groupable("null"));
     // Two of them group in sync
     let (_other, more) = endpoint(vec![Dac::new("hw:0,0", Clock::Real { late: Duration::ZERO })]);
     let pair: Vec<Arc<dyn Output>> = vec![
         Arc::new(
             outs.into_iter()
-                .find(|o| o.remote_id().protocol() == "alsa")
+                .find(|o| o.remote_id().0 == "alsa:hw:1,0")
                 .unwrap(),
         ),
         Arc::new(more.into_iter().next().unwrap()),

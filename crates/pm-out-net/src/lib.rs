@@ -114,7 +114,7 @@ impl NetOutput {
             .into_iter()
             .map(|mut remote| {
                 // A hw: DAC reports its clock in every Ack; the node keeps it in time
-                remote.caps.groupable = remote.id.protocol() == "alsa";
+                remote.caps.groupable = remote.id.0.starts_with("alsa:hw:");
                 NetOutput {
                     addr,
                     key: key.clone(),

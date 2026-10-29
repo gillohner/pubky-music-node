@@ -4,7 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
-- **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
+- **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players on a DAC"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
 
 ## 0.2.0
 
