@@ -54,10 +54,11 @@ stops before writing when the disk is short of space.
 | `homeserver/data.tar.gz` | the homeserver's key, config and your account's files |
 
 The folder holds every secret of the node (`.env`, the sign-ins, the homeserver's key), so it is
-readable by you only. Copy it to another disk or a NAS as it is; anyone with the folder can run
-your node and your homeserver.
+readable by you only. Anyone with the folder can run your node and your homeserver. On a NAS share
+the share's own permissions decide who can read it (the script warns when others can): use a share
+only you can open.
 
-**Every night:** run `crontab -e` as the user that runs Docker and add
+**Every night:** run `mkdir -p ~/backups`, then `crontab -e` as the user that runs Docker, and add
 
 ```
 30 3 * * * $HOME/pubky-music-node/deploy/bundle/backup.sh >> $HOME/backups/pubky-music.log 2>&1
@@ -71,7 +72,7 @@ find the music again is in the backup:
 - shares mounted by Docker (a `cifs` volume declared `external: true` in
   `docker-compose.override.yml`): the override, and `config/recreate-volumes.sh`, which makes each
   volume again with the address, share and options it had (a share password, if you used one, is in
-  there too);
+  there too, as it is in Docker's own volume settings);
 - shares the machine mounts itself (`/etc/fstab`, a NAS app): `config/host-shares.txt` and the
   matching `/etc/fstab` lines in `config/fstab-lines.txt`. Mount them again before the restore.
 
@@ -95,7 +96,11 @@ it cannot find. It only restores into an empty install: it stops when the bundle
 containers or data, so it never overwrites a running node.
 
 On a machine with another network address, change `PUBLIC_IP` and `PM_PUBLIC_URL` in `.env` after
-the restore, then `docker compose up -d`.
+the restore, then `docker compose up -d`. The dashboard and the Cloudflare tunnel start again with
+`docker compose --profile dashboard --profile tunnel up -d`, as after the first install.
+
+If `restore.sh` stops half-way, it says how to start over: `docker compose down -v` removes the
+half-restored install (only this one; the backup folder is never changed), then run it again.
 
 ## Restore a backup file
 
@@ -171,14 +176,14 @@ With the bundle:
 cd ~/pubky-music-node/deploy/bundle
 docker compose stop music
 docker run --rm -i -v pubky-music_music-node:/v alpine:3.22 sh -c \
-  'cat > /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db' \
+  'cp /v/library.db /v/library.db.newer && cat > /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db' \
   < ~/backups/pubky-music/<date-time>/node/library.db
 docker compose start music
 ```
 
 Then restore that backup's `node/library.pmbackup` in **Settings › Backup › Choose a backup file**
 with the passphrase from `node/passphrase`: it puts the sign-ins back. Anything you changed after
-that backup is gone. A homeserver that won't start after `git pull`: go back to the bundle you had
+that backup is gone (the newer library stays next to it as `library.db.newer`). A homeserver that won't start after `git pull`: go back to the bundle you had
 with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`. If
 it still fails, [ask for help](troubleshooting.md#still-stuck) before removing anything; the
 backup folder stays as it is.

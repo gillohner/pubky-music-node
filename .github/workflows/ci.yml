@@ -287,7 +287,8 @@ jobs:
           B=$(ls -d $RUNNER_TEMP/backups/2*/)
           test -z "$(find $RUNNER_TEMP/backups -perm /077 | head -n 1)"
           # It never restores over a bundle that has containers or data
-          if ./restore.sh "$B"; then echo "restore.sh overwrote a running bundle"; exit 1; fi
+          if ./restore.sh "$B" 2> $RUNNER_TEMP/refused.log; then echo "restore.sh ran over a running bundle"; exit 1; fi
+          grep -q 'already has containers' $RUNNER_TEMP/refused.log
           docker compose down -v && sudo rm -rf hsdata
           ./restore.sh "$B"
           python3 -I ../../tools/bundle-backup-check.py compare . $RUNNER_TEMP/before.json

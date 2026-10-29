@@ -65,9 +65,11 @@ PG_DATA=$(vol_of "$PG" /var/lib/postgresql/data)
 # A host folder (HOMESERVER_DATA, POSTGRES_DATA) must be empty too
 for v in "$HS_DATA" "$NODE_DATA" "$TUNNEL" "$PG_DATA"; do
   [ -z "$v" ] && continue
-  docker run --rm -v "$v:/v:ro" "$ALPINE" sh -c '[ -z "$(ls -A /v)" ]' ||
+  docker run --rm -v "$v:/v:ro" "$ALPINE" sh -c '[ -z "$(ls -A /v | grep -vx lost+found)" ]' ||
     die "$v already holds data: this restores into a fresh install only (docker compose down to remove the new containers)"
 done
+# From here on a failure leaves a half-restored install: say how to start over
+trap 'echo "restore: stopped half-way. To start over: docker compose down -v (this install only), empty HOMESERVER_DATA and POSTGRES_DATA if .env sets them, then ./restore.sh again" >&2' ERR
 untar() { docker run --rm -i -v "$1:/v" "$ALPINE" tar xzf - -C /v < "$2"; }
 untar "$HS_DATA" "$B/homeserver/data.tar.gz"
 untar "$NODE_DATA" "$B/node/data.tar.gz"
@@ -77,13 +79,18 @@ docker run --rm -i -v "$NODE_DATA:/v" "$ALPINE" sh -c 'cat > /v/library.db && ch
 
 # The homeserver's database, once PostgreSQL has made its empty one
 docker compose start postgres > /dev/null
+# (the image's set-up server answers on the socket only; the real one also on TCP)
+ready=
 for _ in $(seq 120); do
-  docker logs "$PG" 2>&1 | grep -q 'init process complete' &&
-    [ "$(docker inspect -f '{{.State.Health.Status}}' "$PG")" = healthy ] && break
+  if docker logs "$PG" 2>&1 | grep -q 'init process complete' &&
+    docker exec "$PG" sh -c 'pg_isready -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; then
+    ready=1
+    break
+  fi
   sleep 2
 done
-[ "$(docker inspect -f '{{.State.Health.Status}}' "$PG")" = healthy ] || die "PostgreSQL did not start"
-docker exec -i "$PG" sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --clean --if-exists' \
+[ -n "$ready" ] || die "PostgreSQL did not start"
+docker exec -i "$PG" sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --single-transaction --exit-on-error' \
   < "$B/homeserver/database.dump"
 
 docker compose up -d
@@ -104,15 +111,22 @@ node_api() {
       printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
       exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
+if [ -n "$PASS" ]; then q=''; else q='?skip_secrets=true'; fi
+# The node scans its folders when it starts and refuses a restore meanwhile (409): wait for two
+# idle answers in a row (the scan may not have begun at the first), and try again after a 409
+report=""
+idle=0
 for i in $(seq 720); do
   info=$(node_api GET /v1/info 2>/dev/null || true)
-  case $info in *'"scanning":false'*) break ;; esac
+  case $info in *'"scanning":false'*) idle=$(( idle + 1 )) ;; *) idle=0 ;; esac
+  if [ "$idle" -ge 2 ]; then
+    if report=$(node_api POST "/v1/restore$q" "$B/node/library.pmbackup" 2>&1); then break; fi
+    case $report in *scan*) idle=0 ;; *) die "the node did not take $B/node/library.pmbackup ($report): restore it in Settings › Backup" ;; esac
+    report=""
+  fi
   [ $(( i % 30 )) -ne 0 ] || echo "  still waiting for the node (a first scan of a big library takes a while)"
   sleep 5
 done
-case $info in *'"scanning":false'*) ;; *) die "the node did not finish its first scan: restore $B/node/library.pmbackup in Settings › Backup later" ;; esac
-if [ -n "$PASS" ]; then q=''; else q='?skip_secrets=true'; fi
-report=$(node_api POST "/v1/restore$q" "$B/node/library.pmbackup") ||
-  die "the node did not take $B/node/library.pmbackup: restore it in Settings › Backup"
+[ -n "$report" ] || die "the node did not finish its first scan: restore $B/node/library.pmbackup in Settings › Backup later"
 echo "Restored. The node's report (sign-ins put back, folders it cannot find, notes):"
 printf '%s\n' "$report" | sed 's/,"/,\n  "/g'

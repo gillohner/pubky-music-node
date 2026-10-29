@@ -22,7 +22,8 @@ command -v docker >/dev/null || die "docker is not installed"
 
 ROOT=${1:-${BACKUP_DIR:-$HOME/backups/pubky-music}}
 KEEP=${KEEP:-7}
-case $KEEP in '' | *[!0-9]* | 0) die "KEEP must be a number above 0" ;; esac
+case $KEEP in [1-9] | [1-9]*[0-9]) ;; *) die "KEEP must be a number above 0" ;; esac
+case $KEEP in *[!0-9]*) die "KEEP must be a number above 0" ;; esac
 # curl for the node's API (pinned), and the small image the compose file already uses
 CURL=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
 ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head -n 1)
@@ -54,15 +55,19 @@ PORT=${PORT:-7788}
 
 kb_in() { docker run --rm -v "$1:/v:ro" "$ALPINE" du -sk /v | cut -f1; }
 need=$(( $(kb_in "$NODE_DATA") + $(kb_in "$HS_DATA") + $(docker exec "$PG" du -sk /var/lib/postgresql/data | cut -f1) ))
-mkdir -p "$ROOT"
-chmod 700 "$ROOT"
+# A folder this makes is yours only; one you give keeps its permissions (a NAS share's decide)
+[ -d "$ROOT" ] || { mkdir -p "$ROOT" && chmod 700 "$ROOT"; }
 free=$(df -Pk "$ROOT" | awk 'NR == 2 { print $4 }')
 [ "$free" -gt $(( need + 1048576 )) ] ||
   die "not enough space in $ROOT: about $(( need / 1024 )) MB plus 1 GB needed, $(( free / 1024 )) MB free"
 
 DEST="$ROOT/$(date +%Y-%m-%d-%H%M%S)"
 [ ! -e "$DEST" ] || die "$DEST exists"
+mkdir -m 700 "$DEST"
 mkdir -p "$DEST/config" "$DEST/node" "$DEST/homeserver"
+# Which bundle wrote it: pruning only ever touches this bundle's own backups
+MARK="$(hostname) $PROJECT"
+printf '%s\n' "$MARK" > "$DEST/.pubky-music-backup"
 finish() {
   if [ ! -f "$DEST/SHA256SUMS" ]; then
     mv "$DEST" "$DEST.failed" 2>/dev/null || true
@@ -88,7 +93,7 @@ docker inspect -f '{{range .Mounts}}{{.Type}}	{{if .Name}}{{.Name}}{{else}}{{.So
   echo '# existing volume as it is: remove it first (docker volume rm <name>) to change it.'
   echo 'set -e'
   docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{println}}{{end}}{{end}}' "$NODE" |
-    sed '/^$/d' | grep -v "^${PROJECT}_" | sort -u | while read -r v; do
+    sed '/^$/d' | { grep -v "^${PROJECT}_" || true; } | sort -u | while read -r v; do
     docker volume inspect "$v" > "$DEST/config/volume-$v.json"
     line="docker volume create --driver $(q "$(docker volume inspect -f '{{.Driver}}' "$v")")"
     while IFS= read -r kv; do
@@ -136,7 +141,7 @@ node_api POST '/v1/restore?check=true' "$DEST/node/library.pmbackup" > "$DEST/no
   die "the node cannot read its own backup"
 # 2. a snapshot of the whole database (keeps this node's id; sign-ins come from step 1)
 docker exec "$NODE" sh -c 'pm-node -c "${PM_CONFIG:-${PM_DATA_DIR:-/data}/node.toml}" backup --force /tmp/pm-backup-library.db >/dev/null'
-docker cp -q "$NODE:/tmp/pm-backup-library.db" "$DEST/node/library.db"
+docker cp "$NODE:/tmp/pm-backup-library.db" "$DEST/node/library.db" > /dev/null
 docker exec "$NODE" rm -f /tmp/pm-backup-library.db
 # 3. the rest of the data folder (vault key, Pubky session, remote key, config, covers) and the
 #    tunnel settings
@@ -163,13 +168,15 @@ EOF
 (cd "$DEST" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum) > "$DEST/SHA256SUMS.part"
 mv "$DEST/SHA256SUMS.part" "$DEST/SHA256SUMS"
 chmod -R go-rwx "$DEST"
+open=$(find "$DEST" -perm /077 | head -n 1)
+[ -z "$open" ] || echo "backup: WARNING: others can read $open (a share's own permissions?): it holds the node's secrets" >&2
 
-# Keep the newest $KEEP complete backups
+# Keep the newest $KEEP complete backups of this bundle (never the one just made)
 find "$ROOT" -mindepth 1 -maxdepth 1 -type d -name '20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]' |
   sort -r | while read -r d; do
-  [ -f "$d/SHA256SUMS" ] && echo "$d"
-done | tail -n +"$(( KEEP + 1 ))" | while read -r d; do
-  rm -rf -- "$d" && echo "removed the old backup $d"
+  if [ -f "$d/SHA256SUMS" ] && [ "$(cat "$d/.pubky-music-backup" 2>/dev/null)" = "$MARK" ]; then echo "$d"; fi
+done | tail -n +"$(( 10#$KEEP + 1 ))" | while read -r d; do
+  if [ "$d" != "$DEST" ]; then rm -rf -- "$d" && echo "removed the old backup $d"; fi
 done
 
 counts=$(sed -n 's/.*"tracks": *\([0-9]*\).*/\1/p' "$DEST/node/library-check.json" | head -n 1)
