@@ -2723,6 +2723,19 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
+  // "Share what I'm listening to" (listening together): the player bar's Live switch, the owner's,
+  // shown once signed in with Pubky; off by default.
+  const wireLive = async () => {
+    const b = $('#livebtn'); if (!b) return;
+    if (!(await pubkyUser())) { b.hidden = true; return; }
+    const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
+    try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
+    b.onclick = async () => {
+      const on = b.getAttribute('aria-pressed') !== 'true';
+      b.disabled = true;
+      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+    };
+  };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   const RESIGN_TEXT = 'This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.';
@@ -4779,6 +4792,7 @@
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
       document.body.classList.toggle('listener', isListener());
       if (isOwner()) {
+        wireLive();
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
       } else { state.favUris = new Set(); state.sources = []; }

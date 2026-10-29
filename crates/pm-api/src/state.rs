@@ -519,6 +519,10 @@ impl NodeState {
                         if matches!(event, pm_zones::ZoneEvent::Stopped) {
                             continue_radio(&library, &zone_for_radio);
                         }
+                        // "Share what I'm listening to" (listening_share.rs)
+                        if let Some(n) = node.upgrade() {
+                            crate::listening_share::zone_event(&n, &id.0, &event);
+                        }
                         let _ = events.send(ApiEvent::ZoneEvent {
                             zone: id.clone(),
                             event,
