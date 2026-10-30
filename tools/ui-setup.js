@@ -321,6 +321,52 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#np .warn-text'), 'a node that refuses: the bar says so');
       check(/refused the stream/.test(await p.textContent('#np')), 'in the node’s words');
       await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      // ---- Play from another source (Now playing › Sources) and Similar on item pages ----
+      {
+        // one song on repeat, so it is still playing when Sources opens (the test files are short)
+        const two = (await api('GET', '/library/tracks?limit=10')).tracks.slice(0, 2);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'all' }).catch(() => {});
+        if (two[0]) await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [two[0].id], replace: true, play: true }).catch(() => {});
+        let zs = null; { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'playing' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        // CI's Null output plays faster than real time, so a short song on repeat loops at once: pause it
+        // so the bar and Now playing stay on it (Play from here keeps a paused zone paused)
+        await api('POST', `/zones/${encodeURIComponent(nz.id)}/transport`, { action: 'pause' }).catch(() => {});
+        { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'paused' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        const curUri = zs.now_playing && zs.now_playing.item.uri; const curId = Number((/^track:(\d+)$/.exec(curUri || '') || [])[1]);
+        const other = two.find((t) => t.id !== curId);
+        if (curId && other) {
+          // the song page says the song is also another library file (stands in for TIDAL, Deezer…)
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}$`), (r) => r.fulfill({ json: { kind: 'song', id: `lib-${curId}`, target: { track_id: curId }, source: 'Your library', section: 'albums', songs: [], albums: [], versions: [], about: [], open_on: [], also_on: [{ source: 'library', label: 'Your library: the other file', uri: `track:${other.id}`, url: '' }] } }));
+          let loadBody = null;
+          await p.route(/\/v1\/zones\/[^/]+\/load$/, (r) => { loadBody = JSON.parse(r.request().postData() || '{}'); return r.continue(); });
+          // the page learns the zone plays from the node's events: open Now playing once the bar shows
+          // the song (its cover button), not while it still says the earlier refusal
+          const shown = await p.waitForSelector('#np #npart', { timeout: 20000 }).then(() => true).catch(() => false);
+          check(shown, 'the bar shows the song the zone plays');
+          let sw = null;
+          if (shown) {
+            await p.click('#np #npart');
+            // Now playing draws itself again on zone updates: a locator finds the tab afresh each try
+            const opened = await p.locator('#nowplaying [data-npsheet="sources"]:visible').first().click({ timeout: 15000 }).then(() => true).catch(() => false);
+            if (opened) sw = await p.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null);
+          }
+          check(!!sw && /Play from here/.test(await sw.textContent()), 'Sources: Play from here on another source of the playing song');
+          if (sw) {
+            await p.locator('[data-npswitch]').first().click({ timeout: 10000 });
+            const moved = await (async () => { const end = Date.now() + 10000; for (;;) { const z2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (z2.now_playing && z2.now_playing.item.uri === `track:${other.id}`) return z2; if (Date.now() > end) return null; await p.waitForTimeout(250); } })();
+            check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'paused', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
+          }
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
+          await p.keyboard.press('Escape');
+          // Similar: the library's own (playable rows), then what people tagged alike on Pubky
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
+          const sim = await p.evaluate(() => { const s = document.querySelector('#isimilar'); return s && { head: s.querySelector('h3').textContent, parts: [...s.querySelectorAll('.simhead')].map((h) => h.textContent), rows: s.querySelectorAll('#isimlib .srow, #isimlib .track').length, play: !!s.querySelector('#isimlib [data-splay]'), tiles: s.querySelectorAll('#irelated .tile').length }; });
+          check(sim && sim.head === 'Similar' && sim.parts.join('|') === 'In your library|Tagged alike on Pubky' && sim.rows === 1 && sim.play && sim.tiles === 1, `one Similar section: your library's songs with Play, then Pubky's (${JSON.stringify(sim)})`);
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
+        } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});
+      }
       // A refused play from the transport: the wait ends at once with the node's words
       await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [(await api('GET', '/library/tracks?limit=1')).tracks[0].id], replace: true, play: false });
       await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');

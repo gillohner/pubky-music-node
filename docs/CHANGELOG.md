@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **Similar, and play from another source.** Song, album and artist pages have one Similar section: from your library first (what shares the most genres, then the same artist; each with Play), Last.fm's similar artists on an artist page, then what people tagged alike on Pubky. In Now playing, Sources › Play from here moves the playing song to another source (TIDAL, Deezer, your library…) at the same position, keeping the queue, repeat and radio. `GET /v1/item/{kind}/{id}/extras` gains `similar`.
 - **Fixes to listens, comments, collections, smart playlists and Live sharing:**
   - Listens moved to private while a sync ran no longer keep their public copies. A history deleted on one node is deleted on your other nodes too. The listen stats no longer hold up the node with a long history.
   - What you type in a comment survives the song page refreshing.

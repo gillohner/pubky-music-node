@@ -481,6 +481,10 @@ fn other_recordings(s: &NodeState, pg: &ItemPage) -> Vec<Version> {
 pub struct ItemExtras {
     pub related: Vec<DiscoverItem>,
     pub concerts: Vec<DiscoverItem>,
+    /// The library's own "Similar": songs, albums or artists (as the page is) sharing genres
+    /// with this one, then the same artist's; playable, best first. Works offline.
+    #[serde(default)]
+    pub similar: Vec<crate::search::SearchHit>,
 }
 
 /// Each outside call gets this long; what is not ready is left out.
@@ -510,11 +514,130 @@ pub(crate) async fn page_extras(
         external(&s, &kind, &id, &url).await
     };
     let mut pg = pg;
+    // Library reads (up to a few hundred songs): off the async workers
+    let similar = {
+        let (s2, pg2) = (s.clone(), pg.clone());
+        tokio::task::spawn_blocking(move || {
+            let lib = s2.library.lock().expect("library poisoned");
+            library_similar(&lib, &pg2)
+        })
+        .await
+        .unwrap_or_default()
+    };
     extras(&s, &mut pg).await;
     Ok(Json(ItemExtras {
         related: pg.related,
         concerts: pg.concerts,
+        similar,
     }))
+}
+
+/// How many "Similar" items a page shows.
+const SIMILAR_MAX: usize = 12;
+
+/// The library's own "Similar" for a page: what shares the most genres with its songs (the
+/// tags the files carry), then the same artist's songs or albums. A song page that isn't the
+/// library's own finds its library copy through `also_on`.
+pub(crate) fn library_similar(lib: &pm_library::Library, pg: &ItemPage) -> Vec<crate::search::SearchHit> {
+    use crate::search::{album_hit, artist_hit, song_hit};
+    let num = |k: &str| pg.target.get(k).and_then(serde_json::Value::as_i64);
+    let library_copy = || {
+        pg.also_on
+            .iter()
+            .filter_map(|v| v.uri.as_deref()?.strip_prefix("track:")?.parse::<i64>().ok())
+            .next()
+    };
+    let seeds: Vec<pm_model::Track> = match pg.kind.as_str() {
+        "song" => num("track_id")
+            .or_else(library_copy)
+            .and_then(|n| lib.get_track(pm_model::TrackId(n)).ok().flatten())
+            .into_iter()
+            .collect(),
+        "album" => num("album_id")
+            .and_then(|n| lib.album_tracks(n).ok())
+            .unwrap_or_default(),
+        "artist" => num("artist_id")
+            .and_then(|n| lib.artist_tracks(n).ok())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    // Every song of the page's own is left out; up to 200 of them say which genres to look for
+    let own_ids: Vec<i64> = seeds.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
+    let seed_ids: Vec<i64> = own_ids.iter().copied().take(200).collect();
+    if seed_ids.is_empty() {
+        return Vec::new();
+    }
+    let alike: Vec<pm_model::Track> = lib
+        .tracks_sharing_genres(&seed_ids, &own_ids, 200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|n| lib.get_track(pm_model::TrackId(n)).ok().flatten())
+        .collect();
+    let seed_artists: Vec<i64> = seeds
+        .iter()
+        .flat_map(|t| t.artists.iter().filter_map(|a| a.id))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    match pg.kind.as_str() {
+        "song" => {
+            let seed = &seeds[0];
+            let same_title = |t: &pm_model::Track| t.title.eq_ignore_ascii_case(&seed.title);
+            // the same artist's songs, after those that share genres
+            let by_artist = seed_artists
+                .first()
+                .and_then(|a| lib.artist_tracks(*a).ok())
+                .unwrap_or_default();
+            for t in alike.iter().chain(by_artist.iter()) {
+                if out.len() >= SIMILAR_MAX {
+                    break;
+                }
+                if same_title(t) || !t.id.is_some_and(|i| seen.insert(i.0) && !seed_ids.contains(&i.0)) {
+                    continue;
+                }
+                out.extend(song_hit(t));
+            }
+        }
+        "album" => {
+            let me = num("album_id");
+            let by_artist = seed_artists
+                .first()
+                .and_then(|a| lib.artist_albums(*a).ok())
+                .unwrap_or_default();
+            let albums = alike.iter().filter_map(|t| t.album.clone()).chain(by_artist);
+            for a in albums {
+                if out.len() >= SIMILAR_MAX {
+                    break;
+                }
+                if a.id.is_none() || a.id == me || !seen.insert(a.id.unwrap_or_default()) {
+                    continue;
+                }
+                out.extend(album_hit(&a));
+            }
+        }
+        _ => {
+            let me = num("artist_id");
+            // One read of the artists, not one per similar artist
+            let artists: std::collections::HashMap<i64, pm_library::ArtistSummary> = lib
+                .list_artists()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| (a.id, a))
+                .collect();
+            for id in alike.iter().filter_map(|t| t.artists.first().and_then(|a| a.id)) {
+                if out.len() >= SIMILAR_MAX {
+                    break;
+                }
+                if Some(id) == me || !seen.insert(id) {
+                    continue;
+                }
+                if let Some(a) = artists.get(&id) {
+                    out.push(artist_hit(a));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Sections that appear once Pinakes ships them: related items (announced in

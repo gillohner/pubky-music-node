@@ -2113,11 +2113,46 @@
       if (pg && !pg.reading && !pg.pending) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
     }
     const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
-    const also = (pg && pg.also_on) || [];
-    box.innerHTML = (also.length ? `<div class="list">${rankSvc(also, (v) => srcSvc(v.source)).map((v) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+    // Play from another source (TASK-pinakes-social-ux A4): the same song, where it is, on a node
+    // zone; only from the library or a service that is on and working here (a source the node
+    // can't play would leave the zone stopped)
+    const rk = await loadSvcRank().catch(() => null);
+    if (!$('#npsources', overlay) || gen !== npGen) return;
+    const also = rankSvc((pg && pg.also_on) || [], (v) => srcSvc(v.source));
+    const z0 = currentZone(); const cur = z0 && z0.now_playing ? z0.now_playing.item : null;
+    const canPlay = (v) => (rk ? rk.healthy.has(srcSvc(v.source)) : srcSvc(v.source) === 'library');
+    const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
+    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
+    $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
     npRestore();
+  };
+  // What a source's entry plays as in a queue: a library track, a service's own uri, a YouTube video
+  const switchUri = (v) => (v.uri && (v.source !== 'library' || v.uri.startsWith('track:')) ? v.uri : ytOf(v.url) ? `youtube:video:${ytOf(v.url)}` : null);
+  // The playing song moves to another source at the same position: the zone's queue is loaded
+  // again with that one item swapped (repeat, radio and paused-or-playing stay)
+  // `itemId`: the song the sheet was drawn for; if another one plays by now, nothing changes
+  const switchSource = async (v, b, itemId) => {
+    const zone = state.zone; const uri = switchUri(v);
+    const playingIt = () => { const z = state.zones[zone]; return z && z.now_playing && z.now_playing.item.id === itemId ? z : null; };
+    if (!uri || !playingIt()) { toast('Another song is playing now: open Sources again', 'error'); return; }
+    const name = v.label || srcName(srcSvc(v.source));
+    b.disabled = true;
+    try {
+      const queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
+      const at = queue.findIndex((q) => q.id === itemId);
+      const z = playingIt();
+      if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
+      // The new source's own cover and length: the old item's cover stays only between two items
+      // of the same service (a library file shows its album's); the length comes with the source
+      const scheme = (u) => String(u || '').split(':')[0];
+      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+      if (z.transport === 'playing') startWait('play', zone, `${z.now_playing.item.title || ''} · from ${name}`, true);
+      await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      toast(`Playing from ${name}`);
+      refreshQueue();
+    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); b.disabled = false; }
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -4665,10 +4700,9 @@
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
-            + (kind === 'artist' && target.artist_id != null ? '<div id="isimilar-slot"></div>' : '')
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
+            + '<div id="isimilar-slot"></div>'
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
-            + '<div id="irelated-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${aboutCredit(pg)}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -4683,17 +4717,31 @@
           api('GET', `/item/${kind}/${encodeURIComponent(id)}/extras`).then((ex) => {
             if (state.view !== 'item' || state.viewArg.id !== id) return;
             pg.related = ex.related || []; pg.concerts = ex.concerts || [];
+            // Similar (TASK-pinakes-social-ux A3): the library's own first (shared genres, then the
+            // same artist; playable), Last.fm's similar artists on an artist page, then what people
+            // tagged alike on Pubky. One section; each part only when it has something.
             const ss = $('#isimilar-slot'); if (ss) (async () => {
-              let sim; try { sim = await api('GET', `/library/artists/${target.artist_id}/similar`); } catch { sim = null; }
+              let fm = null;
+              if (kind === 'artist' && target.artist_id != null) { try { fm = await api('GET', `/library/artists/${target.artist_id}/similar`); } catch { fm = null; } }
               if (!ss.isConnected) return;
-              if (!sim || !sim.artists || !sim.artists.length) { ss.remove(); return; }
-              ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar artists</h3><span class="muted small">from Last.fm</span></div><div class="chips">${sim.artists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div></section>`;
+              const mine = ex.similar || []; const fmArtists = (fm && fm.artists) || [];
+              const mineSongs = kind === 'song' ? mine.map((h) => ({ ...h, artist: h.subtitle })) : [];
+              const mineTiles = kind === 'song' ? [] : mine.map((h) => ({ ...h, year: h.subtitle || h.year || '' }));
+              const part = (label, body, id) => `<div class="simpart" id="${id}"><h4 class="simhead muted small">${label}</h4>${body}</div>`;
+              const parts = [
+                mine.length ? part('In your library', kind === 'song' ? songRows(mineSongs, { showAlbum: true, covers: true }) : itemTileGrid(mineTiles, kind), 'isimlib') : '',
+                fmArtists.length ? part('From Last.fm', `<div class="chips">${fmArtists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div>`, 'isimfm') : '',
+                pg.related.length ? part('Tagged alike on Pubky', itemTileGrid(pg.related.map(asTile), 'album'), 'irelated') : '',
+              ].filter(Boolean);
+              if (!parts.length) { ss.remove(); return; }
+              ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar</h3></div>${parts.join('')}</section>`;
+              const lib = $('#isimlib', main);
+              if (lib && kind === 'song') bindSongRows(lib, mineSongs, {}); else if (lib) bindItemTiles(lib, mineTiles, kind);
               $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
+              if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
             })();
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
-            const rs = $('#irelated-slot'); if (rs) { rs.outerHTML = (pg.related && pg.related.length ? `<section class="section" id="irelated"><div class="section-head"><h3>People who tagged this also tagged</h3></div>${itemTileGrid(pg.related.map(asTile), 'album')}</section>` : ''); }
-            if (pg.related.length) bindHome($('#irelated'), { items: pg.related, tags: [] });
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
           if (myTags) bindScopedTags(songRef, linkRef);
