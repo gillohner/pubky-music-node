@@ -433,9 +433,12 @@ impl AudioSink for BluosSink {
                 self.sink_mut().pause()?;
                 Ok(true)
             }
+            // It may have paused all the same (a late answer): the resume sends /Play either
+            // way, and the stream fills the buffer again from then
             Err(e) => {
-                tracing::warn!("BluOS pause refused, the player plays out its buffer: {e}");
-                self.sink_mut().flush().map(|()| false)
+                tracing::warn!("BluOS pause not confirmed, the player may play out its buffer: {e}");
+                self.paused = true;
+                self.sink_mut().flush().map(|()| true)
             }
         }
     }

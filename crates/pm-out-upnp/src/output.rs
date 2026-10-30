@@ -28,6 +28,9 @@ pub struct UpnpOutput {
     openhome: bool,
     describe: Option<Describe>,
     meta: Mutex<Option<TrackMeta>>,
+    /// The renderer answers Pause on the node's live stream but keeps playing (a Linn does):
+    /// it is stopped for a pause instead, and started again on resume. Learned on the first try.
+    stops_for_pause: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl UpnpOutput {
@@ -73,6 +76,7 @@ impl UpnpOutput {
             openhome,
             describe: None,
             meta: Mutex::new(None),
+            stops_for_pause: Arc::default(),
         }
     }
 
@@ -227,8 +231,11 @@ impl Output for UpnpOutput {
         let (pull, generation) = (self.pull.clone(), self.pull.generation());
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_retrying = cancelled.clone();
-        let pause_refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let refused = pause_refused.clone();
+        let refill = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let emptied = refill.clone();
+        let stopped_for_pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stopped_for_pause.clone();
+        let stops_for_pause = self.stops_for_pause.clone();
         std::thread::Builder::new()
             .name("upnp-play".into())
             .spawn(move || {
@@ -247,18 +254,35 @@ impl Output for UpnpOutput {
                     let av = target_set.lock().expect("target").clone();
                     match c {
                         Control::Pause => {
-                            if !(started && av.as_deref().is_some_and(pause_renderer)) {
-                                refused.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let how = match av.as_deref() {
+                                Some(av) if started => pause_renderer(av, &stops_for_pause),
+                                _ => Paused::Refused,
+                            };
+                            match how {
+                                Paused::Held => {}
+                                Paused::Stopped => stopped.store(true, std::sync::atomic::Ordering::SeqCst),
+                                // It played its buffer out: the stream fills it again from now
+                                Paused::Refused => emptied.store(true, std::sync::atomic::Ordering::SeqCst),
                             }
                         }
                         Control::Play => {
                             let r = match av {
                                 Some(av) if started => {
                                     play_after_pause(&av, &renderer, &url, &meta, &target_set, &stop_retrying)
+                                        .map(|restarted| {
+                                            // Set again, it starts with an empty buffer
+                                            if restarted {
+                                                emptied.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            }
+                                        })
                                 }
                                 // Nothing started: a Play has nothing to go on with
                                 _ => Err("the renderer never started the stream".into()),
                             };
+                            if let Err(e) = &r {
+                                // The zone hears it at once, not after the listener timeout
+                                pull.abort(generation, e.clone());
+                            }
                             let _ = played_tx.send(r);
                         }
                     }
@@ -274,7 +298,8 @@ impl Output for UpnpOutput {
             cancelled,
             control: Some(control),
             paused: false,
-            pause_refused,
+            refill,
+            stopped_for_pause,
         }))
     }
 
@@ -352,20 +377,58 @@ enum Control {
     Play,
 }
 
-/// The renderer's own Pause (on the sink's control thread). False when it refused: it plays
-/// its buffer out, as before.
-fn pause_renderer(av: &str) -> bool {
-    match soap::call(av, AV_TRANSPORT, "Pause", &[("InstanceID", "0")]) {
-        Ok(_) => true,
+/// How a renderer took a pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Paused {
+    /// Paused, holding its buffer: Play carries on.
+    Held,
+    /// Stopped instead (it ignores Pause on a live stream): the resume starts it again.
+    Stopped,
+    /// It refused: it plays its buffer out, as before.
+    Refused,
+}
+
+/// How long a renderer may take to report the pause before it counts as ignoring it.
+const PAUSE_CONFIRM: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// The renderer's own Pause (on the sink's control thread). A Linn answers Pause on the
+/// node's live WAV but plays on (NUC, 2026-10-30): a renderer that doesn't report
+/// PAUSED_PLAYBACK soon after is stopped instead, and `stops` remembers it so later pauses stop
+/// it at once.
+fn pause_renderer(av: &str, stops: &std::sync::atomic::AtomicBool) -> Paused {
+    let stop = || match soap::call(av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]) {
+        Ok(_) => Paused::Stopped,
         Err(e) => {
-            tracing::warn!("renderer Pause refused, it plays out its buffer: {e}");
-            false
+            tracing::warn!("renderer Stop for the pause refused, it plays out its buffer: {e}");
+            Paused::Refused
+        }
+    };
+    if stops.load(std::sync::atomic::Ordering::SeqCst) {
+        return stop();
+    }
+    if let Err(e) = soap::call(av, AV_TRANSPORT, "Pause", &[("InstanceID", "0")]) {
+        tracing::info!("renderer Pause refused ({e}); stopping it for the pause");
+        return stop();
+    }
+    let deadline = std::time::Instant::now() + PAUSE_CONFIRM;
+    loop {
+        let state = soap::call(av, AV_TRANSPORT, "GetTransportInfo", &[("InstanceID", "0")])
+            .ok()
+            .and_then(|x| soap::element_text(&x, "CurrentTransportState"));
+        match state.as_deref() {
+            Some("PAUSED_PLAYBACK") => return Paused::Held,
+            Some("STOPPED") => return Paused::Stopped,
+            _ if std::time::Instant::now() >= deadline => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     }
+    tracing::info!("the renderer plays on after Pause; stopping it for pauses from now on");
+    stops.store(true, std::sync::atomic::Ordering::SeqCst);
+    stop()
 }
 
 /// Play after a pause. A renderer that dropped the stream meanwhile (stopped, "no media")
-/// refuses: it is pointed at the same stream again, as at the start.
+/// refuses: it is pointed at the same stream again, as at the start (Ok(true)).
 fn play_after_pause(
     av: &str,
     renderer: &Renderer,
@@ -373,12 +436,12 @@ fn play_after_pause(
     meta: &str,
     target: &Mutex<Option<String>>,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match soap::call(av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(false),
         Err(e) => {
             tracing::info!("renderer refused Play after the pause ({e}); setting the stream again");
-            start(renderer, url, meta, target, cancelled)
+            start(renderer, url, meta, target, cancelled).map(|()| true)
         }
     }
 }
@@ -443,8 +506,11 @@ struct UpnpSink {
     control: Option<std::sync::mpsc::Sender<Control>>,
     /// The renderer was told to pause.
     paused: bool,
-    /// The renderer refused that Pause: it played its buffer out.
-    pause_refused: Arc<std::sync::atomic::AtomicBool>,
+    /// The renderer's buffer emptied (it refused a Pause and played it out, or was set to the
+    /// stream again): the next write lets the stream fill it again from now.
+    refill: Arc<std::sync::atomic::AtomicBool>,
+    /// The renderer was stopped for that pause: the resume starts it again.
+    stopped_for_pause: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl UpnpSink {
@@ -472,6 +538,9 @@ impl AudioSink for UpnpSink {
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         if let Some(e) = self.play_refused() {
             return Err(e);
+        }
+        if self.refill.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.flush()?;
         }
         // A renderer that refused Play never fetches: say that, not "listener stalled"
         self.inner
@@ -501,6 +570,17 @@ impl AudioSink for UpnpSink {
     }
     /// Play again; a refusal shows on the next write, as a refused start does.
     fn resume(&mut self) -> Result<(), SinkError> {
+        // Stopped for the pause: it dropped its buffer, so the zone opens the output again
+        // from what was last heard
+        if self
+            .stopped_for_pause
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.paused = false;
+            return Err(SinkError::Device(
+                "the renderer was stopped for the pause; starting it again".into(),
+            ));
+        }
         if std::mem::take(&mut self.paused) {
             let sent = self
                 .control
@@ -511,15 +591,7 @@ impl AudioSink for UpnpSink {
             }
             self.pending += 1;
         }
-        self.inner.resume()?;
-        // A renderer that refused the Pause played its buffer out: fill it again from now
-        if self
-            .pause_refused
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            self.inner.flush()?;
-        }
-        Ok(())
+        self.inner.resume()
     }
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
@@ -566,19 +638,23 @@ mod tests {
 
     /// [`fake_renderer`] that takes `stop` to answer Stop.
     fn fake_renderer_slow(stop: std::time::Duration) -> (String, Arc<Mutex<Vec<String>>>) {
-        fake_renderer_with(stop, Arc::default())
+        fake_renderer_with(stop, Arc::default(), Arc::default())
     }
 
-    /// [`fake_renderer_slow`] that refuses the next `refuse_play` Plays (UPnP error, HTTP 500).
+    /// [`fake_renderer_slow`] that refuses the next `refuse_play` Plays (UPnP error, HTTP 500)
+    /// and, with `ignores_pause`, answers Pause but plays on (as a Linn does on a live stream).
+    /// It reports its transport state to GetTransportInfo, which is not logged.
     fn fake_renderer_with(
         stop: std::time::Duration,
         refuse_play: Arc<std::sync::atomic::AtomicUsize>,
+        ignores_pause: Arc<std::sync::atomic::AtomicBool>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
         let log2 = log.clone();
         std::thread::spawn(move || {
+            let mut state = "STOPPED";
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { break };
                 let mut buf = Vec::new();
@@ -614,6 +690,11 @@ mod tests {
                     .map(|a| a.trim_matches('"').rsplit('#').next().unwrap_or("").to_string())
                     .unwrap_or_default();
                 let uri = soap::element_text(&text, "CurrentURI").unwrap_or_default();
+                if action == "GetTransportInfo" {
+                    let body = format!("<s:Envelope><s:Body><u:GetTransportInfoResponse><CurrentTransportState>{state}</CurrentTransportState></u:GetTransportInfoResponse></s:Body></s:Envelope>");
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    continue;
+                }
                 log2.lock().unwrap().push(if uri.is_empty() {
                     action.clone()
                 } else {
@@ -621,12 +702,19 @@ mod tests {
                 });
                 if action == "Stop" {
                     std::thread::sleep(stop);
+                    state = "STOPPED";
+                }
+                if action == "Pause" && !ignores_pause.load(std::sync::atomic::Ordering::SeqCst) {
+                    state = "PAUSED_PLAYBACK";
                 }
                 if action == "Play" && refuse_play.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                     refuse_play.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     let body = "<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>701</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
                     let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     continue;
+                }
+                if action == "Play" {
+                    state = "PLAYING";
                 }
                 let body = if action == "GetVolume" {
                     "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume>40</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>"
@@ -787,7 +875,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_play_refused_after_a_pause_sets_the_stream_again() {
         let refuse = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, refuse.clone());
+        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, refuse.clone(), Arc::default());
         let renderer = Renderer {
             udn: "uuid:refuse".into(),
             friendly_name: "Fake DSM".into(),
@@ -863,6 +951,81 @@ mod tests {
         .join()
         .unwrap();
         reader.abort();
+    }
+
+    /// A renderer that answers Pause but plays on (a Linn on the node's live stream) is stopped
+    /// for the pause, and its resume asks the zone to start it again; from then on a pause stops
+    /// it at once (NUC, 2026-10-30).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renderer_that_plays_on_after_pause_is_stopped_instead() {
+        let ignores = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, Arc::default(), ignores);
+        let renderer = Renderer {
+            udn: "uuid:linnish".into(),
+            friendly_name: "Fake Linn".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let pull = Arc::new(PullOutput::controlled("linnish"));
+        let out = UpnpOutput::new(
+            renderer,
+            pull,
+            "http://node/v1/outputs/pull/linnish/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let actions = |skip: usize| -> Vec<String> {
+            log.lock()
+                .unwrap()
+                .iter()
+                .skip(skip)
+                .map(|a| a.split(' ').next().unwrap_or("").to_string())
+                .collect()
+        };
+        let wait_log = |log: Arc<Mutex<Vec<String>>>| {
+            move |n: usize| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        };
+        let sink = out.open(fmt).await.unwrap();
+        let wait = wait_log(log.clone());
+        let (sink, err) = tokio::task::spawn_blocking(move || {
+            let mut sink = sink;
+            wait(3);
+            assert!(sink.pause().unwrap());
+            wait(5);
+            let err = sink.resume().unwrap_err();
+            (sink, err)
+        })
+        .await
+        .unwrap();
+        assert_eq!(actions(0), ["Stop", "SetAVTransportURI", "Play", "Pause", "Stop"]);
+        assert!(err.to_string().contains("starting it again"), "{err}");
+        // Learned: the next stream's pause stops it at once, no Pause first
+        tokio::task::spawn_blocking(move || drop(sink)).await.unwrap();
+        let sink = out.open(fmt).await.unwrap();
+        let wait = wait_log(log.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut sink = sink;
+            wait(9);
+            assert!(sink.pause().unwrap());
+            wait(10);
+        })
+        .await
+        .unwrap();
+        // The first sink's close (Stop), the second's start, its pause (a Stop only, no Pause),
+        // and its close
+        assert_eq!(
+            actions(5),
+            ["Stop", "Stop", "SetAVTransportURI", "Play", "Stop", "Stop"]
+        );
     }
 
     /// A sink closed while the start is still on its first Stop sends neither the URI nor Play
