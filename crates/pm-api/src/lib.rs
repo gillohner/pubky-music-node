@@ -56,6 +56,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod lastfm;
+pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
 pub mod loudness;
@@ -253,6 +254,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/search", get(search))
         .route("/library/loudness", get(loudness::get))
         .route("/library/loudness/measure", post(loudness::measure))
+        .route("/library/matches", get(library_match::status))
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
@@ -12155,5 +12157,201 @@ exec sleep 300
         assert!(!home.contains("picked"), "{home}");
         let set = notes(state_at(dir.path(), "http://172.17.0.2:7788", false).await).await;
         assert!(!set.contains("picked"), "{set}");
+    }
+
+    /// Library matching (F1): an album is matched by title, artist and song count, a tagged
+    /// release by its id, and each artist by its albums' credits; an artist with nothing but a
+    /// name that several MusicBrainz artists share stays unmatched. Pages carry the id and where
+    /// it came from, and a second pass asks nothing.
+    #[tokio::test]
+    async fn library_artists_and_albums_are_matched_without_trusting_a_name_alone() {
+        const RG_TAXI: &str = "0b5d3e2b-4b0c-4d5f-9d4b-1e9a2b3c4d5e";
+        const TAXI: &str = "2d7f5a4d-6d2e-4f7b-9f6d-3a1c4d5e6f70";
+        const RELEASE: &str = "4f9b7c6f-8f4a-4b9d-9b8f-5c3e6f708192";
+        const RG_SOLO: &str = "5a0c8d7a-9a5b-4c0e-8c9a-6d4f708192a3";
+        const SOLO: &str = "6b1d9e8b-0b6c-4d1f-9d0b-7e5a8192a3b4";
+        const SMITH_1: &str = "7c2e0f9c-1c7d-4e2a-8e1c-8f6b92a3b4c5";
+        const SMITH_2: &str = "8d3f1a0d-2d8e-4f3b-9f2d-9a7ca3b4c5d6";
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let credit = |name: &str, id: &str| serde_json::json!([{"name": name, "joinphrase": "", "artist": {"id": id, "name": name}}]);
+        let (c1, c2, c3) = (calls.clone(), calls.clone(), calls.clone());
+        let search = {
+            let taxi = credit("7 Dollar Taxi", TAXI);
+            let smith = credit("John Smith", SMITH_1);
+            move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let query = q.get("query").cloned().unwrap_or_default();
+                let releases = if query.contains("Zahltag") {
+                    serde_json::json!([
+                        {"title": "Zahltag", "track-count": 5, "release-group": {"id": RG_SOLO}, "artist-credit": taxi},
+                        {"title": "Zahltag", "track-count": 2, "release-group": {"id": RG_TAXI}, "artist-credit": taxi}
+                    ])
+                } else {
+                    // John Smith's "Hits" has more songs than the library's copy
+                    serde_json::json!([{"title": "Hits", "track-count": 9, "release-group": {"id": RG_TAXI}, "artist-credit": smith}])
+                };
+                async move { Json(serde_json::json!({"releases": releases})) }
+            }
+        };
+        let mock = Router::new()
+            .route("/ws/2/release", get(search))
+            .route(
+                &format!("/ws/2/release/{RELEASE}"),
+                get(move || {
+                    c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        Json(serde_json::json!({"id": RELEASE, "release-group": {"id": RG_SOLO},
+                            "artist-credit": [{"name": "Solo", "joinphrase": "", "artist": {"id": SOLO, "name": "Solo"}}]}))
+                    }
+                }),
+            )
+            .route(
+                "/ws/2/recording",
+                get(move || {
+                    c3.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Two artists called John Smith with a song of that title and length
+                    async move {
+                        Json(serde_json::json!({"recordings": [
+                            {"title": "Morning", "length": 180_000, "artist-credit": [{"name": "John Smith", "artist": {"id": SMITH_1, "name": "John Smith"}}]},
+                            {"title": "Morning", "length": 181_000, "artist-credit": [{"name": "John Smith", "artist": {"id": SMITH_2, "name": "John Smith"}}]}
+                        ]}))
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.discovery.write().unwrap() = None;
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        {
+            let mut b = s.info_bases.write().unwrap();
+            b.musicbrainz = "http://127.0.0.1:9".into();
+            b.fanart_key = None;
+            b.audiodb = "http://127.0.0.1:9".into();
+        }
+        let song = |file: &str, title: &str, artist: &str, album: Option<(&str, Option<&str>)>, ms: u64| {
+            let mut t = untagged_track(dir.path().join(file), title, artist);
+            t.duration_ms = Some(ms);
+            t.album = album.map(|(name, release)| pm_model::Album {
+                id: None,
+                title: name.into(),
+                album_artist: Some(artist.into()),
+                release_mbid: release.map(|r| pm_model::Mbid::parse(r).unwrap()),
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            t
+        };
+        {
+            let lib = s.library.lock().unwrap();
+            for t in [
+                song(
+                    "1.flac",
+                    "Taxi",
+                    "7 Dollar Taxi",
+                    Some(("Zahltag (Deluxe)", None)),
+                    200_000,
+                ),
+                song(
+                    "2.flac",
+                    "Zahltag",
+                    "7 Dollar Taxi",
+                    Some(("Zahltag (Deluxe)", None)),
+                    210_000,
+                ),
+                song(
+                    "3.flac",
+                    "Alone",
+                    "Solo",
+                    Some(("Solo Album", Some(RELEASE))),
+                    190_000,
+                ),
+                song("4.flac", "Morning", "John Smith", Some(("Hits", None)), 180_500),
+            ] {
+                lib.upsert_track(&t).unwrap();
+            }
+        }
+        let report = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(report.failed, 0, "{report:?}");
+        // Three albums, then John Smith's song (his album didn't match)
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4, "{report:?}");
+        let app = router(s.clone());
+        let (_, m) = call(&app, "GET", "/v1/library/matches", None).await;
+        assert_eq!(m["albums"]["lookup"], 1, "{m}");
+        assert_eq!(m["albums"]["tags"], 1, "{m}");
+        assert_eq!(m["albums"]["unmatched"], 1, "{m}");
+        assert_eq!(m["artists"]["lookup"], 2, "{m}");
+        assert_eq!(m["artists"]["unmatched"], 1, "{m}");
+        assert_eq!(m["artists"]["pending"], 0, "{m}");
+        let artists = s.library.lock().unwrap().list_artists().unwrap();
+        let id_of = |name: &str| artists.iter().find(|a| a.name == name).unwrap().id;
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("7 Dollar Taxi")),
+            None,
+        )
+        .await;
+        assert_eq!(p["mb_match"]["mbid"], TAXI, "{p}");
+        assert_eq!(p["mb_match"]["source"], "lookup");
+        assert_eq!(p["uri"], format!("https://musicbrainz.org/artist/{TAXI}"));
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("Solo")),
+            None,
+        )
+        .await;
+        assert_eq!(p["mb_match"]["mbid"], SOLO, "{p}");
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("John Smith")),
+            None,
+        )
+        .await;
+        assert!(
+            p["mb_match"].is_null(),
+            "a name and a song two artists share: {p}"
+        );
+        let albums = s.library.lock().unwrap().list_albums(None, 100).unwrap();
+        let album_of = |t: &str| albums.iter().find(|a| a.title == t).unwrap().id.unwrap();
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/album/lib-{}", album_of("Zahltag (Deluxe)")),
+            None,
+        )
+        .await;
+        assert_eq!(
+            p["mb_match"],
+            serde_json::json!({"mbid": RG_TAXI, "source": "lookup"}),
+            "{p}"
+        );
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/album/lib-{}", album_of("Solo Album")),
+            None,
+        )
+        .await;
+        assert_eq!(
+            p["mb_match"],
+            serde_json::json!({"mbid": RG_SOLO, "source": "tags"}),
+            "{p}"
+        );
+        assert_eq!(
+            p["uri"],
+            format!("https://musicbrainz.org/release-group/{RG_SOLO}")
+        );
+        // Answered, sure or not: nothing is asked again
+        let again = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(again, library_match::PassReport::default());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 }

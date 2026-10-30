@@ -810,19 +810,23 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         about,
         blurb: None,
         section: "tracks".into(),
+        mb_match: None,
         related: Vec::new(),
         concerts: Vec::new(),
     })
 }
 
 async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
-    let (a, tracks) = {
+    let (a, tracks, mb_match) = {
         let lib = s.library.lock().expect("library poisoned");
         let a = lib
             .get_album(n)?
             .ok_or_else(|| ApiError::not_found(format!("no album {n}")))?;
-        (a, lib.album_tracks(n)?)
+        (a, lib.album_tracks(n)?, lib.album_match(n)?)
     };
+    if mb_match.is_none() {
+        crate::library_match::want_album(n);
+    }
     let songs: Vec<ItemTrack> = tracks.iter().map(library_row).collect();
     let mut versions = vec![Version {
         page: None,
@@ -845,9 +849,8 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
             .unwrap_or_default(),
     );
     versions.extend(matches_for(s, &format!("lib:album:{n}")));
-    let canonical = a
-        .release_group_mbid
-        .map(|m| format!("https://musicbrainz.org/release-group/{m}"))
+    let canonical = mb_match
+        .map(|m| format!("https://musicbrainz.org/release-group/{}", m.mbid))
         .or_else(|| {
             a.release_mbid
                 .map(|m| format!("https://musicbrainz.org/release/{m}"))
@@ -867,11 +870,11 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
     if let Some(m) = a.release_mbid {
         about.push(mb_fact("MusicBrainz release", "release", &m.to_string()));
     }
-    if let Some(m) = a.release_group_mbid {
+    if let Some(m) = mb_match {
         about.push(mb_fact(
             "MusicBrainz release group",
             "release-group",
-            &m.to_string(),
+            &m.mbid.to_string(),
         ));
     }
     if let Some(u) = &a.upc {
@@ -923,6 +926,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         about,
         blurb: None,
         section: "albums".into(),
+        mb_match,
         related: Vec::new(),
         concerts: Vec::new(),
     })
@@ -951,19 +955,27 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
             (a, lib.artist_albums(n)?, lib.artist_tracks(n)?)
         }
     };
+    let mb_match = if unknown {
+        None
+    } else {
+        s.library.lock().expect("library poisoned").artist_match(n)?
+    };
+    if mb_match.is_none() && !unknown {
+        crate::library_match::want_artist(&a.name);
+    }
     let info = if unknown {
         None
     } else {
         crate::artist_info::artist_info(s, n).await.ok()
     };
-    let canonical = a.mbid.map(|m| format!("https://musicbrainz.org/artist/{m}"));
+    let canonical = mb_match.map(|m| format!("https://musicbrainz.org/artist/{}", m.mbid));
     let on_pubky = match &canonical {
         Some(u) => crate::discover::on_pubky_for(s, u).await,
         None => None,
     };
     let mut about = Vec::new();
-    if let Some(m) = a.mbid {
-        about.push(mb_fact("MusicBrainz", "artist", &m.to_string()));
+    if let Some(m) = mb_match {
+        about.push(mb_fact("MusicBrainz", "artist", &m.mbid.to_string()));
     }
     about.push(fact(
         "In your library",
@@ -1056,6 +1068,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         about,
         blurb: info.and_then(|i| i.bio),
         section: "artists".into(),
+        mb_match,
         related: Vec::new(),
         concerts: Vec::new(),
     })
@@ -1240,6 +1253,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         about,
         blurb: it.description.clone().filter(|d| !d.is_empty() && kind != "song"),
         section: if it.in_library.is_some() { "albums" } else { "home" }.into(),
+        mb_match: None,
         related: Vec::new(),
         concerts: Vec::new(),
     }
@@ -1636,6 +1650,7 @@ mod instance_tests {
             source: "Your library".into(),
             source_id: "library".into(),
             section: "tracks".into(),
+            mb_match: None,
             target: serde_json::json!({}),
             versions: vec![
                 v("library", "Your library · FLAC", "", Some("track:7")),

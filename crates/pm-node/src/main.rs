@@ -413,6 +413,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     }
     pm_api::storage::spawn_autosave(&state);
     pm_api::loudness::spawn(&state);
+    pm_api::library_match::spawn(&state);
     pm_api::webdav::spawn_rescans(&state);
     state.set_drive_apps(pm_api::drives::apps_from(
         pm_api::drives::App {

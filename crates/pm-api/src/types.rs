@@ -1188,6 +1188,10 @@ pub struct ItemPage {
     pub concerts: Vec<DiscoverItem>,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
+    /// A library artist's or album's MusicBrainz id (an album's release group) and where it came
+    /// from: the tags, or the node's lookup. None while unmatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mb_match: Option<pm_library::matching::MbMatch>,
 }
 
 /// One song on an item page (an album's tracks, an artist's top songs).

@@ -84,11 +84,12 @@ pub(crate) async fn artist_info(
                 return Ok(c.info);
             }
         }
-        (a.mbid, a.name)
+        // The tags' id, else the node's lookup (`library_match`)
+        (lib.artist_match(artist_id)?.map(|m| m.mbid), a.name)
     };
     let Some(mbid) = mbid else {
         return Ok(ArtistInfo {
-            note: Some("No MusicBrainz artist id in the tags yet.".into()),
+            note: Some("No MusicBrainz artist id yet.".into()),
             ..ArtistInfo::default()
         });
     };
