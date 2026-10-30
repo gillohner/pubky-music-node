@@ -364,6 +364,40 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
 
+    // ---- Home: Listening now (L3) ----
+    if (nz) {
+      await api('PUT', '/node/settings', { dev_outputs: true });
+      c = await ctx(); p = await c.newPage();
+      const K = (ch) => ch.repeat(52);
+      const PRES = [
+        { key: 'owner', you: true, mine: false, playing: true, title: 'My own song', zone: { id: nz.id, name: nz.name }, can_join: false, along: [] },
+        { key: K('a'), name: 'Alice', you: false, mine: false, playing: true, title: 'Night Drive', artist: 'Synth Band', zone: { id: 'z-alice', name: 'Kitchen' }, can_join: true, along: [] },
+        { key: K('b'), name: 'Bob', you: false, mine: false, playing: true, title: 'Hidden Song', zone: null, can_join: false, along: [] },
+        { key: K('c'), name: 'Carol', you: false, mine: true, your_zone: nz.id, playing: true, title: 'Together', zone: { id: 'z-carol', name: 'Living room' }, can_join: true, along: [] },
+      ];
+      await p.route(/\/v1\/presence$/, (r) => r.fulfill({ json: PRES }));
+      await p.route(/\/v1\/me\/presence$/, (r) => r.fulfill({ json: { visible: 'hidden' } }));
+      let alongBody = null; let alongStatus = 409;
+      await p.route(/\/v1\/presence\/along$/, (r) => { alongBody = JSON.parse(r.request().postData() || '{}'); return alongStatus === 200 ? r.fulfill({ json: { ...nz, id: nz.id } }) : r.fulfill({ status: alongStatus, json: { error: 'already listening along' } }); });
+      await p.goto(BASE + '/'); await p.waitForSelector('#h-listening .list-row', { timeout: 15000 }).catch(() => {});
+      const rows = await p.$$eval('#h-listening .list-row', (els) => els.map((e) => ({ name: e.querySelector('.name').textContent.replace(/\s+/g, ' ').trim(), sub: (e.querySelector('.sub') || {}).textContent || '', join: !!e.querySelector('[data-alongjoin]'), pill: (e.querySelector('.pill') || {}).textContent || '' })));
+      check(rows.length === 3 && !rows.some((r) => /My own song/.test(r.name)), `Listening now lists the others, not you (${rows.length})`);
+      check(rows[0] && /^Alice is listening to Night Drive · Synth Band$/.test(rows[0].name) && rows[0].sub === 'on Kitchen' && rows[0].join, `who, what and where, with Listen along (${rows[0] && rows[0].name} / ${rows[0] && rows[0].sub})`);
+      check(rows[1] && /^Bob is listening/.test(rows[1].name) && !rows[1].sub && !rows[1].join, 'a zone not open to you: who, without a place or a button');
+      check(rows[2] && rows[2].pill === 'Listening along' && !rows[2].join, 'the one you listen along with says so');
+      // This browser can't join a group: Listen along asks which of your zones
+      await p.click('[data-alongjoin="0"]'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]', { timeout: 5000 }).catch(() => {});
+      const menuText = await p.evaluate(() => (document.querySelector('.popover.menu:not([hidden])') || {}).textContent || '');
+      check(/Listen from/.test(menuText) && menuText.includes(nz.name), `from This browser it asks which speakers listen along (${menuText.replace(/\s+/g, ' ').slice(0, 80)})`);
+      await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const refusal = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Leave first/.test(v || '')) return v; if (Date.now() > end) return v; await p.waitForTimeout(150); } })();
+      check(/You’re listening along with someone already\. Leave first\./.test(refusal || ''), `a refusal in words (409: ${refusal})`);
+      check(alongBody && alongBody.key === K('a') && alongBody.zone === nz.id, `the request names them and your zone (${JSON.stringify(alongBody && { zone: alongBody.zone })})`);
+      await p.unroute(/\/v1\/presence$/); await p.unroute(/\/v1\/me\/presence$/); await p.unroute(/\/v1\/presence\/along$/);
+      await c.close();
+      await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
+    }
+
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();
     await p.goto(BASE + '/');
