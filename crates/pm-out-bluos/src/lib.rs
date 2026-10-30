@@ -273,6 +273,10 @@ impl Output for BluosOutput {
         }
     }
 
+    fn model(&self) -> Option<String> {
+        self.player.model.clone().filter(|m| !m.trim().is_empty())
+    }
+
     fn sync(&self) -> pm_zones::SyncClass {
         pm_zones::SyncClass::Single
     }
