@@ -1043,7 +1043,10 @@ mod tests {
         let sc = Scratch::new("backup.db").unwrap();
         std::fs::write(&sc, b"secret").unwrap();
         let dir = sc.parent().unwrap().to_path_buf();
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         drop(sc);
         assert!(!dir.exists());
         let f = tempfile::tempdir().unwrap();
