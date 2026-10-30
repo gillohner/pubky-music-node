@@ -410,6 +410,13 @@ mod tests {
         assert!(out_b.caps().accepts(&AudioFormat::pcm(48_000, 16, 2)));
         assert!(!out_b.caps().accepts(&AudioFormat::pcm(96_000, 24, 2)));
         let sink = out_b.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        // The start runs on its own thread; a sink closed before Play sends none
+        for _ in 0..300 {
+            if log.lock().unwrap().iter().any(|a| a.starts_with("A Play")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         drop(sink);
         let l = log.lock().unwrap().clone();
         assert_eq!(
@@ -434,6 +441,12 @@ mod tests {
         let group = SonosGroup::new("Downstairs", out_a, vec![out_b]);
         assert!(group.id().0.starts_with("sonos-group:"));
         let sink = group.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        for _ in 0..300 {
+            if log.lock().unwrap().iter().any(|a| a.starts_with("A Play")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         drop(sink);
         let l = log.lock().unwrap().clone();
         assert_eq!(

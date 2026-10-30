@@ -268,6 +268,11 @@ fn start(
     // Some TVs refuse a new URI while they hold one; a renderer with nothing loaded may answer
     // Stop with an error, which is fine.
     let _ = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]);
+    // The sink closed meanwhile (a slow start): nothing more, so nothing plays after its Stop
+    let closed = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
+    if closed() {
+        return Ok(());
+    }
     soap::call(
         &av,
         AV_TRANSPORT,
@@ -279,13 +284,16 @@ fn start(
         ],
     )
     .map_err(|e| format!("the renderer refused the stream: {e}"))?;
+    if closed() {
+        return Ok(());
+    }
     // TVs answer 701 while they still open the URI: try again for a moment.
     let mut tries = 0;
     loop {
         match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
             Ok(_) => return Ok(()),
             // The sink closed meanwhile: no Play after its Stop
-            Err(e) if tries < 4 && !cancelled.load(std::sync::atomic::Ordering::SeqCst) => {
+            Err(e) if tries < 4 && !closed() => {
                 tries += 1;
                 tracing::debug!(tries, "renderer Play refused, retrying: {e}");
                 std::thread::sleep(std::time::Duration::from_millis(400));
@@ -425,6 +433,11 @@ mod tests {
     /// A fake renderer: answers SOAP posts, records the actions, and on Play
     /// fetches nothing (the test takes the pull stream itself).
     fn fake_renderer() -> (String, Arc<Mutex<Vec<String>>>) {
+        fake_renderer_slow(std::time::Duration::ZERO)
+    }
+
+    /// [`fake_renderer`] that takes `stop` to answer Stop.
+    fn fake_renderer_slow(stop: std::time::Duration) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -470,6 +483,9 @@ mod tests {
                 } else {
                     format!("{action} {uri}")
                 });
+                if action == "Stop" {
+                    std::thread::sleep(stop);
+                }
                 let body = if action == "GetVolume" {
                     "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume>40</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>"
                 } else {
@@ -563,6 +579,33 @@ mod tests {
             out.url(),
             "http://node.local:7788/v1/outputs/pull/fake/stream.wav"
         );
+    }
+
+    /// A sink closed while the start is still on its first Stop sends neither the URI nor Play
+    /// after it: the renderer stays stopped (nothing plays after the sink's own Stop).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sink_closed_during_a_slow_start_never_plays() {
+        let (base, log) = fake_renderer_slow(std::time::Duration::from_millis(300));
+        let renderer = Renderer {
+            udn: "uuid:slow".into(),
+            friendly_name: "Slow TV".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let out = UpnpOutput::new(
+            renderer,
+            Arc::new(PullOutput::new("slow")),
+            "http://node/v1/outputs/pull/slow/stream.wav".into(),
+        );
+        let sink = out.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        std::thread::spawn(move || drop(sink)).join().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(*log.lock().unwrap(), vec!["Stop".to_string(), "Stop".into()]);
     }
 
     /// A renderer like a Linn DS: it answers Play only once it has read the start of the stream.
