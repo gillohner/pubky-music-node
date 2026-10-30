@@ -351,11 +351,30 @@ pub(crate) async fn restore(
         .all_folders()
         .into_iter()
         .find(|f| file.starts_with(f) || std::fs::canonicalize(f).is_ok_and(|c| file.starts_with(c)));
-    let scan_started = match folder {
-        Some(f) => s.start_scan(vec![f]).unwrap_or(false),
-        None => false,
+    // The song is back already; its folder is read again to bring its tags up to date. A scan
+    // that is running now is waited for (every 5 s, up to 10 minutes)
+    let (scan_started, scan_queued) = match folder {
+        Some(f) => match s.start_scan(vec![f.clone()]) {
+            Ok(true) => (true, false),
+            Ok(false) => {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    for _ in 0..120 {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        if !matches!(s.start_scan(vec![f.clone()]), Ok(false)) {
+                            break;
+                        }
+                    }
+                });
+                (false, true)
+            }
+            Err(_) => (false, false),
+        },
+        None => (false, false),
     };
-    Ok(Json(
-        serde_json::json!({ "restored": true, "scan_started": scan_started }),
-    ))
+    Ok(Json(serde_json::json!({
+        "restored": true,
+        "scan_started": scan_started,
+        "scan_queued": scan_queued,
+    })))
 }

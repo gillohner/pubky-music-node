@@ -2120,7 +2120,10 @@
     if (!$('#npsources', overlay) || gen !== npGen) return;
     const also = rankSvc((pg && pg.also_on) || [], (v) => srcSvc(v.source));
     const z0 = currentZone(); const cur = z0 && z0.now_playing ? z0.now_playing.item : null;
-    const canPlay = (v) => (rk ? rk.healthy.has(srcSvc(v.source)) : srcSvc(v.source) === 'library');
+    // Full songs only: a service that gives 30 s previews here, or YouTube (only This browser plays it),
+    // would swap the song for something less
+    const previewOnly = (svc) => /^previews\b/i.test(String(((state.sources || []).find((x) => x.id === svc) || {}).status || ''));
+    const canPlay = (v) => { const svc = srcSvc(v.source); if (svc === 'youtube' || /^youtube:/.test(switchUri(v) || '') || previewOnly(svc)) return false; return rk ? rk.healthy.has(svc) : svc === 'library'; };
     const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
     box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
@@ -2138,9 +2141,13 @@
     const playingIt = () => { const z = state.zones[zone]; return z && z.now_playing && z.now_playing.item.id === itemId ? z : null; };
     if (!uri || !playingIt()) { toast('Another song is playing now: open Sources again', 'error'); return; }
     const name = v.label || srcName(srcSvc(v.source));
-    b.disabled = true;
+    b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
+    const z0 = playingIt(); const version = z0.queue_version;
+    if (z0.transport === 'playing') startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true);
     try {
-      const queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
+      let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
+      // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
+      if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
       const at = queue.findIndex((q) => q.id === itemId);
       const z = playingIt();
       if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
@@ -2148,11 +2155,13 @@
       // of the same service (a library file shows its album's); the length comes with the source
       const scheme = (u) => String(u || '').split(':')[0];
       const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
-      if (z.transport === 'playing') startWait('play', zone, `${z.now_playing.item.title || ''} · from ${name}`, true);
-      await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      const zs = await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
+      if (zs && zs.id) state.zones[zs.id] = zs;
+      if (zs && zs.error) throw new Error(zs.error);
       toast(`Playing from ${name}`);
       refreshQueue();
-    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); b.disabled = false; }
+    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -2473,14 +2482,19 @@
     q: null,
     items: () => $$('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow'),
     reset() {
-      this.at = -1; search.removeAttribute('aria-activedescendant');
+      this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant');
       $$('#sresults .kfocus').forEach((el) => el.classList.remove('kfocus'));
     },
-    // After a re-render: the same search keeps its row (or the last one, if fewer came back)
+    // A row by what it is (its group and its first lines), not its place: answers arriving later
+    // move rows around
+    keyOf: (el) => `${(el.closest('[data-skind]') || { dataset: {} }).dataset.skind || ''}|${(el.innerText || '').split('\n').filter(Boolean).slice(0, 2).join('|')}`,
+    // After a re-render: the same search keeps the same row wherever it went; when it is gone the
+    // highlight goes too (and says so), so Enter never opens a row nobody announced
     keep(q) {
-      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      const n = this.items().length; if (!n) { this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      this.at = Math.min(this.at, n - 1); this.show(false);
+      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); return; }
+      const items = this.items(); const k = items.findIndex((el) => this.keyOf(el) === this.key);
+      if (k < 0) { this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); const said = $('#sresults-said'); if (said) said.textContent = 'The results changed'; return; }
+      this.at = k; this.show(false);
     },
     show(scroll) {
       const items = this.items(); const el = items[this.at]; if (!el) return;
@@ -2493,6 +2507,7 @@
     move(d) {
       const items = this.items(); if (!items.length) return;
       this.at = Math.max(0, Math.min(items.length - 1, this.at + d));
+      this.key = this.keyOf(items[this.at]);
       this.show(true);
       const said = $('#sresults-said'); if (said) said.textContent = `${(items[this.at].innerText || '').split('\n').filter(Boolean).slice(0, 2).join(', ')} (${this.at + 1} of ${items.length})`;
     },

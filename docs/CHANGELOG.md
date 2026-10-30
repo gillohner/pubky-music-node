@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **Fixes from the reviews of Your library, search and Play from here.** A song brought back to the library shows at once, also while a scan is running (that scan is then waited for) or for a WebDAV share or a cloud drive. Search with several tags lists only posts carrying all of them. The keyboard highlight in search stays on the same result while more answers arrive, and goes (and says so) when that result is gone. Play from here shows only for sources that play the whole song on the node (no previews, no YouTube), spins at once, says the zone's own error, and keeps songs added to the queue meanwhile.
 - **Similar, and play from another source.** Song, album and artist pages have one Similar section: from your library first (what shares the most genres, then the same artist; each with Play), Last.fm's similar artists on an artist page, then what people tagged alike on Pubky. In Now playing, Sources › Play from here moves the playing song to another source (TIDAL, Deezer, your library…) at the same position, keeping the queue, repeat and radio. `GET /v1/item/{kind}/{id}/extras` gains `similar`.
 - **Fixes to listens, comments, collections, smart playlists and Live sharing:**
   - Listens moved to private while a sync ran no longer keep their public copies. A history deleted on one node is deleted on your other nodes too. The listen stats no longer hold up the node with a long history.
