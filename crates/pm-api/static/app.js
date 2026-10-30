@@ -1224,16 +1224,18 @@
   };
   // Listen along from a zone that is free to join: a node zone (This browser can't join a group),
   // not one someone else is listening on (joining stops what plays there) and not a listen-along
-  // group. The zone in use when it is one, else a menu of them.
-  const joinAlong = (l, b) => {
+  // group. The zone in use when it is one, else a menu of them. The page only sees listeners who
+  // let it, so the node is the guard: it refuses (409) a zone where someone else's music plays,
+  // and then the menu offers the others (`skip`: zones refused so far).
+  const joinAlong = (l, b, skip = new Set(), quiet = false) => {
     const busy = new Set((state.presence || []).filter((p) => !p.you && p.zone).map((p) => p.zone.id));
-    const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && (!l.zone || id !== l.zone.id);
-    if (free(state.zone)) return doJoinAlong(l, state.zone, b);
+    const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && !skip.has(id) && (!l.zone || id !== l.zone.id);
+    if (!skip.size && free(state.zone)) return doJoinAlong(l, state.zone, b, skip);
     const mine = zoneList().filter((z) => free(z.id));
-    if (!mine.length) { toast('Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
-    showMenu(b, [{ title: 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b) }))], { all: true });
+    if (!mine.length) { if (quiet) return; toast(skip.size ? 'Someone else is listening on your other speakers too: Listen along needs free ones.' : 'Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
+    showMenu(b, [{ title: skip.size ? 'Someone listens there: listen from' : 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b, skip) }))], { all: true });
   };
-  const doJoinAlong = async (l, zone, b) => {
+  const doJoinAlong = async (l, zone, b, skip = new Set()) => {
     // The row may be drawn again while this runs (a zone came, the 20 s poll): it stays "Joining…"
     state.joiningAlong = l.key; renderListening();
     try {
@@ -1243,7 +1245,18 @@
       state.joiningAlong = null;
       toast(`Listening along with ${personName(l)}`);
       await refreshAlong();
-    } catch (e) { state.joiningAlong = null; renderListening(); toast(ALONG_ERRORS[e.status] || e.message, 'error'); }
+    } catch (e) {
+      state.joiningAlong = null; renderListening();
+      // Someone else's music plays on that zone: pick another of yours
+      if (e.status === 409 && /someone else/i.test(e.raw || e.message)) {
+        skip.add(zone); toast(e.message, 'error');
+        const others = (state.presence || []).filter((p) => !p.you);
+        const again = $$('#h-listenwrap [data-alongjoin]').find((x) => (others[Number(x.dataset.alongjoin)] || {}).key === l.key) || b;
+        if (again.isConnected) joinAlong(l, again, skip, true);
+        return;
+      }
+      toast(ALONG_ERRORS[e.status] || e.message, 'error');
+    }
   };
   const leaveAlong = async () => {
     const a = state.along; const b = $('#alongleave'); if (!a) return;
