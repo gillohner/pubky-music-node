@@ -1,13 +1,16 @@
-//! The music node's social objects (handoff §8.3), written as **v1
-//! `PubkyAppPost`s** whose `content` is a JSON envelope (see [`post`]):
+//! The node's working copy of its music objects, and the **legacy** pubky.app form they had
+//! before ADR 0014. What the homeserver gets is pubky-social-specs v1 ([`crate::v1`] converts at
+//! the boundary). The library keeps each object as a pubky.app `PubkyAppPost` whose `content` is a
+//! JSON envelope (see [`post`]); the paths below are only **read**, once per node, for the move to
+//! v1 (and deleted with an object):
 //!
-//! | Object | Envelope `type` | Post path (private by default) |
-//! | :-- | :-- | :-- |
-//! | [`Playlist`] | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` |
-//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` |
-//! | [`Activity`] | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` |
-//! | music tag | `PubkyAppTag` (reused as-is) | `/pub/pubky.music/tags/<id>` ([`TAG_DIR`]) |
-//! | favourite | `PubkyAppBookmark` (reused as-is) | `/priv/pubky.app/bookmarks/<hash id>` |
+//! | Object | Envelope `type` | Legacy path (read for the move) | Written today |
+//! | :-- | :-- | :-- | :-- |
+//! | [`Playlist`] (a collection) | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` | social `collection` |
+//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` | music `review` or social note |
+//! | [`Activity`] (a play) | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` | music `listen` |
+//! | music tag | — | `/pub/pubky.app/tags/<id>`, then [`TAG_DIR`] | social v1 tag ([`crate::v1::music_tag`]) |
+//! | [`Bookmark`] | `PubkyAppBookmark` | `/priv/pubky.app/bookmarks/<hash id>` | social v1 bookmark |
 //!
 //! Ids are Timestamp IDs like every post. Objects follow the pubky-app-specs
 //! conventions: sanitize, then validate; lengths count Unicode scalar
@@ -23,9 +26,9 @@ pub mod post;
 mod review;
 
 pub use activity::{Activity, ActivitySource};
-pub use bookmark::Favourite;
+pub use bookmark::Bookmark;
 pub use builder::{Meta, MusicSpecsBuilder};
-pub use playlist::{ItemSource, Playlist, PlaylistItem};
+pub use playlist::{item_uri, post_uri, web_link, ItemKind, ItemSource, Playlist, PlaylistItem, LAYOUTS};
 pub use post::{MusicContent, MusicPost, Visibility};
 pub use review::Review;
 
@@ -135,21 +138,18 @@ pub(crate) fn validate_image_url(url: &str, max: usize) -> Result<(), SchemaErro
     }
 }
 
-/// The app namespace the node writes public tags under.
-///
-/// Nexus indexes a tag on an *external* link (a TIDAL, Spotify or
-/// MusicBrainz URL) only as a universal tag written in an app's own
-/// namespace; under `pubky.app/tags/` it is parsed as a pubky.app tag, which
-/// must target `pubky://` objects, and is dropped. pubky-social-specs v1
-/// names no music namespace, so the node uses its own.
+/// The app namespace the node wrote public tags under until 2026-10-26.
 pub const TAG_NAMESPACE: &str = pm_appdata::paths::APP_NAMESPACE;
-/// `/pub/pubky.music/tags/`: where the node writes tags.
+/// `/pub/pubky.music/tags/`: where the node wrote tags (`PubkyAppTag`s) from 2026-10-21 to
+/// 2026-10-26, while the Nexus behind Pinakes indexed tags on external links only in an app's own
+/// namespace. The sync moves them to `/pub/social/v1/tags/` once ([`crate::v1::music_tag`]) and
+/// reads this folder until then.
 pub const TAG_DIR: &str = pm_appdata::paths::TAG_DIR;
 /// Where the node wrote tags before 2026-10-21 (Nexus never indexed these;
-/// they are moved to [`TAG_DIR`] by the sync).
+/// the sync moves them to social v1 tags).
 pub const LEGACY_TAG_DIR: &str = "/pub/pubky.app/tags/";
 
-/// The path of a music tag with this id (the `PubkyAppTag` id rule).
-pub fn music_tag_path(id: &str) -> String {
+/// The path of a tag with this id in [`TAG_DIR`] (the `PubkyAppTag` id rule).
+pub fn app_tag_path(id: &str) -> String {
     format!("{TAG_DIR}{id}")
 }

@@ -324,7 +324,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 2, "{d}");
     assert!(d.get("local_tracks").is_none(), "{d}");
-    let (_, _, body) = get(&app, "/v1/favourites?token=pw", None).await;
+    let (_, _, body) = get(&app, "/v1/bookmarks?token=pw", None).await;
     let f: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
         f["uris"]

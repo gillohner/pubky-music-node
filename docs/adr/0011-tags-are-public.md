@@ -35,3 +35,13 @@ another app's namespace; under `pubky.app/tags/` it is parsed as a pubky.app tag
 external links from the old path (idempotent; tags on `pubky://` objects stay) and reads both until
 then. The node's sign-in asks for `/pub/pubky.music/:rw`; a session approved before this needs one
 new Pubky Ring sign-in. Bookmarks, posts and settings are private (`/priv/`) and not affected.
+
+## Amendment (2026-10-26): social v1 tags; the paths above are superseded
+
+Superseded for the path and the object by ADR 0014 (amended 2026-10-26). A tag is a social v1 tag
+(`pubky-social-specs` `PubkySocialTag`, the same `uri`, `label` and `created_at`, the same id: the hash
+of `uri:label`) at `/pub/social/v1/tags/<id>.json`. Upstream Nexus #1165 stops indexing
+`/pub/<app>/tags/` and indexes a tag there on an external URL or an app's object as a resource tag. The
+sync moves the node's tags from `/pub/pubky.app/tags/` and `/pub/pubky.music/tags/` once (settings
+`pubky.tags_moved` and `pubky.tags_social_v1`) and reads them until then. What stays: tags are public,
+written only on an explicit action, and the label is trimmed and lowercased.

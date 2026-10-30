@@ -1,30 +1,34 @@
 //! The node's objects as pubky-social-specs v1 objects (ADR 0014).
 //!
-//! The node keeps its working copy in its own shape ([`MusicContent`], [`Favourite`](crate::Favourite)); this module
+//! The node keeps its working copy in its own shape ([`MusicContent`], [`Bookmark`](crate::Bookmark)); this module
 //! converts at the homeserver boundary, both ways:
 //!
 //! | Node object | v1 object | Path |
 //! | :-- | :-- | :-- |
-//! | [`Playlist`] (up to 100 songs) | social `collection`, `layout: list` | `/{root}/social/v1/posts/{id}/{editId}.json` |
+//! | [`Playlist`] (a collection: songs, albums, artists, posts) | social `collection` with its `layout` | `/{root}/social/v1/posts/{id}/{editId}.json` |
 //! | [`Review`] with a rating | music `review` (rating 1–10) | `/{root}/music/v1/posts/…` |
 //! | [`Review`] without a rating | social `note` embedding the music URL | `/{root}/social/v1/posts/…` |
-//! | [`Activity`] | music `listen` | `/priv/music/v1/posts/…` |
-//! | [`Favourite`](crate::Favourite) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
+//! | [`Activity`] | music `listen` | `/{root}/music/v1/posts/…` (the listen history setting picks the root) |
+//! | [`Bookmark`](crate::Bookmark) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
+//! | a tag (library `tags` row) | social `tag` (id = hash of `uri:label`) | `/pub/social/v1/tags/{id}.json` |
 //!
 //! The local id (a timestamp id of the creation time) is the v1 post id, so a migrated object
 //! keeps its identity. Creation writes `editId == id`; every later write is a new version above
 //! the newest one on the homeserver, and readers take the newest.
 
 use crate::ids;
-use crate::schemas::{Activity, ActivitySource, ItemSource, MusicContent, Playlist, PlaylistItem, Review};
+use crate::schemas::{
+    item_uri, Activity, ActivitySource, ItemKind, ItemSource, MusicContent, Playlist, PlaylistItem, Review,
+    LAYOUTS,
+};
 use pm_model::MusicUri;
 use pubky_music_specs::ext;
 use pubky_music_specs::{MusicPost, MusicPostKind, MusicSource, MUSIC_NAMESPACE};
-use pubky_social_specs::traits::{HasIdPath, Validatable};
+use pubky_social_specs::traits::{HasIdPath, HashId, Validatable};
 use pubky_social_specs::{
     bookmark_target, create_bookmark, namespace_path, validate_timestamp_id_format, PubkySocialBookmark,
     PubkySocialCollectionContent, PubkySocialCollectionItem, PubkySocialCollectionLayout, PubkySocialPost,
-    PubkySocialPostKind, VALIDATION_LIMITS,
+    PubkySocialPostKind, PubkySocialTag, VALIDATION_LIMITS,
 };
 use std::collections::BTreeMap;
 
@@ -269,7 +273,7 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
         .iter()
         .map(|it| {
             let mut item = PubkySocialCollectionItem::new(it.uri.clone(), None);
-            ext::set_item_added_at(&mut item, it.added_at / 1000);
+            ext::set_item_added_at(&mut item, it.added_at);
             if let Some(src) = &it.source {
                 let source = MusicSource {
                     service: src.service.clone(),
@@ -281,17 +285,27 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
             item
         })
         .collect();
+    let layout = p
+        .layout
+        .clone()
+        .map(PubkySocialCollectionLayout::from)
+        .filter(PubkySocialCollectionLayout::is_known)
+        .unwrap_or(PubkySocialCollectionLayout::List);
     let mut post = PubkySocialPost::new_collection(
         p.name.clone(),
         p.description.clone(),
         items,
         p.image.clone(),
-        Some(PubkySocialCollectionLayout::List),
+        Some(layout),
     );
-    if let Some(order) = p.source_order.as_ref().filter(|o| !o.is_empty()) {
+    let order = p.source_order.as_ref().filter(|o| !o.is_empty());
+    if order.is_some() || p.original.is_some() {
         let mut content: PubkySocialCollectionContent =
             serde_json::from_str(&post.content).expect("the collection was just written");
-        ext::set_source_order(&mut content, order);
+        if let Some(order) = order {
+            ext::set_source_order(&mut content, order);
+        }
+        ext::set_original(&mut content, p.original.as_deref());
         post.content = serde_json::to_string(&content).expect("a collection serializes");
     }
     Ok(post)
@@ -319,28 +333,31 @@ fn activity_to_listen(a: &Activity) -> MusicPost {
         ActivitySource::Local => Some(MusicSource::service("library")),
         ActivitySource::Roon => Some(MusicSource::service("roon")),
         ActivitySource::Service { name } => {
-            let name = name.to_ascii_lowercase();
-            pubky_music_specs::is_service_name(&name).then(|| MusicSource::service(name))
+            // The spec's spelling (`apple-music`, never `Apple_Music`)
+            pubky_music_specs::service_name(name).map(MusicSource::service)
         }
         ActivitySource::Unknown => None,
     };
     pubky_music_specs::listen(
-        a.played_at / 1000,
+        a.played_at,
         a.duration_ms.and_then(|d| i64::try_from(d).ok()),
         source,
         a.uri.clone(),
     )
 }
 
-/// Is this collection a music playlist? It is when it carries `ext.music`, or when every item is
-/// a canonical music URL (a playlist another client made).
+/// Is this a music collection? It is when it or one of its items carries `ext.music` (the node
+/// writes `added_at` on every item), when one of its items is a canonical music URL (a playlist
+/// another client made, maybe with posts in it), or when it is empty (a new one, still to fill).
+/// A collection of links or posts only is someone's reading list: not music.
 pub fn is_music_collection(content: &PubkySocialCollectionContent) -> bool {
-    let has_ext = content
-        .extra
-        .get(ext::EXT)
-        .and_then(|e| e.get(ext::MUSIC))
-        .is_some();
-    has_ext || (!content.items.is_empty() && content.items.iter().all(|i| MusicUri::parse(&i.uri).is_ok()))
+    let has_music_ext = |extra: &serde_json::Map<String, serde_json::Value>| {
+        extra.get(ext::EXT).and_then(|e| e.get(ext::MUSIC)).is_some()
+    };
+    content.items.is_empty()
+        || has_music_ext(&content.extra)
+        || content.items.iter().any(|i| has_music_ext(&i.extra))
+        || content.items.iter().any(|i| MusicUri::parse(&i.uri).is_ok())
 }
 
 /// Someone's public playlist, read from the bytes of one version of a social post: it must
@@ -369,12 +386,13 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
             if !is_music_collection(&content) {
                 return None;
             }
+            // Music URLs and public posts; any other link is not something the node can show
             let items = content
                 .items
                 .iter()
                 .filter_map(|it| {
-                    let uri = MusicUri::parse(&it.uri).ok()?.to_url();
-                    let added_at = ext::item_added_at(it).map_or(created_at, |ms| ms * 1000);
+                    let uri = item_uri(&it.uri).ok()?;
+                    let added_at = ext::item_added_at(it).unwrap_or(created_at);
                     let source =
                         ext::item_source(it, &pubky_social_specs::ValidationCtx { root: Root::Priv }, None)
                             .map(|s| ItemSource {
@@ -389,6 +407,12 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
                 })
                 .collect();
             let order = ext::source_order(&content);
+            let original = ext::original(&content, &pubky_social_specs::PUB_CTX);
+            let layout = content
+                .layout
+                .as_ref()
+                .map(|l| l.wire_name().to_string())
+                .filter(|l| LAYOUTS.contains(&l.as_str()));
             Some(MusicContent::Playlist(Playlist {
                 name: content.name,
                 description: content.description,
@@ -397,6 +421,8 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
                 created_at,
                 updated_at: micros_of(edit_id)?.max(created_at),
                 source_order: Some(order).filter(|o| !o.is_empty()),
+                layout,
+                original,
             }))
         }
         PubkySocialPostKind::Note => {
@@ -416,8 +442,11 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
     }
 }
 
-/// A node review read back from a music `review` post.
+/// A node object read back from a music post: a review from a `review`, a play from a `listen`.
 pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
+    if post.kind == MusicPostKind::Listen {
+        return listen_to_activity(post);
+    }
     if post.kind != MusicPostKind::Review {
         return None;
     }
@@ -431,26 +460,91 @@ pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
     }))
 }
 
-/// The bookmark of a favourite: the object and its path. `created_at` is kept.
-pub fn favourite_bookmark(uri: &MusicUri, created_at: i64) -> Result<(PubkySocialBookmark, String), String> {
-    let mut created = create_bookmark(&uri.to_url())?;
+/// A play read back from a `listen` post (the node's id is the post id, its time the play time).
+fn listen_to_activity(post: &MusicPost) -> Option<MusicContent> {
+    let listen = pubky_music_specs::read_listen(post).ok()?;
+    let target = MusicUri::parse(post.embed.as_deref()?).ok()?;
+    let source_kind = match listen.source.map(|s| s.service) {
+        Some(s) if s == "library" => ActivitySource::Local,
+        Some(s) if s == "roon" => ActivitySource::Roon,
+        Some(name) => ActivitySource::Service { name },
+        None => ActivitySource::Unknown,
+    };
+    Some(MusicContent::Activity(Activity {
+        uri: target.to_url(),
+        played_at: listen.played_at,
+        source_kind,
+        duration_ms: listen.duration_ms.and_then(|d| u64::try_from(d).ok()),
+    }))
+}
+
+/// The social v1 bookmark of a music URL or a public post (an item URI in its stored form,
+/// [`crate::schemas::item_uri`]): the object and its path. `created_at` is kept.
+pub fn bookmark_of(uri: &str, created_at: i64) -> Result<(PubkySocialBookmark, String), String> {
+    let mut created = create_bookmark(uri)?;
     created.bookmark.created_at = created_at;
     Ok((created.bookmark, created.path))
 }
 
-/// The path a favourite's bookmark lives at.
-pub fn favourite_bookmark_path(uri: &MusicUri) -> Result<String, String> {
-    let filename = pubky_social_specs::bookmark_filename(&uri.to_url())?;
+/// The path the bookmark of a music URL or a public post lives at.
+pub fn bookmark_path(uri: &str) -> Result<String, String> {
+    let filename = pubky_social_specs::bookmark_filename(uri)?;
     Ok(PubkySocialBookmark::create_path(&filename))
 }
 
-/// The music URL a stored bookmark names, `None` for a bookmark of something else or an invalid
-/// one. `path` is the bookmark's path; `body` its JSON.
-pub fn favourite_from_bookmark(path: &str, body: &[u8]) -> Option<(MusicUri, i64)> {
+/// What a stored bookmark names when the node can hold it: a music URL or a public Pubky post
+/// (someone's collection, say), in its stored form, and the bookmark's time. `None` for a
+/// bookmark of anything else or an invalid one. `path` is the bookmark's path; `body` its JSON.
+pub fn music_bookmark(path: &str, body: &[u8]) -> Option<(String, i64)> {
     let filename = path.rsplit('/').next()?.strip_suffix(".json")?;
     let content: PubkySocialBookmark = serde_json::from_slice(body).ok()?;
     let target = bookmark_target(filename, &content).ok()?;
-    Some((MusicUri::parse(&target).ok()?, content.created_at))
+    // Music and public posts only: a bookmarked web page is another app's, not a music bookmark
+    let uri = item_uri(&target)
+        .ok()
+        .filter(|u| ItemKind::of(u) != Some(ItemKind::Link))?;
+    Some((uri, content.created_at))
+}
+
+/// `/pub/social/v1/tags/`: where tags live (pubky-social-specs v1). Nexus indexes a tag there on
+/// an external URL or an app's object as a resource tag (upstream Nexus #1165).
+pub fn tags_dir() -> String {
+    namespace_path(Root::Pub, SOCIAL_NAMESPACE, "tags/")
+}
+
+/// The social v1 tag `label` on the music URL `uri`: the object, its id (the hash of
+/// `uri:label`, the same id a `PubkyAppTag` had) and its path. `created_at` is kept. The label
+/// must already be folded; the node lowercases it.
+pub fn music_tag(
+    uri: &str,
+    label: &str,
+    created_at: i64,
+) -> Result<(PubkySocialTag, String, String), String> {
+    let tag = PubkySocialTag {
+        uri: uri.to_string(),
+        label: label.to_string(),
+        created_at,
+        extra: Default::default(),
+    };
+    let id = tag.create_id();
+    tag.validate(Some(&id), &pubky_social_specs::PUB_CTX)?;
+    let path = PubkySocialTag::create_path(&id);
+    Ok((tag, id, path))
+}
+
+/// The id a tag file at `path` (`…/tags/{id}.json`) claims.
+pub fn tag_id_of(path: &str) -> Option<&str> {
+    path.rsplit('/').next()?.strip_suffix(".json")
+}
+
+/// A tag read from `path`: its id and the tag when it is a valid social v1 tag on a canonical
+/// music URL; `None` for anything else (another app's tag on a post, or junk).
+pub fn music_tag_from(path: &str, body: &[u8]) -> Option<(String, PubkySocialTag)> {
+    let id = tag_id_of(path)?;
+    let tag: PubkySocialTag = serde_json::from_slice(body).ok()?;
+    tag.validate(Some(id), &pubky_social_specs::PUB_CTX).ok()?;
+    MusicUri::parse(&tag.uri).ok()?;
+    Some((id.to_string(), tag))
 }
 
 /// A timestamp id for `micros`, the same encoding as v1 ids.
@@ -519,6 +613,8 @@ mod tests {
             created_at: created,
             updated_at: created + 10_000_000,
             source_order: None,
+            layout: None,
+            original: None,
         }
     }
 
@@ -567,7 +663,7 @@ mod tests {
         assert_eq!(content["items"][1]["uri"], SONG2);
         assert_eq!(
             content["items"][1]["ext"]["music"]["added_at"],
-            (pl.items[1].added_at / 1000)
+            pl.items[1].added_at
         );
 
         // An edit is a new version above the head
@@ -586,7 +682,10 @@ mod tests {
         assert_eq!(back.created_at, micros_of(&id).unwrap());
         assert_eq!(back.updated_at, micros_of(&edit_id).unwrap());
         assert_eq!(back.items.len(), 3);
-        assert_eq!(back.items[2].added_at, pl.items[2].added_at / 1000 * 1000);
+        assert_eq!(
+            back.items[2].added_at, pl.items[2].added_at,
+            "microseconds both ways"
+        );
     }
 
     #[test]
@@ -684,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn plays_are_private_listens() {
+    fn plays_are_listens_under_either_root() {
         let a = Activity {
             uri: SONG.into(),
             played_at: t0(),
@@ -693,33 +792,229 @@ mod tests {
         };
         let id = id_of(a.played_at);
         let v1 = to_v1(&MusicContent::Activity(a.clone())).unwrap();
-        v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
-        assert!(v1.version_path(&id, None, Root::Pub, &owner()).is_err());
+        let path = v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
+        assert!(path.starts_with("/priv/music/v1/posts/"), "{path}");
+        // A public history writes the same listen under /pub/
+        let path = v1.version_path(&id, None, Root::Pub, &owner()).unwrap();
+        assert!(path.starts_with("/pub/music/v1/posts/"), "{path}");
         let V1Post::Music(post) = &v1 else { panic!() };
         let listen = pubky_music_specs::read_listen(post).unwrap();
-        assert_eq!(listen.played_at, a.played_at / 1000);
+        assert_eq!(listen.played_at, a.played_at, "microseconds");
         assert_eq!(listen.source.unwrap().service, "tidal");
     }
 
     #[test]
-    fn favourites_are_v1_bookmarks() {
+    fn bookmarks_are_v1_bookmarks() {
         let uri = MusicUri::parse(SONG).unwrap();
-        let (b, path) = favourite_bookmark(&uri, 1_792_540_800_000_000).unwrap();
+        let (b, path) = bookmark_of(&uri.to_url(), 1_792_540_800_000_000).unwrap();
         assert!(path.starts_with("/priv/social/v1/bookmarks/"), "{path}");
-        assert_eq!(favourite_bookmark_path(&uri).unwrap(), path);
+        assert_eq!(bookmark_path(&uri.to_url()).unwrap(), path);
         let body = serde_json::to_vec(&b).unwrap();
         assert_eq!(
-            favourite_from_bookmark(&path, &body),
-            Some((uri, 1_792_540_800_000_000))
+            music_bookmark(&path, &body),
+            Some((uri.to_url(), 1_792_540_800_000_000))
+        );
+        // Someone's public collection, bookmarked
+        let post = format!("pubky://{OWNER}/pub/social/v1/posts/{}", id_of(t0()));
+        let (pb, ppath) = bookmark_of(&post, 7).unwrap();
+        assert_eq!(
+            music_bookmark(&ppath, &serde_json::to_vec(&pb).unwrap()),
+            Some((post, 7))
         );
         // A bookmark of something that is not music
         let (other, opath) = {
             let c = create_bookmark("https://example.com/").unwrap();
             (c.bookmark, c.path)
         };
+        assert_eq!(music_bookmark(&opath, &serde_json::to_vec(&other).unwrap()), None);
+    }
+
+    #[test]
+    fn a_collection_keeps_its_layout_and_mixed_items() {
+        let mut pl = playlist(1);
+        let post = format!("pubky://{OWNER}/pub/social/v1/posts/0033SCZXVEPNG");
+        pl.items.push(PlaylistItem {
+            uri: "https://musicbrainz.org/release/1b021cc5-ab1f-4a96-8a4b-a1a9a5e4bd0a".into(),
+            added_at: pl.created_at,
+            source: None,
+        });
+        pl.items.push(PlaylistItem {
+            uri: post.clone(),
+            added_at: pl.created_at,
+            source: None,
+        });
+        pl.layout = Some("visual".into());
+        pl.original = Some(format!("pubky://{OWNER}/pub/social/v1/posts/{}", id_of(t0() - 7)));
+        let id = id_of(pl.created_at);
+        let v1 = to_v1(&MusicContent::Playlist(pl.clone())).unwrap();
+        // Valid under either root (the post is public)
+        v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
+        v1.version_path(&id, None, Root::Pub, &owner()).unwrap();
+        let V1Post::Social(post_v1) = &v1 else { panic!() };
+        let content: serde_json::Value = serde_json::from_str(&post_v1.content).unwrap();
+        assert_eq!(content["layout"], "visual");
+        assert_eq!(content["items"][2]["uri"], post);
+        let Some(MusicContent::Playlist(back)) = from_social(post_v1, &id, &id) else {
+            panic!("reads back")
+        };
+        assert_eq!(back.layout.as_deref(), Some("visual"));
+        assert_eq!(back.original, pl.original, "a duplicate names its original");
+        assert_eq!(content["ext"]["music"]["original"], pl.original.clone().unwrap());
         assert_eq!(
-            favourite_from_bookmark(&opath, &serde_json::to_vec(&other).unwrap()),
-            None
+            back.items.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>(),
+            pl.items.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>()
         );
+        // A newer writer's layout reads as a list; a web link is kept as a link (B3)
+        let mut c: PubkySocialCollectionContent = serde_json::from_str(&post_v1.content).unwrap();
+        c.layout = Some(PubkySocialCollectionLayout::from("carousel".to_string()));
+        c.items.push(PubkySocialCollectionItem::new(
+            "https://example.com/a".into(),
+            None,
+        ));
+        let mut other = post_v1.clone();
+        other.content = serde_json::to_string(&c).unwrap();
+        let Some(MusicContent::Playlist(back)) = from_social(&other, &id, &id) else {
+            panic!("still music")
+        };
+        assert_eq!((back.layout, back.items.len()), (None, 4));
+        assert_eq!(back.items[3].kind(), Some(ItemKind::Link));
+        // Posts only, no ext.music: someone's reading list, not music
+        let posts = PubkySocialPost::new_collection(
+            "Reading".into(),
+            None,
+            vec![PubkySocialCollectionItem::new(post, None)],
+            None,
+            None,
+        );
+        assert_eq!(from_social(&posts, &id, &id), None);
+        // An empty one is a new collection
+        let empty = PubkySocialPost::new_collection("New".into(), None, Vec::new(), None, None);
+        assert!(matches!(
+            from_social(&empty, &id, &id),
+            Some(MusicContent::Playlist(_))
+        ));
+    }
+
+    #[test]
+    fn listens_read_back_as_plays() {
+        let a = Activity {
+            uri: SONG.into(),
+            played_at: t0(),
+            source_kind: ActivitySource::Local,
+            duration_ms: Some(200_000),
+        };
+        let id = id_of(a.played_at);
+        let V1Post::Music(post) = to_v1(&MusicContent::Activity(a.clone())).unwrap() else {
+            panic!()
+        };
+        let Some(MusicContent::Activity(back)) = from_music(&post, &id) else {
+            panic!("a listen reads back")
+        };
+        assert_eq!(back, a);
+        // Another app's listen without a source
+        // In milliseconds, as an older writer put it
+        let bare = pubky_music_specs::listen(1_792_540_800_000, None, None, SONG.into());
+        let Some(MusicContent::Activity(back)) = from_music(&bare, &id) else {
+            panic!()
+        };
+        assert_eq!(
+            (back.played_at, back.source_kind),
+            (1_792_540_800_000_000, ActivitySource::Unknown)
+        );
+    }
+
+    #[test]
+    fn tags_are_social_v1_tags_with_the_old_ids() {
+        use pubky_app_specs::traits::HashId as _;
+        let (tag, id, path) = music_tag(SONG, "late-night", 1_792_540_800_000_000).unwrap();
+        assert_eq!(path, format!("{}{id}.json", tags_dir()));
+        assert_eq!(tags_dir(), "/pub/social/v1/tags/");
+        // The id a PubkyAppTag had for the same uri and label: the library's ids carry over
+        let old = pubky_app_specs::PubkyAppTag {
+            uri: SONG.into(),
+            label: "late-night".into(),
+            created_at: 1,
+        };
+        assert_eq!(old.create_id(), id);
+        let body = serde_json::to_vec(&tag).unwrap();
+        let (back_id, back) = music_tag_from(&path, &body).unwrap();
+        assert_eq!(
+            (back_id.as_str(), back.label.as_str()),
+            (id.as_str(), "late-night")
+        );
+        // Refused: an unfolded label, a wrong id, a tag on a post (not music)
+        assert!(music_tag(SONG, "Loud", 1).is_err());
+        assert!(music_tag_from(&format!("{}{}.json", tags_dir(), "X".repeat(26)), &body).is_none());
+        let post = format!("pubky://{OWNER}/pub/social/v1/posts/0033SCZXVEPNG");
+        let (t, _, p) = music_tag(&post, "nice", 1).unwrap();
+        assert!(music_tag_from(&p, &serde_json::to_vec(&t).unwrap()).is_none());
+    }
+
+    /// pubky-social-migrator (npm) copies a person's `/pub/pubky.app/` tree to v1 with these
+    /// transforms and never deletes. Where it and the node's own move touch the same object, they
+    /// write the same path, so the two converge instead of making duplicates: a tag on a music
+    /// URL keeps its id, a bookmark is keyed by its target, a follow by the followee.
+    #[test]
+    fn the_spec_migrator_writes_where_the_node_does() {
+        use pubky_app_specs::traits::HashId as _;
+        use pubky_social_specs::migrate::MigrationCtx;
+        let mut ctx = MigrationCtx::new(owner());
+        let migrated = |ctx: &mut MigrationCtx, path: &str, body: Vec<u8>| {
+            let m = ctx.migrate(path, &body).unwrap();
+            assert_eq!(m.writes.len(), 1, "{path}");
+            format!("/{}", m.writes[0].0)
+        };
+        // A tag the node wrote under pubky.app/tags/ before 2026-10-21
+        let old = pubky_app_specs::PubkyAppTag {
+            uri: SONG.into(),
+            label: "calm".into(),
+            created_at: 1_792_540_800_000_000,
+        };
+        let (_, _, node_path) = music_tag(SONG, "calm", old.created_at).unwrap();
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/tags/{}", old.create_id()),
+            serde_json::to_vec(&old).unwrap(),
+        );
+        assert_eq!(path, node_path);
+        // A bookmark of a music URL made in pubky.app
+        let b = pubky_app_specs::PubkyAppBookmark {
+            uri: SONG.into(),
+            created_at: 1_792_540_800_000_000,
+        };
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/bookmarks/{}", b.create_id()),
+            serde_json::to_vec(&b).unwrap(),
+        );
+        assert_eq!(path, bookmark_path(SONG).unwrap());
+        // A follow the node wrote in the older form
+        let followee = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/follows/{followee}"),
+            br#"{"created_at":1792540800000000}"#.to_vec(),
+        );
+        assert_eq!(path, pubky_social_specs::PubkySocialFollow::create_path(followee));
+        // The node's older music objects were private: the migrator never reads /priv
+        assert!(ctx
+            .migrate(&format!("priv/pubky.app/posts/{}", id_of(t0())), b"{}")
+            .is_err());
+        // A post both could move keeps its id: v0 posts/{id} becomes v1 posts/{id}/{id}.json,
+        // the path the node's first version of the same id takes
+        let id = id_of(t0());
+        let note = pubky_app_specs::PubkyAppPost::new(
+            "hello".into(),
+            pubky_app_specs::PubkyAppPostKind::Short,
+            None,
+            None,
+            None,
+        );
+        let path = migrated(
+            &mut ctx,
+            &format!("pub/pubky.app/posts/{id}"),
+            serde_json::to_vec(&note).unwrap(),
+        );
+        assert_eq!(path, PubkySocialPost::create_path_in(Root::Pub, &id, &id, None));
     }
 }

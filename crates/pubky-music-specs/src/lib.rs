@@ -1,24 +1,35 @@
 //! Music on Pubky, on top of the v1 social objects.
 //!
 //! Music uses the shared social objects for everything that is not musical: a tag on a song is a
-//! social `tag` on its canonical URL, a favourite is a social `bookmark`, a comment is a social
-//! `post` that embeds the music URL, and a playlist is a social `collection` post. This crate adds
-//! only what is musical:
+//! social `tag` on its canonical URL, a bookmark is a social `bookmark`, a comment is a social
+//! `post` whose `parent` is the music URL, and a playlist is a social `collection` post. This
+//! crate adds only what is musical:
 //!
-//! - two post kinds of its own, [`MusicPostKind::Review`] and [`MusicPostKind::Listen`], on the
-//!   shared [`PostEnvelope`] under the `music` namespace
-//!   (`/{pub,priv}/music/v1/posts/{id}/{editId}.json`), with their content rules;
+//! - post kinds of its own on the shared [`PostEnvelope`] under the `music` namespace
+//!   (`/{pub,priv}/music/v1/posts/{id}/{editId}.json`), with their content rules:
+//!   [`MusicPostKind::Review`], [`MusicPostKind::Listen`] (one play) and
+//!   [`MusicPostKind::Listening`] (someone listening now: one post per session, a version per song;
+//!   others listen along from their own source). The path decides who sees a post: `/priv/` or
+//!   `/pub/`;
+//! - the music feed ([`MusicFeed`], `/{priv,pub}/music/v1/feeds/{id}.json`): a saved query for
+//!   music modelled on the social v1 feed, with a smart playlist's rules;
 //! - the `ext.music` hints a playlist carries on its items and on the collection ([`ext`]), and the
-//!   readers that treat them as hostile input.
+//!   readers that treat them as hostile input. `music`, the spec's namespace, is also its key in
+//!   `ext`.
+//!
+//! Times (`*_at`) are Unix microseconds, like the social specs; durations (`*_ms`) are
+//! milliseconds. Readers take an older millisecond time as one ([`micros_of`]).
 //!
 //! Canonical music URLs (what `embed` and collection items point at), in order of preference:
 //! the MusicBrainz URL first, then the ISRC URL, then the service URL. This crate does not pick
 //! them; it only requires that a review or listen names one.
 //!
-//! Service names (`ext.music.source.service`, `source_order`) are an open vocabulary of 1–32
-//! lowercase letters, digits or `-`: a streaming service's own name (`tidal`, `deezer`, `spotify`),
-//! or `library` for the curator's own files, wherever they play them from. Readers that don't know
-//! a name treat the source as unknown and fall back to the item's canonical URL.
+//! Service names (`source.service`, `source_order`) are an open vocabulary of 1–32 lowercase
+//! letters, digits or `-`: a streaming service's own name, hyphenated (`tidal`, `apple-music`,
+//! `youtube-music`; [`SERVICE_NAMES`] lists the shared spellings), `library` for the curator's own
+//! files wherever they play them from, or `roon`. [`service_name`] folds a spelling like
+//! `Apple_Music` into one. Readers that don't know a name treat the source as unknown and fall back
+//! to the item's canonical URL. A source is where it played, never where a record came from.
 //!
 //! The crate is generic: any app can read and write these objects. It holds no app's own data (no
 //! settings, credentials, vault or library); each app keeps that under its own namespace. It depends on nothing but the social specs and serde, so it can live in its
@@ -29,14 +40,22 @@
 
 mod content;
 pub mod ext;
+mod feed;
 mod kind;
 
 pub use content::{
-    is_service_name, MusicListenContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS,
-    LISTEN_PLAYED_AT_MIN_MS, REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH,
-    SERVICE_MAX_LENGTH,
+    generic_listening_name, is_service_name, micros_of, service_name, MusicListenContent,
+    MusicListeningContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS, LIVE_NAME_MAX_LENGTH,
+    LIVE_WINDOW_MAX_MICROS, MILLIS_BEFORE, REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH,
+    SERVICE_MAX_LENGTH, SERVICE_NAMES, TIME_MIN_MICROS,
+};
+pub use feed::{
+    feed_tags, MusicFeed, MusicFeedConfig, MusicFeedContent, MusicFeedLeaveOut, MusicFeedLimit,
+    MusicFeedMatch, MusicFeedRule, MusicFeedSort, FEED_MINUTES_MAX, FEED_RULES_MAX, FEED_RULE_FIELDS,
+    FEED_RULE_OPS, FEED_SONGS_MAX, FEED_URIS_MAX,
 };
 pub use kind::MusicPostKind;
+pub use pubky_social_specs::{PubkySocialFeedLayout, PubkySocialFeedReach};
 
 pub use pubky_social_specs::{MintedVersion, PostEnvelope, PubkyId, Root, ValidationCtx};
 
@@ -60,22 +79,53 @@ pub fn review(rating: u8, text: Option<String>, embed: String) -> MusicPost {
     PostEnvelope::new(content, MusicPostKind::Review, None, Some(embed), Vec::new())
 }
 
-/// A listen of the music at `embed`, played at `played_at_ms` (Unix milliseconds). Listens are
-/// private: they validate only under the `priv` root. Infallible; validate before writing.
+/// A listen of the music at `embed`, played at `played_at` (Unix microseconds). A listen
+/// validates under either root: `/priv/` for a private history, `/pub/` for a public one.
+/// Infallible; validate before writing.
 pub fn listen(
-    played_at_ms: i64,
+    played_at: i64,
     duration_ms: Option<i64>,
     source: Option<MusicSource>,
     embed: String,
 ) -> MusicPost {
     let content = MusicListenContent {
-        played_at: played_at_ms,
+        played_at,
         duration_ms,
         source,
         extra: Default::default(),
     };
     let content = serde_json::to_string(&content).expect("a listen always serializes");
     PostEnvelope::new(content, MusicPostKind::Listen, None, Some(embed), Vec::new())
+}
+
+/// Listening to the song at `embed`, which started at `started_at`, shown until `expires_at` (Unix
+/// microseconds), called `name`. Trims the name; a blank one becomes absent. A pause or the end is
+/// a new version with `paused_at` or `ended_at` set ([`listening_post`]). Infallible; validate
+/// before writing.
+pub fn listening(
+    started_at: i64,
+    expires_at: Option<i64>,
+    name: Option<String>,
+    duration_ms: Option<i64>,
+    source: Option<MusicSource>,
+    embed: String,
+) -> MusicPost {
+    let content = MusicListeningContent {
+        started_at,
+        expires_at,
+        name: content::trimmed_name(name),
+        duration_ms,
+        source,
+        ..Default::default()
+    };
+    listening_post(&content, embed)
+}
+
+/// The `listening` post of `content` (any of its members: `paused_at`, `ended_at`, …) about the
+/// song at `embed`. Infallible; validate before writing.
+pub fn listening_post(content: &MusicListeningContent, embed: String) -> MusicPost {
+    let content = serde_json::to_string(content).expect("a listening always serializes");
+    PostEnvelope::new(content, MusicPostKind::Listening, None, Some(embed), Vec::new())
 }
 
 /// The review inside a `kind = review` post, checked against the review rules.
@@ -86,12 +136,21 @@ pub fn read_review(post: &MusicPost) -> Result<MusicReviewContent, String> {
     content::parse_review(&post.content)
 }
 
-/// The listen inside a `kind = listen` post, checked against the listen rules.
+/// The listen inside a `kind = listen` post, checked against the listen rules, with `played_at`
+/// in microseconds (an older millisecond value converted).
 pub fn read_listen(post: &MusicPost) -> Result<MusicListenContent, String> {
     if post.kind != MusicPostKind::Listen {
         return Err("Validation Error: not a listen".into());
     }
     content::parse_listen(&post.content)
+}
+
+/// The content of a `kind = listening` post, checked.
+pub fn read_listening(post: &MusicPost) -> Result<MusicListeningContent, String> {
+    if post.kind != MusicPostKind::Listening {
+        return Err("Validation Error: not a listening".into());
+    }
+    content::parse_listening(&post.content)
 }
 
 /// Mints a new post's id and its path under the music namespace.

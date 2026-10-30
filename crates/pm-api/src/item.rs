@@ -2,7 +2,7 @@
 //! (docs/ux/08-item-page.md): the library, a streaming service, or a link
 //! only Pubky knows. Whatever the source, the answer has the same sections:
 //! hero, songs (and albums for artists), versions, On Pubky, About, plus the
-//! playback answer and the target that tags, ratings and favourites attach to.
+//! playback answer and the target that tags, ratings and bookmarks attach to.
 
 use crate::discover::{load_external, page_id, url_of_page};
 use crate::state::NodeState;

@@ -72,6 +72,11 @@ fn hash(token: &str) -> String {
     blake3::hash(token.as_bytes()).to_hex().to_string()
 }
 
+/// Whether a party is running on this zone (its guests add songs to it).
+pub(crate) fn open_on(s: &NodeState, zone: &str) -> bool {
+    load(s).iter().any(|p| p.zone == zone)
+}
+
 /// The parties still running (expired ones are dropped as they are read).
 fn load(s: &NodeState) -> Vec<Party> {
     let all: Vec<Party> = s
