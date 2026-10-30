@@ -261,9 +261,10 @@ pub struct History {
     pub plays: Vec<pm_library::PlayEntry>,
 }
 
-/// A favourite by canonical URL or by library id (one of them).
+/// An item by canonical URL or by library id (one of them): what a bookmark, a tag or a review
+/// targets.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct FavouriteRef {
+pub struct ItemRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,7 +279,7 @@ pub struct FavouriteRef {
     pub at: Option<i64>,
 }
 
-impl FavouriteRef {
+impl ItemRef {
     pub fn uri(uri: impl Into<String>) -> Self {
         Self {
             uri: Some(uri.into()),
@@ -305,16 +306,19 @@ impl FavouriteRef {
     }
 }
 
-/// Favourites joined to the library; `other` are canonical URLs the library
-/// has no object for (favourited elsewhere, or not scanned here).
+/// Bookmarks joined to the library; `other` are canonical URLs the library
+/// has no object for (bookmarked elsewhere, or not scanned here).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Favourites {
+pub struct Bookmarks {
     pub tracks: Vec<Track>,
     pub albums: Vec<Album>,
     pub artists: Vec<ArtistSummary>,
     #[serde(default)]
     pub other: Vec<String>,
-    /// Every favourited canonical URL, for quick "is this a favourite" checks.
+    /// Bookmarked public Pubky posts (`pubky://…/posts/<id>`): other people's collections, say.
+    #[serde(default)]
+    pub posts: Vec<String>,
+    /// Every bookmarked canonical URL, for quick "is this bookmarked" checks.
     #[serde(default)]
     pub uris: Vec<String>,
 }
@@ -427,14 +431,30 @@ pub struct Reviews {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FavouriteChanged {
+pub struct BookmarkChanged {
     pub uri: String,
+    pub bookmarked: bool,
+    /// The same as `bookmarked`, for clients of the deprecated `/v1/favourites`.
+    #[serde(default)]
     pub favourite: bool,
+}
+
+impl BookmarkChanged {
+    pub fn new(uri: String, bookmarked: bool) -> Self {
+        Self {
+            uri,
+            bookmarked,
+            favourite: bookmarked,
+        }
+    }
 }
 
 /// What the Home screen shows: the Roon-style landing page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomePage {
+    #[serde(default)]
+    pub bookmarked_albums: Vec<Album>,
+    /// The same as `bookmarked_albums`, for one release (deprecated name).
     #[serde(default)]
     pub favourite_albums: Vec<Album>,
     pub recently_added: Vec<Album>,
@@ -443,7 +463,7 @@ pub struct HomePage {
     pub most_played: Vec<pm_library::PlayedTrack>,
     pub history: Vec<pm_library::PlayEntry>,
     pub stats: pm_library::LibraryStats,
-    /// Favourite songs not played for two months (or never), the longest-unplayed first.
+    /// Bookmarked songs not played for two months (or never), the longest-unplayed first.
     #[serde(default)]
     pub forgotten: Vec<Track>,
 }
@@ -583,6 +603,49 @@ pub struct PlaylistSummary {
     /// Up to four distinct album covers of its songs in the library: the playlist's mosaic.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub covers: Vec<String>,
+    /// `list`, `grid` or `visual`.
+    #[serde(default = "list_layout")]
+    pub layout: String,
+    /// Every item is a song: a playlist. Otherwise a collection that also holds albums,
+    /// artists or posts.
+    #[serde(default)]
+    pub tracks_only: bool,
+}
+
+fn list_layout() -> String {
+    "list".into()
+}
+
+/// One item of a collection, with what the node knows about it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionEntry {
+    pub index: usize,
+    pub uri: String,
+    /// `track`, `album`, `artist`, `post` or `link` (a web page: `GET /v1/cards` has its card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<pm_pubky::ItemKind>,
+    /// Microseconds.
+    pub added_at: i64,
+    /// The library song, for a song in the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
+    /// The library album, for an album in the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<Album>,
+    /// The library artist, for an artist in the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<ArtistSummary>,
+    /// For a post: its author and id (`/v1/shared/{user}/collections/{id}` opens a collection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<PostRef>,
+}
+
+/// A public Pubky post an item points at.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostRef {
+    /// The author's key (z32).
+    pub user: String,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,6 +654,9 @@ pub struct PlaylistDetail {
     pub playlist: Playlist,
     /// One entry per item: the library track that matches its canonical URL, if any.
     pub tracks: Vec<Option<Track>>,
+    /// One entry per item, of any kind (a collection's view).
+    #[serde(default)]
+    pub entries: Vec<CollectionEntry>,
     /// Library songs without a MusicBrainz id or ISRC yet, kept in this playlist on this node
     /// only (after the items; never synced). They join the playlist once identified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -731,7 +797,7 @@ pub struct CreatePlaylist {
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
-    /// Canonical music URLs.
+    /// Music URLs (songs, albums, artists) or public Pubky post links.
     #[serde(default)]
     pub uris: Vec<String>,
     /// Library tracks; each must have a canonical identity.
@@ -740,6 +806,16 @@ pub struct CreatePlaylist {
     /// Pins for `uris`, by position (ADR 0015); missing or `null` means Auto.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Option<pm_pubky::ItemSource>>,
+    /// `list` (the default), `grid` or `visual`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// Public from the start (default private).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    /// For a duplicate: the public collection it copies (`pubky://…/posts/<id>`), kept in
+    /// `ext.music.original`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 /// `?keep_source=true` on a provider playlist import pins every song to its track on that
@@ -761,6 +837,9 @@ pub struct UpdatePlaylist {
     /// Replace the item list (order matters).
     #[serde(default)]
     pub uris: Option<Vec<String>>,
+    /// `list`, `grid` or `visual`.
+    #[serde(default)]
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -901,9 +980,156 @@ pub struct RecordActivity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedActivity {
+    /// The listen post's id; empty when the history is off.
     pub id: String,
     pub uri: String,
     pub track_id: Option<i64>,
+    /// `false` when the listen history is off: nothing was written.
+    #[serde(default = "yes")]
+    pub recorded: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+// ---- listen history (listens.rs) ----
+
+/// Where the node writes listens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenHistory {
+    /// Nothing is written.
+    Off,
+    /// `/priv/music/v1/posts/` (the default).
+    #[default]
+    Private,
+    /// `/pub/music/v1/posts/`, for everyone to see.
+    Public,
+}
+
+/// `GET /v1/me/listens/settings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenSettings {
+    pub history: ListenHistory,
+    /// Listens the node holds under each root.
+    #[serde(default)]
+    pub private: u64,
+    #[serde(default)]
+    pub public: u64,
+}
+
+/// `PUT /v1/me/listens/settings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetListenSettings {
+    pub history: ListenHistory,
+}
+
+/// `?limit=&before=` (microseconds) for a page of the history.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenPage {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub before: Option<i64>,
+}
+
+/// One play in the history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenEntry {
+    /// The listen post's id; `None` for a play kept on this node only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The music URL (`track:<id>` for a library song without one).
+    pub uri: String,
+    /// Microseconds.
+    pub played_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ActivitySource>,
+    /// The zone it played on, for a play the node recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
+    /// `private` or `public` (a listen post), or `node` (a play kept on this node only: from
+    /// before the history setting, while it was off, or of a song without a music URL).
+    pub visibility: String,
+    /// On the homeserver (a listen post that was pushed).
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenPageResult {
+    pub listens: Vec<ListenEntry>,
+    /// `before` for the next page, `None` at the end.
+    #[serde(default)]
+    pub next: Option<i64>,
+}
+
+/// `?period=week|month|year|all&limit=`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenStatsQuery {
+    #[serde(default)]
+    pub period: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopTrack {
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
+    pub plays: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopArtist {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+    pub plays: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenStats {
+    pub period: String,
+    /// Microseconds; `None` for all time.
+    pub since: Option<i64>,
+    pub listens: u64,
+    pub top_tracks: Vec<TopTrack>,
+    /// From the library's songs (a listen of a song not in the library has no artist here).
+    pub top_artists: Vec<TopArtist>,
+}
+
+/// `POST /v1/me/listens/visibility {public}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveListens {
+    pub public: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovedListens {
+    /// Listens queued to move (the next sync moves them).
+    pub moved: usize,
+}
+
+/// `DELETE /v1/me/listens?local=`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeleteListens {
+    /// Also forget the node's own play counts (Home's recently and most played).
+    #[serde(default)]
+    pub local: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedListens {
+    /// Listen posts deleted (here now, on the homeserver with the next sync).
+    pub deleted: usize,
+    /// Plays the node forgot (`local=true`).
+    pub plays_cleared: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1185,9 +1411,9 @@ pub struct ItemPage {
     /// The canonical URL or the service link the page is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-    /// What tags, ratings and favourites attach to (`{track_id}`, `{album_id}`,
+    /// What tags, ratings and bookmarks attach to (`{track_id}`, `{album_id}`,
     /// `{artist_id}` or `{uri}`), for the existing `/v1/tags`, `/v1/reviews`
-    /// and `/v1/favourites` calls.
+    /// and `/v1/bookmarks` calls.
     pub target: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1267,6 +1493,10 @@ pub struct ItemPage {
     /// The picture's credit when it is from Wikimedia Commons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_credit: Option<ImageCredit>,
+    /// What open sources say (About, its links, the picture) is being fetched: ask for the page
+    /// again in a few seconds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub about_pending: bool,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
     /// A library artist's or album's MusicBrainz id (an album's release group) and where it came
@@ -1711,6 +1941,18 @@ pub struct SharedPlaylistSummary {
     pub items: usize,
     /// Microseconds.
     pub updated_at: i64,
+    /// `list`, `grid` or `visual`.
+    #[serde(default = "list_layout")]
+    pub layout: String,
+    #[serde(default)]
+    pub tracks_only: bool,
+}
+
+/// Someone's public collection: its summary and every item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedCollection {
+    pub summary: SharedPlaylistSummary,
+    pub entries: Vec<CollectionEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1809,6 +2051,14 @@ pub struct ListenImport {
     pub skipped: usize,
 }
 
+/// `POST /v1/listenbrainz/import?public=` : `public=true` confirms that the listens become public
+/// (asked when the listen history setting is public).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenImportQuery {
+    #[serde(default)]
+    pub public: Option<bool>,
+}
+
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -1886,9 +2136,9 @@ pub struct RoonImportQuery {
     /// Only report (default true).
     #[serde(default)]
     pub dry_run: Option<bool>,
-    /// Roon favourites into Favourites (default true).
-    #[serde(default)]
-    pub favourites: Option<bool>,
+    /// Roon favourites into bookmarks (default true). `favourites=` is the deprecated name.
+    #[serde(default, alias = "favourites")]
+    pub bookmarks: Option<bool>,
     /// Roon tags as public tags on Pubky (default false: they become public).
     #[serde(default)]
     pub tags: Option<bool>,
@@ -1911,9 +2161,11 @@ pub struct RoonImportReport {
     pub rows: usize,
     pub matched: usize,
     pub unmatched: usize,
-    /// Matched, but without the canonical identity a favourite, tag or playlist item needs.
+    /// Matched, but without the canonical identity a bookmark, tag or playlist item needs.
     pub not_identified: usize,
-    /// Favourites added (or that would be, in a dry run).
+    /// Bookmarks added (or that would be, in a dry run).
+    pub bookmarks: usize,
+    /// The same as `bookmarks`, for one release (deprecated name).
     pub favourites: usize,
     pub tags_added: usize,
     /// Roon tags Pubky cannot hold (too long, odd characters).

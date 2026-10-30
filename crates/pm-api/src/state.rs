@@ -86,6 +86,9 @@ pub struct NodeState {
     pub music_uploads: crate::add_music::Uploads,
     /// The background sync after a sign-in (or a restore), for the page.
     pub sync_activity: Mutex<crate::types::SyncActivity>,
+    /// Zones a listener changed last (queue or transport): their plays are not the owner's
+    /// listens until the owner changes the zone again (listens.rs).
+    pub(crate) zones_in_listeners_hands: Mutex<std::collections::HashSet<String>>,
     /// The static sign-in return page for the project's apps (`[auth] return_page`).
     return_page: std::sync::RwLock<String>,
     /// What the last scan did (shown when it ends, and in Settings).
@@ -149,11 +152,11 @@ pub struct NodeState {
     pub contact: std::sync::RwLock<String>,
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
-    /// Controller sign-ins in progress: id → (flow, started).
     /// Bulk uploads to the homeserver's private storage, by job id (files.rs).
     pub upload_jobs: std::sync::Mutex<std::collections::HashMap<String, crate::types::UploadProgress>>,
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant)>,
+        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
     >,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
@@ -451,6 +454,7 @@ impl NodeState {
             storage_save: Mutex::new(Default::default()),
             music_uploads: Default::default(),
             sync_activity: Mutex::new(Default::default()),
+            zones_in_listeners_hands: Mutex::new(Default::default()),
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
         })
@@ -513,6 +517,16 @@ impl NodeState {
                     Ok(event) => {
                         if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
                             record_play(&library, &id, &item.uri);
+                            // A listen only when the play is the owner's (listens.rs)
+                            if let Some(n) = node.upgrade() {
+                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                    crate::listens::record_zone_play(
+                                        &library.lock().expect("library poisoned"),
+                                        &item.uri,
+                                        item.duration_ms,
+                                    );
+                                }
+                            }
                             if let Some(n) = node.upgrade() {
                                 crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
                                 crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
@@ -526,6 +540,10 @@ impl NodeState {
                         }
                         if matches!(event, pm_zones::ZoneEvent::Stopped) {
                             continue_radio(&library, &zone_for_radio);
+                        }
+                        // "Share what I'm listening to" (listening_share.rs)
+                        if let Some(n) = node.upgrade() {
+                            crate::listening_share::zone_event(&n, &id.0, &event);
                         }
                         let _ = events.send(ApiEvent::ZoneEvent {
                             zone: id.clone(),
@@ -838,12 +856,13 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
-    /// Create (or reuse) a pull output under `name`, registered for the HTTP route.
+    /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
+    /// renderer the node tells when to fetch ([`pm_zones::outputs::PullOutput::controlled`]).
     pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
         let mut pulls = self.pulls.lock().expect("pulls lock");
         pulls
             .entry(name.to_string())
-            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::new(name)))
+            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
             .clone()
     }
 

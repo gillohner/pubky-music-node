@@ -157,12 +157,7 @@ fn snapshot(s: &NodeState) -> serde_json::Value {
         .map(|p| p.json)
         .collect();
     playlists.sort();
-    let favs: Vec<String> = lib
-        .list_favourites()
-        .unwrap()
-        .into_iter()
-        .map(|f| f.uri)
-        .collect();
+    let favs: Vec<String> = lib.list_bookmarks().unwrap().into_iter().map(|f| f.uri).collect();
     let mut tags: Vec<String> = lib
         .tag_ids()
         .unwrap()
@@ -211,8 +206,8 @@ async fn a_backup_rebuilds_the_node() {
         assert!(lib
             .set_identity(t.id.unwrap().0, &confirmed_uri, Confidence::ConfirmedByUser, None)
             .unwrap());
-        lib.add_favourite(
-            &pm_pubky::Favourite::id_for(&MusicUri::parse(&song).unwrap()),
+        lib.add_bookmark(
+            &pm_pubky::Bookmark::id_for(&MusicUri::parse(&song).unwrap()),
             &song,
             1_700_000_000_000_000,
         )
@@ -508,4 +503,29 @@ async fn hearts_on_songs_without_an_identity_are_counted() {
     assert_eq!(st, StatusCode::OK, "{report}");
     assert_eq!(report["expected"]["favourites"], 1, "{report}");
     assert_eq!(report["restored"]["favourites"], 1, "{report}");
+}
+
+/// Backups are the owner's alone: a scheduled backup file is 0600 (security review 2026-10-30,
+/// #2; the working copy's private folder is `backup.rs`'s test).
+#[cfg(unix)]
+#[tokio::test]
+async fn backups_are_readable_by_their_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), "a", None);
+    let app = router(s.clone());
+    let folder = dir.path().join("backups");
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": folder.to_string_lossy(), "every_hours": 24, "keep": 3})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let file = folder.join(v["last_file"].as_str().unwrap());
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{}", file.display());
 }

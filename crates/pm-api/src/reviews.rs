@@ -1,7 +1,7 @@
 //! The user's own reviews: a rating (1–10, half stars) and/or notes on an album, track or
 //! artist, kept by the node and synced as music `review` posts (ADR 0014). One review per target; editing keeps the post id.
 
-use crate::favourites::canonical_for;
+use crate::bookmarks::canonical_for;
 use crate::playlists::{now_micros, store};
 use crate::state::NodeState;
 use crate::types::*;
@@ -14,8 +14,8 @@ use pm_pubky::schemas::post::TYPE_REVIEW;
 use pm_pubky::{MusicContent, MusicPost, Review, Visibility};
 use std::sync::Arc;
 
-fn target(r: &ReviewRef) -> FavouriteRef {
-    FavouriteRef {
+fn target(r: &ReviewRef) -> ItemRef {
+    ItemRef {
         uri: r.uri.clone(),
         track_id: r.track_id,
         album_id: r.album_id,

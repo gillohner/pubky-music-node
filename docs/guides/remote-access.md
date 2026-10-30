@@ -38,17 +38,17 @@ enabled = false
 
 [Tailscale](https://tailscale.com) puts your devices on a private network of their own.
 
-1. Install Tailscale on the machine that runs the node (for Docker: on the host itself; for
-   Umbrel: the Tailscale app from Umbrel's App Store) and sign in.
+1. Install Tailscale on the machine that runs the node (for Docker: on the host itself) and sign
+   in.
 2. Install it on your phone or laptop with the same account.
 3. Use the node's Tailscale address in the browser, the app or a Subsonic app:
    `http://100.x.y.z:7788` (shown in the Tailscale app), with the same token.
 
 Any similar private network (WireGuard, ZeroTier) works the same way.
 
-## Cloudflare Tunnel (Umbrel and the bundle)
+## Cloudflare Tunnel (the bundle)
 
-On Umbrel and with the [bundle with its own homeserver](install-docker.md#with-your-own-pubky-homeserver),
+With the [bundle with its own homeserver](install-docker.md#with-your-own-pubky-homeserver),
 the node sets up a Cloudflare Tunnel for you. You need a free Cloudflare account and a domain
 managed by Cloudflare.
 
@@ -58,8 +58,7 @@ managed by Cloudflare.
    - one for the homeserver, for example `pubky.example.com`, to `http://localhost:6286`.
 2. In the node: **Settings › Domain and tunnel** (under **This homeserver · admin**), paste the
    token and the two hostnames, and save.
-3. Restart once, as Settings tells you: on Umbrel, right-click the app and choose **Restart**.
-   With the bundle, run these in the `deploy/bundle` folder:
+3. Restart once, as Settings tells you: run these in the `deploy/bundle` folder:
 
    ```sh
    docker compose --profile tunnel up -d

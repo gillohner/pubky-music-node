@@ -1,8 +1,9 @@
 //! Listening activity and playlist import for integrations such as the Roon
 //! bridge sidecar: callers send what they know (title, artist, album, or a
 //! canonical URL) and the node resolves it against the library so that
-//! only canonical identities enter social data (constraint 4). Activity
-//! posts are private (ADR 0006); a full history never leaves the node.
+//! only canonical identities enter social data (constraint 4). A play is a
+//! music `listen` post, private or public as the listen history setting says,
+//! or nothing when it is off ([`crate::listens`]).
 
 use crate::playlists::store;
 use crate::state::NodeState;
@@ -14,7 +15,7 @@ use axum::Json;
 use pm_library::Library;
 use pm_model::{MusicUri, Track};
 use pm_pubky::schemas::post::TYPE_ACTIVITY;
-use pm_pubky::{Activity, ActivitySource, MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
+use pm_pubky::{ActivitySource, MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
 use std::sync::Arc;
 
 /// Find a library track for a described item: by canonical URL when given,
@@ -46,7 +47,8 @@ fn source_of(s: &str) -> ActivitySource {
 }
 
 /// Record a play. The item must resolve to a canonical identity: a
-/// canonical URL in the request, or a library track that has one.
+/// canonical URL in the request, or a library track that has one. With the
+/// history off nothing is written (`recorded: false`).
 pub(crate) async fn record(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<RecordActivity>,
@@ -69,14 +71,11 @@ pub(crate) async fn record(
             ),
         ));
     };
-    let activity = Activity::new(&uri, source_of(&body.source), body.duration_ms);
-    let post = MusicPost::new(MusicContent::Activity(activity));
-    let id = post.create_id();
-    post.validate(Some(&id))
-        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    store(&lib, &post, &id, Visibility::Private)?;
+    // Where the listen history setting says; nothing when it is off
+    let id = crate::listens::record(&lib, &uri, source_of(&body.source), body.duration_ms, None)?;
     Ok(Json(RecordedActivity {
-        id,
+        recorded: id.is_some(),
+        id: id.unwrap_or_default(),
         uri: uri.to_url(),
         track_id: track.and_then(|t| t.id.map(|i| i.0)),
     }))

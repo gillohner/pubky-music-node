@@ -4,7 +4,7 @@
 //! The file (`pubky-music-<date>.pmbackup`) is a zip:
 //! - `manifest.json`: what it is, when, from which node, and counts (tracks, matches, playlists…);
 //! - `library.db`: a snapshot of the library database (matches and corrections, playlists,
-//!   favourites, tags, play history, queues, settings) with every sign-in taken out;
+//!   bookmarks, tags, play history, queues, settings) with every sign-in taken out;
 //! - `secrets.bin`, only when the owner chose a passphrase: the sign-ins (TIDAL, Spotify, Jamendo,
 //!   ListenBrainz, your Subsonic and Jellyfin servers), the Pubky session, the remote-access key
 //!   and the node's config file, encrypted with AES-256-GCM under a key derived from the
@@ -221,12 +221,59 @@ fn session_file(s: &NodeState) -> PathBuf {
         .unwrap_or_else(|| data_dir(s).join("pubky-session.secret"))
 }
 
-fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "pm-{name}-{}-{}",
-        std::process::id(),
-        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-    ))
+/// A file in a private scratch folder of its own (0700 on Unix, made fresh: never one that was
+/// there), removed with everything in it when dropped. The library copy a backup starts from
+/// still holds the sign-ins in plain text until they are taken out.
+struct Scratch {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl Scratch {
+    fn new(name: &str) -> std::io::Result<Self> {
+        let dir = std::env::temp_dir().join(format!(
+            "pm-{name}-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        b.create(&dir)?;
+        Ok(Self {
+            file: dir.join(name),
+            dir,
+        })
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.file
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.file
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Write `bytes` to a new file only its owner can read (0600 on Unix).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(bytes)
 }
 
 fn remove_db(path: &Path) {
@@ -235,17 +282,17 @@ fn remove_db(path: &Path) {
     }
 }
 
-/// What a backup holds: the library's counts, with the favourites kept on this node only (songs,
-/// albums and artists without an identity live in settings, not in the favourites table).
+/// What a backup holds: the library's counts, with the bookmarks kept on this node only (songs,
+/// albums and artists without an identity live in settings, not in the bookmarks table).
 fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
     let mut c = lib.backup_counts()?;
-    c.favourites += crate::favourites::local_count(lib);
+    c.bookmarks += crate::bookmarks::local_count(lib);
     Ok(c)
 }
 
 /// The backup file's bytes. `passphrase`: lock the sign-ins in; `None` leaves them out.
 pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifest), BackupError> {
-    let snap = scratch("backup.db");
+    let snap = Scratch::new("backup.db")?;
     let (counts, folders, mut secrets) = {
         let lib = s.library.lock().expect("library poisoned");
         lib.backup_to(&snap)?;
@@ -474,7 +521,12 @@ async fn restore_locked(
     secrets: Option<Secrets>,
 ) -> Result<RestoreReport, ApiError> {
     let m = &parsed.manifest;
-    let staged = scratch("restore.db");
+    let staged = Scratch::new("restore.db").map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot stage the restore: {e}"),
+        )
+    })?;
     std::fs::write(&staged, &parsed.database)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Open (and migrate) the copy first: a broken file never replaces a working library
@@ -782,7 +834,8 @@ pub async fn run_scheduled(s: &Arc<NodeState>) -> Result<String, String> {
         let (bytes, _) = make(&st, pass.as_deref()).map_err(|e| e.to_string())?;
         let name = file_name(time::OffsetDateTime::now_utc());
         let tmp = folder.join(format!(".{name}.part"));
-        std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let _ = std::fs::remove_file(&tmp);
+        write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, folder.join(&name)).map_err(|e| e.to_string())?;
         Ok(name)
     })
@@ -980,6 +1033,28 @@ pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The library copy a backup starts from (sign-ins still in it) lives in a fresh folder only
+    /// its owner can open, gone with everything in it afterwards (security review 2026-10-30, #2).
+    #[cfg(unix)]
+    #[test]
+    fn the_working_copy_is_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let sc = Scratch::new("backup.db").unwrap();
+        std::fs::write(&sc, b"secret").unwrap();
+        let dir = sc.parent().unwrap().to_path_buf();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(sc);
+        assert!(!dir.exists());
+        let f = tempfile::tempdir().unwrap();
+        let p = f.path().join("b.pmbackup");
+        write_private(&p, b"x").unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(write_private(&p, b"y").is_err(), "never over an existing file");
+    }
 
     #[test]
     fn secrets_seal_and_open_only_with_the_passphrase() {

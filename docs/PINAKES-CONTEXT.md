@@ -33,13 +33,14 @@ it as a client.
 - **Join with Nexus by URL,** never by id. Each side keeps its own ids.
 
 ## What Pinakes indexes
-- Every link Nexus reports as referenced, today through **tags**
-  (`/pub/pubky.app/tags/:id`, `PubkyAppTag` with any URI as target).
+- Every link Nexus reports as referenced, today through **tags**. The node writes social v1 tags
+  (`/pub/social/v1/tags/:id.json`), which Nexus indexes on an external URL as resource tags
+  (upstream #1165).
 - Nexus reserves further reference kinds (reply, embed, collection, event).
-- **A `/pub/pubky.music/playlists/:id` file is not indexed by itself.**
+- **A playlist is a social v1 `collection` post** (`/pub/social/v1/posts/:id/:editId.json` while
+  public; ADR 0014). There is no `/pub/pubky.music/playlists/` path.
   - Its items reach Pinakes only if they are tagged, or once Nexus emits `collection`
-    references for a playlist schema.
-  - Agree that schema with the Nexus/Pinakes owner before relying on it.
+    references (our Nexus fork, coming).
 
 ## Canonical music URIs: use real URLs, not a `music:` scheme
 Pinakes reads web URLs and a few identifier schemes (`isbn:`, `doi:`, `geo:`, `pubky://`, …). It

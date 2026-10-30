@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const MAX_ENTRIES: usize = 20_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
+/// What the cache may hold in all (anyone on the network can fill it, one URL at a time).
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct Cached {
@@ -123,11 +125,21 @@ pub(crate) async fn forward(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    let body = match resp.bytes().await {
-        Ok(b) if b.len() <= MAX_BODY => b.to_vec(),
-        Ok(_) => return (StatusCode::BAD_GATEWAY, "musicbrainz: answer too large").into_response(),
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("musicbrainz: {e}")).into_response(),
-    };
+    // Read up to the limit, never more (a large answer is refused as it comes, not after)
+    let too_large = || (StatusCode::BAD_GATEWAY, "musicbrainz: answer too large").into_response();
+    if resp.content_length().is_some_and(|n| n > MAX_BODY as u64) {
+        return too_large();
+    }
+    let mut resp = resp;
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(c)) if body.len() + c.len() <= MAX_BODY => body.extend_from_slice(&c),
+            Ok(Some(_)) => return too_large(),
+            Ok(None) => break,
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("musicbrainz: {e}")).into_response(),
+        }
+    }
     let entry = Cached {
         at: Instant::now(),
         status,
@@ -136,9 +148,10 @@ pub(crate) async fn forward(
     };
     if status == 200 || status == 404 {
         let mut cache = p.cache.lock().await;
-        if cache.len() >= MAX_ENTRIES {
+        let bytes = |c: &HashMap<String, Cached>| c.values().map(|e| e.body.len()).sum::<usize>();
+        if cache.len() >= MAX_ENTRIES || bytes(&cache) + entry.body.len() > MAX_CACHE_BYTES {
             cache.retain(|_, c| c.at.elapsed() < TTL / 2);
-            if cache.len() >= MAX_ENTRIES {
+            if cache.len() >= MAX_ENTRIES || bytes(&cache) + entry.body.len() > MAX_CACHE_BYTES {
                 cache.clear();
             }
         }

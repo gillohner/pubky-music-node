@@ -7,7 +7,7 @@
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_library::Library;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, TrackId};
-use pm_zones::{FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
+use pm_zones::{FetchLimit, FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -487,6 +487,93 @@ pub fn open_http_stream_with(
     headers: &[(String, String)],
     ext_hint: Option<&str>,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
+    open_http_stream_via(http_client(), uri, headers, ext_hint, None)
+}
+
+/// Whether a fetch for `limit` (an item someone other than the owner queued) may connect to `ip`.
+pub fn allows(limit: FetchLimit, ip: std::net::IpAddr) -> bool {
+    pm_renderer::ip_allowed(ip, limit.peer, limit.lan)
+}
+
+/// DNS for a guarded fetch: only the addresses its [`FetchLimit`] allows.
+struct GuardResolver(FetchLimit);
+
+impl reqwest::dns::Resolve for GuardResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let (reach, host) = (self.0, name.as_str().to_string());
+        Box::pin(async move {
+            let found: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let ok: Vec<std::net::SocketAddr> = found.into_iter().filter(|a| allows(reach, a.ip())).collect();
+            if ok.is_empty() {
+                return Err(format!("{host} is not an address this stream may be fetched from").into());
+            }
+            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Whether a URL's host is allowed when it is an address (names go through [`GuardResolver`]).
+fn literal_ok(url: &url::Url, reach: FetchLimit) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => allows(reach, ip.into()),
+        Some(url::Host::Ipv6(ip)) => allows(reach, ip.into()),
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    }
+}
+
+/// A client for one guarded stream: its resolver and every redirect keep to `reach`; no proxy
+/// (a proxy would resolve the name itself).
+fn guarded_client(reach: FetchLimit) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(None)
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(GuardResolver(reach)))
+        .redirect(reqwest::redirect::Policy::custom(move |a| {
+            let url = a.url().clone();
+            if a.previous().len() >= 5 {
+                a.error("too many redirects")
+            } else if !matches!(url.scheme(), "http" | "https") || !literal_ok(&url, reach) {
+                a.error(format!(
+                    "a redirect to {} is not allowed here",
+                    url.host_str().unwrap_or("?")
+                ))
+            } else {
+                a.follow()
+            }
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// [`open_http_stream`] for an item someone other than the owner queued (its [`FetchLimit`]).
+pub fn open_http_stream_guarded(uri: &str, reach: FetchLimit) -> Result<Box<dyn FrameSource>, SourceError> {
+    let err = |reason: String| SourceError::Open {
+        uri: uri.to_string(),
+        reason,
+    };
+    let url = url::Url::parse(uri).map_err(|e| err(e.to_string()))?;
+    if !literal_ok(&url, reach) {
+        return Err(err(
+            "that address is not one this stream may be fetched from".into()
+        ));
+    }
+    let client = guarded_client(reach).map_err(err)?;
+    open_http_stream_via(&client, uri, &[], None, Some(reach))
+}
+
+/// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
+fn open_http_stream_via(
+    client: &reqwest::blocking::Client,
+    uri: &str,
+    headers: &[(String, String)],
+    ext_hint: Option<&str>,
+    limit: Option<FetchLimit>,
+) -> Result<Box<dyn FrameSource>, SourceError> {
     {
         let err = |reason: String| SourceError::Open {
             uri: uri.to_string(),
@@ -494,7 +581,7 @@ pub fn open_http_stream_with(
         };
         let mut url = uri.to_string();
         for hop in 0..2 {
-            let mut rb = http_client().get(&url).header("Icy-MetaData", "1");
+            let mut rb = client.get(&url).header("Icy-MetaData", "1");
             for (k, v) in headers {
                 rb = rb.header(k.as_str(), v.as_str());
             }
@@ -511,6 +598,15 @@ pub fn open_http_stream_with(
             if is_playlist(&url, &mime) && hop == 0 {
                 let text = resp.text().map_err(|e| err(e.to_string()))?;
                 url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
+                if let Some(limit) = limit {
+                    let ok = url::Url::parse(&url)
+                        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && literal_ok(&u, limit));
+                    if !ok {
+                        return Err(err(
+                            "the playlist points at an address this stream may not be fetched from".into(),
+                        ));
+                    }
+                }
                 continue;
             }
             let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url)).or(ext_hint);
@@ -587,7 +683,10 @@ impl SourceFactory for NodeSources {
             });
         }
         if is_http_uri(&item.uri) {
-            return open_http_stream(&item.uri);
+            return match item.limit {
+                Some(limit) => open_http_stream_guarded(&item.uri, limit),
+                None => open_http_stream(&item.uri),
+            };
         }
         if item.uri == crate::librespot::LIVE_URI {
             return crate::librespot::open_live();
@@ -799,6 +898,164 @@ mod tests {
         assert_eq!(
             parse_icy_title(b"StreamTitle='It's Alright - X';StreamUrl='';").as_deref(),
             Some("It's Alright - X")
+        );
+    }
+
+    /// A tiny server: `/ok` is a WAV, `/to-metadata` redirects to the cloud metadata address,
+    /// `/to-name` to `localhost` by name.
+    fn redirecting_server() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let mut wav = std::io::Cursor::new(Vec::new());
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44_100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::new(&mut wav, spec).unwrap();
+            for _ in 0..4410 {
+                w.write_sample(0i16).unwrap();
+                w.write_sample(0i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let wav = wav.into_inner();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for s in l.incoming() {
+                let Ok(mut s) = s else { break };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let redirect = |to: String| {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                match path.as_str() {
+                    "/ok" => {
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len());
+                        let _ = s.write_all(&wav);
+                    }
+                    "/to-metadata" => {
+                        let _ = s
+                            .write_all(redirect("http://169.254.169.254/latest/meta-data".into()).as_bytes());
+                    }
+                    "/to-name" => {
+                        let _ = s.write_all(redirect(format!("http://localhost:{port}/ok")).as_bytes());
+                    }
+                    // A playlist's stream is a second request, not a redirect
+                    "/metadata.m3u" | "/local.m3u" => {
+                        let body = if path == "/metadata.m3u" {
+                            "http://169.254.169.254/latest/meta-data/\n".to_string()
+                        } else {
+                            format!("http://127.0.0.1:{port}/ok\n")
+                        };
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
+                    _ => {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                }
+            }
+        });
+        port
+    }
+
+    /// Someone other than the owner (a listener, a UPnP controller) can't make the node fetch
+    /// what they couldn't reach themselves: not by an address, not through a redirect, not by a
+    /// name that resolves there (security review 2026-10-30, #1 and #3).
+    #[test]
+    fn guarded_streams_keep_to_where_their_sender_may_reach() {
+        let port = redirecting_server();
+        let here = FetchLimit {
+            peer: Some("127.0.0.1".parse().unwrap()),
+            lan: true,
+        };
+        let lan = FetchLimit {
+            peer: Some("192.168.1.5".parse().unwrap()),
+            lan: true,
+        };
+        let public = FetchLimit::PUBLIC;
+        let reason = |r: Result<Box<dyn FrameSource>, SourceError>| match r {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        // A controller on this machine may use loopback, by address or by name
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/ok"),
+                here
+            )),
+            ""
+        );
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/to-name"),
+                here
+            )),
+            ""
+        );
+        // Never the metadata service, even through a redirect
+        let r = reason(open_http_stream_guarded(
+            &format!("http://127.0.0.1:{port}/to-metadata"),
+            here,
+        ));
+        assert!(r.contains("redirect"), "{r}");
+        // A LAN controller or a listener: not this machine, by address or by a name for it
+        for reach in [lan, public] {
+            let r = reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/ok"),
+                reach,
+            ));
+            assert!(
+                r.contains("not one this stream may be fetched from"),
+                "{reach:?}: {r}"
+            );
+            let r = reason(open_http_stream_guarded(
+                &format!("http://localhost:{port}/ok"),
+                reach,
+            ));
+            assert!(!r.is_empty(), "{reach:?}: a name for this machine was fetched");
+        }
+        // A playlist that points somewhere the sender may not reach is not followed (review of
+        // #177, high 1); one that points where it may, is
+        let r = reason(open_http_stream_guarded(
+            &format!("http://127.0.0.1:{port}/metadata.m3u"),
+            here,
+        ));
+        assert!(r.contains("playlist points at an address"), "{r}");
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/local.m3u"),
+                here
+            )),
+            ""
+        );
+        // The stricter of two limits wins
+        assert_eq!(here.and(public), public);
+        assert!(allows(public, "93.184.216.34".parse().unwrap()));
+        for no in [
+            "10.1.2.3",
+            "100.64.0.1",
+            "fd00::1",
+            "0.1.2.3",
+            "198.18.0.1",
+            "240.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "64:ff9b::a01:203",
+        ] {
+            assert!(!allows(public, no.parse().unwrap()), "{no}");
+        }
+        assert!(allows(lan, "10.1.2.3".parse().unwrap()));
+        assert!(!allows(lan, "169.254.169.254".parse().unwrap()));
+        assert!(
+            !allows(lan, "64:ff9b::a9fe:a9fe".parse().unwrap()),
+            "NAT64 to the metadata address"
         );
     }
 }
