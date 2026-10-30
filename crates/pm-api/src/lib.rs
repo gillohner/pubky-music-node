@@ -1233,11 +1233,28 @@ async fn pull_stream(
         };
         return Ok(with_headers(mime, axum::body::Body::empty()));
     }
-    let Some(live) = out.take_stream(pm_zones::outputs::LISTENER_TIMEOUT).await else {
-        return Err(ApiError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            "no zone is playing into this stream; start playback to the Stream zone first",
-        ));
+    // `g`: the stream the node gave the renderer this URL for (pm-out-upnp); an older one's poll
+    // never takes a newer stream
+    let generation = q.get("g").and_then(|g| g.parse::<u64>().ok());
+    let live = match out
+        .take_stream_for(pm_zones::outputs::LISTENER_TIMEOUT, generation)
+        .await
+    {
+        Ok(live) => live,
+        Err(pm_zones::outputs::Missed::Timeout) => {
+            return Err(ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "no zone is playing into this stream; start playback to the Stream zone first",
+            ))
+        }
+        // A renderer polling its old URI while a new stream opened: the fetch the node asks
+        // for next gets it
+        Err(pm_zones::outputs::Missed::Superseded) => {
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "a new stream started after this request; ask again",
+            ))
+        }
     };
     let fmt = live.format;
     if kind == pm_out_upnp::dlna::StreamKind::L16 && fmt.bits != 16 {
