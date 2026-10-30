@@ -61,6 +61,7 @@ pub mod lastfm;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod listening_share;
 pub mod listens;
 pub mod loudness;
 pub mod lrclib;
@@ -682,6 +683,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/prefs", get(prefs::get).put(prefs::put))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route(
+            "/me/listening",
+            get(listening_share::get).put(listening_share::put),
+        )
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
         .route(
