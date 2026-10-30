@@ -56,7 +56,7 @@ Without one, a node listening beyond localhost makes its own on first start (`<d
 | POST | `/v1/backup/schedule/run` | | one scheduled backup now |
 | GET | `/v1/library/tracks/{id}/lyrics` | | `{track_id, source: lrc\|tag, synced, text, lines: [{ms?, text}]}` from the file's tags or a sidecar `.lrc`; 404 when none |
 | GET | `/v1/library/tracks/{id}` | | `Track` |
-| DELETE | `/v1/library/tracks/{id}` | | 204; owner only. Takes the song out of the library: its rows go (as a removed folder's), the file stays, and scans skip it until it is brought back |
+| DELETE | `/v1/library/tracks/{id}` | | 204; owner only. Takes the song out of the library: nothing is deleted (its plays, matches and edits stay), the file is marked missing and every track read leaves it out; scans skip it until it is brought back, the same song |
 | PUT / DELETE | `/v1/library/tracks/{id}/edit` | PUT: `{title?, artist?, album?, album_artist?}` | the `Track`; owner only. The owner's edit of a song's tags, kept on the node (the file is not touched) and applied whenever the file is read again; blank fields keep the file's value, an empty edit or DELETE goes back to the file's tags. `artist` is one credit (`A, B` names two) |
 | PUT | `/v1/library/albums/{id}/edit` | `{title?, album_artist?}` (`""` clears the album artist) | `{id}`; owner only. Renames the album on the node (its id and cover stay); its songs keep the name across rescans |
 | GET | `/v1/library/hidden` | | `[{path, hidden_at}]`; owner only: the songs taken out of the library |

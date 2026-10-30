@@ -697,10 +697,27 @@ impl Library {
                 restore_originals(&mut t, &ot, &oa, oal, oaa);
             }
         }
+        let old_album = t.album.as_ref().and_then(|a| a.id);
         o.apply(&mut t);
         self.upsert_track(&t)?;
+        self.carry_cover(id, old_album)?;
         self.prune_empty_albums()?;
         self.get_track(id)
+    }
+
+    /// A song moved to another album by an edit: the new album takes the old one's cover when it
+    /// has none (covers embedded in files are not read again while the file is unchanged).
+    fn carry_cover(&self, id: TrackId, old_album: Option<i64>) -> Result<()> {
+        let Some(old) = old_album else { return Ok(()) };
+        let new = self.get_track(id)?.and_then(|t| t.album.and_then(|a| a.id));
+        if let Some(new) = new.filter(|n| *n != old) {
+            self.lock().execute(
+                "INSERT OR IGNORE INTO album_art(album_id, file, mime, source, set_at)
+                 SELECT ?2, file, mime, source, set_at FROM album_art WHERE album_id = ?1",
+                params![old, new],
+            )?;
+        }
+        Ok(())
     }
 
     /// Undo a song's edit: back to what its file says.
@@ -722,8 +739,10 @@ impl Library {
             o
         };
         if let Some((title, artists, album, album_artist)) = orig {
+            let old_album = t.album.as_ref().and_then(|a| a.id);
             restore_originals(&mut t, &title, &artists, album, album_artist);
             self.upsert_track(&t)?;
+            self.carry_cover(id, old_album)?;
             self.prune_empty_albums()?;
         }
         self.get_track(id)
@@ -846,6 +865,26 @@ impl Library {
             }
         }
         Ok(AlbumEdit::Done)
+    }
+
+    /// The file names and content-hash prefixes of the songs taken out of the library (My music
+    /// says "taken out" for them, not "not in the library yet").
+    pub fn hidden_names_and_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock();
+        let mut out = std::collections::HashSet::new();
+        let mut stmt = conn.prepare(
+            "SELECT h.path, substr(fh.blake3, 1, 16) FROM hidden_files h LEFT JOIN file_hashes fh ON fh.path = h.path",
+        )?;
+        for row in stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })? {
+            let (path, hash) = row?;
+            if let Some(name) = Path::new(&path).file_name() {
+                out.insert(name.to_string_lossy().to_string());
+            }
+            out.extend(hash);
+        }
+        Ok(out)
     }
 
     /// Library files by the first 16 hex of their content hash (how the homeserver names the
@@ -1336,6 +1375,16 @@ impl Library {
              WHERE source = 'folder' AND substr(file, 1, length(?1) + 1) = ?1 || '/'",
             params![from, to],
         )?;
+        // The owner's edits and the songs taken out move with their files
+        for table in ["track_overrides", "hidden_files"] {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET path = ?2 || substr(path, length(?1) + 1)
+                     WHERE path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/'"
+                ),
+                params![from, to],
+            )?;
+        }
         tx.execute("DELETE FROM folders WHERE path = ?1", params![from])?;
         tx.execute(
             "INSERT OR IGNORE INTO folders(path, enabled) VALUES (?1, 1)",
@@ -2640,7 +2689,8 @@ impl TrackOverride {
                 })
                 .collect();
         }
-        if self.album.is_some() || self.album_artist.is_some() {
+        // An album artist alone, on a song without an album, makes no album
+        if self.album.is_some() || (self.album_artist.is_some() && t.album.is_some()) {
             let a = t.album.get_or_insert_with(|| pm_model::Album {
                 id: None,
                 title: String::new(),
@@ -2680,15 +2730,7 @@ fn restore_originals(
     album_artist: Option<String>,
 ) {
     t.title = title.to_string();
-    t.artists = serde_json::from_str::<Vec<String>>(artists)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|name| pm_model::Artist {
-            id: None,
-            name,
-            mbid: None,
-        })
-        .collect();
+    t.artists = original_artists(artists);
     match (album, t.album.as_mut()) {
         (Some(title), Some(a)) => {
             a.id = None;
@@ -2700,12 +2742,52 @@ fn restore_originals(
     }
 }
 
-/// What a track's file says, as kept under an edit: title, artist names (JSON), album, album artist.
+/// One artist as a file says it, kept under an edit: the name and its MusicBrainz id (artists are
+/// told apart by both, so an undo without the id would make a second artist).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OriginalArtist {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mbid: Option<String>,
+}
+
+/// The artists kept under an edit (JSON): objects with their ids, or plain names.
+fn original_artists(json: &str) -> Vec<pm_model::Artist> {
+    if let Ok(list) = serde_json::from_str::<Vec<OriginalArtist>>(json) {
+        return list
+            .into_iter()
+            .map(|a| pm_model::Artist {
+                id: None,
+                name: a.name,
+                mbid: a.mbid.and_then(|m| Mbid::parse(&m).ok()),
+            })
+            .collect();
+    }
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| pm_model::Artist {
+            id: None,
+            name,
+            mbid: None,
+        })
+        .collect()
+}
+
+/// What a track's file says, as kept under an edit: title, artists (JSON, with their ids),
+/// album, album artist.
 fn originals_of(t: &Track) -> (String, String, Option<String>, Option<String>) {
-    let names: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+    let artists: Vec<OriginalArtist> = t
+        .artists
+        .iter()
+        .map(|a| OriginalArtist {
+            name: a.name.clone(),
+            mbid: a.mbid.map(|m| m.to_string()),
+        })
+        .collect();
     (
         t.title.clone(),
-        serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(&artists).unwrap_or_else(|_| "[]".into()),
         t.album.as_ref().map(|a| a.title.clone()),
         t.album.as_ref().and_then(|a| a.album_artist.clone()),
     )
@@ -3645,7 +3727,7 @@ mod genre_tests {
 
 #[cfg(test)]
 mod identify_tests {
-    use super::tests_support::sample_track;
+    use super::tests_support::{sample_track, MB};
     use super::*;
     use crate::identify::Candidate;
 
@@ -3926,5 +4008,75 @@ mod identify_tests {
             lib.track_ids_by_hash_prefix().unwrap().get("fedcba9876543210"),
             Some(&id)
         );
+    }
+
+    #[test]
+    fn edits_keep_artist_ids_covers_and_moved_paths() {
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib
+            .upsert_track(&sample_track("/m/a/lucky.flac", "Get Lucky"))
+            .unwrap();
+        let artist = lib.get_track(id).unwrap().unwrap().artists[0].id;
+        // A second edit, then undo: the same artist, with its MusicBrainz id
+        let edit = |title: &str| TrackOverride {
+            title: Some(title.into()),
+            artist: Some("Someone".into()),
+            ..Default::default()
+        };
+        lib.edit_track(id, &edit("X")).unwrap();
+        lib.edit_track(id, &edit("Y")).unwrap();
+        let t = lib.undo_edit(id).unwrap().unwrap();
+        assert_eq!(t.artists[0].id, artist, "not a second Daft Punk");
+        assert_eq!(t.artists[0].mbid, Some(Mbid::parse(MB).unwrap()));
+        // The originals kept as plain names (before ids were kept) still restore
+        assert_eq!(original_artists(r#"["A","B"]"#).len(), 2);
+        // An edit that moves the song to another album takes the cover along, and so does undo
+        let album = t.album.as_ref().unwrap().id.unwrap();
+        lib.set_album_art(&AlbumArt {
+            album_id: album,
+            file: PathBuf::from("/m/a/cover.jpg"),
+            mime: "image/jpeg".into(),
+            source: "folder".into(),
+        })
+        .unwrap();
+        let t = lib
+            .edit_track(
+                id,
+                &TrackOverride {
+                    album: Some("Another".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let moved = t.album.unwrap().id.unwrap();
+        assert_ne!(moved, album);
+        assert_eq!(
+            lib.album_art(moved).unwrap().map(|a| a.file),
+            Some(PathBuf::from("/m/a/cover.jpg"))
+        );
+        let t = lib.undo_edit(id).unwrap().unwrap();
+        assert!(lib.album_art(t.album.unwrap().id.unwrap()).unwrap().is_some());
+        // An album artist alone makes no album for a song without one
+        let mut single = sample_track("/m/a/single.flac", "Single");
+        single.album = None;
+        TrackOverride {
+            album_artist: Some("Someone".into()),
+            ..Default::default()
+        }
+        .apply(&mut single);
+        assert!(single.album.is_none());
+        // A moved folder takes its edits and its removed songs along
+        lib.edit_track(id, &edit("Z")).unwrap();
+        let gone = lib.upsert_track(&sample_track("/m/a/gone.flac", "Gone")).unwrap();
+        assert!(lib.hide_track(gone).unwrap());
+        lib.move_folder(Path::new("/m/a"), Path::new("/m/b")).unwrap();
+        assert!(lib.is_hidden(Path::new("/m/b/gone.flac")).unwrap());
+        assert!(!lib.is_hidden(Path::new("/m/a/gone.flac")).unwrap());
+        assert!(lib
+            .track_override(Path::new("/m/b/lucky.flac"))
+            .unwrap()
+            .is_some());
+        assert_eq!(lib.undo_edit(id).unwrap().unwrap().title, "Get Lucky");
     }
 }

@@ -82,6 +82,9 @@ pub struct MyFile {
     /// The library song it is, once the library has read it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub song: Option<FileSong>,
+    /// The owner took this song out of the library (Node library brings it back).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +117,7 @@ pub(crate) async fn my_music(
         // hash the homeserver names files with (songs this node saved there from its folders)
         let ids = lib.track_ids_by_file_name()?;
         let by_hash = lib.track_ids_by_hash_prefix()?;
+        let hidden = lib.hidden_names_and_hashes()?;
         let mut files = Vec::with_capacity(remote.len());
         let mut bytes = 0;
         for f in remote {
@@ -134,6 +138,8 @@ pub(crate) async fn my_music(
             };
             bytes += f.size.unwrap_or(0);
             files.push(MyFile {
+                removed: song.is_none()
+                    && (hidden.contains(&file_name) || hash.as_ref().is_some_and(|h| hidden.contains(h))),
                 path: f.path,
                 name,
                 size: f.size,
