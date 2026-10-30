@@ -328,6 +328,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'all' }).catch(() => {});
         if (two[0]) await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [two[0].id], replace: true, play: true }).catch(() => {});
         let zs = null; { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'playing' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        // CI's Null output plays faster than real time, so a short song on repeat loops at once: pause it
+        // so the bar and Now playing stay on it (Play from here keeps a paused zone paused)
+        await api('POST', `/zones/${encodeURIComponent(nz.id)}/transport`, { action: 'pause' }).catch(() => {});
+        { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'paused' || Date.now() > end) break; await p.waitForTimeout(200); } }
         const curUri = zs.now_playing && zs.now_playing.item.uri; const curId = Number((/^track:(\d+)$/.exec(curUri || '') || [])[1]);
         const other = two.find((t) => t.id !== curId);
         if (curId && other) {
@@ -349,7 +353,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           if (sw) {
             await sw.click();
             const moved = await (async () => { const end = Date.now() + 10000; for (;;) { const z2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (z2.now_playing && z2.now_playing.item.uri === `track:${other.id}`) return z2; if (Date.now() > end) return null; await p.waitForTimeout(250); } })();
-            check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'playing', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
+            check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'paused', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
           }
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
           await p.keyboard.press('Escape');
