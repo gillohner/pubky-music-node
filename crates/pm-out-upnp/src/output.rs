@@ -233,8 +233,7 @@ impl Output for UpnpOutput {
         let stop_retrying = cancelled.clone();
         let refill = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let emptied = refill.clone();
-        let stopped_for_pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stopped = stopped_for_pause.clone();
+        let (paused_tx, pause_results) = std::sync::mpsc::channel::<Paused>();
         let stops_for_pause = self.stops_for_pause.clone();
         std::thread::Builder::new()
             .name("upnp-play".into())
@@ -255,15 +254,14 @@ impl Output for UpnpOutput {
                     match c {
                         Control::Pause => {
                             let how = match av.as_deref() {
-                                Some(av) if started => pause_renderer(av, &stops_for_pause),
+                                Some(av) if started => pause_renderer(av, &stops_for_pause, &stop_retrying),
                                 _ => Paused::Refused,
                             };
-                            match how {
-                                Paused::Held => {}
-                                Paused::Stopped => stopped.store(true, std::sync::atomic::Ordering::SeqCst),
+                            if how == Paused::Refused {
                                 // It played its buffer out: the stream fills it again from now
-                                Paused::Refused => emptied.store(true, std::sync::atomic::Ordering::SeqCst),
+                                emptied.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
+                            let _ = paused_tx.send(how);
                         }
                         Control::Play => {
                             let r = match av {
@@ -299,7 +297,8 @@ impl Output for UpnpOutput {
             control: Some(control),
             paused: false,
             refill,
-            stopped_for_pause,
+            pause_results,
+            pauses_pending: 0,
         }))
     }
 
@@ -390,12 +389,20 @@ enum Paused {
 
 /// How long a renderer may take to report the pause before it counts as ignoring it.
 const PAUSE_CONFIRM: std::time::Duration = std::time::Duration::from_millis(450);
+/// How long a resume waits for its pause's outcome (the confirmation and a Stop's answer).
+const PAUSE_OUTCOME_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The renderer's own Pause (on the sink's control thread). A Linn answers Pause on the
-/// node's live WAV but plays on (NUC, 2026-10-30): a renderer that doesn't report
-/// PAUSED_PLAYBACK soon after is stopped instead, and `stops` remembers it so later pauses stop
-/// it at once.
-fn pause_renderer(av: &str, stops: &std::sync::atomic::AtomicBool) -> Paused {
+/// node's live WAV but plays on (NUC, 2026-10-30): a renderer that still reports a playing
+/// state soon after is stopped instead, and `stops` remembers it so later pauses stop it at
+/// once. A sink closed meanwhile (`cancelled`: a new track or a seek while paused) gets
+/// nothing more: its own Stop follows, and a late one could stop the next stream.
+fn pause_renderer(
+    av: &str,
+    stops: &std::sync::atomic::AtomicBool,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Paused {
+    let closed = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
     let stop = || match soap::call(av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]) {
         Ok(_) => Paused::Stopped,
         Err(e) => {
@@ -408,19 +415,31 @@ fn pause_renderer(av: &str, stops: &std::sync::atomic::AtomicBool) -> Paused {
     }
     if let Err(e) = soap::call(av, AV_TRANSPORT, "Pause", &[("InstanceID", "0")]) {
         tracing::info!("renderer Pause refused ({e}); stopping it for the pause");
-        return stop();
+        return if closed() { Paused::Held } else { stop() };
     }
     let deadline = std::time::Instant::now() + PAUSE_CONFIRM;
+    let mut last = None;
     loop {
+        if closed() {
+            return Paused::Held;
+        }
         let state = soap::call(av, AV_TRANSPORT, "GetTransportInfo", &[("InstanceID", "0")])
             .ok()
             .and_then(|x| soap::element_text(&x, "CurrentTransportState"));
         match state.as_deref() {
             Some("PAUSED_PLAYBACK") => return Paused::Held,
             Some("STOPPED") => return Paused::Stopped,
-            _ if std::time::Instant::now() >= deadline => break,
-            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => {}
         }
+        last = state.or(last);
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // A renderer that never said its state may well have paused: nothing learned from that
+    if last.is_none() || closed() {
+        return Paused::Held;
     }
     tracing::info!("the renderer plays on after Pause; stopping it for pauses from now on");
     stops.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -506,11 +525,14 @@ struct UpnpSink {
     control: Option<std::sync::mpsc::Sender<Control>>,
     /// The renderer was told to pause.
     paused: bool,
-    /// The renderer's buffer emptied (it refused a Pause and played it out, or was set to the
-    /// stream again): the next write lets the stream fill it again from now.
+    /// The renderer's buffer emptied (it refused both Pause and Stop and played it out, or was
+    /// set to the stream again): the next write lets the stream fill it again from now.
     refill: Arc<std::sync::atomic::AtomicBool>,
-    /// The renderer was stopped for that pause: the resume starts it again.
-    stopped_for_pause: Arc<std::sync::atomic::AtomicBool>,
+    /// How each pause went, from the control thread: a renderer stopped for it is started
+    /// again by the zone on resume.
+    pause_results: std::sync::mpsc::Receiver<Paused>,
+    /// Pauses whose outcome hasn't been read.
+    pauses_pending: usize,
 }
 
 impl UpnpSink {
@@ -562,6 +584,7 @@ impl AudioSink for UpnpSink {
         if let Some(c) = &self.control {
             if c.send(Control::Pause).is_ok() {
                 self.paused = true;
+                self.pauses_pending += 1;
                 self.inner.pause()?;
                 return Ok(true);
             }
@@ -570,12 +593,24 @@ impl AudioSink for UpnpSink {
     }
     /// Play again; a refusal shows on the next write, as a refused start does.
     fn resume(&mut self) -> Result<(), SinkError> {
-        // Stopped for the pause: it dropped its buffer, so the zone opens the output again
-        // from what was last heard
-        if self
-            .stopped_for_pause
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
+        // How the pause went (a quick resume waits for it, briefly). Stopped for it: the renderer
+        // dropped its buffer, so the zone opens the output again from what was last heard
+        let deadline = std::time::Instant::now() + PAUSE_OUTCOME_WAIT;
+        let mut outcome = None;
+        while self.pauses_pending > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.pause_results.recv_timeout(left) {
+                Ok(how) => {
+                    self.pauses_pending -= 1;
+                    outcome = Some(how);
+                }
+                Err(_) => {
+                    self.pauses_pending = 0;
+                    break;
+                }
+            }
+        }
+        if outcome == Some(Paused::Stopped) {
             self.paused = false;
             return Err(SinkError::Device(
                 "the renderer was stopped for the pause; starting it again".into(),
@@ -1000,7 +1035,7 @@ mod tests {
             let mut sink = sink;
             wait(3);
             assert!(sink.pause().unwrap());
-            wait(5);
+            // Resumed at once: the resume waits for how the pause went
             let err = sink.resume().unwrap_err();
             (sink, err)
         })
