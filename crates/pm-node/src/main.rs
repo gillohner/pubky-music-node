@@ -15,7 +15,7 @@ use config::NodeConfig;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "pm-node", version, about = "Pubky Music Node")]
+#[command(name = "pm-node", version = node_version(), about = "Pubky Music Node")]
 struct Cli {
     /// Path to the node's config.toml.
     #[arg(short, long, global = true)]
@@ -200,7 +200,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     let state = pm_api::NodeState::new(
         pm_api::NodeSettings {
             name: cfg.api.name.clone(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: node_version().into(),
             db_path,
             scan_folders: cfg.library.folders.clone(),
             art_dir: cfg.data_dir.join("art"),
@@ -686,6 +686,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The version this build reports: `PM_NODE_VERSION` at build time (release.yml sets the release's
+/// version, or `<version>-edge+<sha>` for a build of main), else Cargo.toml's.
+fn node_version() -> &'static str {
+    match option_env!("PM_NODE_VERSION") {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 /// An environment variable when set and not blank, else the config value.

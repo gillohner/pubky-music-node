@@ -8,6 +8,10 @@
 | tag `v1.2.3` | release `v1.2.3` (marked latest), images `:1.2.3`, `:1.2`, `:latest` |
 | manual run (Actions → release → Run workflow, any branch) | everything built as workflow artifacts, nothing published |
 
+The node reports its version in `/v1/info` and Settings › About: a release says `0.2.1`, an edge
+build `0.2.1-edge+<sha>` (a manual run `-dev+<sha>`, a local build Cargo.toml's version). The
+workflow passes it to the build as `PM_NODE_VERSION`.
+
 A release run that is still building finishes and publishes; newer pushes queue behind it, so
 `edge` can lag a busy `main` by one build.
 

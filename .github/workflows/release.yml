@@ -47,6 +47,7 @@ jobs:
       channel: ${{ steps.m.outputs.channel }}
       version: ${{ steps.m.outputs.version }}
       app_version: ${{ steps.m.outputs.app_version }}
+      node_version: ${{ steps.m.outputs.node_version }}
       update_channel: ${{ steps.m.outputs.update_channel }}
       publish: ${{ steps.m.outputs.publish }}
       android_version_code: ${{ steps.m.outputs.android_version_code }}
@@ -85,11 +86,19 @@ jobs:
           else
             app_version="$version"; update_channel=latest
           fi
-          echo "channel=$channel version=$version app=$app_version ($update_channel) publish=$publish android_version_code=$code"
+          # What the node reports (/v1/info, Settings › About): a release its version, any other
+          # build the version it will become part of plus the channel and commit.
+          if [ "$channel" = edge ] || [ "$channel" = dev ]; then
+            node_version="$version-$channel+${GITHUB_SHA::7}"
+          else
+            node_version="$version"
+          fi
+          echo "channel=$channel version=$version node=$node_version app=$app_version ($update_channel) publish=$publish android_version_code=$code"
           {
             echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"
             echo "android_version_code=$code"
             echo "app_version=$app_version"; echo "update_channel=$update_channel"
+            echo "node_version=$node_version"
           } >> "$GITHUB_OUTPUT"
 
   app:
@@ -310,6 +319,8 @@ jobs:
             bins: pm-node
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      PM_NODE_VERSION: ${{ needs.meta.outputs.node_version }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -388,6 +399,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
+            PM_NODE_VERSION=${{ needs.meta.outputs.node_version }}
             PM_PROJECT_TIDAL_CLIENT_ID=${{ vars.PM_PROJECT_TIDAL_CLIENT_ID }}
             PM_PROJECT_JAMENDO_CLIENT_ID=${{ vars.PM_PROJECT_JAMENDO_CLIENT_ID }}
             PM_PROJECT_ACOUSTID_KEY=${{ vars.PM_PROJECT_ACOUSTID_KEY }}

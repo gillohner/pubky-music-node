@@ -11,6 +11,7 @@ docker run --rm \
   -v "${CARGO_HOME_CACHE:-$PWD/.cargo-armv7}":/usr/local/cargo/registry \
   -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR=always \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -e PM_NODE_VERSION="${PM_NODE_VERSION:-}" \
   rust:1-bookworm bash -euo pipefail -c '
     dpkg --add-architecture armhf
     apt-get update -qq
