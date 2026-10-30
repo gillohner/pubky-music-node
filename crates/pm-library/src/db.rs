@@ -28,7 +28,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("migrations/0012_fts_rowid.sql")),
     (13, include_str!("migrations/0013_file_hashes.sql")),
     (14, include_str!("migrations/0014_loudness.sql")),
-    (15, include_str!("migrations/0015_bookmarks.sql")),
+    (15, include_str!("migrations/0015_mb_matches.sql")),
+    (16, include_str!("migrations/0016_bookmarks.sql")),
 ];
 
 pub struct Library {
@@ -2918,7 +2919,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 15);
+        assert_eq!(lib.schema_version().unwrap(), 16);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
