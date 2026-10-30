@@ -77,10 +77,12 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
     let s = node(dir.path());
     let app = router(s.clone());
 
-    // Without a bundled homeserver: "This homeserver" is a 404, and the index leaves it out
+    // Without a bundled homeserver: "This homeserver" says it isn't configured, and the index leaves it out
+    let (st, b) = call(&app, OWNER, "GET", "/v1/homeserver/bundled", None).await;
     assert_eq!(
-        call(&app, OWNER, "GET", "/v1/homeserver/bundled", None).await.0,
-        StatusCode::NOT_FOUND
+        (st, b["configured"].as_bool()),
+        (StatusCode::OK, Some(false)),
+        "{b}"
     );
     let (st, ix) = call(&app, OWNER, "GET", "/v1/node", None).await;
     assert_eq!(st, StatusCode::OK, "{ix}");
