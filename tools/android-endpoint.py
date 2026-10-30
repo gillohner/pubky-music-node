@@ -377,32 +377,53 @@ def run(node):
         def phone_outputs():
             return [o for o in api("GET", "/v1/outputs") if o["id"].startswith(f"net:{address}/")]
 
-        outs = until("the phone's outputs on the node", phone_outputs, timeout=30)
-        log("phone outputs: " + ", ".join(o["name"] for o in outs))
-        want = os.environ.get("PM_TEST_OUTPUT", "Speaker or headphones")
-        phone = next((o for o in outs if want.lower() in o["name"].lower()), None)
-        assert phone, f"no output named like {want!r}"
-        zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
-        zid = zone["id"]
-        api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
-        until("playback", lambda: position(zid)[1], timeout=30)
-        z = zone_state(zid)
-        np = z["now_playing"]
-        log(f"playing on {z['name']}: {np['source_format']} -> {np['output_format']}")
+        def play_here():
+            outs = until("the phone's outputs on the node", phone_outputs, timeout=30)
+            log("phone outputs: " + ", ".join(o["name"] for o in outs))
+            want = os.environ.get("PM_TEST_OUTPUT", "Speaker or headphones")
+            phone = next((o for o in outs if want.lower() in o["name"].lower()), None)
+            assert phone, f"no output named like {want!r}"
+            zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
+            zid = zone["id"]
+            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
+            until("playback", lambda: position(zid)[1], timeout=30)
+            z = zone_state(zid)
+            np = z["now_playing"]
+            log(f"playing on {z['name']}: {np['source_format']} -> {np['output_format']}")
 
-        rate, tr = rate_over(zid, 10)
-        assert tr == "playing" and 0.8 < rate < 1.2, f"foreground: {rate:.2f}x ({tr})"
+            rate, tr = rate_over(zid, 10)
+            assert tr == "playing" and 0.8 < rate < 1.2, f"foreground: {rate:.2f}x ({tr})"
 
-        adb("shell", "input", "keyevent", "3")  # HOME: the app goes to the background
-        log("app in the background")
-        time.sleep(15)
-        rate, tr = rate_over(zid, 15)
-        services = adb("shell", "dumpsys", "activity", "services", PKG)
-        (out / "services.txt").write_text(services)
-        assert "PlayerService" in services and "isForeground=true" in services, "the player service is not in the foreground"
-        assert tr == "playing" and 0.8 < rate < 1.2, f"background: {rate:.2f}x ({tr})"
-        shot("3-background")
-        api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
+            adb("shell", "input", "keyevent", "3")  # HOME: the app goes to the background
+            log("app in the background")
+            time.sleep(15)
+            rate, tr = rate_over(zid, 15)
+            services = adb("shell", "dumpsys", "activity", "services", PKG)
+            (out / "services.txt").write_text(services)
+            assert "PlayerService" in services and "isForeground=true" in services, "the player service is not in the foreground"
+            assert tr == "playing" and 0.8 < rate < 1.2, f"background: {rate:.2f}x ({tr})"
+            shot("3-background")
+            api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
+
+        # Android may kill the app while it plays when Play services restarts on the emulator
+        # (the WebView depends on its fonts provider): that is the system's doing, not the app's,
+        # so the app is started again, registers again (a new key) and plays once more
+        for attempt in (1, 2):
+            seen = len(system_kills())
+            try:
+                play_here()
+                break
+            except (AssertionError, RuntimeError) as e:
+                kills = system_kills()
+                if attempt == 2 or len(kills) == seen:
+                    raise
+                log(f"Android killed the app while it played, not a crash ({kills[-1]}); starting it again ({e})")
+                (out / "logcat.txt").write_text("")
+                adb("logcat", "-c")
+                adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+                wait_page("the node's page after Android killed the app", relaunch=True)
+                done, address = until("the player's registration", registered, timeout=90)
+                assert done, f"the node cannot reach the player at {address}"
         log("the phone is a zone, plays in real time, and keeps playing in the background")
 
         # Started again with the node saved: it reconnects and the service starts again
