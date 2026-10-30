@@ -107,6 +107,19 @@ pub struct IdentityCounts {
     pub unknown: u64,
     /// Tracks identification has not looked at yet.
     pub unchecked: u64,
+    /// How the identified ones were identified.
+    #[serde(default)]
+    pub by: IdentifiedBy,
+}
+
+/// Identified tracks by how: IDs in the tags, the folder as an album, the fingerprint, or the
+/// owner's choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentifiedBy {
+    pub tags: u64,
+    pub album: u64,
+    pub fingerprint: u64,
+    pub you: u64,
 }
 
 /// A bookmark as stored locally (a social v1 bookmark of a canonical music URL).
@@ -491,12 +504,12 @@ impl Library {
             Some(id) => {
                 tx.execute(
                     // A rescan of a file without IDs in its tags keeps what identification
-                    // found (fingerprint, release match, the owner's confirmation).
+                    // found (fingerprint, release match, folder match, the owner's confirmation).
                     "UPDATE tracks SET title=?2, album_id=?3, track_no=?4, disc_no=?5, duration_ms=?6, recording_mbid=?7, isrc=?8,
                      acoustid=COALESCE(?9, acoustid),
-                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
-                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
-                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
+                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
+                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
+                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
                      replaygain_track_gain_db=?13, replaygain_album_gain_db=?14
                      WHERE id=?1",
                     params![
@@ -2191,6 +2204,15 @@ impl Library {
             .optional()?)
     }
 
+    /// Whether any AcoustID answer is cached (else no file needs reading for one).
+    pub fn has_cached_lookups(&self) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM fingerprints WHERE lookup_json IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn save_fingerprint(&self, key: &str, duration_secs: u64, fingerprint: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO fingerprints(file_key, duration_secs, fingerprint) VALUES (?1, ?2, ?3)
@@ -2271,7 +2293,7 @@ impl Library {
 
     pub fn identified_not_tagged(&self) -> Result<Vec<(Track, Option<Mbid>)>> {
         let tracks = self.tracks_where(
-            "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",
+            "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",
             "https://musicbrainz.org/recording/".into(),
         )?;
         let conn = self.lock();
@@ -2305,6 +2327,11 @@ impl Library {
             "t.canonical_uri IS NULL AND ?1 = '' AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)"
         };
         self.tracks_where(clause, String::new())
+    }
+
+    /// Every track, in one query (identification groups them by folder).
+    pub fn all_tracks(&self) -> Result<Vec<Track>> {
+        self.tracks_where("?1 = ''", String::new())
     }
 
     /// Audio files in the folder of `path` that the library knows.
@@ -2448,6 +2475,12 @@ impl Library {
             unchecked: q(
                 "SELECT COUNT(*) FROM tracks t WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)",
             )?,
+            by: IdentifiedBy {
+                tags: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('tagged_mbid','tagged_isrc')")?,
+                album: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'album_fit'")?,
+                fingerprint: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release')")?,
+                you: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'confirmed_by_user'")?,
+            },
         })
     }
 
@@ -2890,6 +2923,7 @@ fn confidence_source(c: &Confidence) -> &'static str {
         Confidence::TaggedIsrc => "tagged_isrc",
         Confidence::Fingerprint { .. } => "fingerprint",
         Confidence::FingerprintRelease { .. } => "fingerprint+release",
+        Confidence::AlbumFit { .. } => "album_fit",
         Confidence::ConfirmedByUser => "confirmed_by_user",
         Confidence::Fuzzy { .. } => "fuzzy",
     }
@@ -2901,6 +2935,7 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
         "tagged_isrc" => Confidence::TaggedIsrc,
         "fingerprint" => Confidence::Fingerprint { score: score as f32 },
         "fingerprint+release" => Confidence::FingerprintRelease { score: score as f32 },
+        "album_fit" => Confidence::AlbumFit { score: score as f32 },
         "confirmed_by_user" => Confidence::ConfirmedByUser,
         "fuzzy" => Confidence::Fuzzy { score: score as f32 },
         other => {
@@ -4234,5 +4269,44 @@ mod identify_tests {
         );
         assert_eq!(lib.get_setting("favourites.local").unwrap(), None);
         assert_eq!(lib.backup_counts().unwrap().bookmarks, 1);
+    }
+
+    /// A song its folder identified keeps that identity when its file changes (tags fixed,
+    /// ReplayGain written) and is read again, and is one "Write IDs" writes.
+    #[test]
+    fn a_folder_match_survives_a_rescan_of_a_changed_file() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/music/Band/Album/01 Song.flac", "Song");
+        let id = lib.upsert_track(&t).unwrap().0;
+        let uri = MusicUri::Recording {
+            mbid: Mbid::parse(BOHEMIAN).unwrap(),
+        };
+        assert!(lib
+            .set_identity(id, &uri, Confidence::AlbumFit { score: 0.95 }, None)
+            .unwrap());
+        lib.set_identify_state(id, "identified", Some("album_fit"))
+            .unwrap();
+        assert_eq!(lib.identified_not_tagged().unwrap().len(), 1);
+        // The file changed on disk: the scanner reads it again, still without IDs in its tags
+        t.file.size_bytes += 512;
+        t.file.mtime_unix += 60;
+        t.replaygain_track_gain_db = Some(-7.5);
+        lib.upsert_track(&t).unwrap();
+        let (kept, conf) = lib.get_track(TrackId(id)).unwrap().unwrap().canonical.unwrap();
+        assert_eq!(kept, uri);
+        assert_eq!(conf, Confidence::AlbumFit { score: 0.95 });
+        assert_eq!(lib.identity_counts().unwrap().by.album, 1);
+        let todo = lib.identified_not_tagged().unwrap();
+        assert_eq!(todo.len(), 1, "Write IDs writes folder matches");
+        assert_eq!(todo[0].0.id, Some(TrackId(id)));
+        // Nothing cached yet, then an AcoustID answer
+        assert!(!lib.has_cached_lookups().unwrap());
+        lib.save_fingerprint("k", 3, "AQ").unwrap();
+        assert!(
+            !lib.has_cached_lookups().unwrap(),
+            "a fingerprint not looked up yet"
+        );
+        lib.save_lookup("k", "{}").unwrap();
+        assert!(lib.has_cached_lookups().unwrap());
     }
 }

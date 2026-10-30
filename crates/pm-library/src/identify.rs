@@ -2,11 +2,13 @@
 //!
 //! Strongest evidence first, each stored with its [`Confidence`]:
 //! 1. IDs embedded in tags ([`crate::canonical::assign`], at scan time);
-//! 2. a Chromaprint fingerprint looked up on AcoustID: one recording at or
+//! 2. the folder as an album: one release for the whole folder, each file
+//!    matched by position, length and title ([`crate::album_fit`]);
+//! 3. for the rest, a Chromaprint fingerprint looked up on AcoustID: one recording at or
 //!    above [`Confidence::FINGERPRINT_ACCEPT`] is accepted; several are
 //!    disambiguated by the **folder as a release** (Picard's approach: the
 //!    release whose track count, positions and durations fit the folder);
-//! 3. otherwise the candidates are kept as *suggestions* for the owner to
+//! 4. otherwise the candidates are kept as *suggestions* for the owner to
 //!    confirm, never used as identity on their own.
 //!
 //! The pure decision logic lives here and is tested against AcoustID-shaped
@@ -220,7 +222,8 @@ pub struct Candidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_title: Option<String>,
     pub score: f32,
-    /// `fingerprint` (AcoustID) or `search` (MusicBrainz by tags).
+    /// `fingerprint` (AcoustID), `search` (MusicBrainz by tags) or `album` (the folder as a
+    /// release, when the fingerprint names another song).
     pub source: String,
 }
 

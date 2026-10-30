@@ -297,7 +297,7 @@
         + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
           + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
         + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
-        + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then how it sounds (AcoustID), with the folder as the album. Unsure matches wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
+        + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
     return library;
   };
   const bindNodeLibrary = () => {
@@ -1340,7 +1340,7 @@
           toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
           queue = rest;
         }
-        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
+        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null, limit: it.limit || null }));
         if (!items.length) throw new Error('Nothing to move: the queue is empty');
         const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
@@ -1361,7 +1361,7 @@
         if (cur && z.transport !== 'stopped' && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
         await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
-        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
+        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null, limit: it.limit || null }; });
         try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
         if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
       } else {
@@ -3954,7 +3954,7 @@
           const byFolder = new Map(); for (const g of byTrack.values()) { const f = (g.track.file.path || '').replace(/[^/]*$/, ''); if (!byFolder.has(f)) byFolder.set(f, []); byFolder.get(f).push(g); }
           // The release most suggestions in a folder point at (the folder as an album).
           const releaseOf = (groups) => { const n = new Map(); groups.forEach((g) => g.options.forEach((o) => { if (o.release_mbid) n.set(o.release_mbid, (n.get(o.release_mbid) || 0) + 1); })); let best = null; n.forEach((c, r) => { if (!best || c > best[1]) best = [r, c]; }); return best && best[0]; };
-          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file, with what MusicBrainz knows about it. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file, with what MusicBrainz knows about it. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
           // Side by side: the folder's files and the MusicBrainz release's tracklist, aligned by position.
           $$('[data-align]', main).forEach((b) => b.onclick = async () => {
             const sec = b.closest('[data-folder]'); const box = $('.alignbox', sec); const groups = byFolder.get(b.dataset.align) || [];
@@ -4775,18 +4775,22 @@
           if (isListener()) pg.about = pg.about.filter((f) => f.label !== 'File');
           // About (F6): the article's opening (Wikipedia in the reader's language, or TheAudioDB) with
           // its link and licence, the picture's Commons credit, then the facts. With an article it
-          // sits under the header; without one it stays at the end of the page.
-          const at = pg.about_text;
-          const aboutTop = !!(at && at.text); // artist, album and song (F5: the same About everywhere)
-          const blurbText = (at && at.text) || pg.blurb;
-          const aboutHtml = `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${aboutTop ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${aboutTop ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(pg)}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
+          // sits under the header; without one it stays at the end of the page. A function: when open
+          // sources answer later (about_pending) it is redrawn in place.
+          const aboutTop = !!(pg.about_text && pg.about_text.text); // artist, album and song (F5: the same About everywhere)
+          const aboutHtml = (p) => {
+            const at = p.about_text;
+            const clamp = !!(at && at.text);
+            const blurbText = (at && at.text) || p.blurb;
+            return `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${clamp ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${clamp ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
+          };
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
-            + (aboutTop ? aboutHtml : '')
+            + (aboutTop ? aboutHtml(pg) : '')
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
@@ -4794,16 +4798,17 @@
             + '<div id="isimilar-slot"></div>'
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
-            + (aboutTop ? '' : aboutHtml);
+            + (aboutTop ? '' : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
           // is measured again when its width or the text size changes (zoom, rotation, a late font)
-          { const bl = $('#iblurb', main); const bm = $('#iblurbmore', main);
+          const bindBlurb = () => { const bl = $('#iblurb', main); const bm = $('#iblurbmore', main);
             if (bl && bm) {
               const sync = () => { if (bl.classList.contains('clamp')) bm.hidden = !(bl.scrollHeight > bl.clientHeight + 2); };
               bm.onclick = () => { const open = bl.classList.toggle('clamp') === false; bm.textContent = open ? 'Less' : 'More'; bm.setAttribute('aria-expanded', String(open)); };
               sync(); if (window.ResizeObserver) new ResizeObserver(sync).observe(bl);
-            } }
+            } };
+          bindBlurb();
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
             const same = bk && $$('[data-crumb-id]', main).find((c) => bk.textContent.trim().endsWith(c.textContent.trim()));
@@ -4868,9 +4873,28 @@
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          // About from open sources comes in the background too: ask again until it is there. Not
-          // while someone types a comment: the render would take the box away under them
-          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
+          // Not while someone types a comment: the render would take the box away under them
+          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
+          // About from open sources comes in the background: ask for the page again and redraw only
+          // About and the portrait in place (the page stays put: scroll, focus, a half-typed tag).
+          // When it brings other sources ("Also on"), the page is drawn once more at the end.
+          else if (pg.about_pending) {
+            const here = () => state.view === 'item' && state.viewArg.id === id;
+            const poll = (tries) => setTimeout(async () => {
+              if (!here()) return;
+              let np; try { np = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); } catch { return; }
+              if (!here()) return;
+              if (np.about_pending) { if (tries < 12) poll(tries + 1); return; }
+              const sources = (p) => JSON.stringify([(p.also_on || []).map((v) => v.url), (p.open_on || []).map((v) => v.url)]);
+              if (sources(np) !== sources(pg)) { const redraw = () => { if (!here()) return; if (commentTyping()) { setTimeout(redraw, 3000); return; } render(); }; redraw(); return; }
+              if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
+              const sec = $('#iabout', main); if (sec) { sec.outerHTML = aboutHtml({ ...np, about: np.about || [] }); bindBlurb(); }
+              const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
+              if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
+              Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });
+            }, 3000);
+            poll(1);
+          }
           break;
         }
         case 'queue': {
@@ -5660,6 +5684,8 @@
   const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null;
+  // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
+  const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
   const renderIdentify = async () => {
     const box = $('#idbox'); if (!box) return;
     let st; try { st = await api('GET', '/library/identify'); } catch (e) { box.textContent = e.message; return; }
@@ -5667,7 +5693,8 @@
     const pct = c.total ? Math.round((c.identified / c.total) * 100) : 0;
     box.innerHTML = `<div class="idbar"><span style="width:${pct}%"></span></div>
       <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
-      ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : '')}
+      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
+      ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : '')}
       ${p.acoustid_refused ? `<p class="small warn-text" role="status">AcoustID refused the key (${esc(p.acoustid_refused)}), so songs were matched by title and artist only. Enter a new key${st.acoustid_own ? ' or remove this one' : ''}.</p>` : ''}
       ${st.acoustid && !st.acoustid_own && !p.acoustid_refused ? '' : `<form class="set-group" id="acidform"><p class="small muted">${st.acoustid_own && !p.acoustid_refused ? 'Matching by how songs sound uses your AcoustID key.' : 'Songs are matched by their title and artist. Matching by how they sound (AcoustID) finds more. It needs a free key: sign in at <a href="https://acoustid.org/new-application" target="_blank" rel="noopener">acoustid.org/new-application</a>, register an application, and paste its key here.'}</p><div class="row" style="gap:8px"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own ? 'A new key' : 'AcoustID application key'}" autocomplete="off" aria-label="AcoustID key"><button class="btn sm" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}</div></form>`}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>

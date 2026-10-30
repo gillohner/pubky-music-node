@@ -10,8 +10,16 @@ on:
       - crates/pm-endpoint/**
       - crates/pm-stream/**
       - crates/pm-out-net/**
+      # The node's side: registration and keys (pm-api), the zones, the binary
+      - crates/pm-api/**
+      - crates/pm-zones/**
+      - crates/pm-node/**
+      - Cargo.toml
+      - Cargo.lock
       - tools/android-endpoint.py
       - tools/release/android-patch.py
+      # The player service and the crash report the check asserts on
+      - tools/release/android/**
       - .github/workflows/android-emulator.yml
   workflow_dispatch:
 concurrency:
