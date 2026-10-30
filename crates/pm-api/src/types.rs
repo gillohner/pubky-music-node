@@ -118,6 +118,26 @@ pub struct TransferRequest {
     pub to: String,
 }
 
+/// `POST /v1/zones/{id}/load`: the queue of a player the node does not run (This browser) moves
+/// into the zone, which stops and empties first; `index` plays from `position_ms`, paused when
+/// the player was paused (`transport`), and nothing starts when it was stopped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadRequest {
+    pub items: Vec<QueueItem>,
+    /// The item that was playing or paused, if any.
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub position_ms: u64,
+    /// `playing`, `paused` or `stopped` (the default).
+    #[serde(default)]
+    pub transport: pm_zones::Transport,
+    #[serde(default)]
+    pub repeat: pm_zones::Repeat,
+    #[serde(default)]
+    pub radio: bool,
+}
+
 /// Sleep timer: pause the zone after `seconds`; `null` cancels.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SetSleep {
@@ -201,25 +221,6 @@ pub struct SourceArtist {
     pub albums: Vec<SourceHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_artist_id: Option<i64>,
-}
-
-/// "Find on other services": one possible match, with what tells it apart from others of the
-/// same name and the evidence that it is this item (STEWARD-FIX-same-artist.md).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MatchCandidate {
-    #[serde(flatten)]
-    pub version: Version,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// What tells it apart: "12,345 fans", "2015 · Sefa".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// Why it may be the same: "has your album Trip To Bangladesh", "same ISRC".
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    /// The only candidate with evidence: the page pre-selects it.
-    #[serde(default)]
-    pub likely: bool,
 }
 
 /// Where else a library album or track can be streamed from (Roon's "Versions").
@@ -509,6 +510,17 @@ pub struct NodeSettingsView {
     /// A song page whose own source has only a preview plays the full track from another source.
     #[serde(default)]
     pub prefer_full: bool,
+    /// The library folders from the config (`[library] folders`, `PM_FOLDERS` in Docker): scanned
+    /// at every start, so they are removed there, not through the API.
+    #[serde(default)]
+    pub config_folders: Vec<String>,
+    /// The owner hid Home's "Get started" card for everyone (`GET /v1/me/first-steps`).
+    #[serde(default)]
+    pub first_steps_hidden: bool,
+    /// The node made its API token itself (`<data_dir>/api-token`), so the owner may replace it
+    /// with `POST /v1/node/token`; false when the token is set in the config or there is none.
+    #[serde(default)]
+    pub token_replaceable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -527,6 +539,9 @@ pub struct NodeSettingsUpdate {
     pub genre_tags: Option<bool>,
     #[serde(default)]
     pub prefer_full: Option<bool>,
+    /// Hide Home's "Get started" card for everyone (false shows it again).
+    #[serde(default)]
+    pub first_steps_hidden: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +553,9 @@ pub struct FolderRequest {
 pub struct FoldersChanged {
     /// `[path, present]` for every library folder.
     pub folders: Vec<(String, bool)>,
+    /// Those of them from the config (see [`NodeSettingsView::config_folders`]).
+    #[serde(default)]
+    pub config_folders: Vec<String>,
     /// A scan of the new folder started (false when one was already running).
     #[serde(default)]
     pub scan_started: bool,
@@ -669,7 +687,7 @@ pub struct DiscoveryReport {
     /// Renderer addresses added by hand (`POST /v1/outputs/upnp`).
     #[serde(default)]
     pub saved_addresses: Vec<String>,
-    /// Endpoint addresses added by hand (`POST /v1/outputs/endpoints`).
+    /// Endpoint addresses registered (`POST /v1/outputs/endpoints`); never their keys.
     #[serde(default)]
     pub saved_endpoints: Vec<String>,
     /// Which node scanned (people run more than one).
@@ -683,11 +701,17 @@ pub struct AddRenderer {
     pub address: String,
 }
 
-/// `POST /v1/outputs/endpoints`: a `pm-endpoint` (or the desktop app's
-/// player) by `host:port`.
+/// The key the desktop app's player answers to (`Debug` hides it).
+pub use pm_stream::Key as EndpointKey;
+
+/// `POST /v1/outputs/endpoints`: the desktop app's player by `host:port`, with the key it made
+/// when it started (it answers only a node that shows it). Never sent back by the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddEndpoint {
     pub address: String,
+    /// Empty only from an app older than protocol 2, which is refused with a reason.
+    #[serde(default)]
+    pub key: EndpointKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,11 +9,14 @@
 #                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers
 #   PM_PUBLIC_URL  how devices reach this node (http://<host-ip>:7788); renderers and endpoints
-#                fetch audio from it, so set it when the container is not on the host network
-#   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   TIDAL developer app (developer.tidal.com); optional
+#                fetch audio from it. Empty: this machine's address on its way to the network, so
+#                set it when the container is not on the host network or that is the wrong one
+#   PM_TIDAL_CLIENT_ID / PM_TIDAL_CLIENT_SECRET   your own TIDAL app instead of the built-in one; optional
+#                (docs/STREAMING-PROVIDERS.md, "Advanced: use your own app")
 #   PM_TIDAL_SCOPES   scopes to request at sign-in (default: all the node can use; must be enabled on the app)
-#   PM_SPOTIFY_CLIENT_ID / PM_SPOTIFY_CLIENT_SECRET   Spotify developer app (developer.spotify.com); optional
-#   PM_ACOUSTID_KEY   AcoustID application key (acoustid.org/new-application); identifies untagged files
+#   PM_SPOTIFY_CLIENT_ID / PM_SPOTIFY_CLIENT_SECRET   your own Spotify app; optional (Sources › Spotify
+#                sets one too)
+#   PM_ACOUSTID_KEY   your own AcoustID key instead of the built-in one; optional
 set -eu
 DATA_DIR="${PM_DATA_DIR:-/data}"
 CONF="${PM_CONFIG:-$DATA_DIR/node.toml}"

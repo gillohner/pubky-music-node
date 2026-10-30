@@ -55,6 +55,10 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("jamendo.user", "Jamendo"),
     ("listenbrainz.account", "ListenBrainz"),
     ("lastfm.app", "the Last.fm app"),
+    (
+        "apps.own",
+        "your own TIDAL, Jamendo, Google Drive and OneDrive apps",
+    ),
     ("lastfm.session", "Last.fm"),
     ("opensubsonic.server", "your Subsonic server"),
     ("jellyfin.server", "Jellyfin"),
@@ -231,6 +235,14 @@ fn remove_db(path: &Path) {
     }
 }
 
+/// What a backup holds: the library's counts, with the bookmarks kept on this node only (songs,
+/// albums and artists without an identity live in settings, not in the bookmarks table).
+fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
+    let mut c = lib.backup_counts()?;
+    c.bookmarks += crate::bookmarks::local_count(lib);
+    Ok(c)
+}
+
 /// The backup file's bytes. `passphrase`: lock the sign-ins in; `None` leaves them out.
 pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifest), BackupError> {
     let snap = scratch("backup.db");
@@ -248,7 +260,7 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             .into_iter()
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        (lib.backup_counts()?, folders, secrets)
+        (counts_of(&lib)?, folders, secrets)
     };
     // The snapshot without sign-ins and without what belongs to this node only
     let db = (|| -> Result<Vec<u8>, BackupError> {
@@ -514,7 +526,7 @@ async fn restore_locked(
             }
         }
         lib.drop_missing_art()?;
-        report.restored = lib.backup_counts()?;
+        report.restored = counts_of(&lib)?;
         report.missing_folders = lib
             .list_folders()?
             .into_iter()
@@ -542,6 +554,13 @@ async fn restore_locked(
     let dir = data_dir(s);
     if let Some(sec) = &secrets {
         for (name, value) in &sec.files {
+            // The owner replaced the token after this backup: the old one stays dead
+            if name == "api-token" && crate::access_token::replaced_after(&dir, m.created_at) {
+                report.notes.push(
+                    "The node's API token was replaced after this backup was made, so the node keeps its current one.".into(),
+                );
+                continue;
+            }
             let Ok(bytes) = b64().decode(value) else {
                 continue;
             };

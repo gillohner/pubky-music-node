@@ -1,5 +1,9 @@
 # Deploying the node
 
+The reference for every way to deploy the node. For step-by-step installs, start with the
+[guides](guides/): [Docker](guides/install-docker.md), [Umbrel](guides/install-umbrel.md),
+[Linux without Docker](guides/install-linux.md).
+
 One binary, three shapes. The homeserver is always a separate Pubky service the node talks to by key.
 
 ## Directly on hardware (Pi, NUC, NAS)
@@ -264,7 +268,7 @@ with no errors, and CI's `bundle` job starts the app with Umbrel's variables and
 - **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
   published as its own repository, [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel);
   add `https://github.com/gillohner/pubky-music-umbrel` in Umbrel's App Store › Community App Stores.
-- **The image:** the app pins a release image by digest (now `0.1.0`), multi-arch (amd64 and
+- **The image:** the app pins a release image by digest (now `0.2.0`), multi-arch (amd64 and
   arm64). Images are published to `ghcr.io/gillohner/pubky-music-node` by
   `.github/workflows/release.yml`: every `v*` tag gives `<version>`, `<major.minor>` and `latest`,
   and every push to main `edge`. A new release updates the pin (docs/RELEASING.md).
@@ -290,42 +294,47 @@ works until the Pubky transport exists (ADR 0008):
 
 Nothing for most services. A release build carries the project's own TIDAL, Jamendo and AcoustID apps (public ids only;
 no secrets ship), and the TIDAL sign-in goes through the project's static return page, so it works on a LAN address.
-Open Sources › TIDAL › Connect TIDAL.
+Open Sources › TIDAL › Sign in. Settings › This node › Service apps lists every service: whether this build's app is
+in use or yours, and what the service limits.
 
-- **Spotify:** Spotify allows no shared app, so you make your own free one once. Sources › Spotify walks you through
-  it and takes only the client ID.
-- **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). Under
-  Sources › Spotify › Play on this machine: save your own Soloist API key (made with a Premium account at
-  developer.spotify.com › Dashboard › Spotify Soloist API Key), press Download Soloist (from Spotify's own servers;
-  Spotify forbids us to ship it), switch it on, then pick the device in a Spotify app. It plays on the machine's
-  PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or `PM_SOLOIST`) names an install of
-  your own. In Docker it needs the host's audio socket, which the image doesn't set up.
+- **Spotify:** playing through Spotify Connect needs no app (librespot, below). Search, your library and playlist
+  import need an app of your own, because Spotify allows no shared one (an app in development mode lets in 25 people).
+  Sources › Spotify walks you through it; see [Advanced: use your own app](STREAMING-PROVIDERS.md#advanced-use-your-own-app).
+- **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). It needs a
+  Soloist API key of your own (see Advanced). Then under Sources › Spotify › Play on this machine press Download
+  Soloist (from Spotify's own servers; Spotify forbids us to ship it), switch it on, and pick the device in a Spotify
+  app. It plays on the machine's PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or
+  `PM_SOLOIST`) names an install of your own. In Docker it needs the host's audio socket, which the image doesn't set up.
 - **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
   distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
   play on the machine's sound or into one of the node's zones.
 - **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
   in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
-  entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer portal is not
+  entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer site is not
   a device client and won't work there).
 - **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
   you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
   value of your bandcamp.com `identity` cookie under Sources › Bandcamp. Purchases land in `<data_dir>/bandcamp`, a
   library folder.
-- **Last.fm:** optional. Make a free API account at last.fm/api/account/create and enter its API key and shared
-  secret under Settings › Accounts › Last.fm (or `[lastfm] api_key / api_secret`), then Connect. Plays you make
-  here are scrobbled; artist pages show similar artists.
-- **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
-  (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
-  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
-  in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
-  rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
+- **Last.fm:** optional, and for now it needs an app of your own (see Advanced): enter it under Settings › Accounts ›
+  Last.fm, then Connect. Plays you make here are scrobbled; artist pages show similar artists.
+- **Google Drive and OneDrive:** Settings › Library › Cloud drives. OneDrive uses the project's app once a release
+  carries it; Google Drive needs an app of your own for now (see Advanced).
+- **node.toml and the environment:** `[tidal]`, `[jamendo]`, `[acoustid]` and `[drives]` in `node.toml` always win
+  over the built-in apps and over an app entered in Settings › Service apps (Spotify has none built in: `[spotify]` is
+  your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET`, `PM_ACOUSTID_KEY`,
+  `PM_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` and `PM_ONEDRIVE_CLIENT_ID` itself, and these override node.toml; so
+  does `PM_MUSICBRAINZ_URL` (a MusicBrainz mirror, the top-level `musicbrainz_base_url` key in node.toml).
+  `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only in the Docker image, which writes them into node.toml on first
+  start (or with `PM_REWRITE_CONFIG=1`, which rewrites the whole file); setting them on a running install changes
+  nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
   `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one
   without `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` has no built-in TIDAL device client; add your
-  own as above.
+  own in Settings › This node › Service apps.
 
 ## Phones and desktops without the native app
 
@@ -336,17 +345,30 @@ Any OpenSubsonic client (Symfonium, Feishin, Amperfy, play:Sub, Supersonic) conn
 address with user `[api] subsonic_user` and the API token as password, and gets browsing, search,
 playlists, cover art and bit-exact file streaming (`docs/api.md`).
 
-## Endpoints (a Pi next to a DAC)
+## Speakers: a Pi next to a DAC, network speakers, this computer
+
+A Raspberry Pi (or any computer) next to a DAC runs **squeezelite**, with the node as its server
+(Slimproto, next section): bit-perfect PCM, and players in a group start together and stay in time.
 
 ```sh
-cargo build --release -p pm-endpoint --features alsa     # on the endpoint machine
-pm-endpoint --name "Kitchen Pi"                          # 0.0.0.0:7790, advertised over mDNS
+sudo apt install squeezelite
+squeezelite -n "Kitchen" -s <node-ip> -o hw:0,0      # `squeezelite -l` lists the devices
 ```
 
-The node lists the endpoint's outputs next to its own (`[outputs] discover = true`, or
-`endpoints = ["192.168.1.20:7790"]` where multicast does not cross). The endpoint receives the
-negotiated format and packs it for its DAC exactly as the node would locally; its DAC buffer paces
-the stream (ADR 0007). The traffic is plain TCP on the LAN; never expose the port to the internet.
+Network speakers play in their own protocols: UPnP/OpenHome renderers (Sonos and HEOS players too,
+with their own grouping), Chromecast, AirPlay, BluOS, MPD and Snapcast (`[outputs]` and Settings ›
+Speakers and outputs).
+
+The computer the Pubky Music app runs on is a zone through the app's **built-in player** (ADR 0007).
+It answers only its own node: each time the app starts it makes a random key and registers the
+player with the node it is connected to (`POST /v1/outputs/endpoints {address, key}`); the node
+keeps the key in `<data_dir>/endpoint-keys.json` (0600) and shows it in every connection. Another
+host on the LAN can hold at most two connections waiting for their `Hello`, and the node's address
+waits apart, so no one can lock the node out of its player. With the
+node on the same computer (a `localhost` or `127.0.0.1` address) the player listens on loopback
+only; otherwise the node must reach this computer on TCP 7790. The player receives the negotiated
+format and packs it for its DAC exactly as the node would locally; its DAC buffer paces the stream.
+The audio is plain TCP on the LAN; never expose the port to the internet.
 
 ## Squeezebox players and squeezelite
 
@@ -403,6 +425,15 @@ folders it cannot find. Type each folder's new place and the tracks keep their m
 and history (`POST /v1/library/folders/move`). Covers taken from the files are read again. The old
 config file is kept as `<data_dir>/node.restored.toml`; from the next start its service keys fill
 whatever this node's own config leaves empty.
+
+**The bundle (node and homeserver):** `deploy/bundle/backup.sh` backs up everything while it runs:
+the backup file above with the sign-ins locked, a snapshot of the library database, the rest of the
+node's data folder, the tunnel settings, the homeserver's PostgreSQL dump and data volume (its key,
+config and users' files), `.env`, the compose files and the definitions of the network-share
+volumes the node mounts (`config/recreate-volumes.sh`). Each run is a folder readable by its owner
+only, the newest `KEEP` (7) kept. `deploy/bundle/restore.sh <folder>` puts it back into an empty
+install and refuses to touch one that has containers or data. Details:
+[guides/backup-and-update.md](guides/backup-and-update.md).
 
 From the command line: `pm-node -c node.toml backup <file>` writes a database snapshot (without
 sign-ins) while the node runs. `pm-node -c node.toml restore <file>`, with the node stopped, takes

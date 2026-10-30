@@ -22,12 +22,16 @@ RUN set -eu; \
 WORKDIR /src
 COPY . .
 ENV CARGO_INCREMENTAL=0
+# The version the node reports (release.yml: 0.2.1, or 0.2.1-edge+<sha>); empty = Cargo.toml's
+ARG PM_NODE_VERSION
 # Built-in apps and the masked TIDAL device client, compiled in by crates/pm-api/build.rs (build stage only)
 ARG PM_PROJECT_TIDAL_CLIENT_ID
 ARG PM_PROJECT_JAMENDO_CLIENT_ID
 ARG PM_PROJECT_ACOUSTID_KEY
 ARG PM_PROJECT_FANART_KEY
 ARG PM_PROJECT_AUDIODB_KEY
+ARG PM_PROJECT_ONEDRIVE_CLIENT_ID
+ARG PM_PROJECT_GOOGLE_CLIENT_ID
 ARG PM_TIDAL_DEVICE_CLIENT_ID
 ARG PM_TIDAL_DEVICE_CLIENT_SECRET
 RUN set -eu; \

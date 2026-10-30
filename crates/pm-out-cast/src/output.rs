@@ -101,6 +101,10 @@ impl Output for CastOutput {
         }
     }
 
+    fn model(&self) -> Option<String> {
+        self.device.model.clone().filter(|m| !m.trim().is_empty())
+    }
+
     fn sync(&self) -> pm_zones::SyncClass {
         if self.device.is_group() {
             pm_zones::SyncClass::Tight
