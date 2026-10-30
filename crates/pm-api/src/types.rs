@@ -1956,6 +1956,10 @@ pub struct SharedPlaylist {
     pub summary: SharedPlaylistSummary,
     /// Where each song plays from on this node.
     pub play_from: PlaylistPlayFrom,
+    /// Every item with its kind, in the same order: a web page or a post shows as its card, not
+    /// as a song that doesn't play.
+    #[serde(default)]
+    pub entries: Vec<CollectionEntry>,
 }
 
 /// `GET /v1/sources/jamendo/status`.
