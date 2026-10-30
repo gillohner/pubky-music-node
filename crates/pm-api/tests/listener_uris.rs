@@ -174,6 +174,18 @@ async fn a_listener_queues_library_songs_service_tracks_and_public_links_only() 
         serde_json::json!({"peer": null, "lan": false}),
         "{it}"
     );
+    // The URL as parsed is queued: `HTTP://` or backslashes are not left to look like a file
+    let (st, body) = call(
+        &app,
+        &listener,
+        "POST",
+        &format!("/v1/zones/{zone}/queue"),
+        Some(serde_json::json!({"items": [{"uri": "HTTP://Radio.Example.org\\live\\a.mp3"}], "play": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, q) = call(&app, OWNER, "GET", &format!("/v1/zones/{zone}/queue"), None).await;
+    assert!(q.contains("\"http://radio.example.org/live/a.mp3\""), "{q}");
     // The owner plays their own files and LAN streams
     for ok in ["/music/a.flac", "http://192.168.1.10/a.mp3"] {
         let (st, body) = call(

@@ -1092,7 +1092,7 @@
           toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
           queue = rest;
         }
-        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
+        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null, limit: it.limit || null }));
         if (!items.length) throw new Error('Nothing to move: the queue is empty');
         const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
@@ -1113,7 +1113,7 @@
         if (cur && z.transport !== 'stopped' && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
         await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
-        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
+        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null, limit: it.limit || null }; });
         try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
         if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
       } else {

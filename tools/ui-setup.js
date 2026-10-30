@@ -375,7 +375,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.evaluate(() => { document.querySelector('#main .hero').dataset.mark = 'same'; });
     check(await visible(p, '#iabout .blurb', 9000), 'About arrives by itself');
     check(await p.evaluate(() => document.querySelector('#main .hero')?.dataset.mark === 'same'), 'without drawing the page again');
-    check(asked === 2, `the page was asked twice, not ${asked} times`);
+    check(asked === 2, `the page is asked again once About is due (asked ${asked} times, want 2)`);
     await c.close();
 
     // ---- The login dialog ----

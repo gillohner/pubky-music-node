@@ -698,6 +698,13 @@ impl SourceFactory for NodeSources {
             return crate::audiobookshelf::open_track_blocking(&self.audiobookshelf, rest);
         }
         let Some(id) = item.uri.strip_prefix(TRACK_SCHEME) else {
+            // Someone other than the owner queued it (a fetch limit): never a file on the node
+            if item.limit.is_some() {
+                return Err(SourceError::Open {
+                    uri: item.uri.clone(),
+                    reason: "only the owner plays files on the node".into(),
+                });
+            }
             return self.files.open(item);
         };
         let id: i64 = id.parse().map_err(|_| SourceError::Open {
@@ -1024,6 +1031,7 @@ mod tests {
             "64:ff9b::a9fe:a9fe",
             "2002:a9fe:a9fe::1",
             "64:ff9b::a01:203",
+            "64:ff9b:1::a9fe:a9fe",
         ] {
             assert!(!allows(public, no.parse().unwrap()), "{no}");
         }
@@ -1032,6 +1040,10 @@ mod tests {
         assert!(
             !allows(lan, "64:ff9b::a9fe:a9fe".parse().unwrap()),
             "NAT64 to the metadata address"
+        );
+        assert!(
+            !allows(lan, "64:ff9b:1::a9fe:a9fe".parse().unwrap()),
+            "local-use NAT64"
         );
     }
 }

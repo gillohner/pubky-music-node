@@ -814,7 +814,7 @@ async fn auth(
     req.extensions_mut().insert(caller);
     let resp = next.run(req).await;
     if not_owner {
-        accounts::listener_response(resp).await
+        accounts::listener_response(resp, &accounts::library_roots(&state)).await
     } else {
         resp
     }
@@ -2819,19 +2819,56 @@ const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs
 const MAX_LOGINS: usize = 64;
 const MAX_LOGINS_PER_ORIGIN: usize = 6;
 
-/// Whether `origin` may start another sign-in while `waiting` (their origins) are open.
-fn may_start_login<'a>(waiting: impl Iterator<Item = &'a str>, origin: &str) -> bool {
-    let (mut all, mut mine) = (0, 0);
-    for o in waiting {
-        all += 1;
-        mine += (o == origin) as usize;
+/// Which waiting sign-in (`(id, started, origin)`) makes room for one more from `origin`: its own
+/// oldest when it has its share, else, when every place is taken, the oldest of the biggest
+/// bucket. Nobody is refused, so no client can lock everyone else out (review of #177); `None`
+/// when there is room.
+fn make_room(waiting: &[(String, std::time::Instant, String)], origin: &str) -> Option<String> {
+    let oldest_of = |o: &str| {
+        waiting
+            .iter()
+            .filter(|(_, _, w)| w == o)
+            .min_by_key(|(_, at, _)| *at)
+            .map(|(id, _, _)| id.clone())
+    };
+    let mine = waiting.iter().filter(|(_, _, w)| w == origin).count();
+    if mine >= MAX_LOGINS_PER_ORIGIN {
+        return oldest_of(origin);
     }
-    all < MAX_LOGINS && mine < MAX_LOGINS_PER_ORIGIN
+    if waiting.len() < MAX_LOGINS {
+        return None;
+    }
+    // The biggest bucket; of equal ones, the one whose oldest is oldest
+    let mut buckets: std::collections::HashMap<&str, (usize, std::time::Instant)> =
+        std::collections::HashMap::new();
+    for (_, at, w) in waiting {
+        let b = buckets.entry(w.as_str()).or_insert((0, *at));
+        b.0 += 1;
+        b.1 = b.1.min(*at);
+    }
+    let biggest = buckets
+        .into_iter()
+        .max_by_key(|(_, (n, oldest))| (*n, std::cmp::Reverse(*oldest)))?
+        .0;
+    oldest_of(biggest)
 }
 
-/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: iroh for the remote tunnel; the address
-/// a proxy or tunnel on this machine names (Cloudflare's, then `X-Forwarded-For`'s first); else
-/// the connection's own.
+/// An address as a sign-in bucket: IPv4 as it is, IPv6 by its /64 (one network hands out many).
+fn login_bucket(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().expect("mapped").to_string(),
+        v4 => v4.to_string(),
+    }
+}
+
+/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: iroh for the remote tunnel; behind a
+/// proxy or tunnel on this machine, the last address in `X-Forwarded-For` (the one that proxy
+/// saw; anything before it the client may have written); else the connection's own. By
+/// [`login_bucket`].
 fn login_origin(req: &axum::extract::Request) -> String {
     if req.extensions().get::<peer::Remote>().is_some() {
         return "iroh".into();
@@ -2844,21 +2881,17 @@ fn login_origin(req: &axum::extract::Request) -> String {
     // local reverse proxy): from anyone else it is whatever they wrote, a new bucket each time
     // (review of #177)
     if !conn.is_some_and(|ip| ip.is_loopback()) {
-        return conn.map_or_else(|| "unknown".into(), |ip| ip.to_string());
+        return conn.map_or_else(|| "unknown".into(), login_bucket);
     }
-    let h = req.headers();
-    let named = h
-        .get("cf-connecting-ip")
-        .or_else(|| h.get("x-real-ip"))
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| {
-            h.get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split(',').next())
-                .map(|v| v.trim().to_string())
-        });
-    named.unwrap_or_else(|| conn.map_or_else(|| "unknown".into(), |ip| ip.to_string()))
+    let forwarded = req
+        .headers()
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|a| a.trim().parse::<std::net::IpAddr>().ok())
+        .next_back();
+    forwarded.or(conn).map_or_else(|| "unknown".into(), login_bucket)
 }
 
 /// A QR code of `text` as an SVG string (dark modules on a light tile, a
@@ -2894,12 +2927,6 @@ async fn controller_login_start(
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    if !may_start_login(logins.values().map(|(_, _, o)| o.as_str()), &origin) {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many sign-ins are waiting; finish one or try again in a few minutes",
-        ));
-    }
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -2917,6 +2944,18 @@ async fn controller_login_start(
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
+    loop {
+        let waiting: Vec<(String, std::time::Instant, String)> = logins
+            .iter()
+            .map(|(id, (_, at, o))| (id.clone(), *at, o.clone()))
+            .collect();
+        match make_room(&waiting, &origin) {
+            Some(old) => {
+                logins.remove(&old);
+            }
+            None => break,
+        }
+    }
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     drop(logins);
     let qr_svg = qr_svg(&url);
@@ -8095,16 +8134,34 @@ mod tests {
         assert_eq!(v["status"], "expired");
     }
 
-    /// Anyone may start a Pubky Ring sign-in, so few wait at once: six from one address, 64 in
-    /// all (security review 2026-10-30, #4).
+    /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per
+    /// /64), 64 in all. Nobody is refused: the oldest waiting one makes room, its own when an
+    /// address has its share, else the biggest bucket's, so one client can't lock everyone out
+    /// (security reviews 2026-10-30, #4 and of #177).
     #[test]
-    fn sign_ins_waiting_are_capped_per_address_and_in_all() {
-        let six = ["1.2.3.4"; MAX_LOGINS_PER_ORIGIN];
-        assert!(!may_start_login(six.iter().copied(), "1.2.3.4"));
-        assert!(may_start_login(six.iter().copied(), "5.6.7.8"));
-        let many: Vec<String> = (0..MAX_LOGINS).map(|i| format!("10.0.0.{i}")).collect();
-        assert!(!may_start_login(many.iter().map(String::as_str), "9.9.9.9"));
-        assert!(may_start_login(many[1..].iter().map(String::as_str), "9.9.9.9"));
+    fn sign_ins_make_room_instead_of_locking_everyone_out() {
+        let t0 = std::time::Instant::now();
+        let at = |n: u64| t0 + std::time::Duration::from_secs(n);
+        let entry = |id: &str, n: u64, o: &str| (id.to_string(), at(n), o.to_string());
+        // One address with its share: its own oldest goes
+        let mine: Vec<_> = (0..MAX_LOGINS_PER_ORIGIN as u64)
+            .map(|n| entry(&format!("a{n}"), n, "1.2.3.4"))
+            .collect();
+        assert_eq!(make_room(&mine, "1.2.3.4").as_deref(), Some("a0"));
+        assert_eq!(make_room(&mine, "5.6.7.8"), None, "another address has room");
+        // Every place taken (an attacker's ten addresses and some others): the biggest bucket's
+        // oldest makes room for a newcomer
+        let mut full: Vec<_> = (0..60u64)
+            .map(|n| entry(&format!("x{n}"), 100 + n, &format!("10.0.0.{}", n % 10)))
+            .collect();
+        full.extend((0..4u64).map(|n| entry(&format!("o{n}"), n, &format!("192.168.1.{n}"))));
+        assert_eq!(full.len(), MAX_LOGINS);
+        let gone = make_room(&full, "192.168.1.50").unwrap();
+        assert!(
+            gone.starts_with('x'),
+            "an attacker's goes, not a lone sign-in: {gone}"
+        );
+        assert_eq!(gone, "x0", "the oldest of the biggest bucket");
         let req = |h: Option<(&str, &str)>, from: Option<&str>| {
             let mut b = Request::builder().uri("/v1/auth/pubky/start");
             if let Some((k, v)) = h {
@@ -8119,21 +8176,23 @@ mod tests {
             r
         };
         assert_eq!(login_origin(&req(None, Some("192.168.1.9:5000"))), "192.168.1.9");
+        // Behind a local proxy: the address it saw is the last one; what the client wrote before
+        // it, and Cloudflare-style headers it could set itself, don't count
+        assert_eq!(
+            login_origin(&req(
+                Some(("x-forwarded-for", "6.6.6.6, 198.51.100.2")),
+                Some("127.0.0.1:1")
+            )),
+            "198.51.100.2"
+        );
         assert_eq!(
             login_origin(&req(
                 Some(("cf-connecting-ip", "203.0.113.7")),
                 Some("127.0.0.1:1")
             )),
-            "203.0.113.7"
+            "127.0.0.1"
         );
-        assert_eq!(
-            login_origin(&req(
-                Some(("x-forwarded-for", "198.51.100.2, 10.0.0.1")),
-                Some("127.0.0.1:1")
-            )),
-            "198.51.100.2"
-        );
-        // From anyone else a forwarded address is ignored: one client can't pose as many
+        // From anyone else a forwarded address is ignored
         assert_eq!(
             login_origin(&req(
                 Some(("x-forwarded-for", "198.51.100.2")),
@@ -8141,12 +8200,14 @@ mod tests {
             )),
             "192.168.1.9"
         );
+        // IPv6 by /64: one network is one bucket
         assert_eq!(
-            login_origin(&req(
-                Some(("cf-connecting-ip", "203.0.113.8")),
-                Some("203.0.113.1:443")
-            )),
-            "203.0.113.1"
+            login_origin(&req(None, Some("[2001:db8:1:2:aaaa::1]:5000"))),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(
+            login_origin(&req(None, Some("[2001:db8:1:2:bbbb::9]:5000"))),
+            "2001:db8:1:2::/64"
         );
         let mut tunnel = req(None, Some("127.0.0.1:1"));
         tunnel.extensions_mut().insert(peer::Remote);
