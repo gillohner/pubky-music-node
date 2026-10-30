@@ -216,7 +216,9 @@ fn signed_in(s: &NodeState) -> Result<(String, Fan), ApiError> {
     Ok((cookie, fan))
 }
 
-fn mark_down(library: &std::sync::Mutex<pm_library::Library>, why: &str) {
+/// Bandcamp switched off, with why; with the node at hand, its cached search answers go too (a
+/// song that fails while it opens has only the library: they expire by themselves).
+fn mark_down(library: &std::sync::Mutex<pm_library::Library>, node: Option<&NodeState>, why: &str) {
     tracing::warn!("Bandcamp (unofficial) switched off: {why}");
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib);
@@ -228,7 +230,9 @@ fn mark_down(library: &std::sync::Mutex<pm_library::Library>, why: &str) {
         });
         save(&lib, &st);
     }
-    crate::search::forget_answers();
+    if let Some(s) = node {
+        crate::search::forget_answers(s);
+    }
 }
 
 fn mark_ok(library: &std::sync::Mutex<pm_library::Library>, what: &str) {
@@ -483,7 +487,7 @@ impl StreamingService for Bandcamp {
         if let Err(f) = judge(resp.status().as_u16(), "search") {
             return Err(match f {
                 Failure::Mode(m) => {
-                    mark_down(&s.library, &m);
+                    mark_down(&s.library, Some(s), &m);
                     upstream(m)
                 }
                 Failure::Item(m) => upstream(m),
@@ -492,7 +496,7 @@ impl StreamingService for Bandcamp {
         let v: Value = resp.json().await.map_err(upstream)?;
         let Some(results) = v["auto"]["results"].as_array() else {
             let m = "Bandcamp's search changed: no results list";
-            mark_down(&s.library, m);
+            mark_down(&s.library, Some(s), m);
             return Err(upstream(m));
         };
         Ok(results
@@ -516,7 +520,7 @@ impl StreamingService for Bandcamp {
         match tralbum(s, band, kind, slug).await {
             Ok(d) => Ok(item_from(band, kind, slug, &d)),
             Err(Failure::Mode(m)) => {
-                mark_down(&s.library, &m);
+                mark_down(&s.library, Some(s), &m);
                 Err(upstream(m))
             }
             Err(Failure::Item(m)) => Err(ApiError::not_found(m)),
@@ -539,10 +543,14 @@ fn pick_track(d: &Value, n: u64) -> Result<String, Failure> {
     stream_of(t).ok_or_else(|| Failure::Item("the artist doesn't let Bandcamp stream this track".into()))
 }
 
-fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String, Failure>) {
+fn record(
+    library: &std::sync::Mutex<pm_library::Library>,
+    node: Option<&NodeState>,
+    r: &Result<String, Failure>,
+) {
     match r {
         Ok(_) => mark_ok(library, "tracks are playing"),
-        Err(Failure::Mode(m)) => mark_down(library, m),
+        Err(Failure::Mode(m)) => mark_down(library, node, m),
         Err(Failure::Item(_)) => {}
     }
 }
@@ -562,7 +570,7 @@ pub(crate) fn open_track_blocking(
         return Err(fail("Bandcamp is off (Sources › Bandcamp)".into()));
     }
     let r = tralbum_blocking(&band, &kind, &slug).and_then(|d| pick_track(&d, n));
-    record(library, &r);
+    record(library, None, &r);
     let url = r.map_err(|e| match e {
         Failure::Mode(m) | Failure::Item(m) => fail(m),
     })?;
@@ -581,7 +589,7 @@ pub(crate) async fn stream(
         Ok(d) => pick_track(&d, n),
         Err(e) => Err(e),
     };
-    record(&s.library, &r);
+    record(&s.library, Some(&s), &r);
     let url = r.map_err(|e| match e {
         Failure::Mode(m) => upstream(m),
         Failure::Item(m) => ApiError::not_found(m),
@@ -712,7 +720,7 @@ async fn collection_of(
         if let Err(f) = judge(resp.status().as_u16(), "your collection") {
             return Err(match f {
                 Failure::Mode(m) => {
-                    mark_down(&s.library, &m);
+                    mark_down(&s.library, Some(s), &m);
                     upstream(m)
                 }
                 Failure::Item(m) => upstream(m),
@@ -1190,7 +1198,7 @@ pub(crate) async fn put(
             st.format = f;
         }
     });
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(view(&s)))
 }
 

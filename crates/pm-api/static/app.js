@@ -196,7 +196,7 @@
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
-    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; throw err; }
+    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; throw err; }
     return json;
   };
 
@@ -1411,10 +1411,65 @@
     if (!state.me || isOffline() || document.hidden) return;
     try {
       const ls = await api('GET', '/presence');
-      state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null;
+      state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null; state.presence = ls;
       if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
     } catch { return; }
-    renderAlong(); followAlong();
+    renderAlong(); followAlong(); renderListening();
+  };
+  // Home's "Listening now" (TASK-pinakes-social-ux L3): who else on this node is listening, what and
+  // where, with Listen along when their zone is open to you. A zone you can't see: just who.
+  // The node's own words name the reason (along already, someone else's zone, a maker's group,
+  // a zone that is gone); a 403 gets a plain sentence
+  const ALONG_ERRORS = { 403: 'That zone isn’t open to you.' };
+  const renderListening = () => {
+    const wrap = $('#h-listenwrap'); if (!wrap || state.view !== 'home') return;
+    const others = (state.presence || []).filter((l) => !l.you);
+    if (!others.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `<section class="section" id="h-listening"><div class="section-head"><h3>Listening now</h3></div><div class="list">${others.map((l, k) => {
+      const name = personName(l);
+      const face = l.avatar ? `<img class="thumb round" src="${esc(imgSrc(l.avatar))}" alt="" loading="lazy" data-err="hide">` : `<div class="avatar" aria-hidden="true">${esc(initials(name))}</div>`;
+      const what = l.title ? ` to <b>${esc(l.title)}</b>${l.artist ? ` <span class="muted">· ${esc(l.artist)}</span>` : ''}` : '';
+      const joining = state.joiningAlong === l.key;
+      const act = l.mine ? '<span class="pill ok">Listening along</span>' : l.zone && l.can_join ? `<button class="btn sm" data-alongjoin="${k}" ${joining ? 'disabled aria-label="Joining…"' : `aria-label="Listen along with ${esc(name)}"`}>${joining ? '<span class="spin"></span> Joining…' : `${icon('zone')} Listen along`}</button>` : '';
+      return `<div class="list-row listening">${face}${l.image ? `<img class="thumb" src="${esc(imgSrc(l.image))}" alt="" loading="lazy" data-err="hide">` : ''}<div class="grow"><div class="name">${esc(name)} is listening${what}</div>${l.zone ? `<div class="sub">on ${esc(l.zone.name)}${l.playing === false ? ' · paused' : ''}</div>` : ''}</div>${act}</div>`;
+    }).join('')}</div></section>`;
+    $$('[data-alongjoin]', wrap).forEach((b) => b.onclick = () => joinAlong(others[Number(b.dataset.alongjoin)], b));
+  };
+  // Listen along from a zone that is free to join: a node zone (This browser can't join a group),
+  // not one someone else is listening on (joining stops what plays there) and not a listen-along
+  // group. The zone in use when it is one, else a menu of them. The page only sees listeners who
+  // let it, so the node is the guard: it refuses (409) a zone where someone else's music plays,
+  // and then the menu offers the others (`skip`: zones refused so far).
+  const joinAlong = (l, b, skip = new Set(), quiet = false) => {
+    const busy = new Set((state.presence || []).filter((p) => !p.you && p.zone).map((p) => p.zone.id));
+    const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && !skip.has(id) && (!l.zone || id !== l.zone.id);
+    if (!skip.size && free(state.zone)) return doJoinAlong(l, state.zone, b, skip);
+    const mine = zoneList().filter((z) => free(z.id));
+    if (!mine.length) { if (quiet) return; toast(skip.size ? 'Someone else is listening on your other speakers too: Listen along needs free ones.' : 'Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
+    showMenu(b, [{ title: skip.size ? 'Someone listens there: listen from' : 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b, skip) }))], { all: true });
+  };
+  const doJoinAlong = async (l, zone, b, skip = new Set()) => {
+    // The row may be drawn again while this runs (a zone came, the 20 s poll): it stays "Joining…"
+    state.joiningAlong = l.key; renderListening();
+    try {
+      const zs = await api('POST', '/presence/along', { key: l.key, zone });
+      state.zones[zs.id] = zs; state.zone = zs.id; try { localStorage.setItem('pm.zone', state.zone); } catch { /* storage unavailable */ }
+      renderZoneName(); renderBar(); refreshQueue();
+      state.joiningAlong = null;
+      toast(`Listening along with ${personName(l)}`);
+      await refreshAlong();
+    } catch (e) {
+      state.joiningAlong = null; renderListening();
+      // Someone else's music plays on that zone: pick another of yours
+      if (e.status === 409 && /someone else/i.test(e.raw || e.message)) {
+        skip.add(zone); toast(e.message, 'error');
+        const others = (state.presence || []).filter((p) => !p.you);
+        const again = $$('#h-listenwrap [data-alongjoin]').find((x) => (others[Number(x.dataset.alongjoin)] || {}).key === l.key) || b;
+        if (again.isConnected) joinAlong(l, again, skip, true);
+        return;
+      }
+      toast(ALONG_ERRORS[e.status] || e.message, 'error');
+    }
   };
   const leaveAlong = async () => {
     const a = state.along; const b = $('#alongleave'); if (!a) return;
@@ -2113,11 +2168,55 @@
       if (pg && !pg.reading && !pg.pending) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
     }
     const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
-    const also = (pg && pg.also_on) || [];
-    box.innerHTML = (also.length ? `<div class="list">${rankSvc(also, (v) => srcSvc(v.source)).map((v) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+    // Play from another source (TASK-pinakes-social-ux A4): the same song, where it is, on a node
+    // zone; only from the library or a service that is on and working here (a source the node
+    // can't play would leave the zone stopped)
+    const rk = await loadSvcRank().catch(() => null);
+    if (!$('#npsources', overlay) || gen !== npGen) return;
+    const also = rankSvc((pg && pg.also_on) || [], (v) => srcSvc(v.source));
+    const z0 = currentZone(); const cur = z0 && z0.now_playing ? z0.now_playing.item : null;
+    // Full songs only: a service that gives 30 s previews here, or YouTube (only This browser plays it),
+    // would swap the song for something less
+    const previewOnly = (svc) => /^previews\b/i.test(String(((state.sources || []).find((x) => x.id === svc) || {}).status || ''));
+    const canPlay = (v) => { const svc = srcSvc(v.source); if (svc === 'youtube' || /^youtube:/.test(switchUri(v) || '') || previewOnly(svc)) return false; return rk ? rk.healthy.has(svc) : svc === 'library'; };
+    const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
+    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
+    $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
     npRestore();
+  };
+  // What a source's entry plays as in a queue: a library track, a service's own uri, a YouTube video
+  const switchUri = (v) => (v.uri && (v.source !== 'library' || v.uri.startsWith('track:')) ? v.uri : ytOf(v.url) ? `youtube:video:${ytOf(v.url)}` : null);
+  // The playing song moves to another source at the same position: the zone's queue is loaded
+  // again with that one item swapped (repeat, radio and paused-or-playing stay)
+  // `itemId`: the song the sheet was drawn for; if another one plays by now, nothing changes
+  const switchSource = async (v, b, itemId) => {
+    const zone = state.zone; const uri = switchUri(v);
+    const playingIt = () => { const z = state.zones[zone]; return z && z.now_playing && z.now_playing.item.id === itemId ? z : null; };
+    if (!uri || !playingIt()) { toast('Another song is playing now: open Sources again', 'error'); return; }
+    const name = v.label || srcName(srcSvc(v.source));
+    b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
+    const z0 = playingIt(); const version = z0.queue_version;
+    if (z0.transport === 'playing') startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true);
+    try {
+      let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
+      // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
+      if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
+      const at = queue.findIndex((q) => q.id === itemId);
+      const z = playingIt();
+      if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
+      // The new source's own cover and length: the old item's cover stays only between two items
+      // of the same service (a library file shows its album's); the length comes with the source
+      const scheme = (u) => String(u || '').split(':')[0];
+      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+      const zs = await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
+      if (zs && zs.id) state.zones[zs.id] = zs;
+      if (zs && zs.error) throw new Error(zs.error);
+      toast(`Playing from ${name}`);
+      refreshQueue();
+    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -2438,14 +2537,19 @@
     q: null,
     items: () => $$('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow'),
     reset() {
-      this.at = -1; search.removeAttribute('aria-activedescendant');
+      this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant');
       $$('#sresults .kfocus').forEach((el) => el.classList.remove('kfocus'));
     },
-    // After a re-render: the same search keeps its row (or the last one, if fewer came back)
+    // A row by what it is (its group and its first lines), not its place: answers arriving later
+    // move rows around
+    keyOf: (el) => `${(el.closest('[data-skind]') || { dataset: {} }).dataset.skind || ''}|${(el.innerText || '').split('\n').filter(Boolean).slice(0, 2).join('|')}`,
+    // After a re-render: the same search keeps the same row wherever it went; when it is gone the
+    // highlight goes too (and says so), so Enter never opens a row nobody announced
     keep(q) {
-      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      const n = this.items().length; if (!n) { this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      this.at = Math.min(this.at, n - 1); this.show(false);
+      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); return; }
+      const items = this.items(); const k = items.findIndex((el) => this.keyOf(el) === this.key);
+      if (k < 0) { this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); const said = $('#sresults-said'); if (said) said.textContent = 'The results changed'; return; }
+      this.at = k; this.show(false);
     },
     show(scroll) {
       const items = this.items(); const el = items[this.at]; if (!el) return;
@@ -2458,6 +2562,7 @@
     move(d) {
       const items = this.items(); if (!items.length) return;
       this.at = Math.max(0, Math.min(items.length - 1, this.at + d));
+      this.key = this.keyOf(items[this.at]);
       this.show(true);
       const said = $('#sresults-said'); if (said) said.textContent = `${(items[this.at].innerText || '').split('\n').filter(Boolean).slice(0, 2).join(', ')} (${this.at + 1} of ${items.length})`;
     },
@@ -2789,8 +2894,9 @@
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
-  const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+  // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
+  const showMenu = (anchor, items, opts = {}) => {
+    if (isListener() && !opts.all) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
     if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
     else if (menuPick) {
       const want = menuPick; menuPick = null; closeMenu();
@@ -3658,7 +3764,7 @@
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
           // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
-          const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
+          const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
           // Your Home (Settings › You): your own layout where you set one, else the node's default
           if (!state.homeLayout) {
             const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
@@ -3670,7 +3776,7 @@
           const showRow = (k) => !(lay.hidden || []).includes(k);
           const rowOf = (k) => HOME_ROWS.find(([x]) => x === k);
           const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`;
-          const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
+          const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (k === 'listening') return '<div id="h-listenwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
@@ -3696,6 +3802,8 @@
             })();
           };
           $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
+          // Listening now: what is known at once, then the node's latest
+          renderListening(); refreshAlong();
           const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
           $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
           const move = (i, d) => { const o = [...ordered]; const [x] = o.splice(i, 1); o.splice(i + d, 0, x); saveLayout({ order: o, hidden: lay.hidden || [] }); };
@@ -4647,8 +4755,17 @@
           const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
           const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
           const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          // Artists and albums (TASK-pinakes-social-ux F6): "Also on" is a row of service icons next to
+          // Play/Shuffle, the working services first. One opens the service's page here when the node
+          // plays from it (on and working: Play is there), else the service's site (every link has a
+          // page here, so `page` alone says nothing). Songs keep the source line with its play buttons.
+          const iconAlso = kind === 'artist' || kind === 'album';
+          const playsHereFrom = (v) => !!v.page && (rk ? rk.healthy.has(alsoSvc(v)) : alsoSvc(v) === 'library');
+          const alsoIcon = ({ v, k }) => { const name = instName(v); return playsHereFrom(v) || (v.page && !webUrl(v.url)) ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
+          const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-label="Also on">${alsoAll.map(alsoIcon).join('')}</span>` : '';
+          const [lineFirst, lineMore] = iconAlso ? [[], []] : [alsoFirst, alsoMore];
           const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
-          const alsoLine = (isGlobal && !alsoAll.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && alsoFirst.length ? '<span class="muted">· also</span>' : ''}${alsoFirst.map(alsoItem).join('')}${alsoMore.length ? `${!isGlobal && !alsoFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${alsoMore.length} more source${alsoMore.length === 1 ? '' : 's'}">${alsoFirst.length || !isGlobal ? `${alsoMore.length} more` : `${alsoMore.length} services`}</button><span class="srcrest" hidden>${alsoMore.map(alsoItem).join('')}</span>` : ''}</div>`
+          const alsoLine = (isGlobal && !lineFirst.length && !lineMore.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && lineFirst.length ? '<span class="muted">· also</span>' : ''}${lineFirst.map(alsoItem).join('')}${lineMore.length ? `${!isGlobal && !lineFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${lineMore.length} more source${lineMore.length === 1 ? '' : 's'}">${lineFirst.length || !isGlobal ? `${lineMore.length} more` : `${lineMore.length} services`}</button><span class="srcrest" hidden>${lineMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${webUrl(v.url) ? ` <a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
@@ -4656,24 +4773,42 @@
           const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id ? ['album', pg.album] : null].filter(Boolean);
           const crumbBar = crumbs.length ? `<nav class="crumbs" aria-label="Breadcrumb"><ol>${crumbs.map(([k, l]) => `<li><button class="lnk" data-crumb-kind="${k}" data-crumb-id="${esc(l.id)}">${esc(l.name)}</button></li>`).join('')}<li aria-current="page">${esc(state.itemTitle || '')}</li></ol></nav>` : '';
           if (isListener()) pg.about = pg.about.filter((f) => f.label !== 'File');
-          // The About section, also redrawn on its own when open sources answer (about_pending)
-          const aboutHtml = (p) => `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${p.blurb ? `<p class="blurb">${esc(p.blurb)}</p>` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
+          // About (F6): the article's opening (Wikipedia in the reader's language, or TheAudioDB) with
+          // its link and licence, the picture's Commons credit, then the facts. With an article it
+          // sits under the header; without one it stays at the end of the page. A function: when open
+          // sources answer later (about_pending) it is redrawn in place.
+          const aboutTop = !!(pg.about_text && pg.about_text.text); // artist, album and song (F5: the same About everywhere)
+          const aboutHtml = (p) => {
+            const at = p.about_text;
+            const clamp = !!(at && at.text);
+            const blurbText = (at && at.text) || p.blurb;
+            return `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${clamp ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${clamp ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
+          };
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button></div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
+            + (aboutTop ? aboutHtml(pg) : '')
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
-            + (kind === 'artist' && target.artist_id != null ? '<div id="isimilar-slot"></div>' : '')
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
+            + '<div id="isimilar-slot"></div>'
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
-            + '<div id="irelated-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
-            + aboutHtml(pg);
+            + (aboutTop ? '' : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
+          // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
+          // is measured again when its width or the text size changes (zoom, rotation, a late font)
+          const bindBlurb = () => { const bl = $('#iblurb', main); const bm = $('#iblurbmore', main);
+            if (bl && bm) {
+              const sync = () => { if (bl.classList.contains('clamp')) bm.hidden = !(bl.scrollHeight > bl.clientHeight + 2); };
+              bm.onclick = () => { const open = bl.classList.toggle('clamp') === false; bm.textContent = open ? 'Less' : 'More'; bm.setAttribute('aria-expanded', String(open)); };
+              sync(); if (window.ResizeObserver) new ResizeObserver(sync).observe(bl);
+            } };
+          bindBlurb();
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
             const same = bk && $$('[data-crumb-id]', main).find((c) => bk.textContent.trim().endsWith(c.textContent.trim()));
@@ -4685,17 +4820,31 @@
           api('GET', `/item/${kind}/${encodeURIComponent(id)}/extras`).then((ex) => {
             if (state.view !== 'item' || state.viewArg.id !== id) return;
             pg.related = ex.related || []; pg.concerts = ex.concerts || [];
+            // Similar (TASK-pinakes-social-ux A3): the library's own first (shared genres, then the
+            // same artist; playable), Last.fm's similar artists on an artist page, then what people
+            // tagged alike on Pubky. One section; each part only when it has something.
             const ss = $('#isimilar-slot'); if (ss) (async () => {
-              let sim; try { sim = await api('GET', `/library/artists/${target.artist_id}/similar`); } catch { sim = null; }
+              let fm = null;
+              if (kind === 'artist' && target.artist_id != null) { try { fm = await api('GET', `/library/artists/${target.artist_id}/similar`); } catch { fm = null; } }
               if (!ss.isConnected) return;
-              if (!sim || !sim.artists || !sim.artists.length) { ss.remove(); return; }
-              ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar artists</h3><span class="muted small">from Last.fm</span></div><div class="chips">${sim.artists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div></section>`;
+              const mine = ex.similar || []; const fmArtists = (fm && fm.artists) || [];
+              const mineSongs = kind === 'song' ? mine.map((h) => ({ ...h, artist: h.subtitle })) : [];
+              const mineTiles = kind === 'song' ? [] : mine.map((h) => ({ ...h, year: h.subtitle || h.year || '' }));
+              const part = (label, body, id) => `<div class="simpart" id="${id}"><h4 class="simhead muted small">${label}</h4>${body}</div>`;
+              const parts = [
+                mine.length ? part('In your library', kind === 'song' ? songRows(mineSongs, { showAlbum: true, covers: true }) : itemTileGrid(mineTiles, kind), 'isimlib') : '',
+                fmArtists.length ? part('From Last.fm', `<div class="chips">${fmArtists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div>`, 'isimfm') : '',
+                pg.related.length ? part('Tagged alike on Pubky', itemTileGrid(pg.related.map(asTile), 'album'), 'irelated') : '',
+              ].filter(Boolean);
+              if (!parts.length) { ss.remove(); return; }
+              ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar</h3></div>${parts.join('')}</section>`;
+              const lib = $('#isimlib', main);
+              if (lib && kind === 'song') bindSongRows(lib, mineSongs, {}); else if (lib) bindItemTiles(lib, mineTiles, kind);
               $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
+              if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
             })();
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
-            const rs = $('#irelated-slot'); if (rs) { rs.outerHTML = (pg.related && pg.related.length ? `<section class="section" id="irelated"><div class="section-head"><h3>People who tagged this also tagged</h3></div>${itemTileGrid(pg.related.map(asTile), 'album')}</section>` : ''); }
-            if (pg.related.length) bindHome($('#irelated'), { items: pg.related, tags: [] });
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
           if (myTags) bindScopedTags(songRef, linkRef);
@@ -4739,7 +4888,7 @@
               const sources = (p) => JSON.stringify([(p.also_on || []).map((v) => v.url), (p.open_on || []).map((v) => v.url)]);
               if (sources(np) !== sources(pg)) { const redraw = () => { if (!here()) return; if (commentTyping()) { setTimeout(redraw, 3000); return; } render(); }; redraw(); return; }
               if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
-              const sec = $('#iabout', main); if (sec) sec.outerHTML = aboutHtml({ ...np, about: np.about || [] });
+              const sec = $('#iabout', main); if (sec) { sec.outerHTML = aboutHtml({ ...np, about: np.about || [] }); bindBlurb(); }
               const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
               if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
               Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });

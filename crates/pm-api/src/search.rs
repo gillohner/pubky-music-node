@@ -152,16 +152,13 @@ pub fn sources_for(s: &NodeState, scope: &str) -> Vec<String> {
 }
 
 /// Answers by (query, source), with when they were fetched.
-type AnswerCache = Mutex<HashMap<(String, String), (Instant, SourceAnswer)>>;
+/// Each node's answers, by query and source (on `NodeState`: one node's change never empties
+/// another's, as two nodes in one process, or tests running side by side, would otherwise).
+pub(crate) type AnswerCache = Mutex<HashMap<(String, String), (Instant, SourceAnswer)>>;
 
-/// Drop cached answers (a source was switched on or off).
-pub(crate) fn forget_answers() {
-    cache().lock().expect("search cache").clear();
-}
-
-fn cache() -> &'static AnswerCache {
-    static C: OnceLock<AnswerCache> = OnceLock::new();
-    C.get_or_init(Default::default)
+/// Drop this node's cached answers (a source was switched on or off).
+pub(crate) fn forget_answers(s: &NodeState) {
+    s.search_answers.lock().expect("search cache").clear();
 }
 
 /// `GET /v1/search?q=&in=`: NDJSON, one line per source as it answers.
@@ -201,7 +198,8 @@ pub(crate) async fn search(
                     format!("{src}|listener")
                 },
             );
-            let hit = cache()
+            let hit = s
+                .search_answers
                 .lock()
                 .expect("search cache")
                 .get(&key)
@@ -242,7 +240,7 @@ pub(crate) async fn search(
                         },
                     };
                     if a.status == "ok" {
-                        cache()
+                        s.search_answers
                             .lock()
                             .expect("search cache")
                             .insert(key, (Instant::now(), a.clone()));
@@ -300,7 +298,7 @@ async fn one_source(
 }
 
 /// A library song as a search row.
-fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
+pub(crate) fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
     let tid = t.id?;
     let mut keys = Vec::new();
     if let Some(i) = &t.isrc {
@@ -334,6 +332,37 @@ fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
         keys,
         format: Some(file_format(&t.file)),
         quality: Some(file_quality(&t.file).into()),
+        ..Default::default()
+    })
+}
+
+/// A library artist as a result.
+pub(crate) fn artist_hit(a: &pm_library::ArtistSummary) -> SearchHit {
+    SearchHit {
+        kind: "artist".into(),
+        title: a.name.clone(),
+        subtitle: Some(format!("{} · your library", crate::plural(a.albums, "album"))),
+        id: format!("lib-{}", a.id),
+        keys: a.mbid.map(|m| vec![format!("mb:{m}")]).unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// A library album as a result.
+pub(crate) fn album_hit(a: &pm_model::Album) -> Option<SearchHit> {
+    let id = a.id?;
+    Some(SearchHit {
+        kind: "album".into(),
+        title: a.title.clone(),
+        subtitle: a.album_artist.clone(),
+        image: Some(format!("/v1/library/albums/{id}/cover")),
+        id: format!("lib-{id}"),
+        year: a.year,
+        keys: a
+            .upc
+            .as_ref()
+            .map(|u| vec![format!("upc:{u}")])
+            .unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -437,14 +466,7 @@ fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Resul
         .filter(|a| a.name.to_lowercase().contains(&needle))
         .take(8)
     {
-        out.push(SearchHit {
-            kind: "artist".into(),
-            title: a.name.clone(),
-            subtitle: Some(format!("{} · your library", crate::plural(a.albums, "album"))),
-            id: format!("lib-{}", a.id),
-            keys: a.mbid.map(|m| vec![format!("mb:{m}")]).unwrap_or_default(),
-            ..Default::default()
-        });
+        out.push(artist_hit(&a));
     }
     let own_playlists = if owner {
         crate::playlists::summaries_named(&lib, &needle, 6).unwrap_or_default()
@@ -465,21 +487,7 @@ fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Resul
         });
     }
     for a in lib.search_albums(q, 12)? {
-        let Some(id) = a.id else { continue };
-        out.push(SearchHit {
-            kind: "album".into(),
-            title: a.title.clone(),
-            subtitle: a.album_artist.clone(),
-            image: Some(format!("/v1/library/albums/{id}/cover")),
-            id: format!("lib-{id}"),
-            year: a.year,
-            keys: a
-                .upc
-                .as_ref()
-                .map(|u| vec![format!("upc:{u}")])
-                .unwrap_or_default(),
-            ..Default::default()
-        });
+        out.extend(album_hit(&a));
     }
     for t in lib.search_tracks(q, limit)? {
         out.extend(song_hit(&t));
@@ -654,8 +662,41 @@ async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
         .discovery()
         .ok_or_else(|| "Posts on Pubky need the upstream contact (Settings)".to_string())?;
     let nexus = d.nexus();
-    let found = match hash_tags(q).first() {
-        Some(label) => nexus.posts_by_tag(label, limit.min(10)).await,
+    let tags = hash_tags(q);
+    let found = match tags.first() {
+        // One tag: Nexus' own list. Several: posts carrying all of them (each tag's list, kept
+        // where they meet, in the first tag's order)
+        Some(label) if tags.len() == 1 => nexus.posts_by_tag(label, limit.min(10)).await,
+        Some(_) => {
+            let lists =
+                futures_util::future::join_all(tags.iter().take(5).map(|l| nexus.posts_by_tag(l, 100))).await;
+            let mut lists = lists.into_iter();
+            match lists.next() {
+                Some(Ok(first)) => {
+                    let mut rest = Vec::new();
+                    let mut failed = None;
+                    for l in lists {
+                        match l {
+                            Ok(k) => rest.push(k.into_iter().collect::<std::collections::HashSet<_>>()),
+                            Err(e) => {
+                                failed = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    match failed {
+                        Some(e) => Err(e),
+                        None => Ok(first
+                            .into_iter()
+                            .filter(|k| rest.iter().all(|r| r.contains(k)))
+                            .take(limit.min(10) as usize)
+                            .collect()),
+                    }
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(Vec::new()),
+            }
+        }
         None => {
             // Nexus searches 2 to 30 characters and at most 4 words
             let term: String = text_words(q)

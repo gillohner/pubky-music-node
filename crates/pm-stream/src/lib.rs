@@ -161,17 +161,27 @@ pub fn write_frame(w: &mut dyn Write, frame: &Frame) -> Result<(), StreamError> 
     write_raw(w, KIND_CONTROL, &body)
 }
 
+/// Bytes of one sample frame in wire layout.
+fn wire_frame_bytes(fmt: AudioFormat) -> usize {
+    match fmt.kind {
+        pm_model::SampleKind::Pcm => 4 * fmt.channels as usize,
+        pm_model::SampleKind::Dsd => fmt.channels as usize,
+    }
+    .max(1)
+}
+
+/// Sample frames in each audio frame of a block that [`write_audio`] splits (all but the last).
+pub fn frames_per_part(fmt: AudioFormat) -> u64 {
+    (MAX_FRAME as usize / wire_frame_bytes(fmt)) as u64
+}
+
 /// Write a block's samples in wire layout as audio frames: one, or several of whole sample frames
 /// when the block is larger than [`MAX_FRAME`]. Returns how many frames were sent (each is
 /// answered by its own `Ack`).
 pub fn write_audio(w: &mut dyn Write, block: &AudioBlock) -> Result<usize, StreamError> {
     let bytes = encode_samples(block);
-    let per_frame = match block.format.kind {
-        pm_model::SampleKind::Pcm => 4 * block.format.channels as usize,
-        pm_model::SampleKind::Dsd => block.format.channels as usize,
-    }
-    .max(1);
-    let chunk = (MAX_FRAME as usize / per_frame) * per_frame;
+    let per_frame = wire_frame_bytes(block.format);
+    let chunk = frames_per_part(block.format) as usize * per_frame;
     if bytes.is_empty() {
         write_raw(w, KIND_AUDIO, &bytes)?;
         return Ok(1);

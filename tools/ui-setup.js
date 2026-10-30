@@ -197,6 +197,35 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('.hero .art');
     const h1 = await badge('.hero .art');
     check(h1 && h1.label === 'From your library', `a library album’s cover too (${h1 && h1.label})`);
+    // ---- Library artist pages: About under the header, Also on next to Play (F6) ----
+    const LONG = 'Mock Artist is a band from Zürich. '.repeat(30);
+    await p.route(/\/v1\/item\/artist\/lib-900$/, (r) => r.fulfill({ json: pageJson('artist', 'lib-900', {
+      source: 'Your library', source_id: 'library', image: IMG, songs: [SONGS[1]], albums: [ALBUMS[1]],
+      blurb: LONG, about_text: { text: LONG, source: 'Wikipedia', title: 'Mock Artist', url: 'https://de.wikipedia.org/wiki/Mock_Artist', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: 'Jane Doe', licence: 'CC BY-SA 3.0', licence_url: 'https://creativecommons.org/licenses/by-sa/3.0/', file_page: 'https://commons.wikimedia.org/wiki/File:Mock.jpg', source: 'Wikimedia Commons' },
+      about: [{ label: 'Origin', value: 'Zürich' }, { label: 'Active', value: '1998–' }],
+      also_on: [{ source: 'tidal', id: 'artist:77', label: 'TIDAL', url: 'https://tidal.com/artist/77', page: 'tidal-77' }, { source: 'spotify', id: 'artist:abc', label: 'Spotify', url: 'https://open.spotify.com/artist/abc', page: 'spotify-abc' }],
+    }) }));
+    // TIDAL on and working here, Spotify not: the TIDAL icon opens its page here, Spotify's its site
+    // (the node gives every link a page, so the fixture does too)
+    await p.route(/\/v1\/sources$/, (r) => r.fulfill({ json: [{ id: 'tidal', name: 'TIDAL', enabled: true, healthy: true }, { id: 'spotify', name: 'Spotify', enabled: true, healthy: false }] }));
+    await p.route(/\/v1\/play-order$/, (r) => r.fulfill({ json: { order: ['library', 'tidal', 'spotify'], services: [{ id: 'tidal', connected: true }, { id: 'spotify', connected: false }] } }));
+    await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
+    const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
+    check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
+    check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
+    check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
+    await p.click('#iblurbmore');
+    check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
+    check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
+    await p.click('.also-icons [data-also]'); await p.waitForTimeout(300);
+    check(/\/artist\/tidal-77$/.test(await p.evaluate(() => location.pathname)), 'a service the node plays from opens its page here');
+    await p.unroute(/\/v1\/item\/artist\/lib-900$/);
+    await p.unroute(/\/v1\/sources$/);
+    await p.unroute(/\/v1\/play-order$/);
+    // without an article, About stays at the end
+    await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('#iabout');
+    check(await p.evaluate(() => { const s = [...document.querySelectorAll('#main > section')]; return s[s.length - 1].id === 'iabout'; }), 'without an article, About stays at the end of the page');
     await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
     // Now playing: the first library track plays in This browser; the bar's art and the big cover
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
@@ -322,6 +351,52 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#np .warn-text'), 'a node that refuses: the bar says so');
       check(/refused the stream/.test(await p.textContent('#np')), 'in the node’s words');
       await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      // ---- Play from another source (Now playing › Sources) and Similar on item pages ----
+      {
+        // one song on repeat, so it is still playing when Sources opens (the test files are short)
+        const two = (await api('GET', '/library/tracks?limit=10')).tracks.slice(0, 2);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'all' }).catch(() => {});
+        if (two[0]) await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [two[0].id], replace: true, play: true }).catch(() => {});
+        let zs = null; { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'playing' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        // CI's Null output plays faster than real time, so a short song on repeat loops at once: pause it
+        // so the bar and Now playing stay on it (Play from here keeps a paused zone paused)
+        await api('POST', `/zones/${encodeURIComponent(nz.id)}/transport`, { action: 'pause' }).catch(() => {});
+        { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'paused' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        const curUri = zs.now_playing && zs.now_playing.item.uri; const curId = Number((/^track:(\d+)$/.exec(curUri || '') || [])[1]);
+        const other = two.find((t) => t.id !== curId);
+        if (curId && other) {
+          // the song page says the song is also another library file (stands in for TIDAL, Deezer…)
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}$`), (r) => r.fulfill({ json: { kind: 'song', id: `lib-${curId}`, target: { track_id: curId }, source: 'Your library', section: 'albums', songs: [], albums: [], versions: [], about: [], open_on: [], also_on: [{ source: 'library', label: 'Your library: the other file', uri: `track:${other.id}`, url: '' }] } }));
+          let loadBody = null;
+          await p.route(/\/v1\/zones\/[^/]+\/load$/, (r) => { loadBody = JSON.parse(r.request().postData() || '{}'); return r.continue(); });
+          // the page learns the zone plays from the node's events: open Now playing once the bar shows
+          // the song (its cover button), not while it still says the earlier refusal
+          const shown = await p.waitForSelector('#np #npart', { timeout: 20000 }).then(() => true).catch(() => false);
+          check(shown, 'the bar shows the song the zone plays');
+          let sw = null;
+          if (shown) {
+            await p.click('#np #npart');
+            // Now playing draws itself again on zone updates: a locator finds the tab afresh each try
+            const opened = await p.locator('#nowplaying [data-npsheet="sources"]:visible').first().click({ timeout: 15000 }).then(() => true).catch(() => false);
+            if (opened) sw = await p.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null);
+          }
+          check(!!sw && /Play from here/.test(await sw.textContent()), 'Sources: Play from here on another source of the playing song');
+          if (sw) {
+            await p.locator('[data-npswitch]').first().click({ timeout: 10000 });
+            const moved = await (async () => { const end = Date.now() + 10000; for (;;) { const z2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (z2.now_playing && z2.now_playing.item.uri === `track:${other.id}`) return z2; if (Date.now() > end) return null; await p.waitForTimeout(250); } })();
+            check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'paused', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
+          }
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
+          await p.keyboard.press('Escape');
+          // Similar: the library's own (playable rows), then what people tagged alike on Pubky
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
+          const sim = await p.evaluate(() => { const s = document.querySelector('#isimilar'); return s && { head: s.querySelector('h3').textContent, parts: [...s.querySelectorAll('.simhead')].map((h) => h.textContent), rows: s.querySelectorAll('#isimlib .srow, #isimlib .track').length, play: !!s.querySelector('#isimlib [data-splay]'), tiles: s.querySelectorAll('#irelated .tile').length }; });
+          check(sim && sim.head === 'Similar' && sim.parts.join('|') === 'In your library|Tagged alike on Pubky' && sim.rows === 1 && sim.play && sim.tiles === 1, `one Similar section: your library's songs with Play, then Pubky's (${JSON.stringify(sim)})`);
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
+        } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});
+      }
       // A refused play from the transport: the wait ends at once with the node's words
       await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [(await api('GET', '/library/tracks?limit=1')).tracks[0].id], replace: true, play: false });
       await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');
@@ -526,8 +601,52 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.evaluate(() => { document.querySelector('#main .hero').dataset.mark = 'same'; });
     check(await visible(p, '#iabout .blurb', 9000), 'About arrives by itself');
     check(await p.evaluate(() => document.querySelector('#main .hero')?.dataset.mark === 'same'), 'without drawing the page again');
+    check(await p.evaluate(() => { const b = document.querySelector('#iblurbmore'); return !!document.querySelector('#iblurb.clamp') && !!b && typeof b.onclick === 'function'; }), 'the article that arrived is clamped, with its More button working');
     check(asked === 2, `the page is asked again once About is due (asked ${asked} times, want 2)`);
     await c.close();
+
+    // ---- Home: Listening now (L3) ----
+    if (nz) {
+      await api('PUT', '/node/settings', { dev_outputs: true });
+      c = await ctx(); p = await c.newPage();
+      const K = (ch) => ch.repeat(52);
+      const PRES = [
+        { key: 'owner', you: true, mine: false, playing: true, title: 'My own song', zone: { id: nz.id, name: nz.name }, can_join: false, along: [] },
+        { key: K('a'), name: 'Alice', you: false, mine: false, playing: true, title: 'Night Drive', artist: 'Synth Band', zone: { id: 'z-alice', name: 'Kitchen' }, can_join: true, along: [] },
+        { key: K('b'), name: 'Bob', you: false, mine: false, playing: true, title: 'Hidden Song', zone: null, can_join: false, along: [] },
+        { key: K('c'), name: 'Carol', you: false, mine: true, your_zone: nz.id, playing: true, title: 'Together', zone: { id: 'z-carol', name: 'Living room' }, can_join: true, along: [] },
+      ];
+      await p.route(/\/v1\/presence$/, (r) => r.fulfill({ json: PRES }));
+      await p.route(/\/v1\/me\/presence$/, (r) => r.fulfill({ json: { visible: 'hidden' } }));
+      let alongBody = null; let alongStatus = 409;
+      // the node answers with the new group zone: their music, your speakers with theirs
+      const GROUP = { ...nz, id: `group:${nz.output}+alice`, name: 'Kitchen + Null output', output: `group:${nz.output}+alice` };
+      await p.route(/\/v1\/presence\/along$/, (r) => { alongBody = JSON.parse(r.request().postData() || '{}'); if (alongStatus !== 200) return r.fulfill({ status: alongStatus, json: { error: 'someone else is listening on that zone: listen along from yours' } }); PRES[1] = { ...PRES[1], mine: true, your_zone: nz.id }; return r.fulfill({ json: GROUP }); });
+      await p.goto(BASE + '/'); await p.waitForSelector('#h-listening .list-row', { timeout: 15000 }).catch(() => {});
+      const rows = await p.$$eval('#h-listening .list-row', (els) => els.map((e) => ({ name: e.querySelector('.name').textContent.replace(/\s+/g, ' ').trim(), sub: (e.querySelector('.sub') || {}).textContent || '', join: !!e.querySelector('[data-alongjoin]'), pill: (e.querySelector('.pill') || {}).textContent || '' })));
+      check(rows.length === 3 && !rows.some((r) => /My own song/.test(r.name)), `Listening now lists the others, not you (${rows.length})`);
+      check(rows[0] && /^Alice is listening to Night Drive · Synth Band$/.test(rows[0].name) && rows[0].sub === 'on Kitchen' && rows[0].join, `who, what and where, with Listen along (${rows[0] && rows[0].name} / ${rows[0] && rows[0].sub})`);
+      check(rows[1] && /^Bob is listening/.test(rows[1].name) && !rows[1].sub && !rows[1].join, 'a zone not open to you: who, without a place or a button');
+      check(rows[2] && rows[2].pill === 'Listening along' && !rows[2].join, 'the one you listen along with says so');
+      // This browser can't join a group: Listen along asks which of your zones
+      await p.click('[data-alongjoin="0"]'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]', { timeout: 5000 }).catch(() => {});
+      const menuText = await p.evaluate(() => (document.querySelector('.popover.menu:not([hidden])') || {}).textContent || '');
+      check(/Listen from/.test(menuText) && menuText.includes(nz.name), `from This browser it asks which speakers listen along (${menuText.replace(/\s+/g, ' ').slice(0, 80)})`);
+      await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const refusal = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/listen along from yours/i.test(v || '')) return v; if (Date.now() > end) return v; await p.waitForTimeout(150); } })();
+      check(/someone else is listening on that zone/i.test(refusal || ''), `a refusal in the node's words (409: ${refusal})`);
+      check(alongBody && alongBody.key === K('a') && alongBody.zone === nz.id, `the request names them and your zone (${JSON.stringify(alongBody && { zone: alongBody.zone })})`);
+      check(await p.evaluate(() => { const b = document.querySelector('[data-alongjoin="0"]'); return !!b && !b.disabled && /Listen along with Alice/.test(b.getAttribute('aria-label')); }), 'after a refusal the button is back, named again');
+      // and now it works: the page switches to the group and the row says you listen along
+      alongStatus = 200;
+      await p.click('[data-alongjoin="0"]'); await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const ok = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Listening along with Alice/.test(v || '')) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } })();
+      check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);
+      check(await waitText(p, '#h-listening .list-row:first-child .pill', 'Listening along'), 'the row says you listen along now');
+      await p.unroute(/\/v1\/presence$/); await p.unroute(/\/v1\/me\/presence$/); await p.unroute(/\/v1\/presence\/along$/);
+      await c.close();
+      await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
+    }
 
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();
