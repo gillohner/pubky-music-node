@@ -263,7 +263,8 @@ impl PullOutput {
         generation: Option<u64>,
     ) -> Result<LiveStream, Missed> {
         let deadline = tokio::time::Instant::now() + wait;
-        let since = generation.unwrap_or_else(|| self.shared.slot.lock().expect("pull lock").generation);
+        let start = self.shared.slot.lock().expect("pull lock").generation;
+        let since = generation.unwrap_or(start);
         let checked = self.controlled || generation.is_some();
         loop {
             // Registered before the check, so a stream parked in between wakes us
@@ -273,14 +274,11 @@ impl PullOutput {
             {
                 let mut slot = self.shared.slot.lock().expect("pull lock");
                 // A request naming its stream gets that one only (older, newer, or from before a
-                // restart: answered); one that doesn't, none opened after it began
+                // restart); one that doesn't, none opened after it began
                 let other = match generation {
                     Some(g) => slot.generation != g,
                     None => slot.generation > since,
                 };
-                if checked && other {
-                    return Err(Missed::Superseded);
-                }
                 // A stream whose sink closed with nothing left to hear is no stream
                 if slot
                     .pending
@@ -289,7 +287,17 @@ impl PullOutput {
                 {
                     slot.pending = None;
                 }
-                if let Some(p) = slot.pending.take() {
+                if checked && other {
+                    // Answered at once when a newer stream waits to be fetched, or one opened
+                    // while it waited: the renderer's fetch of its new URL gets it. An old URL
+                    // with nothing new (after a restart, a refused SetAVTransportURI) is held
+                    // like any request for a stream that isn't playing: answered at once, a
+                    // stopped Linn would ask again in a tight loop
+                    let newer_waiting = slot.pending.is_some();
+                    if generation.is_none() || newer_waiting || slot.generation != start {
+                        return Err(Missed::Superseded);
+                    }
+                } else if let Some(p) = slot.pending.take() {
                     if slot.left.is_some_and(|(g, _)| g == p.generation) {
                         slot.left = None;
                     }
@@ -742,6 +750,53 @@ mod tests {
         drop(sink);
         // A new node (a restart) does not start where the old one did
         assert_ne!(PullOutput::controlled("named").generation(), 0);
+    }
+
+    /// An old URL while nothing new waits (after a restart, a refused SetAVTransportURI) is
+    /// held like a request for a stream that isn't playing, not answered at once: a stopped Linn
+    /// would ask again in a tight loop (review of #181). A stream opening meanwhile answers it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_old_url_with_nothing_new_is_held_not_answered_at_once() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = Arc::new(PullOutput::controlled("held-old"));
+        // The current stream is playing to its listener: nothing waits to be fetched
+        let mut sink = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        let w = std::thread::spawn(move || {
+            sink.write(&block(fmt, 0)).unwrap();
+            sink
+        });
+        let mut live = out.take_stream(Duration::from_secs(2)).await.unwrap();
+        assert!(live.next_chunk().await.is_some());
+        let t = Instant::now();
+        let r = out.take_stream_for(Duration::from_millis(600), Some(g - 1)).await;
+        assert_eq!(r.err(), Some(Missed::Timeout));
+        assert!(
+            t.elapsed() >= Duration::from_millis(550),
+            "answered after {:?}",
+            t.elapsed()
+        );
+        // Held, then a new stream opens: answered then, and the new one is not taken
+        let o = out.clone();
+        let held = tokio::spawn(async move {
+            let t = Instant::now();
+            (
+                o.take_stream_for(Duration::from_secs(5), Some(g - 1)).await.err(),
+                t.elapsed(),
+            )
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(live);
+        drop(w.join().unwrap());
+        let next = out.open_now(fmt).unwrap();
+        let (missed, took) = held.await.unwrap();
+        assert_eq!(missed, Some(Missed::Superseded));
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(out
+            .take_stream_for(Duration::from_secs(1), Some(out.generation()))
+            .await
+            .is_ok());
+        drop(next);
     }
 
     /// Nobody comes back: the sink fails soon after the listener left, not after the full
