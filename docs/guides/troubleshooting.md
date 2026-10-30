@@ -57,6 +57,12 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
   share's options.
 - The log names files it could not read.
 
+## The homeserver keeps restarting (own homeserver)
+
+`docker compose logs homeserver` shows "Failed to publish the homeserver's pkarr packet to the
+DHT": the homeserver needs the internet when it starts, to publish its address. It starts by
+itself once the machine is online again (after a power cut, the router may come up later).
+
 ## The node doesn't start: "Permission denied" on /data
 
 The data folder must be writable by user id 1000. With a folder instead of a Docker volume:

@@ -365,7 +365,17 @@ async fn own_apps_are_set_in_service_apps_and_node_toml_wins() {
         "{text}"
     );
 
-    // The drives and Jamendo, the same way; OneDrive is a public client
+    // The drives and Jamendo, the same way; OneDrive is a public client. A drive signed in with
+    // the old app is signed out (its refresh token can't work with the new app)
+    s.drives.write().unwrap().accounts.insert(
+        pm_api::drives::Provider::Google,
+        pm_api::drives::Account {
+            refresh_token: "from-the-old-app".into(),
+            access_token: String::new(),
+            expires_at: 0,
+            user: Some("me@example.org".into()),
+        },
+    );
     for (id, body) in [
         (
             "google-drive",
@@ -384,6 +394,14 @@ async fn own_apps_are_set_in_service_apps_and_node_toml_wins() {
     assert_eq!(
         s.drives.read().unwrap().apps[&pm_api::drives::Provider::Google].client_secret,
         "g-secret"
+    );
+    assert!(
+        !s.drives
+            .read()
+            .unwrap()
+            .accounts
+            .contains_key(&pm_api::drives::Provider::Google),
+        "the old app's sign-in goes"
     );
     assert_eq!(s.jamendo.read().unwrap().creds.client_id, "jam-id");
     let (st, r) = call(

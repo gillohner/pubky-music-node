@@ -37,6 +37,12 @@ pub enum AirPlayError {
     Protocol(String),
     #[error("the receiver refused {0} ({1})")]
     Refused(String, u16),
+    /// The receiver hung up (it ends an RTSP connection it thinks is idle).
+    #[error("the receiver closed the connection ({0})")]
+    Closed(String),
+    /// What the node cannot do for this receiver, in words for the zone's error.
+    #[error("{0}")]
+    Unsupported(String),
 }
 
 /// An AirPlay receiver as found on the network.
@@ -54,6 +60,13 @@ pub struct Device {
 }
 
 impl Device {
+    /// The receiver wants `POST /auth-setup` before ANNOUNCE: AirPlay 2 speakers that list MFi
+    /// authentication (`et` 4; Bluesound, many 2020s speakers) answer ANNOUNCE with 403 without
+    /// it. The node sends a public key and checks nothing back (the stream stays unencrypted).
+    pub fn needs_auth_setup(&self) -> bool {
+        self.encryption.iter().any(|e| e == "4")
+    }
+
     /// Why the node cannot play to it, if it cannot.
     pub fn unsupported(&self) -> Option<String> {
         if !self.encryption.is_empty() && !self.encryption.iter().any(|e| e == "0") {
@@ -183,6 +196,13 @@ fn err(e: AirPlayError) -> SinkError {
     SinkError::Device(e.to_string())
 }
 
+/// Open a session and show the track's text.
+fn start_session(addr: SocketAddr, auth: bool, text: &Text) -> Result<Session, AirPlayError> {
+    let mut s = Session::start(addr, auth)?;
+    let _ = s.set_text(text);
+    Ok(s)
+}
+
 /// AirPlay volume: -30 dB (quietest) to 0 dB; -144 is mute.
 fn percent_to_db(p: u8) -> f32 {
     if p == 0 {
@@ -229,26 +249,27 @@ impl Output for AirPlayOutput {
         if let Some(old) = self.session.lock().expect("session").take() {
             old.teardown();
         }
-        let addr = self.device.addr;
+        let (addr, auth) = (self.device.addr, self.device.needs_auth_setup());
         let meta = self.meta.lock().expect("meta").clone().unwrap_or_default();
-        let session = std::thread::spawn(move || -> Result<Session, AirPlayError> {
-            let mut s = Session::start(addr)?;
-            let _ = s.set_text(&Text {
-                title: meta.title,
-                artist: meta.artist,
-                album: meta.album,
-            });
-            Ok(s)
-        })
-        .join()
-        .map_err(|_| SinkError::Device("airplay thread panicked".into()))?
-        .map_err(err)?;
+        let text = Text {
+            title: meta.title,
+            artist: meta.artist,
+            album: meta.album,
+        };
+        let first = text.clone();
+        let session = std::thread::spawn(move || start_session(addr, auth, &first))
+            .join()
+            .map_err(|_| SinkError::Device("airplay thread panicked".into()))?
+            .map_err(err)?;
         *self.session.lock().expect("session") = Some(session);
         Ok(Box::new(AirPlaySink {
             fmt,
             session: self.session.clone(),
             written: 0,
             clock: (Instant::now(), 0),
+            addr,
+            auth,
+            text,
         }))
     }
 
@@ -275,6 +296,10 @@ struct AirPlaySink {
     session: Arc<Mutex<Option<Session>>>,
     written: u64,
     clock: (Instant, u64),
+    /// To open the session again when the receiver closed it (a Linn does after a pause).
+    addr: SocketAddr,
+    auth: bool,
+    text: Text,
 }
 
 impl AirPlaySink {
@@ -301,10 +326,27 @@ impl AudioSink for AirPlaySink {
         };
         {
             let mut guard = self.session.lock().expect("session");
-            let session = guard
-                .as_mut()
-                .ok_or_else(|| SinkError::Device("AirPlay session closed".into()))?;
-            session.push(&stereo).map_err(err)?;
+            // The receiver closed the last session: open a new one and go on
+            if guard.is_none() {
+                tracing::info!(addr = %self.addr, "AirPlay: opening the session again");
+                *guard = Some(start_session(self.addr, self.auth, &self.text).map_err(err)?);
+                self.clock = (Instant::now(), self.written);
+            }
+            let session = guard.as_mut().expect("session just opened");
+            match session.push(&stereo) {
+                Ok(_) => {}
+                Err(AirPlayError::Closed(why)) => {
+                    tracing::info!(addr = %self.addr, "AirPlay receiver closed the session ({why}); opening it again");
+                    if let Some(old) = guard.take() {
+                        old.teardown();
+                    }
+                    let mut fresh = start_session(self.addr, self.auth, &self.text).map_err(err)?;
+                    fresh.push(&stereo).map_err(err)?;
+                    *guard = Some(fresh);
+                    self.clock = (Instant::now(), self.written);
+                }
+                Err(e) => return Err(err(e)),
+            }
         }
         self.written += block.frames() as u64;
         let elapsed = self.clock.0.elapsed();
@@ -325,9 +367,21 @@ impl AudioSink for AirPlaySink {
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
-        if let Some(s) = self.session.lock().expect("session").as_mut() {
-            s.flush().map_err(err)?;
+        let mut guard = self.session.lock().expect("session");
+        if let Some(s) = guard.as_mut() {
+            match s.flush() {
+                Ok(()) => {}
+                // Nothing left to flush on a receiver that hung up; the next write opens a new session
+                Err(AirPlayError::Closed(why)) => {
+                    tracing::info!(addr = %self.addr, "AirPlay receiver closed the session ({why})");
+                    if let Some(old) = guard.take() {
+                        old.teardown();
+                    }
+                }
+                Err(e) => return Err(err(e)),
+            }
         }
+        drop(guard);
         self.clock = (Instant::now(), self.written);
         Ok(())
     }

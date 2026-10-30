@@ -114,12 +114,25 @@ pub(crate) fn image_path(s: &NodeState, artist_id: i64) -> std::path::PathBuf {
 }
 
 async fn get_json(http: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+    // MusicBrainz: one request at a time with the rest of the node
+    let mut turn = match url.contains("/ws/2/") {
+        true => Some(pm_library::musicbrainz::take_turn(url, std::time::Duration::from_secs(1)).await),
+        false => None,
+    };
     let resp = http
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
         .ok()?;
+    if matches!(resp.status().as_u16(), 503 | 429) {
+        if let Some(t) = turn.as_mut() {
+            t.back_off(pm_library::musicbrainz::retry_after(
+                resp.headers(),
+                std::time::Duration::from_secs(2),
+            ));
+        }
+    }
     if !resp.status().is_success() {
         return None;
     }

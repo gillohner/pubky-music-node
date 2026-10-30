@@ -1059,6 +1059,16 @@ pub(crate) async fn sign_out(
     Ok(Json(serde_json::json!({"signed_out": p.id()})))
 }
 
+/// The node's app for `p` changed (Settings › Service apps): the drive's sign-in belonged to the
+/// old app and can't be refreshed with the new one, so it goes (its folders stay; signing in again
+/// picks them up).
+pub(crate) fn app_changed(s: &NodeState, p: Provider) -> Result<(), ApiError> {
+    if s.drives.write().expect("drives").accounts.remove(&p).is_some() {
+        save(s)?;
+    }
+    Ok(())
+}
+
 /// Rescans every drive folder now and then.
 pub fn spawn_rescans(s: &Arc<NodeState>) {
     let weak = Arc::downgrade(s);
