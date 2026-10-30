@@ -252,6 +252,18 @@ async fn presence_is_chosen_per_person_and_listening_along_groups_the_speakers()
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{r}");
+    // ...and pausing it doesn't make it theirs: the owner still listens there
+    let (_, seen) = call(&app, OWNER, "GET", "/v1/presence", None).await;
+    assert_eq!(
+        (
+            seen[0]["key"].as_str(),
+            seen[0]["zone"]["id"].as_str(),
+            seen[0]["hosting"].as_bool()
+        ),
+        (Some("owner"), Some(gid.as_str()), Some(true)),
+        "{seen}"
+    );
+    assert_eq!(seen[0]["your_zone"], "kitchen", "the host's way back: {seen}");
     call(
         &app,
         &listener,
@@ -270,11 +282,284 @@ async fn presence_is_chosen_per_person_and_listening_along_groups_the_speakers()
     assert_eq!(st, StatusCode::NOT_FOUND, "the group is gone");
     let (st, _) = call(&app, &listener, "DELETE", "/v1/presence/along", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "not along any more");
-    // Pausing the group didn't make it the listener's: the owner listens in the kitchen again
+    // The owner listens in the kitchen again
     let (_, seen) = call(&app, OWNER, "GET", "/v1/presence", None).await;
     assert_eq!(
         (seen[0]["key"].as_str(), seen[0]["zone"]["id"].as_str()),
         (Some("owner"), Some("kitchen")),
         "{seen}"
     );
+}
+
+const KEY2: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+
+/// A node with these rooms and one song, and two listeners besides the owner (everyone shown
+/// to everyone). Answers the tokens of the two listeners too.
+async fn rooms(
+    dir: &std::path::Path,
+    names: &[&'static str],
+) -> (Arc<NodeState>, axum::Router, i64, String, String) {
+    let music = dir.join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("song.wav"));
+    let db = dir.join("lib.sqlite");
+    let outputs = OutputRegistry::new();
+    for n in names {
+        outputs.register(Arc::new(Room(n, NullOutput::realtime())));
+    }
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.join("art"),
+            mirror_dir: dir.join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some(OWNER.into()),
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        outputs,
+    );
+    s.zones_for_all_outputs();
+    let roster = serde_json::json!({"people": [
+        {"key": KEY, "access": "music", "music_enabled": true, "added_at": 0},
+        {"key": KEY2, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    let (l1, l2) = (
+        pm_api::accounts::mint(&s, KEY).unwrap(),
+        pm_api::accounts::mint(&s, KEY2).unwrap(),
+    );
+    let app = router(s.clone());
+    call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/library/scan",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, found) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    let track = found["tracks"][0]["id"].as_i64().unwrap();
+    for t in [OWNER, l1.as_str(), l2.as_str()] {
+        let (st, _) = call(
+            &app,
+            t,
+            "PUT",
+            "/v1/me/presence",
+            Some(serde_json::json!({"visible": "everyone"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
+    (s, app, track, l1, l2)
+}
+
+/// `token` plays the song on `zone`, and it is playing.
+async fn play(app: &axum::Router, token: &str, zone: &str, track: i64) {
+    let (st, r) = call(
+        app,
+        token,
+        "POST",
+        &format!("/v1/zones/{zone}/queue"),
+        Some(serde_json::json!({"track_ids": [track], "replace": true, "play": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    for _ in 0..100 {
+        let (_, z) = call(app, token, "GET", &format!("/v1/zones/{zone}"), None).await;
+        if z["transport"] == "playing" {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{zone} doesn't play");
+}
+
+async fn zone_ids(app: &axum::Router) -> Vec<String> {
+    let (_, zs) = call(app, OWNER, "GET", "/v1/zones", None).await;
+    let mut ids: Vec<String> = zs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|z| z["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Review of #175: a speaker plays in one group at a time; ending a group never overwrites the
+/// host's own zone once they used it; deleting a group zone ends it like its host would; and a
+/// group whose home is gone can still be left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_speaker_plays_in_one_group_and_ending_one_keeps_the_hosts_music() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app, track, l1, l2) = rooms(dir.path(), &["Kitchen", "Den", "Hall"]).await;
+    let along = |key: &str, zone: &str| serde_json::json!({"key": key, "zone": zone});
+    play(&app, OWNER, "kitchen", track).await;
+    let (st, g1) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(along("owner", "den")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g1}");
+    play(&app, &l2, "hall", track).await;
+    // The host can't join someone else while others listen along with them
+    let (st, e) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/presence/along",
+        Some(along(KEY2, "kitchen")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    // A speaker in a group (the host's, a joiner's) can't join from its own zone too
+    for z in ["kitchen", "den"] {
+        let (st, e) = call(&app, &l2, "POST", "/v1/presence/along", Some(along("owner", z))).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{z}: {e}");
+    }
+    let (st, g2) = call(
+        &app,
+        &l2,
+        "POST",
+        "/v1/presence/along",
+        Some(along("owner", "hall")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g2}");
+    assert_eq!(g2["name"], "Kitchen + Den + Hall", "{g2}");
+    assert_eq!(
+        zone_ids(&app).await.len(),
+        4,
+        "the bigger group took the first's place"
+    );
+
+    // The host plays something at home meanwhile: the end of the group doesn't overwrite it
+    play(&app, OWNER, "kitchen", track).await;
+    let (st, r) = call(&app, &l1, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (st, home) = call(&app, &l2, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert_eq!(
+        (home["id"].as_str(), home["transport"].as_str()),
+        (Some("kitchen"), Some("playing")),
+        "the host's own music plays on: {home}"
+    );
+    assert_eq!(
+        zone_ids(&app).await,
+        ["den", "hall", "kitchen"],
+        "the group is gone"
+    );
+
+    // Deleting a group zone ends it as its host would: the music goes home
+    let (st, g) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(along("owner", "den")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g}");
+    let gid = g["id"].as_str().unwrap().to_string();
+    let (st, _) = call(&app, OWNER, "DELETE", &format!("/v1/zones/{gid}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, kitchen) = call(&app, OWNER, "GET", "/v1/zones/kitchen", None).await;
+    assert_eq!(
+        (
+            kitchen["transport"].as_str(),
+            kitchen["now_playing"]["item"]["title"].as_str()
+        ),
+        (Some("playing"), Some("Song")),
+        "{kitchen}"
+    );
+    assert_eq!(zone_ids(&app).await, ["den", "hall", "kitchen"]);
+
+    // A group whose home zone is gone can still be left: the music plays on where it is
+    let (st, g) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(along("owner", "den")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g}");
+    let (st, _) = call(&app, OWNER, "DELETE", "/v1/zones/kitchen", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, left) = call(&app, &l1, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK, "{left}");
+    assert_eq!(left["id"], g["id"], "{left}");
+    let (st, _) = call(&app, &l1, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "not along any more");
+}
+
+/// Joining stops your zone: never one where someone else's music plays (mn-app's review of
+/// #193), whether or not they let you see them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_never_stops_someone_elses_music() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app, track, l1, l2) = rooms(dir.path(), &["Kitchen", "Den", "Hall"]).await;
+    call(
+        &app,
+        &l2,
+        "PUT",
+        "/v1/me/presence",
+        Some(serde_json::json!({"visible": "hidden"})),
+    )
+    .await;
+    play(&app, OWNER, "kitchen", track).await;
+    play(&app, &l2, "den", track).await;
+    let along = |zone: &str| serde_json::json!({"key": "owner", "zone": zone});
+    let (st, e) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("den"))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    let (_, den) = call(&app, OWNER, "GET", "/v1/zones/den", None).await;
+    assert_eq!(den["transport"], "playing", "l2's music plays on: {den}");
+    // A zone of yours that shares a speaker with theirs (a group of the kitchen and the hall):
+    // one speaker can't be opened twice (review of #183)
+    let (st, both) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/zones",
+        Some(serde_json::json!({"name": "Kitchen and Hall", "outputs": ["room:kitchen", "room:hall"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{both}");
+    let (st, e) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(along(both["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    let (st, g) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("hall"))).await;
+    assert_eq!(st, StatusCode::OK, "a zone nobody plays on: {g}");
 }

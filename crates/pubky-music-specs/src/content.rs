@@ -34,7 +34,7 @@ pub const LIVE_WINDOW_MAX_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 pub const LIVE_NAME_MAX_LENGTH: usize = 100;
 /// The services everyone spells the same way (an open vocabulary: other well-formed names are
 /// fine, and a reader that does not know one treats the source as unknown). Hyphenated, never
-/// underscored: Pinakes maps its `apple_music` to `apple-music`.
+/// underscored: a spelling with underscores folds to hyphens (`apple_music` is `apple-music`).
 pub const SERVICE_NAMES: &[&str] = &[
     "library",
     "roon",
@@ -134,13 +134,16 @@ impl MusicSource {
 /// reactions are social tags on it.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MusicListeningContent {
-    /// When this song started, Unix microseconds: its position is now − `started_at` (while
-    /// playing).
+    /// When this song would have started for the position it is at, Unix microseconds: the time
+    /// the version was written minus the position then, so the position is now − `started_at`
+    /// while playing. A resume or a seek writes it anew (now − position) and clears `paused_at`;
+    /// a pause keeps it.
     pub started_at: i64,
     /// When a reader stops showing it if no newer version comes, Unix microseconds (at most
     /// [`LIVE_WINDOW_MAX_MICROS`] after `started_at`). A writer keeps it a little past the song's
-    /// end, so a client that stops without saying so leaves nothing showing for long. Absent: a
-    /// reader stops a day after the post's newest version.
+    /// end (and past the pause while paused), so a client that stops without saying so leaves
+    /// nothing showing for long. Absent: a reader stops [`LIVE_WINDOW_MAX_MICROS`] after
+    /// `started_at`, which every version moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
     /// Set while paused, Unix microseconds: the position is `paused_at` − `started_at`.
@@ -175,7 +178,10 @@ impl MusicListeningContent {
 
     /// Whether a reader shows it at `now` (Unix microseconds): not ended and not expired.
     pub fn is_live(&self, now: i64) -> bool {
-        self.ended_at.is_none_or(|e| now < e) && self.expires_at.is_none_or(|e| now < e)
+        let expires = self
+            .expires_at
+            .unwrap_or(self.started_at.saturating_add(LIVE_WINDOW_MAX_MICROS));
+        self.ended_at.is_none_or(|e| now < e) && now < expires
     }
 
     /// Where in the song it is at `now` (Unix microseconds), in milliseconds: the paused position
