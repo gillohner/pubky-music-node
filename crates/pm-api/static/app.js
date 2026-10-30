@@ -196,7 +196,7 @@
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
-    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; throw err; }
+    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; throw err; }
     return json;
   };
 
@@ -1411,10 +1411,65 @@
     if (!state.me || isOffline() || document.hidden) return;
     try {
       const ls = await api('GET', '/presence');
-      state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null;
+      state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null; state.presence = ls;
       if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
     } catch { return; }
-    renderAlong(); followAlong();
+    renderAlong(); followAlong(); renderListening();
+  };
+  // Home's "Listening now" (TASK-pinakes-social-ux L3): who else on this node is listening, what and
+  // where, with Listen along when their zone is open to you. A zone you can't see: just who.
+  // The node's own words name the reason (along already, someone else's zone, a maker's group,
+  // a zone that is gone); a 403 gets a plain sentence
+  const ALONG_ERRORS = { 403: 'That zone isn’t open to you.' };
+  const renderListening = () => {
+    const wrap = $('#h-listenwrap'); if (!wrap || state.view !== 'home') return;
+    const others = (state.presence || []).filter((l) => !l.you);
+    if (!others.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `<section class="section" id="h-listening"><div class="section-head"><h3>Listening now</h3></div><div class="list">${others.map((l, k) => {
+      const name = personName(l);
+      const face = l.avatar ? `<img class="thumb round" src="${esc(imgSrc(l.avatar))}" alt="" loading="lazy" data-err="hide">` : `<div class="avatar" aria-hidden="true">${esc(initials(name))}</div>`;
+      const what = l.title ? ` to <b>${esc(l.title)}</b>${l.artist ? ` <span class="muted">· ${esc(l.artist)}</span>` : ''}` : '';
+      const joining = state.joiningAlong === l.key;
+      const act = l.mine ? '<span class="pill ok">Listening along</span>' : l.zone && l.can_join ? `<button class="btn sm" data-alongjoin="${k}" ${joining ? 'disabled aria-label="Joining…"' : `aria-label="Listen along with ${esc(name)}"`}>${joining ? '<span class="spin"></span> Joining…' : `${icon('zone')} Listen along`}</button>` : '';
+      return `<div class="list-row listening">${face}${l.image ? `<img class="thumb" src="${esc(imgSrc(l.image))}" alt="" loading="lazy" data-err="hide">` : ''}<div class="grow"><div class="name">${esc(name)} is listening${what}</div>${l.zone ? `<div class="sub">on ${esc(l.zone.name)}${l.playing === false ? ' · paused' : ''}</div>` : ''}</div>${act}</div>`;
+    }).join('')}</div></section>`;
+    $$('[data-alongjoin]', wrap).forEach((b) => b.onclick = () => joinAlong(others[Number(b.dataset.alongjoin)], b));
+  };
+  // Listen along from a zone that is free to join: a node zone (This browser can't join a group),
+  // not one someone else is listening on (joining stops what plays there) and not a listen-along
+  // group. The zone in use when it is one, else a menu of them. The page only sees listeners who
+  // let it, so the node is the guard: it refuses (409) a zone where someone else's music plays,
+  // and then the menu offers the others (`skip`: zones refused so far).
+  const joinAlong = (l, b, skip = new Set(), quiet = false) => {
+    const busy = new Set((state.presence || []).filter((p) => !p.you && p.zone).map((p) => p.zone.id));
+    const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && !skip.has(id) && (!l.zone || id !== l.zone.id);
+    if (!skip.size && free(state.zone)) return doJoinAlong(l, state.zone, b, skip);
+    const mine = zoneList().filter((z) => free(z.id));
+    if (!mine.length) { if (quiet) return; toast(skip.size ? 'Someone else is listening on your other speakers too: Listen along needs free ones.' : 'Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
+    showMenu(b, [{ title: skip.size ? 'Someone listens there: listen from' : 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b, skip) }))], { all: true });
+  };
+  const doJoinAlong = async (l, zone, b, skip = new Set()) => {
+    // The row may be drawn again while this runs (a zone came, the 20 s poll): it stays "Joining…"
+    state.joiningAlong = l.key; renderListening();
+    try {
+      const zs = await api('POST', '/presence/along', { key: l.key, zone });
+      state.zones[zs.id] = zs; state.zone = zs.id; try { localStorage.setItem('pm.zone', state.zone); } catch { /* storage unavailable */ }
+      renderZoneName(); renderBar(); refreshQueue();
+      state.joiningAlong = null;
+      toast(`Listening along with ${personName(l)}`);
+      await refreshAlong();
+    } catch (e) {
+      state.joiningAlong = null; renderListening();
+      // Someone else's music plays on that zone: pick another of yours
+      if (e.status === 409 && /someone else/i.test(e.raw || e.message)) {
+        skip.add(zone); toast(e.message, 'error');
+        const others = (state.presence || []).filter((p) => !p.you);
+        const again = $$('#h-listenwrap [data-alongjoin]').find((x) => (others[Number(x.dataset.alongjoin)] || {}).key === l.key) || b;
+        if (again.isConnected) joinAlong(l, again, skip, true);
+        return;
+      }
+      toast(ALONG_ERRORS[e.status] || e.message, 'error');
+    }
   };
   const leaveAlong = async () => {
     const a = state.along; const b = $('#alongleave'); if (!a) return;
@@ -2839,8 +2894,9 @@
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
-  const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+  // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
+  const showMenu = (anchor, items, opts = {}) => {
+    if (isListener() && !opts.all) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
     if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
     else if (menuPick) {
       const want = menuPick; menuPick = null; closeMenu();
@@ -3708,7 +3764,7 @@
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
           await pubkyUser();
           // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
-          const HOME_ROWS = [['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
+          const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
           // Your Home (Settings › You): your own layout where you set one, else the node's default
           if (!state.homeLayout) {
             const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
@@ -3720,7 +3776,7 @@
           const showRow = (k) => !(lay.hidden || []).includes(k);
           const rowOf = (k) => HOME_ROWS.find(([x]) => x === k);
           const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`;
-          const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
+          const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (k === 'listening') return '<div id="h-listenwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
@@ -3746,6 +3802,8 @@
             })();
           };
           $('#hedit').onclick = () => { state.homeEdit = !state.homeEdit; render(); };
+          // Listening now: what is known at once, then the node's latest
+          renderListening(); refreshAlong();
           const hd = $('#hdone'); if (hd) hd.onclick = () => { state.homeEdit = false; render(); };
           $$('[data-hshow]', main).forEach((c) => c.onchange = () => { const hidden = new Set(lay.hidden || []); if (c.checked) hidden.delete(c.dataset.hshow); else hidden.add(c.dataset.hshow); saveLayout({ order: ordered, hidden: [...hidden] }); });
           const move = (i, d) => { const o = [...ordered]; const [x] = o.splice(i, 1); o.splice(i + d, 0, x); saveLayout({ order: o, hidden: lay.hidden || [] }); };

@@ -1390,3 +1390,5 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 .mrow .thumb { margin-right: 0; }
 .mrow .msize { min-width: 64px; text-align: right; }
 @media (max-width: 600px) { .mrow .msize { display: none; } }
+/* Home's Listening now: who, their song's cover, what and where, Listen along */
+.list-row.listening .thumb + .thumb, .list-row.listening .avatar + .thumb { margin-left: -14px; box-shadow: 0 0 0 2px var(--bg); }
