@@ -89,6 +89,9 @@ impl PinakesReader {
 /// resolve. Never an error: an unreachable Pinakes is `Unknown`.
 pub async fn card(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     let uri = uri.trim().to_string();
+    if crate::activity::is_search_link(&uri) {
+        return Card::Unknown;
+    }
     if let Some(c) = s.pinakes_reader.cached(&uri) {
         return c;
     }
@@ -110,8 +113,12 @@ pub async fn card(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     resolve(s, &uri).await
 }
 
-/// Ask Pinakes to read `uri`, once at a time per link.
+/// Ask Pinakes to read `uri`, once at a time per link. Never an import's search link: its
+/// words are a private playlist's.
 pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
+    if crate::activity::is_search_link(uri) {
+        return Card::Unknown;
+    }
     let fut = {
         let mut inflight = s.pinakes_reader.inflight.lock().expect("reader inflight");
         if let Some(f) = inflight.get(uri) {

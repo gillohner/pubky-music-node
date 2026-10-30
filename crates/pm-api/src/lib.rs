@@ -12209,8 +12209,20 @@ exec sleep 300
                 ),
             )
             .route(
+                "/v1/resources/lookup",
+                post(|body: String| async move {
+                    if body.contains("musicbrainz.org/search") {
+                        ASKED_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Json(serde_json::json!([]))
+                }),
+            )
+            .route(
                 "/v1/resolve",
-                post(|| async {
+                post(|body: String| async move {
+                    if body.contains("musicbrainz.org/search") {
+                        ASKED_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     (
                         StatusCode::UNPROCESSABLE_ENTITY,
                         Json(serde_json::json!({"error": "cannot read"})),
@@ -12276,6 +12288,27 @@ exec sleep 300
         .await;
         assert_eq!(st, StatusCode::OK, "{c}");
         assert_eq!(c, serde_json::json!({"uri": search, "status": "unknown"}));
+        // Nor when a playlist that has one is opened: its sources are found without it (review
+        // of #156 at ed1ff43: /play-from looked it up, then had Pinakes read it)
+        let (st, pl) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "Imported", "uris": [search, "https://example.com/nothing"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pl}");
+        let id = pl["summary"]["id"].as_str().unwrap().to_string();
+        let (st, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pf}");
+        assert_eq!(pf["items"].as_array().map(Vec::len), Some(2), "{pf}");
+        let (_, _) = call(
+            &app,
+            "POST",
+            "/v1/discover/describe",
+            Some(serde_json::json!({"uris": [search]})),
+        )
+        .await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(
             !ASKED_SEARCH.load(std::sync::atomic::Ordering::SeqCst),

@@ -52,8 +52,15 @@ const api = async (method, path, body) => {
       assert.deepEqual([...new Set(asked)].sort(), [LINK, POST].sort(), 'both cards are asked for, the search never');
       assert.match(await list.locator('.card-row').nth(1).locator('.card-sub').textContent(), /A link/);
       assert.match(await page.locator('.hero .sub').textContent(), /1 song · 3 links/);
-      // Clicking a card's row plays nothing and breaks nothing
+      // Clicking a card's row, or an unmatched line's words, plays nothing and breaks nothing
+      // (review of #156: the search row's click replaced the queue from song 1)
+      const sent = []; page.on('request', (r) => { if (r.method() !== 'GET' && r.url().includes('/v1/')) sent.push(`${r.method()} ${new URL(r.url()).pathname}`); });
       await card.locator('.grow').click();
+      await search.locator('.grow').click();
+      await page.waitForTimeout(500);
+      assert.deepEqual(sent, [], 'nothing was played');
+      assert.equal(await page.locator('#toast.show').count(), 0, 'nothing was tried');
+      assert.equal(await search.locator('a', { hasText: 'Find on MusicBrainz' }).getAttribute('aria-label'), 'Find “Nobody Missing” on MusicBrainz');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       assert.ok(overflow <= 0, `no sideways scroll at ${width} px (${overflow})`);
       assert.deepEqual(errors, []);

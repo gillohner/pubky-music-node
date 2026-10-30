@@ -2705,7 +2705,7 @@
   // words, and never asked of Pinakes (they are a private playlist's)
   const MB_SEARCH = 'https://musicbrainz.org/search?type=recording&query=';
   const mbSearchWords = (uri) => { if (!String(uri || '').startsWith(MB_SEARCH)) return null; try { return new URL(uri).searchParams.get('query') || null; } catch { return null; } };
-  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" title="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}</div>`;
+  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}</div>`;
   const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}</div>`;
   const fillCards = (box) => $$('[data-card]', box).forEach(async (row) => {
     if (mbSearchWords(row.dataset.card)) return;
@@ -2774,10 +2774,11 @@
     io.observe(hero);
   };
   const bindSongRows = (box, all, ctx = {}) => {
-    // Cards (web pages, posts) don't play: play the songs only, from the one clicked
+    // Cards (web pages, posts) and unmatched lines don't play: play the songs only, from the one
+    // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
-    $$('[data-srow]:not([data-card])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
+    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
     fillCards(box);
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: all[Number(a.dataset.sartist)].artist_id }); });
