@@ -1764,32 +1764,43 @@
       if (pg && !pg.reading && !pg.pending) { npSrcCache.set(songPage, pg); if (npSrcCache.size > 50) npSrcCache.delete(npSrcCache.keys().next().value); }
     }
     const box = $('#npsources', overlay); if (!box || gen !== npGen) return;
+    // Play from another source (TASK-pinakes-social-ux A4): the same song, where it is, on a node
+    // zone; only from the library or a service that is on and working here (a source the node
+    // can't play would leave the zone stopped)
+    const rk = await loadSvcRank().catch(() => null);
+    if (!$('#npsources', overlay) || gen !== npGen) return;
     const also = rankSvc((pg && pg.also_on) || [], (v) => srcSvc(v.source));
-    // Play from another source (TASK-pinakes-social-ux A4): the same song, where it is, on a node zone
     const z0 = currentZone(); const cur = z0 && z0.now_playing ? z0.now_playing.item : null;
-    const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri;
-    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from ${esc(v.label || srcName(srcSvc(v.source)))} instead">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+    const canPlay = (v) => (rk ? rk.healthy.has(srcSvc(v.source)) : srcSvc(v.source) === 'library');
+    const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
+    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
-    $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b));
+    $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
     npRestore();
   };
   // What a source's entry plays as in a queue: a library track, a service's own uri, a YouTube video
   const switchUri = (v) => (v.uri && (v.source !== 'library' || v.uri.startsWith('track:')) ? v.uri : ytOf(v.url) ? `youtube:video:${ytOf(v.url)}` : null);
   // The playing song moves to another source at the same position: the zone's queue is loaded
   // again with that one item swapped (repeat, radio and paused-or-playing stay)
-  const switchSource = async (v, b) => {
-    const zone = state.zone; const z = state.zones[zone]; const np = z && z.now_playing; const uri = switchUri(v);
-    if (!np || !uri) return;
+  // `itemId`: the song the sheet was drawn for; if another one plays by now, nothing changes
+  const switchSource = async (v, b, itemId) => {
+    const zone = state.zone; const uri = switchUri(v);
+    const playingIt = () => { const z = state.zones[zone]; return z && z.now_playing && z.now_playing.item.id === itemId ? z : null; };
+    if (!uri || !playingIt()) { toast('Another song is playing now: open Sources again', 'error'); return; }
     const name = v.label || srcName(srcSvc(v.source));
     b.disabled = true;
     try {
       const queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
-      const at = queue.findIndex((q) => q.id === np.item.id);
-      if (at < 0) throw new Error('the song is no longer in the queue');
-      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: q.image || null } : q));
-      if (z.transport === 'playing') startWait('play', zone, `${np.item.title || ''} · from ${name}`, true);
-      await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: np.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      const at = queue.findIndex((q) => q.id === itemId);
+      const z = playingIt();
+      if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
+      // The new source's own cover and length: the old item's cover stays only between two items
+      // of the same service (a library file shows its album's); the length comes with the source
+      const scheme = (u) => String(u || '').split(':')[0];
+      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+      if (z.transport === 'playing') startWait('play', zone, `${z.now_playing.item.title || ''} · from ${name}`, true);
+      await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
       toast(`Playing from ${name}`);
       refreshQueue();
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); b.disabled = false; }
@@ -4231,7 +4242,7 @@
               if (!parts.length) { ss.remove(); return; }
               ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar</h3></div>${parts.join('')}</section>`;
               const lib = $('#isimlib', main);
-              if (lib && kind === 'song') { bindSongRows(lib, mineSongs, {}); enableSelect(lib, mineSongs); } else if (lib) bindItemTiles(lib, mineTiles, kind);
+              if (lib && kind === 'song') bindSongRows(lib, mineSongs, {}); else if (lib) bindItemTiles(lib, mineTiles, kind);
               $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
               if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });

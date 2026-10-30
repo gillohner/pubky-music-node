@@ -514,9 +514,15 @@ pub(crate) async fn page_extras(
         external(&s, &kind, &id, &url).await
     };
     let mut pg = pg;
+    // Library reads (up to a few hundred songs): off the async workers
     let similar = {
-        let lib = s.library.lock().expect("library poisoned");
-        library_similar(&lib, &pg)
+        let (s2, pg2) = (s.clone(), pg.clone());
+        tokio::task::spawn_blocking(move || {
+            let lib = s2.library.lock().expect("library poisoned");
+            library_similar(&lib, &pg2)
+        })
+        .await
+        .unwrap_or_default()
     };
     extras(&s, &mut pg).await;
     Ok(Json(ItemExtras {
@@ -555,12 +561,14 @@ pub(crate) fn library_similar(lib: &pm_library::Library, pg: &ItemPage) -> Vec<c
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let seed_ids: Vec<i64> = seeds.iter().filter_map(|t| t.id.map(|i| i.0)).take(200).collect();
+    // Every song of the page's own is left out; up to 200 of them say which genres to look for
+    let own_ids: Vec<i64> = seeds.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
+    let seed_ids: Vec<i64> = own_ids.iter().copied().take(200).collect();
     if seed_ids.is_empty() {
         return Vec::new();
     }
     let alike: Vec<pm_model::Track> = lib
-        .tracks_sharing_genres(&seed_ids, 200)
+        .tracks_sharing_genres(&seed_ids, &own_ids, 200)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|n| lib.get_track(pm_model::TrackId(n)).ok().flatten())
@@ -609,6 +617,13 @@ pub(crate) fn library_similar(lib: &pm_library::Library, pg: &ItemPage) -> Vec<c
         }
         _ => {
             let me = num("artist_id");
+            // One read of the artists, not one per similar artist
+            let artists: std::collections::HashMap<i64, pm_library::ArtistSummary> = lib
+                .list_artists()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| (a.id, a))
+                .collect();
             for id in alike.iter().filter_map(|t| t.artists.first().and_then(|a| a.id)) {
                 if out.len() >= SIMILAR_MAX {
                     break;
@@ -616,8 +631,8 @@ pub(crate) fn library_similar(lib: &pm_library::Library, pg: &ItemPage) -> Vec<c
                 if Some(id) == me || !seen.insert(id) {
                     continue;
                 }
-                if let Ok(Some(a)) = lib.get_artist(id) {
-                    out.push(artist_hit(&a));
+                if let Some(a) = artists.get(&id) {
+                    out.push(artist_hit(a));
                 }
             }
         }
