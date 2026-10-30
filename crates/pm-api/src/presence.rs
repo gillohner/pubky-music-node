@@ -631,6 +631,14 @@ pub async fn join(
             joiners: Vec::new(),
         },
     };
+    // A speaker plays in one group at a time: none of yours among theirs, and on a first join none
+    // of theirs in anyone else's group
+    let clash = outputs.iter().any(|o| along.host_outputs.contains(o))
+        || (existing.is_none() && along.host_outputs.iter().any(|o| s.presence.in_a_group(o)));
+    if clash {
+        s.presence.along.lock().expect("presence lock").extend(existing);
+        return Err(conflict("those speakers play in a listen-along group already"));
+    }
     along.joiners.push(Joiner {
         key: me,
         zone: body.zone.clone(),

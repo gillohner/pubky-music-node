@@ -540,6 +540,26 @@ async fn joining_never_stops_someone_elses_music() {
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
     let (_, den) = call(&app, OWNER, "GET", "/v1/zones/den", None).await;
     assert_eq!(den["transport"], "playing", "l2's music plays on: {den}");
+    // A zone of yours that shares a speaker with theirs (a group of the kitchen and the hall):
+    // one speaker can't be opened twice (review of #183)
+    let (st, both) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/zones",
+        Some(serde_json::json!({"name": "Kitchen and Hall", "outputs": ["room:kitchen", "room:hall"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{both}");
+    let (st, e) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(along(both["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
     let (st, g) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("hall"))).await;
     assert_eq!(st, StatusCode::OK, "a zone nobody plays on: {g}");
 }
