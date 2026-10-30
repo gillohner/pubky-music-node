@@ -225,8 +225,13 @@ pub struct ZoneRef {
 pub struct Listening {
     /// Their Pubky key ([`OWNER`] for an owner not signed in to Pubky).
     pub key: String,
+    /// Their name and picture (`/v1/profiles/<key>/avatar`), when their profile is known.
+    pub name: Option<String>,
+    pub avatar: Option<String>,
     /// It is the one asking.
     pub you: bool,
+    /// The one asking listens along with them.
+    pub mine: bool,
     /// Playing, or paused.
     pub playing: bool,
     pub uri: String,
@@ -294,7 +299,9 @@ pub async fn list(
         };
         let may = accounts::may_use_zone(&s, &c, &st.id.0);
         let mut with = Vec::new();
-        if let Some(a) = along.iter().find(|a| a.group == st.id.0) {
+        let group = along.iter().find(|a| a.group == st.id.0);
+        let mine = group.is_some_and(|a| a.joiners.iter().any(|j| j.key == me));
+        if let Some(a) = group {
             for j in &a.joiners {
                 if visible_to(&s, &j.key, &me).await {
                     with.push(j.key.clone());
@@ -302,6 +309,9 @@ pub async fn list(
             }
         }
         out.push(Listening {
+            name: None,
+            avatar: None,
+            mine,
             you: p.key == me,
             can_join: may && p.key != me && !along_me,
             key: p.key,
@@ -320,6 +330,14 @@ pub async fn list(
             }),
             along: with,
         });
+    }
+    let keys: Vec<String> = out.iter().map(|l| l.key.clone()).collect();
+    let cards = crate::profiles::known_cards(&s, &keys).await;
+    for l in &mut out {
+        if let Some(c) = cards.get(&l.key) {
+            l.name = Some(c.name.clone());
+            l.avatar = c.avatar.clone();
+        }
     }
     Ok(Json(out))
 }

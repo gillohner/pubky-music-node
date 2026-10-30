@@ -223,6 +223,14 @@ async fn presence_is_chosen_per_person_and_listening_along_groups_the_speakers()
     let (_, seen) = call(&app, OWNER, "GET", "/v1/presence", None).await;
     assert_eq!(seen[0]["zone"]["id"], gid.as_str(), "{seen}");
     assert_eq!(seen[0]["along"], serde_json::json!([]));
+    assert_eq!(seen[0]["mine"], false, "{seen}");
+    let (_, theirs) = call(&app, &listener, "GET", "/v1/presence", None).await;
+    assert_eq!(
+        theirs[0]["mine"], true,
+        "the listener is along with them: {theirs}"
+    );
+    assert_eq!(theirs[0]["can_join"], false, "{theirs}");
+    assert!(theirs[0]["name"].is_null(), "no profile for the owner: {theirs}");
     call(
         &app,
         &listener,

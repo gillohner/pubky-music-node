@@ -187,6 +187,20 @@ fn card(s: &NodeState, id: &str, v: Option<&UserView>, me: Option<&str>) -> Pers
     }
 }
 
+/// The cards of these people (cached, else one Nexus call), for those it knows.
+pub(crate) async fn known_cards(s: &NodeState, ids: &[String]) -> HashMap<String, PersonCard> {
+    let ids: Vec<String> = ids.iter().filter(|id| valid_id(id)).cloned().collect();
+    let me = me(s);
+    views(s, &ids)
+        .await
+        .into_iter()
+        .filter_map(|(id, v)| {
+            let v = v?;
+            Some((id.clone(), card(s, &id, Some(&v), me.as_deref())))
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PeopleQuery {
     /// Comma-separated z32 keys (up to 50).
