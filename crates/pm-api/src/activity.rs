@@ -259,7 +259,7 @@ fn bridge(lib: &pm_library::Library, d: &DescribedTrack) -> Result<Bridged, ApiE
     if let Some(u) = named {
         return Ok(Bridged::Identified(u.to_url()));
     }
-    if let Some(link) = addresses.iter().find_map(|a| pm_pubky::schemas::web_link(a)) {
+    if let Some(link) = addresses.iter().find_map(|a| kept_link(a)) {
         return Ok(Bridged::Kept(link));
     }
     let stem = d.path.as_deref().map(|p| {
@@ -273,22 +273,66 @@ fn bridge(lib: &pm_library::Library, d: &DescribedTrack) -> Result<Bridged, ApiE
     Ok(search_link(d.artist.as_deref(), title.as_deref()).map_or(Bridged::Empty, Bridged::Kept))
 }
 
+/// The longest link a collection keeps: a social v1 reference's limit, so the collection still
+/// syncs.
+const LINK_MAX: usize = pubky_social_specs::VALIDATION_LIMITS.reference_uri_max_length;
+
+/// Host names that only mean something on one network.
+const LAN_SUFFIXES: [&str; 9] = [
+    ".local",
+    ".lan",
+    ".home",
+    ".internal",
+    ".localhost",
+    ".localdomain",
+    ".home.arpa",
+    ".intranet",
+    ".ts.net",
+];
+
+/// A line's web address, kept as a link only when it is safe to keep and to share. Playlist
+/// files from a media server name streams with their sign-in in them (Jellyfin's `api_key`,
+/// Subsonic's `t` and `s`, Plex's `X-Plex-Token`, `user:pass@`), and a kept link is shown
+/// through Pinakes and published with the collection. So: no userinfo, query or fragment, a
+/// public host (a name, not an IP address, `localhost` or a LAN name), and no longer than a v1
+/// reference. Anything else falls back to the line's words.
+fn kept_link(raw: &str) -> Option<String> {
+    let link = pm_pubky::schemas::web_link(raw)?;
+    let u = url::Url::parse(&link).ok()?;
+    let public_host = match u.host()? {
+        url::Host::Domain(d) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d.contains('.') && !LAN_SUFFIXES.iter().any(|s| d.ends_with(s) || d == s[1..])
+        }
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => false,
+    };
+    let bare =
+        u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none();
+    (public_host && bare && link.len() <= LINK_MAX).then_some(link)
+}
+
 /// A MusicBrainz recording search for an unmatched song's words, kept as a collection link so
-/// the line isn't lost; `None` without any words.
+/// the line isn't lost; `None` without any words. Long words are cut so the link stays within a
+/// v1 reference.
 pub(crate) fn search_link(artist: Option<&str>, title: Option<&str>) -> Option<String> {
+    const SEARCH: &str = "https://musicbrainz.org/search?type=recording&query=";
     let words = [artist.map(str::trim), title.map(str::trim)]
         .into_iter()
         .flatten()
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if words.is_empty() {
-        return None;
+    let mut query = String::new();
+    for c in words.chars() {
+        let mut buf = [0; 4];
+        let part: String = url::form_urlencoded::byte_serialize(c.encode_utf8(&mut buf).as_bytes()).collect();
+        if SEARCH.len() + query.len() + part.len() > LINK_MAX {
+            break;
+        }
+        query.push_str(&part);
     }
-    let query: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
-    Some(format!(
-        "https://musicbrainz.org/search?type=recording&query={query}"
-    ))
+    let query = query.trim_end_matches('+');
+    (!query.is_empty()).then(|| format!("{SEARCH}{query}"))
 }
 
 #[cfg(test)]
@@ -304,5 +348,36 @@ mod tests {
             Some("https://musicbrainz.org/search?type=recording&query=Only+a+title")
         );
         assert_eq!(super::search_link(Some("  "), None), None);
+        // Percent-encoding takes 9 bytes a CJK character: cut to fit a v1 reference
+        let long = super::search_link(Some("Artist"), Some(&"曲".repeat(500))).unwrap();
+        assert!(long.len() <= super::LINK_MAX, "{}", long.len());
+        assert!(long.starts_with("https://musicbrainz.org/search?type=recording&query=Artist+%E6%9B%B2"));
+    }
+
+    #[test]
+    fn a_link_with_a_sign_in_or_on_the_lan_is_not_kept() {
+        assert_eq!(
+            super::kept_link(" https://example.com/mixtape-notes ").as_deref(),
+            Some("https://example.com/mixtape-notes")
+        );
+        for bad in [
+            "http://jellyfin.example.com/Audio/x/stream.mp3?api_key=secret",
+            "https://music.example.com/rest/stream.view?u=admin&t=abc&s=def",
+            "https://plex.example.com/library/parts/1/file.mp3?X-Plex-Token=secret",
+            "https://user:pass@stream.example.com/live.mp3",
+            "https://token@stream.example.com/live.mp3",
+            "https://example.com/s.mp3#access_token=secret",
+            "http://nas:8096/Audio/x/stream.mp3",
+            "http://192.168.1.20/music/a.mp3",
+            "http://[fd00::1]/a.mp3",
+            "http://localhost:4533/a.mp3",
+            "http://nas.local/a.mp3",
+            "http://box.home.arpa/a.mp3",
+            "https://pc.tail1234.ts.net/a.mp3",
+        ] {
+            assert_eq!(super::kept_link(bad), None, "{bad}");
+        }
+        let long = format!("https://cdn.example.com/{}", "a".repeat(super::LINK_MAX));
+        assert_eq!(super::kept_link(&long), None, "longer than a v1 reference");
     }
 }

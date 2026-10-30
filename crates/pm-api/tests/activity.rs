@@ -298,6 +298,47 @@ async fn record_and_import_resolve_through_the_library() {
         app.clone().oneshot(req).await.unwrap().status(),
         StatusCode::UNPROCESSABLE_ENTITY
     );
+    // A media server's playlist (review of #156): streams with their sign-in in them, on the
+    // LAN, or longer than a v1 reference are never kept; the lines fall back to their words,
+    // and the import still works
+    let m3u = format!(
+        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\n",
+        "a".repeat(3000)
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?file=server.m3u")
+        .body(Body::from(m3u))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let st = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    assert_eq!(imp["kept"], 4, "{imp}");
+    let (_, server) = call(
+        &app,
+        "GET",
+        &format!("/v1/collections/{}", imp["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    let uris: Vec<&str> = server["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        [
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Token+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Password+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Nas+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Long+Song",
+        ],
+        "{server}"
+    );
     let (_, lists) = call(&app, "GET", "/v1/playlists", None).await;
     assert!(lists
         .as_array()
