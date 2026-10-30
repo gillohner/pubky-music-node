@@ -88,7 +88,7 @@
     </div>
     <div class="player-right">
       <button class="jobchip" id="jobchip" hidden aria-label="Files job"></button>
-      <button class="quality" id="quality" title="Sound quality: how the sound gets to you" aria-label="Sound quality"><span class="qdot"></span><span class="qtext">—</span></button>
+      <button class="quality" id="quality" title="Sound: where it plays from, how it gets to you, DSP and volume" aria-label="Sound" aria-haspopup="dialog" aria-expanded="false"><span class="qsrc" aria-hidden="true"></span><span class="qdot"></span><span class="qtext">—</span><span class="qdsp" hidden>DSP</span><span class="qshort" aria-hidden="true"></span></button>
       <div class="volume">
         <svg class="ic"><use href="#i-volume"/></svg>
         <input type="range" id="vol" min="-60" max="0" value="-20" aria-label="Volume in dB">
@@ -107,6 +107,7 @@
 </div>
 
 <div class="popover" id="zonepop" hidden></div>
+<div class="popover qpanel" id="qpanel" hidden role="dialog" aria-label="Sound"></div>
 <div class="popover" id="jobpop" hidden role="status"></div>
 <div class="overlay" id="nowplaying" hidden></div>
 <aside class="embedpanel ytpanel" id="ytpanel" hidden aria-label="YouTube player"><div class="embedhead"><strong id="yttitle">YouTube</strong><span class="muted small">YouTube’s own player · its ads and terms apply · plays only in this browser</span><button class="icon-btn" id="ytmin" title="Make the video smaller" aria-label="Make the video smaller" aria-expanded="true"><svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg></button></div><div class="ytbox"><div id="ytframe"></div></div></aside>

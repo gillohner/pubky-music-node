@@ -415,6 +415,8 @@ jobs:
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
+      - name: 'no developer-console link in the docs outside "Advanced: use your own app"'
+        run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
         run: python3 -I tools/secret-scan.py --binary target/debug/pm-node
       - name: TIDAL sign-in with an app and no secret, through the return page (mock TIDAL)
@@ -564,6 +566,9 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
+      - name: service apps (built in or your own, limits, Advanced form, the secret kept back)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-service-apps.js ci-token http://127.0.0.1:7788
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788

@@ -155,6 +155,32 @@ impl Output for UpnpOutput {
         self.renderer.friendly_name.clone()
     }
 
+    /// Maker and model from the device description: `Linn Klimax DSM`, `Sonos One` (the maker
+    /// once, without its company suffix).
+    fn model(&self) -> Option<String> {
+        let maker = self.renderer.manufacturer.as_deref().and_then(|m| {
+            let m = m.trim().trim_end_matches('.');
+            let m = ["Inc", "Ltd", "GmbH", "LLC", "Corporation", "Corp", "Co"]
+                .iter()
+                .fold(m, |m, s| {
+                    m.trim_end_matches(s).trim().trim_end_matches(',').trim()
+                });
+            (!m.is_empty()).then(|| m.to_string())
+        });
+        let model = self
+            .renderer
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        match (maker, model) {
+            (Some(a), Some(b)) if b.to_lowercase().contains(&a.to_lowercase()) => Some(b),
+            (Some(a), Some(b)) => Some(format!("{a} {b}")),
+            (a, b) => a.or(b),
+        }
+    }
+
     fn caps(&self) -> &OutputCaps {
         &self.caps
     }
