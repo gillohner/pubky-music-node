@@ -364,6 +364,36 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
 
+    // ---- Smart playlists: Tags from the network (E3) ----
+    c = await ctx(); p = await c.newPage();
+    {
+      const NET = [
+        { uri: 'https://tidal.com/track/1', kind: 'track', title: 'Night Drive', artist: 'Synth Band', plays_from: { service: 'tidal', label: 'TIDAL', mode: 'stream' }, tagged_by: [{ key: 'a'.repeat(52), name: 'Alice', labels: ['techno'] }], taggers_count: 4 },
+        { uri: 'https://example.bandcamp.com/track/x', kind: 'track', title: 'Card Only', page: 'https://example.bandcamp.com/track/x', site: 'Bandcamp', tagged_by: [{ key: 'b'.repeat(52), labels: ['techno'] }], taggers_count: 1 },
+      ];
+      const sent = [];
+      await p.route(/\/v1\/smart\/preview$/, (r) => { const b = JSON.parse(r.request().postData() || '{}'); sent.push(b); return r.fulfill({ json: { matched: 0, tracks: [], ...(b.reach && b.reach !== 'me' ? { network: NET } : {}) } }); });
+      let saved = null;
+      await p.route(/\/v1\/smart$/, (r) => { if (r.request().method() !== 'POST') return r.continue(); saved = JSON.parse(r.request().postData() || '{}'); return r.fulfill({ json: { id: 'sm-net', ...saved } }); });
+      await p.route(/\/v1\/smart\/sm-net\/tracks$/, (r) => r.fulfill({ json: { playlist: { id: 'sm-net', ...(saved || {}) }, matched: 0, tracks: [], network: NET } }));
+      await p.goto(BASE + '/playlists'); await p.waitForSelector('#smartnew'); await p.click('#smartnew'); await p.waitForSelector('[name="smreach"]');
+      const opts = await p.$$eval('[name="smreach"]', (els) => els.map((e) => `${e.value}${e.checked ? '*' : ''}`));
+      check(opts.join(',') === 'me*,following,friends,all' && (await p.getAttribute('.reachopts', 'role')) === 'radiogroup', `Tags from: Just me by default, then people you follow, friends, everyone (${opts.join(',')})`);
+      await p.check('[name="smreach"][value="following"]'); await p.waitForSelector('#smtags');
+      check(await p.evaluate(() => document.activeElement && document.activeElement.value === 'following'), 'the choice keeps the keyboard focus');
+      await p.fill('#smname', 'Techno friends'); await p.fill('#smtags', '#techno, night');
+      await p.waitForSelector('[data-net="1"]', { timeout: 8000 }).catch(() => {});
+      const last = sent[sent.length - 1] || {};
+      check(last.reach === 'following' && JSON.stringify(last.tags) === '["techno","night"]' && last.match === 'any', `the preview asks for the reach and the tags (${JSON.stringify({ reach: last.reach, tags: last.tags, match: last.match })})`);
+      const rows = await p.$$eval('#smprev [data-net]', (els) => els.map((e) => ({ sub: e.querySelector('.sub').textContent, play: !!e.querySelector('[data-netplay]'), link: (e.querySelector('a[target="_blank"]') || {}).href || '' })));
+      check(rows.length === 2 && /Tagged by Alice \(#techno\) and 3 more/.test(rows[0].sub) && rows[0].play && !rows[1].play && /bandcamp/.test(rows[1].link), `the preview says who tagged what; Play where it plays here, a link where not (${rows.map((x) => x.sub).join(' | ')})`);
+      await p.click('#smsave'); await p.waitForSelector('#smnet', { timeout: 8000 }).catch(() => {});
+      check(saved && saved.reach === 'following' && saved.tags.length === 2 && saved.name === 'Techno friends', `Save sends the reach and tags (${JSON.stringify(saved && { reach: saved.reach, tags: saved.tags })})`);
+      check(/From Pubky/.test(await p.textContent('#smnet').catch(() => '')) && (await p.locator('#smnet [data-net]').count()) === 2, 'the smart playlist shows what people tagged, under its songs');
+      await p.unroute(/\/v1\/smart\/preview$/); await p.unroute(/\/v1\/smart$/); await p.unroute(/\/v1\/smart\/sm-net\/tracks$/);
+    }
+    await c.close();
+
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();
     await p.goto(BASE + '/');
