@@ -518,6 +518,37 @@ async fn pause_pauses_the_device_and_a_failed_resume_reopens_the_output() {
     );
 }
 
+/// Next (or a queue item) while paused plays on a device that was told to pause: the sink
+/// resumes first, else the device would sit paused while the zone writes into it.
+#[tokio::test]
+async fn a_track_started_while_paused_resumes_the_device() {
+    let r = rig(&[("a", RATE, 1000), ("b", RATE, 300)]);
+    r.rec.device_pause.store(true, Ordering::SeqCst);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 200).await;
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    r.zone.next();
+    w.wait_for(|s| s.transport == Transport::Playing && s.queue_index == Some(1))
+        .await
+        .unwrap();
+    assert_eq!(*r.rec.resumes.lock().unwrap(), 1, "the device plays again");
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.opens.lock().unwrap(),
+        1,
+        "the same sink went on with the next track"
+    );
+}
+
 #[tokio::test]
 async fn next_previous_stop_and_restart() {
     // Three blocks per track, so no track can end while a command is in flight.

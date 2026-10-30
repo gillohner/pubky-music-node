@@ -117,6 +117,8 @@ struct Engine {
     runtime: Option<tokio::runtime::Handle>,
     /// The sequence number of the command being handled (for a panic in it).
     handling: u64,
+    /// The sink was paused ([`AudioSink::pause`]): it resumes before anything plays on it.
+    sink_paused: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -152,6 +154,7 @@ pub(crate) fn spawn(
         dirty: false,
         runtime: tokio::runtime::Handle::try_current().ok(),
         handling: 0,
+        sink_paused: false,
     };
     std::thread::Builder::new()
         .name(name)
@@ -408,6 +411,7 @@ impl Engine {
                 self.fail(format!("pause: {e}"));
                 return;
             }
+            self.sink_paused = true;
         }
         if let Some(c) = self.current.as_mut() {
             c.paused_at_ms = Some(pos);
@@ -418,22 +422,11 @@ impl Engine {
     }
 
     fn resume(&mut self) {
-        if self.current.is_none() {
+        let Some(fmt) = self.current.as_ref().map(|c| c.proc.output_format()) else {
             return;
-        }
-        // A sink that cannot carry on (its device dropped the stream during a long pause)
-        // opens again, and the track goes on from the paused position
-        if let Some(Err(e)) = self.sink.as_mut().map(|s| s.resume()) {
-            tracing::info!(zone = %self.id, "resume: opening the output again ({e})");
-            let fmt = self.current.as_ref().map(|c| c.proc.output_format());
-            if let Some(mut s) = self.sink.take() {
-                let _ = s.flush();
-            }
-            if let Some(fmt) = fmt {
-                if !self.ensure_sink(fmt, false) {
-                    return;
-                }
-            }
+        };
+        if !self.unpause_sink(fmt) {
+            return;
         }
         let Some(c) = self.current.as_mut() else {
             return;
@@ -449,6 +442,23 @@ impl Engine {
         self.transport = Transport::Playing;
         self.dirty = true;
         self.emit(ZoneEvent::Resumed);
+    }
+
+    /// Resume a paused sink before it plays again (resume, or a track started while paused).
+    /// One that cannot carry on (its device dropped the stream during a long pause) opens
+    /// again. False when it could not: the error is recorded and the zone stopped.
+    fn unpause_sink(&mut self, fmt: AudioFormat) -> bool {
+        if !std::mem::take(&mut self.sink_paused) {
+            return true;
+        }
+        let Some(Err(e)) = self.sink.as_mut().map(|s| s.resume()) else {
+            return true;
+        };
+        tracing::info!(zone = %self.id, "resume: opening the output again ({e})");
+        if let Some(mut s) = self.sink.take() {
+            let _ = s.flush();
+        }
+        self.ensure_sink(fmt, false)
     }
 
     fn seek(&mut self, ms: u64) {
@@ -490,6 +500,7 @@ impl Engine {
     /// Stop now: discard buffered audio and close the sink.
     fn stop(&mut self) {
         self.abort_current();
+        self.sink_paused = false;
         if let Some(mut s) = self.sink.take() {
             let _ = s.flush();
         }
@@ -542,6 +553,7 @@ impl Engine {
                 tracing::warn!(zone = %self.id, "closing sink: {e}");
             }
         }
+        self.sink_paused = false;
         let _runtime = self.runtime.as_ref().map(|h| h.enter());
         match block_on(self.output.open(fmt)) {
             Ok(s) => {
@@ -567,7 +579,8 @@ impl Engine {
         let fmt = proc.output_format();
         let gapless = self.sink.as_ref().is_some_and(|s| s.format() == fmt) && self.current.is_some();
         self.output.now_playing(Some(&item));
-        if !self.ensure_sink(fmt, true) {
+        // A track started while paused (next, a queue item): the device plays again first
+        if !self.unpause_sink(fmt) || !self.ensure_sink(fmt, true) {
             return false;
         }
         let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
