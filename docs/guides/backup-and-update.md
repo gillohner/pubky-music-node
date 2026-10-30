@@ -112,14 +112,13 @@ tracks keep their playlists and history.
 ## Copying the whole data folder
 
 The node's data folder holds everything, including the access token and the key for remote
-access. Stop the node before copying it. Copying it on a NAS or Umbrel needs a terminal (SSH);
+access. Stop the node before copying it. Copying it on a NAS needs a terminal (SSH);
 the backup file above doesn't.
 
 | Install | Data folder |
 | :-- | :-- |
 | Docker ([install guide](install-docker.md)) | the `pubky-music-data` volume (`/data` in the container) |
 | Docker with its own homeserver (`deploy/bundle`) | the `pubky-music_music-node` volume; the homeserver is in `pubky-music_homeserver` and `pubky-music_postgres` (use `backup.sh`) |
-| Umbrel | `umbrel/app-data/pubky-music-node/data/node` (the homeserver and its database are next to it) |
 | Linux without Docker | `/var/lib/pubky-music` |
 
 ## Updating
@@ -150,8 +149,6 @@ docker compose up -d
 
 With a NAS app (Synology, Portainer, TrueNAS), use its "pull" or "update" button for the
 project, or redeploy it.
-
-**Umbrel:** the App Store shows an update for Pubky Music Node when there is one.
 
 **Linux without Docker:** download the new release file and install `pm-node` again as in
 [step 1](install-linux.md#1-download-and-install), then `sudo systemctl restart pubky-music-node`.

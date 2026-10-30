@@ -140,24 +140,6 @@ pub struct Relationship {
     pub followed_by: bool,
 }
 
-/// A post as Nexus lists it; only what search shows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PostView {
-    pub details: PostDetails,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PostDetails {
-    pub id: String,
-    pub author: String,
-    #[serde(default)]
-    pub content: String,
-    #[serde(default)]
-    pub uri: String,
-    #[serde(default)]
-    pub kind: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct UserView {
     pub details: UserDetails,
@@ -176,6 +158,45 @@ pub struct HotTag {
     pub tagged_count: u64,
     #[serde(default)]
     pub taggers_count: u64,
+}
+
+/// A post as Nexus answers it: the fields the node reads (the rest is ignored).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostView {
+    pub details: PostDetails,
+    #[serde(default)]
+    pub counts: PostCounts,
+    #[serde(default)]
+    pub relationships: PostRelationships,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostDetails {
+    pub id: String,
+    pub author: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub kind: String,
+    /// The post's versionless `pubky://` URI.
+    #[serde(default)]
+    pub uri: String,
+    /// Unix milliseconds.
+    #[serde(default)]
+    pub indexed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostCounts {
+    #[serde(default)]
+    pub replies: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostRelationships {
+    /// The URI the post replies to.
+    #[serde(default)]
+    pub replied: Option<String>,
 }
 
 #[derive(Clone)]
@@ -399,6 +420,50 @@ impl NexusClient {
             url = with_query(&url, &[("limit", &l.clamp(1, 40).to_string())]);
         }
         Self::json(self.http.get(url).send().await?).await
+    }
+
+    /// Live posts replying to a Resource (a song's MusicBrainz URL, say), newest first.
+    /// [`NexusError::NotFound`] when Nexus has no such Resource.
+    pub async fn resource_replies(
+        &self,
+        resource_id: &str,
+        skip: u32,
+        limit: u32,
+    ) -> Result<Vec<PostView>, NexusError> {
+        let resp = self
+            .http
+            .get(with_query(
+                &self.url(&format!("/resource/{resource_id}/replies")),
+                &[("skip", &skip.to_string()), ("limit", &limit.to_string())],
+            ))
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
+    /// Live posts replying to one post (`author_id`'s `post_id`).
+    pub async fn post_replies(
+        &self,
+        author_id: &str,
+        post_id: &str,
+        skip: u32,
+        limit: u32,
+    ) -> Result<Vec<PostView>, NexusError> {
+        let resp = self
+            .http
+            .get(with_query(
+                &self.url("/stream/posts"),
+                &[
+                    ("source", "post_replies"),
+                    ("author_id", author_id),
+                    ("post_id", post_id),
+                    ("skip", &skip.to_string()),
+                    ("limit", &limit.to_string()),
+                ],
+            ))
+            .send()
+            .await?;
+        Self::json(resp).await
     }
 
     /// Batch hydration by URI (1–100). Returns [`NexusError::RouteUnavailable`]

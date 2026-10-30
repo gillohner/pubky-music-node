@@ -1,8 +1,10 @@
 //! Pubky profiles (STEWARD-UX-PEOPLE.md; not the node's own users, which are `people.rs`): the faces of who tagged something, and a page per
-//! person. A profile is the person's own `/pub/pubky.app/profile.json`, read through Nexus (or
-//! straight from their homeserver when Nexus doesn't know them yet). The node never writes a
-//! profile of its own; following writes the standard `/pub/pubky.app/follows/<id>` object that
-//! the person's other Pubky apps already use.
+//! person. A profile is the person's own profile, read through Nexus, or straight from their
+//! homeserver when Nexus doesn't know them yet: the social v1 `/pub/social/v1/profile.json` first,
+//! then the older `/pub/pubky.app/profile.json`. The node never writes a profile of its own.
+//! Following writes the social v1 follow (`/pub/social/v1/follows/<id>.json`) and, until Nexus
+//! indexes v1 follows, the older `/pub/pubky.app/follows/<id>` that pubky.app and Nexus read today;
+//! unfollowing removes both.
 
 use crate::search::SearchHit;
 use crate::state::NodeState;
@@ -283,22 +285,26 @@ pub(crate) async fn page(State(s): State<Arc<NodeState>>, Path(id): Path<String>
     Ok(Json(pg))
 }
 
-/// A person Nexus doesn't know yet: their `/pub/pubky.app/profile.json`, read from their homeserver.
+/// Where a person's profile is, newest spec first.
+const PROFILE_PATHS: [&str; 2] = ["/pub/social/v1/profile.json", "/pub/pubky.app/profile.json"];
+
+/// A person Nexus doesn't know yet: their profile read from their homeserver, the social v1 one
+/// first, then the older pubky.app one (both have `name`, `bio`, `status`, `links`).
 async fn profile_from_homeserver(s: &NodeState, id: &str) -> Option<UserView> {
     let h = s.homeserver().ok()?;
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(5),
-        h.get_bytes(
-            id,
-            "/pub/pubky.app/profile.json",
-            pm_pubky::Visibility::Public,
-            None,
-        ),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let p: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let mut found = None;
+    for path in PROFILE_PATHS {
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            h.get_bytes(id, path, pm_pubky::Visibility::Public, None),
+        )
+        .await;
+        if let Ok(Ok(bytes)) = read {
+            found = Some(bytes);
+            break;
+        }
+    }
+    let p: serde_json::Value = serde_json::from_slice(&found?).ok()?;
     Some(UserView {
         details: pm_pubky::nexus::UserDetails {
             id: id.to_string(),
@@ -380,7 +386,8 @@ pub struct Followed {
     pub following: bool,
 }
 
-/// `PUT` / `DELETE /v1/profiles/<id>/follow`: the standard pubky.app follow on your homeserver.
+/// `PUT` / `DELETE /v1/profiles/<id>/follow`: the social v1 follow on your homeserver, and the
+/// older pubky.app one while Nexus indexes only that.
 pub(crate) async fn follow(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<Followed> {
     set_follow(&s, &id, true).await
 }
@@ -402,12 +409,45 @@ async fn set_follow(s: &NodeState, id: &str, on: bool) -> ApiResult<Followed> {
     if sync.z32() == id {
         return Err(ApiError::bad_request("that's you"));
     }
-    let path = format!("/pub/pubky.app/follows/{id}");
+    use pubky_social_specs::traits::HasIdPath;
+    let v1_path = pubky_social_specs::PubkySocialFollow::create_path(id);
+    let legacy_path = format!("/pub/pubky.app/follows/{id}");
+    let hs = sync.homeserver();
     let r = if on {
-        let f = pubky_app_specs::PubkyAppFollow::new();
-        sync.homeserver().write_object(sync.session(), &path, &f).await
+        match hs
+            .write_object(
+                sync.session(),
+                &v1_path,
+                &pubky_social_specs::PubkySocialFollow::new(),
+            )
+            .await
+        {
+            // The v1 follow is the follow; the older copy only helps today's Nexus
+            Ok(()) => {
+                if let Err(e) = hs
+                    .write_object(
+                        sync.session(),
+                        &legacy_path,
+                        &pubky_app_specs::PubkyAppFollow::new(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%legacy_path, error = %e, "followed on v1 only");
+                }
+                Ok(())
+            }
+            e => e,
+        }
     } else {
-        sync.homeserver().delete(sync.session(), &path).await
+        // Either may be missing (followed before v1, or from another app)
+        let gone = |r: Result<(), pm_pubky::homeserver::HomeserverError>| match r {
+            Err(e) if e.to_string().contains("404") => Ok(()),
+            r => r,
+        };
+        match gone(hs.delete(sync.session(), &v1_path).await) {
+            Ok(()) => gone(hs.delete(sync.session(), &legacy_path).await),
+            e => e,
+        }
     };
     r.map_err(|e| {
         ApiError::new(

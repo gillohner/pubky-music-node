@@ -703,7 +703,7 @@ pub struct LikesImport {
     pub skipped: usize,
 }
 
-/// `POST /v1/sources/soundcloud/likes/import`: favourite them here too, by their SoundCloud link.
+/// `POST /v1/sources/soundcloud/likes/import`: bookmark them here too, by their SoundCloud link.
 pub(crate) async fn import_likes(State(s): State<Arc<NodeState>>) -> ApiResult<LikesImport> {
     let c = signed_in(&s)?;
     let (_, docs) = likes_of(&s, &c).await?;
@@ -716,7 +716,7 @@ pub(crate) async fn import_likes(State(s): State<Arc<NodeState>>) -> ApiResult<L
                 .and_then(|u| pm_model::MusicUri::parse(u).ok())
             {
                 Some(uri) => {
-                    crate::favourites::add(&lib, uri)?;
+                    crate::bookmarks::add(&lib, uri)?;
                     r.imported += 1;
                 }
                 None => r.skipped += 1,
@@ -825,6 +825,7 @@ pub(crate) async fn import_playlist(
             uris,
             track_ids: Vec::new(),
             sources,
+            ..Default::default()
         }),
     )
     .await?;

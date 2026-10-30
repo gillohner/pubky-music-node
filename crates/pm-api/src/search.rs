@@ -712,9 +712,10 @@ async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
             SearchHit {
                 kind: "post".into(),
                 title,
-                subtitle: Some(match d.kind.as_deref() {
-                    Some(k) if k != "short" && k != "long" => format!("{by} · {k}"),
-                    _ => by,
+                // The kind when it says more than "a post" (Nexus' social kind is "" when unknown)
+                subtitle: Some(match d.kind.as_str() {
+                    "" | "short" | "long" => by,
+                    k => format!("{by} · {k}"),
                 }),
                 id: format!("post-{}:{}", d.author, d.id),
                 page: Some(format!("https://pubky.app/post/{}/{}", d.author, d.id)),

@@ -1,7 +1,13 @@
-//! Playlists: v1 post envelopes (ADR 0006) stored locally in the library and
-//! pushed to the private homeserver folder by [`crate::sync`]. Items are
-//! canonical music URLs; playing a playlist resolves each item to a library
-//! track by that URL.
+//! Collections (social v1 `collection` posts, ADR 0014): kept locally in the library and pushed to
+//! the homeserver by [`crate::sync`]: always under `/priv/` (the draft), and also published under
+//! `/pub/` while the collection's switch says public.
+//! Items are music URLs (songs, albums, artists) or public Pubky posts; each collection has a
+//! `layout` (`list`, `grid`, `visual`). A playlist is a collection of songs.
+//!
+//! `/v1/collections` and `/v1/playlists` are one resource: the same ids, handlers and answers
+//! (`/v1/playlists` stays for the clients and Subsonic, which call them playlists). Playing a
+//! collection queues its songs and the library's albums in it; artists, posts and what plays
+//! nowhere here are reported in `missing`.
 
 use crate::state::NodeState;
 use crate::types::*;
@@ -12,7 +18,7 @@ use axum::Json;
 use pm_library::{Library, MusicPostRow};
 use pm_model::{MusicUri, Track, TrackId};
 use pm_pubky::schemas::post::TYPE_PLAYLIST;
-use pm_pubky::{MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
+use pm_pubky::{ItemKind, MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
 use pm_zones::{Insert, ZoneId};
 use std::sync::Arc;
 
@@ -94,7 +100,53 @@ fn summary(row: &MusicPostRow, p: &Playlist) -> PlaylistSummary {
         visibility: row.visibility.clone(),
         synced: row.synced_at.is_some_and(|s| s >= row.updated_at),
         covers: Vec::new(),
+        layout: p.layout.clone().unwrap_or_else(|| "list".into()),
+        tracks_only: p.is_tracks_only(),
     }
+}
+
+/// The library album an album item names, if the library has it.
+fn library_album(lib: &Library, uri: &str) -> Option<pm_model::Album> {
+    match MusicUri::parse(uri).ok()? {
+        MusicUri::Release { mbid } => lib.album_by_release_mbid(mbid).ok().flatten(),
+        _ => None,
+    }
+}
+
+/// Every item with what the node knows about it.
+pub(crate) fn entries(lib: &Library, p: &Playlist) -> Vec<CollectionEntry> {
+    p.items
+        .iter()
+        .enumerate()
+        .map(|(index, it)| {
+            let kind = it.kind();
+            let mut e = CollectionEntry {
+                index,
+                uri: it.uri.clone(),
+                kind,
+                added_at: it.added_at,
+                track: None,
+                album: None,
+                artist: None,
+                post: None,
+            };
+            match kind {
+                Some(ItemKind::Track) => e.track = resolve(lib, it),
+                Some(ItemKind::Album) => e.album = library_album(lib, &it.uri),
+                Some(ItemKind::Artist) => {
+                    if let Ok(MusicUri::Artist { mbid }) = MusicUri::parse(&it.uri) {
+                        e.artist = lib.artist_by_mbid(mbid).ok().flatten();
+                    }
+                }
+                Some(ItemKind::Post) => {
+                    e.post = crate::shared::parse_post(&it.uri).map(|(user, id)| PostRef { user, id })
+                }
+                // A web page: the client shows its card (`GET /v1/cards`)
+                Some(ItemKind::Link) | None => {}
+            }
+            e
+        })
+        .collect()
 }
 
 /// The first four distinct album covers among a playlist's songs in the library (its mosaic).
@@ -104,9 +156,15 @@ fn covers(lib: &Library, row_id: &str, p: &Playlist) -> Vec<String> {
         .items
         .iter()
         .take(60)
-        .filter_map(|it| resolve(lib, it))
-        .chain(local_tracks(lib, row_id))
-        .filter_map(|t| t.album.and_then(|a| a.id));
+        .filter_map(|it| match it.kind() {
+            Some(ItemKind::Album) => library_album(lib, &it.uri).and_then(|a| a.id),
+            _ => resolve(lib, it).and_then(|t| t.album.and_then(|a| a.id)),
+        })
+        .chain(
+            local_tracks(lib, row_id)
+                .into_iter()
+                .filter_map(|t| t.album.and_then(|a| a.id)),
+        );
     for a in albums {
         let u = format!("/v1/library/albums/{a}/cover");
         if !out.contains(&u) {
@@ -213,13 +271,33 @@ fn local_tracks(lib: &Library, id: &str) -> Vec<Track> {
         .collect()
 }
 
+/// Items from URIs: music URLs, links to public Pubky posts, or web links.
 fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
     uris.iter()
         .map(|u| {
-            let m = MusicUri::parse(u).map_err(|e| ApiError::bad_request(format!("{u}: {e}")))?;
-            Ok(PlaylistItem::new(&m))
+            let uri = pm_pubky::schemas::item_uri(u).map_err(|e| {
+                ApiError::bad_request(format!(
+                    "{u}: not a music link, a public Pubky post or a web link ({e})"
+                ))
+            })?;
+            Ok(PlaylistItem::of(uri))
         })
         .collect()
+}
+
+/// A layout as given: `list`, `grid` or `visual`; empty means the default list.
+fn checked_layout(layout: &str) -> Result<Option<String>, ApiError> {
+    let l = layout.trim().to_ascii_lowercase();
+    if l.is_empty() {
+        return Ok(None);
+    }
+    if !pm_pubky::schemas::LAYOUTS.contains(&l.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "layout must be one of {}",
+            pm_pubky::schemas::LAYOUTS.join(", ")
+        )));
+    }
+    Ok(Some(l))
 }
 
 /// The library track for a playlist item, if any.
@@ -238,6 +316,7 @@ fn detail(lib: &Library, row: &MusicPostRow, p: &Playlist) -> PlaylistDetail {
         summary,
         playlist: p.clone(),
         tracks,
+        entries: entries(lib, p),
         local_tracks,
     }
 }
@@ -318,12 +397,28 @@ pub(crate) async fn create(
     }
     let (more, local) = split_tracks(&lib, &body.track_ids)?;
     items.extend(more);
-    let playlist = Playlist::new(body.name, body.description, body.image, items);
+    let mut playlist = Playlist::new(body.name, body.description, body.image, items);
+    playlist.layout = match &body.layout {
+        Some(l) => checked_layout(l)?,
+        None => None,
+    };
+    playlist.original = match &body.original {
+        Some(o) => Some(
+            pm_pubky::schemas::post_uri(o)
+                .ok_or_else(|| ApiError::bad_request(format!("{o}: not a public Pubky post")))?,
+        ),
+        None => None,
+    };
     let post = MusicPost::new(MusicContent::Playlist(playlist));
     let id = post.create_id();
     post.validate(Some(&id))
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    store(&lib, &post, &id, Visibility::Private)?;
+    let visibility = if body.public == Some(true) {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    };
+    store(&lib, &post, &id, visibility)?;
     set_local_ids(&lib, &id, &local)?;
     let (row, p) = load(&lib, &id)?;
     let d = detail(&lib, &row, &p);
@@ -451,6 +546,9 @@ pub(crate) async fn update(
     if let Some(i) = body.image {
         p.image = Some(i).filter(|i| !i.trim().is_empty());
     }
+    if let Some(l) = body.layout {
+        p.layout = checked_layout(&l)?;
+    }
     if let Some(uris) = body.uris {
         // Keep `added_at` and the pin for items that stay (each copy keeps its own).
         let mut old = p.items.clone();
@@ -562,9 +660,10 @@ pub(crate) async fn pin_source(
     Ok(Json(d))
 }
 
-/// `PUT /v1/playlists/{id}/visibility {public}`: share the playlist on Pubky (the next sync
-/// publishes it under /pub/social/v1/posts/) or make it private again (the next sync removes the
-/// public copy; the private versions stay).
+/// `PUT /v1/collections/{id}/visibility {public}`: share the collection on Pubky (the next sync
+/// publishes its newest version under `/pub/social/v1/posts/`, pubky-social-specs
+/// `plan_publish`) or make it private again (the next sync removes every public version). The
+/// private draft and its versions always stay.
 pub(crate) async fn set_visibility(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -622,9 +721,10 @@ pub(crate) async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Queue the playlist into a zone, each item from where it plays (its pin, else the
-/// playlist's order, else the node's; see [`crate::play_from`]). Items that play only on a
-/// Spotify device, or nowhere here, are reported in `missing`.
+/// Queue the collection into a zone, each song from where it plays (its pin, else the
+/// playlist's order, else the node's; see [`crate::play_from`]) and each album in the library
+/// whole. Items that play only on a Spotify device or nowhere here, artists and posts are
+/// reported in `missing`.
 pub(crate) async fn play(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -635,13 +735,34 @@ pub(crate) async fn play(
         .get(&ZoneId::new(&body.zone))
         .ok_or_else(|| ApiError::not_found(format!("no zone {}", body.zone)))?;
     let p = load_playlist(&s, &id)?;
-    let (_, _, resolved) = crate::play_from::resolve_playlist(&s, &p).await;
+    // The owner (playlists are the owner's) takes the zone back from a listener
+    crate::listens::zone_changed_by(&s, &body.zone, true);
+    // Songs play from where they play (pins, orders); the library's albums play whole, in place
+    let mut songs = p.clone();
+    songs.items.retain(|i| i.kind() == Some(ItemKind::Track));
+    let (_, _, resolved) = crate::play_from::resolve_playlist(&s, &songs).await;
+    let mut resolved = resolved.into_iter();
     let mut items = Vec::new();
     let mut missing = Vec::new();
-    for r in resolved {
-        match r.queue {
-            Some(q) => items.push(q),
-            None => missing.push(r.view.uri),
+    for it in &p.items {
+        match it.kind() {
+            Some(ItemKind::Track) => match resolved.next().and_then(|r| r.queue) {
+                Some(q) => items.push(q),
+                None => missing.push(it.uri.clone()),
+            },
+            Some(ItemKind::Album) => {
+                let lib = s.library.lock().expect("library poisoned");
+                let tracks = library_album(&lib, &it.uri)
+                    .and_then(|a| a.id)
+                    .and_then(|a| lib.album_tracks(a).ok())
+                    .unwrap_or_default();
+                if tracks.is_empty() {
+                    missing.push(it.uri.clone());
+                }
+                items.extend(tracks.iter().map(local_queue_item));
+            }
+            // An artist or a post is something to open, not to play
+            _ => missing.push(it.uri.clone()),
         }
     }
     // The node-only songs after them

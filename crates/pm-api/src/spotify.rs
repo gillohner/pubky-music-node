@@ -996,7 +996,7 @@ pub(crate) async fn collection(State(s): State<Arc<NodeState>>) -> ApiResult<Sou
     }))
 }
 
-/// `POST /v1/sources/spotify/collection/import`: saved tracks (by ISRC) and albums as favourites.
+/// `POST /v1/sources/spotify/collection/import`: saved tracks (by ISRC) and albums as bookmarks.
 pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiResult<ImportReport> {
     need_user(&s)?;
     let tracks = paged_items(&s, "/me/tracks", &[("limit", "50".into())]).await?;
@@ -1006,7 +1006,7 @@ pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiRes
     for t in &tracks {
         match canonical_track(&t["track"]) {
             Some(uri) => {
-                crate::favourites::add(&lib, uri)?;
+                crate::bookmarks::add(&lib, uri)?;
                 report.imported += 1;
             }
             None => report.skipped += 1,
@@ -1018,7 +1018,7 @@ pub(crate) async fn import_collection(State(s): State<Arc<NodeState>>) -> ApiRes
             .and_then(|id| pm_model::MusicUri::parse(&spotify_url("album", id)).ok())
         {
             Some(uri) => {
-                crate::favourites::add(&lib, uri)?;
+                crate::bookmarks::add(&lib, uri)?;
                 report.imported += 1;
             }
             None => report.skipped += 1,
@@ -1107,6 +1107,7 @@ pub(crate) async fn import_playlist(
             uris,
             track_ids: Vec::new(),
             sources,
+            ..Default::default()
         }),
     )
     .await?;

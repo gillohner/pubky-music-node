@@ -1,8 +1,9 @@
 # Deploying the node
 
 The reference for every way to deploy the node. For step-by-step installs, start with the
-[guides](guides/): [Docker](guides/install-docker.md), [Umbrel](guides/install-umbrel.md),
-[Linux without Docker](guides/install-linux.md).
+[guides](guides/): [Docker](guides/install-docker.md),
+[Linux without Docker](guides/install-linux.md). Umbrel isn't supported right now; on an Umbrel
+box, use Docker.
 
 One binary, three shapes. The homeserver is always a separate Pubky service the node talks to by key.
 
@@ -45,7 +46,7 @@ the old `change-me` placeholder gets a made token instead (the log says so).
 
 `deploy/bundle/` runs the node together with a Pubky homeserver, so your playlists, favourites and
 files (Copy to homeserver, Bring files here) live on your own machine instead of a shared public
-homeserver. It follows Pubky's own Umbrel app: PostgreSQL, pubky-homeserver (v0.16.2) with its
+homeserver. It follows Pubky's own homeserver setup: PostgreSQL, pubky-homeserver (v0.16.2) with its
 config wrapper, and optionally Pubky's homeserver dashboard and a Cloudflare tunnel. Every image is
 pinned by version and digest.
 
@@ -113,9 +114,6 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs
   the node in. Playlists, favourites, Copy to homeserver and Bring files here then use it. "Use an
   existing homeserver" is the usual Pubky sign-in; moving an existing account here comes later.
-
-The Umbrel app (below) bundles the same homeserver. Install it or Pubky's own "Pubky Homeserver"
-app, not both: both use port 6287.
 
 ## With its own Pubky homeserver, without Docker (bare metal)
 
@@ -236,45 +234,6 @@ no port mapping is needed and the UI is on port 7788, and the apps find the node
 `http://<nas-ip>:7788` so devices get a reachable address. The entrypoint writes `/data/node.toml`
 only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for one restart.
 
-## Umbrel
-
-**Install:** in umbrelOS, App Store › ⋯ › Community App Stores, add
-`https://github.com/gillohner/pubky-music-umbrel`, open the "Pubky Music" store and install Pubky Music
-Node. That repository mirrors `deploy/umbrel/` (the `umbrel-mirror` workflow; docs/RELEASING.md).
-
-`deploy/umbrel/` is an Umbrel community app store (`umbrel-app-store.yml`, store id `pubky-music`)
-with one app, `pubky-music-node`: the node with its own Pubky homeserver inside, as in the compose
-bundle (PostgreSQL, pubky-homeserver v0.16.2 with Pubky's config wrapper, cloudflared). Umbrel's
-own linter (`npm run lint:apps -- pubky-music-node --check-images` in getumbrel/umbrel-apps) passes
-with no errors, and CI's `bundle` job starts the app with Umbrel's variables and checks it
-(`tools/umbrel-check.py`). Points worth knowing:
-
-- **Host network:** the node finds speakers on the LAN (SSDP, mDNS) and serves its web UI and API
-  itself on 7788, the app's port; umbrelOS adds HTTPS in front. Native apps and OpenSubsonic
-  clients use 7788 with the bearer token: the password umbrelOS shows for the app (right-click
-  its icon; `APP_PASSWORD`, generated per install). The homeserver's admin and database password
-  is a different one that umbrelOS keeps to itself (`APP_SEED`).
-- **The homeserver:** Pubky TLS on 6287 on the network; its plain HTTP (6286) and admin API (6288)
-  on 127.0.0.1 only, for the node and cloudflared. Install this app or Pubky's "Pubky Homeserver"
-  app, not both: both publish 6287. On first open, Settings › Accounts › Create account here.
-- **Remote access:** Settings › Remote access saves the Cloudflare tunnel token; cloudflared starts
-  by itself once it exists (send the hostnames to `http://localhost:6286` and
-  `http://localhost:7788`). Then restart the app once so the homeserver publishes the hostname.
-- `/dev/snd` is passed through for a DAC on the Umbrel box; otherwise use a network endpoint.
-- Umbrel's shared storage is mounted read-only at `/music`, so a torrent or download app writing
-  there is just a scan source; the node watches its folders and rescans 15 s after the last change.
-  Music uploaded or copied into your homeserver (Library › Add music) is played from the
-  homeserver's own files, read-only, with no second copy.
-- **Installing it:** Umbrel reads a store from the root of a git repository, so the folder is
-  published as its own repository, [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel);
-  add `https://github.com/gillohner/pubky-music-umbrel` in Umbrel's App Store › Community App Stores.
-- **The image:** the app pins a release image by digest (now `0.2.0`), multi-arch (amd64 and
-  arm64). Images are published to `ghcr.io/gillohner/pubky-music-node` by
-  `.github/workflows/release.yml`: every `v*` tag gives `<version>`, `<major.minor>` and `latest`,
-  and every push to main `edge`. A new release updates the pin (docs/RELEASING.md).
-- **Downloads:** the image includes ffmpeg, so phones can keep smaller copies (AAC, MP3, Opus)
-  as well as the originals.
-
 ## Reaching the node from outside the house
 
 **Without any of the below:** once the node is signed in with Pubky Ring, the Pubky Music app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.
@@ -387,7 +346,7 @@ The node scans folders; anything the operating system can mount is a folder.
 | Local disks, USB drives | add the folder in Settings or `[library] folders` |
 | NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
 | Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
-| Downloads from another app (Umbrel, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
+| Downloads from another app (a download client, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
 | Your Pubky homeserver | `pm-node upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |
 | Streams | internet radio and the Internet Archive need no storage at all |
 

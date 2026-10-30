@@ -280,6 +280,55 @@
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
+  // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
+  // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
+  const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
+  const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm" disabled>Post</button></form>`;
+  // "Post about this" (B2): a public social v1 note with the item as its embed, so any Pubky app
+  // (pubky.app among them) shows it with the item's card.
+  const postAbout = async (uri, title) => {
+    const r = await choiceDialog({ title: 'Post about this', text: `A public post on your homeserver with ${title ? `“${title}”` : 'this'} attached; Pubky apps show it with its card.`, field: { label: 'What you want to say', value: '' }, choices: [{ label: 'Post', value: true, primary: true }] });
+    if (!r || !r.value) return;
+    if (!r.text) { toast('Write something to post', 'error'); return; }
+    try { await api('POST', '/posts', { uri, content: r.text }); toast('Posted'); } catch (e) { toast(e.message, 'error'); }
+  };
+  const mountComments = (sec) => {
+    const uri = sec.dataset.curi; const body = $('.comments-body', sec);
+    const show = async () => {
+      let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+      if (!sec.isConnected) return;
+      body.innerHTML = `${commentForm('Add a comment')}${t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : `<p class="muted small">No comments yet.</p>`}<p class="muted small">A comment is a public post on your homeserver, so every Pubky app shows it.</p>`;
+    };
+    const replies = async (li, post) => {
+      let t; try { t = await api('GET', `/comments?post=${encodeURIComponent(post)}`); } catch (e) { toast(e.message, 'error'); return; }
+      $('.comment-sub', li).innerHTML = t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : '<p class="muted small">No replies yet.</p>';
+    };
+    // Post wakes up once there is something to post
+    sec.addEventListener('input', (e) => { const f = e.target.closest('form.comment-form'); if (f) f.querySelector('button').disabled = !f.elements.content.value.trim(); });
+    sec.addEventListener('submit', async (e) => {
+      const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
+      const content = f.elements.content.value.trim(); if (!content) return;
+      const b = f.querySelector('button'); b.disabled = true;
+      try {
+        await api('POST', '/comments', f.dataset.replyTo ? { reply_to: f.dataset.replyTo, content } : { uri, content });
+        toast(f.dataset.replyTo ? 'Reply posted' : 'Comment posted');
+        if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
+      } catch (err) { b.disabled = false; toast(err.message, 'error'); }
+    });
+    sec.addEventListener('click', async (e) => {
+      const r = e.target.closest('[data-creply]');
+      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); const f = $(':scope > form', sub); f.dataset.replyTo = r.dataset.creply; f.elements.content.focus(); } return; }
+      const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
+      const d = e.target.closest('[data-cdel]');
+      if (d) {
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true }] });
+        if (!go) return;
+        d.disabled = true;
+        try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
+      }
+    });
+    show();
+  };
   // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
   const importPlaylist = async (b, service, id) => {
     const name = SERVICE_NAMES[service] || service;
@@ -597,8 +646,8 @@
       return;
     }
     if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
-    if (replace) startWait('play', state.zone, qitems[0].title || '');
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    if (replace) startWait('play', state.zone, qitems[0].title || '', true);
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (replace) startSent(); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
@@ -862,7 +911,7 @@
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     audio.play().catch(async (e) => {
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
       // Ask what came back: a busy node or a proxy in front of it can answer with an error page
@@ -872,7 +921,9 @@
       if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
-    if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    // A song moved in from a zone was counted there already
+    if (it.track_id != null && !it.moved) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    it.moved = false;
     mediaSessionUpdate(it);
     renderBar();
     if (state.view === 'queue') render();
@@ -929,9 +980,10 @@
       if (state.view === 'queue') render();
       return;
     }
-    if (replace) startWait('play', state.zone, tracks[0].title);
+    if (replace) startWait('play', state.zone, tracks[0].title, true);
     try {
       await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
+      if (replace) startSent();
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
     } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
@@ -953,7 +1005,7 @@
       const st = await api('POST', `/zones/${state.zone}/transport`, action);
       state.zones[st.id] = st;
       renderBar();
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
   };
   const playStation = async (st) => {
     if (isBrowser()) {
@@ -961,14 +1013,17 @@
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }
-    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    startWait('play', state.zone, st.name, true);
+    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const playPlaylist = async (id) => {
     try {
       if (isBrowser()) { const d = await api('GET', `/playlists/${id}`); playTracks(d.tracks.filter(Boolean), true); return; }
+      startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
       const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
+      startSent();
       toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const refreshQueue = async (rerender = true) => {
     if (!isBrowser()) {
@@ -1040,12 +1095,16 @@
     const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
     if (ytOf(it.uri)) { browserPlay(index); return; } // YouTube's player starts from the top
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
+    // The seek is for this song only: a later song (this one never loaded) is not moved
+    audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
     state.browserIndex = index;
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
-    audio.addEventListener('loadedmetadata', () => { try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
-    if (paused) { audio.preload = 'metadata'; audio.load(); } else audio.play().catch(() => {});
+    audio.preload = 'metadata'; audio.load();
     mediaSessionUpdate(it); renderBar();
   };
+  // Whether this browser can play a queue item: a library file, a stream it reaches, YouTube
+  const browserCanPlay = (it) => !!it && (/^track:\d+$/.test(it.uri || '') || !!ytOf(it.uri) || !!streamUrlFor(it.uri));
   // Move what plays to another device (owner, 2026-10-29): the song at its position, the queue,
   // repeat and radio; paused stays paused. Zone to zone is the node's transfer. This browser is no
   // zone of the node's, so out of it the target loads the browser's queue (POST /zones/{id}/load)
@@ -1057,6 +1116,8 @@
     const from = state.zone;
     if (target === from || moving) return;
     moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
+    // Zone to zone can take a while (the node opens the track first): say so at once when the menu is closed
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: 'This browser' } : state.zones[target]; toast(`Moving to ${(tz0 && tz0.name) || 'the zone'}…`); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -1088,6 +1149,9 @@
         const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
         if (!z.queue || !z.queue.length) throw new Error('Nothing to move: the queue is empty');
         const np = z.now_playing; const index = np ? np.index : (z.queue_index != null ? z.queue_index : -1); const pos = np ? np.position_ms || 0 : 0;
+        // Refused before the zone empties: the song in hand must be one this browser can play
+        const cur = index >= 0 ? z.queue[index] : null;
+        if (cur && z.transport !== 'stopped' && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
         await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
         state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
@@ -1106,8 +1170,10 @@
       if (target !== BROWSER && wasPlaying && tz && tz.transport !== 'playing') startWait('move', target, curTitle);
       renderZoneName(); renderBar(); refreshQueue();
       const name = (currentZone() || {}).name || target;
+      moving = false; // before the menu draws again, so its Move here buttons are on
       if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
     } catch (e) {
+      moving = false;
       if (resume) audio.play().catch(() => {});
       startFail(e.message, true);
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
@@ -1115,12 +1181,12 @@
   };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
-    const moving = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
+    const movingTo = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>${moving === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
+      </button>${movingTo === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" ${moving ? 'disabled' : ''} data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
       + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
       + `<div class="pop-title">This zone</div>`
@@ -1399,23 +1465,36 @@
   // The play control just pressed: it shows a spinner until the music starts (capture phase, so
   // every play button on every page counts without each call site knowing)
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
-  const startWait = (what, zoneId = state.zone, title = '') => {
+  // `replace`: the queue is being replaced, so the song still playing does not end the wait
+  const startWait = (what, zoneId = state.zone, title = '', replace = false) => {
     startDone(true);
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
-    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a }; state.startError = null;
+    const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
+    // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
+    // (its song ended) isn't taken for the new one starting
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace }; state.startError = null;
     setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
     renderBar();
+  };
+  // The node took the replace: from now on the zone playing another song ends the wait (it may
+  // already be playing it)
+  const startSent = () => {
+    const s = state.starting; if (!s || s.sent) return; s.sent = true;
+    const z = state.zones[s.zone]; if (z && z.transport === 'playing' && z.now_playing && z.now_playing.item.id !== s.oldItem) startDone();
   };
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
   const startFail = (msg, quiet) => {
     const s = state.starting; if (!s) return; startDone(true);
-    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now() };
+    // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
+    const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
+    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
     if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? 'This browser' : 'The zone')}: ${state.startError.msg}`, 'error');
     renderBar(); setTimeout(renderBar, 10500);
   };
   // The browser's own player: it starts (or fails) by itself
   audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
+  audio.addEventListener('pause', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
@@ -1430,20 +1509,36 @@
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
   // A quick switch: the whole config goes back with one part changed (what was set stays set)
+  // One switch at a time (a second one is built on the first's answer), and nothing set is lost:
+  // EQ remembers which bands were on (kept in this browser per zone), crossfeed and room correction
+  // switch their own `enabled` and keep their values.
+  const eqKey = (zone) => `pm.eqOn.${zone}`;
   const toggleDsp = async (what, on) => {
+    if (state.dspBusy) return;
+    state.dspBusy = true; state.dspFocus = what;
+    $$('[data-dsp]', qPanel).forEach((c) => { c.disabled = true; });
+    try {
     const zone = state.zone; const cfg = { ...((state.dspCfg || {})[zone] || {}) }; delete cfg.error;
-    if (what === 'eq') cfg.eq = (cfg.eq || []).map((b) => ({ ...b, enabled: on }));
+    if (what === 'eq') {
+      const bands = cfg.eq || [];
+      if (!on) { try { localStorage.setItem(eqKey(zone), JSON.stringify(bands.map((b) => b.enabled !== false))); } catch { /* no storage: all come back on */ } }
+      let was = null; if (on) { try { was = JSON.parse(localStorage.getItem(eqKey(zone)) || 'null'); } catch { was = null; } }
+      const back = Array.isArray(was) && was.length === bands.length && was.some(Boolean) ? was : null;
+      cfg.eq = bands.map((b, i) => ({ ...b, enabled: on ? (back ? back[i] : true) : false }));
+    }
     if (what === 'room' && cfg.convolution) cfg.convolution = { ...cfg.convolution, enabled: on };
     if (what === 'loudness') { if (!on && cfg.loudness && cfg.loudness !== 'off') state.loudnessLast = cfg.loudness; cfg.loudness = on ? (state.loudnessLast || 'album') : 'off'; }
-    if (what === 'crossfeed') { if (!on && cfg.crossfeed) state.crossfeedLast = cfg.crossfeed; cfg.crossfeed = on ? { ...(state.crossfeedLast || { level_db: -6, cutoff_hz: 700, delay_us: 300 }), enabled: true } : null; }
-    try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
-    qPanelKey = null; // re-render whatever the node says now (a refused change too)
+    if (what === 'crossfeed') cfg.crossfeed = cfg.crossfeed ? { ...cfg.crossfeed, enabled: on } : on ? { level_db: -6, cutoff_hz: 700, delay_us: 300, enabled: true } : null;
+    try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); (state.dspCfg = state.dspCfg || {})[zone] = cfg; toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
     await loadDsp();
+    } finally { state.dspBusy = false; qPanelKey = null; syncQPanel(); }
   };
   const renderQPanel = () => {
     const z = currentZone(); if (!z) return; const np = z.now_playing; const cfg = (state.dspCfg || {})[state.zone];
     // A re-render (the outputs arrived, a switch answered) keeps the keyboard where it was
-    const ae = document.activeElement; const had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
+    const ae = document.activeElement; let had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
+    // A switch that answered gets the keyboard back (disabling it while it saved dropped the focus)
+    if (!had && state.dspFocus && !state.dspBusy) { had = `[data-dsp="${state.dspFocus}"]`; state.dspFocus = null; }
     const svc = np && npSvc(np);
     const row = (id, label, on, disabled, note) => `<label class="qp-row${disabled ? ' off' : ''}"><span class="grow"><span class="name">${label}</span>${note ? `<span class="sub">${esc(note)}</span>` : ''}</span><input type="checkbox" class="switch" data-dsp="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"></label>`;
     let dsp;
@@ -1474,7 +1569,7 @@
       <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>
       <div class="qp-foot">${np && np.format ? '<button class="btn sm ghost" id="qpquality">Quality choices…</button>' : ''}<button class="btn sm ghost" id="qpnow">${icon('play')} Now playing</button></div>`;
     qPanelKey = qpKey();
-    $$('[data-dsp]', qPanel).forEach((c) => c.onchange = () => { c.disabled = true; toggleDsp(c.dataset.dsp, c.checked); });
+    $$('[data-dsp]', qPanel).forEach((c) => { if (state.dspBusy) c.disabled = true; c.onchange = () => toggleDsp(c.dataset.dsp, c.checked); });
     const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
     const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
@@ -2435,7 +2530,7 @@
   }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
-  const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
     if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
@@ -2583,7 +2678,7 @@
   const svcBadge = (site, extra = '') => site ? `<span class="src-badge ico${extra ? ' ' + extra : ''}" title="${esc(site)}">${svcIcon(site)}</span>` : '';
   // A service we can name on a cover: the library, or one with an accent or a glyph. Not a
   // MusicBrainz or Pubky page (nothing plays from those) and not a plain link.
-  const knownSvc = (k) => (k && k !== 'musicbrainz' && (k === 'library' || Object.hasOwn(SRC_ACCENT, k) || Object.hasOwn(SERVICE_GLYPHS, k)) ? k : null);
+  const knownSvc = (k) => (k && k !== 'musicbrainz' && (k === 'library' || Object.prototype.hasOwnProperty.call(SRC_ACCENT, k) || Object.prototype.hasOwnProperty.call(SERVICE_GLYPHS, k)) ? k : null);
   // The provider badge on a cover (owner, 2026-10-29): where this plays from, in the cover's bottom
   // left corner. The service's glyph in its own colour on a dark disc with a light ring, so it reads
   // on light and dark covers; our own files get a white glyph. Absolute over the cover (no layout
@@ -2743,7 +2838,23 @@
     ]);
   };
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
-  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // A collection item that doesn't play (a web page, a post): its Pinakes card in the list, with
+  // Open instead of Play; filled in by fillCards (GET /v1/cards).
+  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}</div>`;
+  const fillCards = (box) => $$('[data-card]', box).forEach(async (row) => {
+    for (let tries = 0; tries < 3; tries++) {
+      let c; try { c = await api('GET', `/cards?uri=${encodeURIComponent(row.dataset.card)}`); } catch { return; }
+      if (!row.isConnected) return;
+      if (c.status === 'found' || (c.status === 'reading' && c.name)) {
+        if (c.name) $('.name', row).textContent = c.name;
+        $('.card-sub', row).textContent = [c.site, c.description].filter(Boolean).join(' · ');
+        const img = webUrl(c.image); if (img) $('.card-thumb', row).outerHTML = `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" data-err="hide">`;
+      }
+      if (c.status !== 'reading') { if (c.status === 'unknown') $('.card-sub', row).textContent = 'A link'; return; }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  });
+  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -2795,14 +2906,17 @@
     const io = new IntersectionObserver(([en]) => { if (!document.body.contains(bar)) { io.disconnect(); return; } bar.hidden = en.isIntersecting; }, { root: main, threshold: 0 });
     io.observe(hero);
   };
-  const bindSongRows = (box, songs, ctx = {}) => {
-    $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, Number(b.dataset.splay), 'replace', ctx.plays_from, b, ctx.fallback); });
-    $$('[data-srow]', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, Number(r.dataset.srow), 'replace', ctx.plays_from, r, ctx.fallback); });
-    $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: songs[Number(a.dataset.ssong)].id }); });
-    $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: songs[Number(a.dataset.sartist)].artist_id }); });
-    $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = songs[Number(a.dataset.sartistq)].artist; runSearch(); });
-    $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: songs[Number(a.dataset.salbum)].album_id }); });
-    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = songs[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
+  const bindSongRows = (box, all, ctx = {}) => {
+    // Cards (web pages, posts) don't play: play the songs only, from the one clicked
+    const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
+    $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
+    $$('[data-srow]:not([data-card])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
+    fillCards(box);
+    $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
+    $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: all[Number(a.dataset.sartist)].artist_id }); });
+    $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = all[Number(a.dataset.sartistq)].artist; runSearch(); });
+    $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: all[Number(a.dataset.salbum)].album_id }); });
+    $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = all[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
   const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
@@ -3062,6 +3176,19 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
+  // "Share what I'm listening to" (listening together): the player bar's Live switch, the owner's,
+  // shown once signed in with Pubky; off by default.
+  const wireLive = async () => {
+    const b = $('#livebtn'); if (!b) return;
+    if (!(await pubkyUser())) { b.hidden = true; return; }
+    const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
+    try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
+    b.onclick = async () => {
+      const on = b.getAttribute('aria-pressed') !== 'true';
+      b.disabled = true;
+      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+    };
+  };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   const RESIGN_TEXT = 'This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.';
@@ -3708,6 +3835,9 @@
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           const songs = d.playlist.items.map((it, k) => {
+            // A web page or a post plays nowhere: it shows as its card, in its place (B3)
+            const kind = d.entries && d.entries[k] && d.entries[k].kind;
+            if (kind === 'link' || kind === 'post') return { no: k + 1, card: true, title: (() => { try { return new URL(it.uri).hostname.replace(/^www\./, ''); } catch { return it.uri; } })(), page: it.uri };
             const t = d.tracks[k]; const r = pf && pf.items[k];
             const base = r ? { plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), pinLost: !!r.pin_unavailable, unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services'), sources: r.sources, connect: r.connect } : {};
             const lib = r && r.plays_from && r.plays_from.service === 'library';
@@ -3718,16 +3848,17 @@
           });
           const localSongs = (d.local_tracks || []).map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
           const total = [...songs, ...localSongs].reduce((a, t) => a + (t.duration_ms || 0), 0);
+          const songCount = songs.filter((t) => !t.card).length; const cardCount = songs.length - songCount;
           const empty = (t) => `<p class="muted small">${t}</p>`;
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
           const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
-          const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songs.length} song${songs.length === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
+          const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const ownOrder = pf && pf.own_order;
           // Only what can play here: services not connected aren't part of the answer (second review #16)
           const orderText = pf ? pf.order.order.filter((k) => { const sv = (pf.order.services || []).find((x) => x.id === k); return !sv || sv.connected; }).map(srcName).join(' › ') || 'Your library' : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songs.length + localSongs.length, 'songs')}${total ? ' · ' + mins(total) : ''}</p>
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
@@ -4186,6 +4317,8 @@
           const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
           const songs = pg.songs || [];
           const target = pg.target;
+          // What comments are about: the song's own link, else this item's (a web link only)
+          const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3)
           const songRef = target.track_id != null || target.album_id != null || target.artist_id != null ? target : pg.song_uri ? { uri: pg.song_uri } : target;
@@ -4193,9 +4326,10 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
-            api('GET', `/tags?${refQs(songRef)}`).then((r) => r.tags).catch(() => null),
+            // An item with no identity yet (needs_match): the "match it first" message, no editor
+            api('GET', `/tags?${refQs(songRef)}`).then((r) => (r.needs_match ? null : r.tags)).catch(() => null),
             linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
-            api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
+            api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
@@ -4247,6 +4381,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
+            + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
@@ -4288,7 +4423,7 @@
             // A file not matched yet: "Which song is this?" first, then the heart
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
-          const extra = [];
+          const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
@@ -4297,6 +4432,7 @@
           const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+          const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
           break;
@@ -4628,7 +4764,7 @@
             + group('Access', row('This browser', 'Changes only the token this browser uses to reach the node; the node’s token stays as it is.', '<button class="btn ghost" id="logout">Use a different token in this browser</button>')
               + (ns.token_replaceable
                 ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app, browser and Subsonic app needs the new one. People you invited keep their own sign-ins.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
-                : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker, the app password on Umbrel): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
+                : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
           // You › Home: whose layout applies; edit it on Home itself
@@ -4967,7 +5103,7 @@
                   + (t.restart_needed ? `<div class="notice warn" role="status">Restart the homeserver once so it publishes the address. ${t.restart_hint ? esc(t.restart_hint) : `On the machine, in <code>deploy/bundle</code>: <code>${esc(t.restart_command || '')}</code> <button class="btn sm ghost" data-copylink="${esc(t.restart_command || '')}">Copy</button>`}</div>` : '')
                   + row('Check from outside', 'Opens both addresses over HTTPS, as someone outside your network would.', '<button class="btn" id="rtcheck">Check now</button>')
                 : row('Not set up', 'Reach this node and its homeserver from anywhere, with no open ports or static IP.', ''))
-              + block(t.configured ? 'Change the tunnel' : 'Set up', 'In Cloudflare Zero Trust › Networks › Tunnels, create a tunnel and give it two public hostnames: one to <code>http://localhost:6286</code> (the homeserver), one to <code>http://localhost:7788</code> (this node). Paste the tunnel’s token and the hostnames here. With the compose bundle, start cloudflared once: <code>docker compose --profile tunnel up -d</code> (Umbrel and the bare-metal install start it by themselves).', `<form class="stack" id="rtform"><input class="input" id="rttoken" type="password" autocomplete="off" placeholder="${t.configured ? 'Tunnel token (saved; paste to replace)' : 'Tunnel token'}" aria-label="Cloudflare tunnel token"><input class="input" id="rths" placeholder="Homeserver hostname, e.g. pubky.example.org" aria-label="Homeserver hostname" value="${esc(t.homeserver_domain || '')}"><input class="input" id="rtmusic" placeholder="This node’s hostname (optional), e.g. music.example.org" aria-label="This node's hostname" value="${esc(t.music_hostname || '')}"><div class="actions"><button class="btn primary" id="rtsave" type="submit">Save tunnel</button>${t.configured ? '<button class="btn ghost" id="rtdel" type="button">Remove tunnel</button>' : ''}</div></form>`))
+              + block(t.configured ? 'Change the tunnel' : 'Set up', 'In Cloudflare Zero Trust › Networks › Tunnels, create a tunnel and give it two public hostnames: one to <code>http://localhost:6286</code> (the homeserver), one to <code>http://localhost:7788</code> (this node). Paste the tunnel’s token and the hostnames here. With the compose bundle, start cloudflared once: <code>docker compose --profile tunnel up -d</code> (the bare-metal install starts it by itself).', `<form class="stack" id="rtform"><input class="input" id="rttoken" type="password" autocomplete="off" placeholder="${t.configured ? 'Tunnel token (saved; paste to replace)' : 'Tunnel token'}" aria-label="Cloudflare tunnel token"><input class="input" id="rths" placeholder="Homeserver hostname, e.g. pubky.example.org" aria-label="Homeserver hostname" value="${esc(t.homeserver_domain || '')}"><input class="input" id="rtmusic" placeholder="This node’s hostname (optional), e.g. music.example.org" aria-label="This node's hostname" value="${esc(t.music_hostname || '')}"><div class="actions"><button class="btn primary" id="rtsave" type="submit">Save tunnel</button>${t.configured ? '<button class="btn ghost" id="rtdel" type="button">Remove tunnel</button>' : ''}</div></form>`))
               + group('Other ways', row('Your own domain', 'A static IP, ports 80, 443 and 6287 forwarded, and Caddy in front: see “With its own Pubky homeserver” in the deploy guide (docs/deploy.md).', ''));
             const ck = $('#rtcheck', box); if (ck) ck.onclick = () => loadRemote(true);
             $('#rtform', box).onsubmit = async (e) => {
@@ -5177,6 +5313,7 @@
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
       document.body.classList.toggle('listener', isListener());
       if (isOwner()) {
+        wireLive();
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
       } else { state.favUris = new Set(); state.sources = []; }
@@ -5215,11 +5352,14 @@
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
         if (state.starting && ev.state.id === state.starting.zone) {
-          if (ev.state.transport === 'playing' || (state.starting.what === 'move' && ev.state.transport !== 'stopped')) startDone(true);
+          const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
+          if (state.starting.sent !== false && ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped'))) startDone(true);
           // Only an error that is new fails the start: the engine keeps the last error until a track starts
           else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
-        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
+        // A start that failed says so until the zone starts playing (from stopped or paused) something
+        // other than the song it was already playing: that song going on, or the next one of its queue, is not that start
+        if (ev.state.transport === 'playing' && (!old || old.transport !== 'playing') && state.startError && state.startError.zone === ev.state.id && !(ev.state.now_playing && ev.state.now_playing.item.id === state.startError.still)) state.startError = null;
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
