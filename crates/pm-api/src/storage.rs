@@ -1,7 +1,7 @@
 //! Where the music and the user's data are kept, for the one status line that replaces the
 //! sync UI (STEWARD-BUNDLED-HOMESERVER.md §7).
 //!
-//! - **Saving is automatic:** playlists, favourites, tags and history go to the homeserver by
+//! - **Saving is automatic:** playlists, bookmarks, tags and history go to the homeserver by
 //!   themselves, a little after the last change ([`spawn_autosave`]); `GET /v1/storage` says
 //!   "saved", "saving N changes" or the error, and `POST /v1/storage/save` retries now.
 //! - **The homeserver's music is a library folder:** with the bundled homeserver the node mounts
@@ -48,11 +48,11 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Changes not on the homeserver yet: music posts, favourites and tags.
+/// Changes not on the homeserver yet: music posts, bookmarks and tags.
 pub fn pending(s: &NodeState) -> usize {
     let lib = s.library.lock().expect("library poisoned");
     lib.unsynced_music_posts().map(|v| v.len()).unwrap_or(0)
-        + lib.unsynced_favourites().map(|v| v.len()).unwrap_or(0)
+        + lib.unsynced_bookmarks().map(|v| v.len()).unwrap_or(0)
         + lib.unsynced_tags().map(|v| v.len()).unwrap_or(0)
 }
 

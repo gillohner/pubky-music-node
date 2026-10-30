@@ -74,7 +74,7 @@ fn page_url(band: &str, kind: &str, slug: &str) -> String {
     }
 }
 
-/// The public link (always the real one, for "open" and for favourites).
+/// The public link (always the real one, for "open" and for bookmarks).
 fn public_url(band: &str, kind: &str, slug: &str) -> String {
     format!("https://{band}.bandcamp.com/{kind}/{slug}")
 }

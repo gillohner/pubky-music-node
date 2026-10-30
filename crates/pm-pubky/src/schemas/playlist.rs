@@ -1,8 +1,74 @@
-use super::{canonical_uri, chars, limits, sanitize_uri, validate_image_url, SchemaError, Validatable};
+use super::{canonical_uri, chars, limits, validate_image_url, SchemaError, Validatable};
 use crate::ids::{self, validate_timestamp_id};
+use pm_model::MusicUri;
 use serde::{Deserialize, Serialize};
 
-/// One entry of a playlist: a canonical music URL and when it was added.
+/// What a collection item is. A playlist is a collection whose items are all tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    /// A song: a MusicBrainz recording, an ISRC or a service's track link.
+    Track,
+    /// A MusicBrainz release or release group, or a service's album link.
+    Album,
+    Artist,
+    /// A public Pubky post (a review, a note, someone's collection).
+    Post,
+}
+
+impl ItemKind {
+    /// The kind of an item URI, `None` when it is neither a music URL nor a public Pubky post.
+    pub fn of(uri: &str) -> Option<Self> {
+        if let Ok(m) = MusicUri::parse(uri) {
+            return Some(match m {
+                MusicUri::Recording { .. } | MusicUri::Isrc { .. } => ItemKind::Track,
+                MusicUri::Release { .. } | MusicUri::ReleaseGroup { .. } => ItemKind::Album,
+                MusicUri::Artist { .. } => ItemKind::Artist,
+                MusicUri::Service(l) => match l.kind {
+                    pm_model::ids::ServiceLinkKind::Album => ItemKind::Album,
+                    pm_model::ids::ServiceLinkKind::Artist => ItemKind::Artist,
+                    _ => ItemKind::Track,
+                },
+            });
+        }
+        post_uri(uri).map(|_| ItemKind::Post)
+    }
+}
+
+/// A public Pubky post as a collection item, in its canonical `pubky://` form: any social v1
+/// post (`/pub/social/v1/posts/<id>`), a music post (`/pub/music/v1/posts/<id>`) or an older
+/// `pubky.app` post. The versionless reference, never one stored version. `None` otherwise: a
+/// private post is nobody else's to read, and a collection item must stay readable.
+pub fn post_uri(raw: &str) -> Option<String> {
+    use pubky_social_specs::{ParsedUri, Resource, Visibility};
+    let uri = pubky_social_specs::canonicalize_pubky_uri(raw.trim()).ok()?;
+    let parsed = ParsedUri::try_from(uri.as_str()).ok()?;
+    if parsed.visibility != Visibility::Public {
+        return None;
+    }
+    let is_post = match &parsed.resource {
+        Resource::Post { version: None, .. } => true,
+        Resource::Foreign { rest, .. } => {
+            rest.len() == 2 && rest[0] == "posts" && validate_timestamp_id(&rest[1]).is_ok()
+        }
+        _ => false,
+    };
+    is_post.then_some(uri)
+}
+
+/// An item URI in its stored form: the canonical music URL, or the canonical post URI.
+pub fn item_uri(raw: &str) -> Result<String, SchemaError> {
+    match canonical_uri(raw) {
+        Ok(u) => Ok(u),
+        Err(e) => post_uri(raw).filter(|u| chars(u) <= limits::URI_MAX).ok_or(e),
+    }
+}
+
+/// The layouts a collection can ask for (pubky-social-specs `PubkySocialCollectionLayout`).
+pub const LAYOUTS: [&str; 3] = ["list", "grid", "visual"];
+
+/// One entry of a collection: a canonical music URL (or a public Pubky post) and when it was
+/// added.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistItem {
     pub uri: String,
@@ -25,17 +91,27 @@ pub struct ItemSource {
 
 impl PlaylistItem {
     pub fn new(uri: &pm_model::MusicUri) -> Self {
+        Self::of(uri.to_url())
+    }
+
+    /// An item added now, for a URI already in its stored form ([`item_uri`]).
+    pub fn of(uri: String) -> Self {
         Self {
-            uri: uri.to_url(),
+            uri,
             added_at: ids::now_micros(),
             source: None,
         }
     }
+
+    pub fn kind(&self) -> Option<ItemKind> {
+        ItemKind::of(&self.uri)
+    }
 }
 
-/// The `pubky.music/playlist` envelope of a post (see [`super::post`]).
-/// Private by default (`/priv/pubky.app/posts/<timestamp id>`); a public
-/// one is an ordinary pubky.app post, so nothing private goes there.
+/// A collection as the node keeps it (written as a social v1 `collection`, [`crate::v1`]). A
+/// playlist is a collection of tracks; a collection may also hold albums, artists and public
+/// Pubky posts. Locally it rides in the `pubky.music/playlist` envelope of a post
+/// (see [`super::post`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
@@ -53,6 +129,13 @@ pub struct Playlist {
     /// follows the node's global order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_order: Option<Vec<String>>,
+    /// How to show it: `list`, `grid` or `visual` ([`LAYOUTS`]); `None` is a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// For a duplicate: the public collection it was copied from (`pubky://…/posts/<id>`,
+    /// `ext.music.original`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 impl Playlist {
@@ -71,8 +154,15 @@ impl Playlist {
             created_at: now,
             updated_at: now,
             source_order: None,
+            layout: None,
+            original: None,
         }
         .sanitize()
+    }
+
+    /// Whether every item is a track: a playlist in the narrow sense.
+    pub fn is_tracks_only(&self) -> bool {
+        self.items.iter().all(|i| i.kind() == Some(ItemKind::Track))
     }
 
     /// New timestamp ID; use the same ID on later edits.
@@ -110,7 +200,7 @@ impl Validatable for Playlist {
                 .items
                 .into_iter()
                 .map(|i| PlaylistItem {
-                    uri: sanitize_uri(&i.uri),
+                    uri: item_uri(&i.uri).unwrap_or_else(|_| i.uri.trim().to_string()),
                     added_at: i.added_at,
                     source: i.source.map(|s| ItemSource {
                         service: s.service.trim().to_ascii_lowercase(),
@@ -130,6 +220,11 @@ impl Validatable for Playlist {
                 }
                 out
             }),
+            layout: self
+                .layout
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| !l.is_empty()),
+            original: self.original.map(|o| post_uri(&o).unwrap_or(o)),
         }
     }
 
@@ -162,8 +257,23 @@ impl Validatable for Playlist {
                 limits::PLAYLIST_ITEMS_MAX
             )));
         }
+        if let Some(l) = &self.layout {
+            if !LAYOUTS.contains(&l.as_str()) {
+                return Err(SchemaError::validation(format!(
+                    "layout must be one of {}",
+                    LAYOUTS.join(", ")
+                )));
+            }
+        }
+        if let Some(o) = &self.original {
+            if post_uri(o).as_deref() != Some(o.as_str()) {
+                return Err(SchemaError::validation(
+                    "original must be a public Pubky post, pubky://<key>/pub/…/posts/<id>",
+                ));
+            }
+        }
         for item in &self.items {
-            canonical_uri(&item.uri)?;
+            item_uri(&item.uri)?;
             if item.added_at <= 0 {
                 return Err(SchemaError::validation(
                     "item added_at must be positive microseconds",
@@ -311,5 +421,85 @@ mod tests {
         let json = r#"{"name":"n","description":null,"image":null,"items":[],"created_at":1,"updated_at":1}"#;
         let p: Playlist = serde_json::from_str(json).unwrap();
         assert_eq!(p.description, None);
+    }
+
+    const KEY: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
+
+    #[test]
+    fn collection_items_are_music_urls_or_public_posts() {
+        let kind = |u: &str| ItemKind::of(u);
+        assert_eq!(kind(&rec().to_url()), Some(ItemKind::Track));
+        assert_eq!(
+            kind("https://musicbrainz.org/release/1b021cc5-ab1f-4a96-8a4b-a1a9a5e4bd0a"),
+            Some(ItemKind::Album)
+        );
+        assert_eq!(
+            kind("https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56"),
+            Some(ItemKind::Artist)
+        );
+        assert_eq!(kind("https://tidal.com/album/50850118"), Some(ItemKind::Album));
+        assert_eq!(kind("https://tidal.com/track/50850120"), Some(ItemKind::Track));
+        // Posts: social v1, a music review, an older pubky.app post; the short form is folded
+        for (raw, want) in [
+            (
+                format!("pubky://{KEY}/pub/social/v1/posts/0033SCZXVEPNG"),
+                format!("pubky://{KEY}/pub/social/v1/posts/0033SCZXVEPNG"),
+            ),
+            (
+                format!("pubky{KEY}/pub/music/v1/posts/0033SCZXVEPNG"),
+                format!("pubky://{KEY}/pub/music/v1/posts/0033SCZXVEPNG"),
+            ),
+            (
+                format!(" pubky://{KEY}/pub/pubky.app/posts/0033SCZXVEPNG "),
+                format!("pubky://{KEY}/pub/pubky.app/posts/0033SCZXVEPNG"),
+            ),
+        ] {
+            assert_eq!(post_uri(&raw), Some(want.clone()), "{raw}");
+            assert_eq!(kind(&want), Some(ItemKind::Post));
+            assert_eq!(item_uri(&raw).unwrap(), want);
+        }
+        // Not items: a private post, one stored version, a profile, a tag, junk
+        for bad in [
+            format!("pubky://{KEY}/priv/social/v1/posts/0033SCZXVEPNG"),
+            format!("pubky://{KEY}/pub/social/v1/posts/0033SCZXVEPNG/0033SCZXVEPNG.json"),
+            format!("pubky://{KEY}/pub/social/v1/profile.json"),
+            format!("pubky://{KEY}/pub/social/v1/tags/ES26HNPH6M0CYFFW65PCRC107W.json"),
+            format!("pubky://{KEY}/pub/music/v1/posts/nope"),
+            "https://example.com/a".to_string(),
+        ] {
+            assert_eq!(kind(&bad), None, "{bad}");
+            assert!(item_uri(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_collection_mixes_items_and_has_a_layout() {
+        let post = format!("pubky://{KEY}/pub/social/v1/posts/0033SCZXVEPNG");
+        let mut p = Playlist::new(
+            "Mixed",
+            None,
+            None,
+            vec![
+                PlaylistItem::new(&rec()),
+                PlaylistItem::of(
+                    "https://musicbrainz.org/release/1b021cc5-ab1f-4a96-8a4b-a1a9a5e4bd0a".into(),
+                ),
+                PlaylistItem::of(format!("pubky{KEY}/pub/social/v1/posts/0033SCZXVEPNG")),
+            ],
+        );
+        p.layout = Some(" Grid ".into());
+        let p = p.sanitize();
+        assert_eq!(p.layout.as_deref(), Some("grid"));
+        assert_eq!(p.items[2].uri, post, "stored in the canonical form");
+        assert!(!p.is_tracks_only());
+        p.validate(Some(&p.create_id())).unwrap();
+        let mut bad = p.clone();
+        bad.layout = Some("carousel".into());
+        assert!(bad.validate(None).unwrap_err().to_string().contains("layout"));
+        let tracks = Playlist::new("Songs", None, None, vec![PlaylistItem::new(&rec())]);
+        assert!(tracks.is_tracks_only());
+        // An older stored playlist has no layout: a list
+        let json = r#"{"name":"n","items":[],"created_at":1,"updated_at":1}"#;
+        assert_eq!(serde_json::from_str::<Playlist>(json).unwrap().layout, None);
     }
 }

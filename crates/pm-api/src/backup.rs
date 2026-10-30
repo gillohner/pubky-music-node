@@ -4,7 +4,7 @@
 //! The file (`pubky-music-<date>.pmbackup`) is a zip:
 //! - `manifest.json`: what it is, when, from which node, and counts (tracks, matches, playlists…);
 //! - `library.db`: a snapshot of the library database (matches and corrections, playlists,
-//!   favourites, tags, play history, queues, settings) with every sign-in taken out;
+//!   bookmarks, tags, play history, queues, settings) with every sign-in taken out;
 //! - `secrets.bin`, only when the owner chose a passphrase: the sign-ins (TIDAL, Spotify, Jamendo,
 //!   ListenBrainz, your Subsonic and Jellyfin servers), the Pubky session, the remote-access key
 //!   and the node's config file, encrypted with AES-256-GCM under a key derived from the
@@ -235,11 +235,11 @@ fn remove_db(path: &Path) {
     }
 }
 
-/// What a backup holds: the library's counts, with the favourites kept on this node only (songs,
-/// albums and artists without an identity live in settings, not in the favourites table).
+/// What a backup holds: the library's counts, with the bookmarks kept on this node only (songs,
+/// albums and artists without an identity live in settings, not in the bookmarks table).
 fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
     let mut c = lib.backup_counts()?;
-    c.favourites += crate::favourites::local_count(lib);
+    c.bookmarks += crate::bookmarks::local_count(lib);
     Ok(c)
 }
 

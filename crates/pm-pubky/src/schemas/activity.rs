@@ -22,7 +22,8 @@ pub enum ActivitySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     pub uri: String,
-    /// Microseconds; also the ID.
+    /// Microseconds. The node's newer listens have their own id, the time they were written
+    /// (pm-api `listens::record`); older ones used this.
     pub played_at: i64,
     #[serde(default)]
     pub source_kind: ActivitySource,

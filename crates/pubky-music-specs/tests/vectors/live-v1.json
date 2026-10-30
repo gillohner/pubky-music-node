@@ -1,0 +1,163 @@
+{
+  "description": "pubky-music-specs `listening` and `session` contents (music v1). Each post is the v1 envelope with this kind and content, `embed` a music URL, no parent, attachments or lock, validated under /pub. `valid` cases give what a reader shows for the person `display_name`: the `name`, or the generic name when it is absent. `invalid` cases are refused with an error naming `error`. `generic_names` are what a client writes when the person gave no name, and what a reader shows. Times are Unix microseconds.",
+  "author": "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+  "embed": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+  "valid": [
+    {
+      "kind": "session",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792544400000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "Friday night"
+      },
+      "shown_as": "Friday night"
+    },
+    {
+      "kind": "session",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo"
+      },
+      "shown_as": "Alice's listening session"
+    },
+    {
+      "kind": "session",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "Alice's listening session"
+      },
+      "shown_as": "Alice's listening session"
+    },
+    {
+      "kind": "session",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää"
+      },
+      "shown_as": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää"
+    },
+    {
+      "kind": "listening",
+      "display_name": "Bob",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792541013000000,
+        "name": "Late shift",
+        "duration_ms": 213000,
+        "source": {
+          "service": "tidal",
+          "uri": "https://tidal.com/track/50850120"
+        }
+      },
+      "shown_as": "Late shift"
+    },
+    {
+      "kind": "listening",
+      "display_name": "Bob",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792541013000000
+      },
+      "shown_as": "Bob is listening"
+    },
+    {
+      "kind": "listening",
+      "display_name": "",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792541013000000
+      },
+      "shown_as": "Someone is listening"
+    }
+  ],
+  "invalid": [
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": ""
+      },
+      "error": "name"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "   "
+      },
+      "error": "name"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": " Friday night"
+      },
+      "error": "name"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "error": "name"
+    },
+    {
+      "kind": "listening",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792540800000001,
+        "name": "Late shift\n"
+      },
+      "error": "name"
+    },
+    {
+      "kind": "listening",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792540800000001,
+        "name": 7
+      },
+      "error": "content"
+    }
+  ],
+  "generic_names": [
+    {
+      "display_name": "Alice",
+      "session": "Alice's listening session",
+      "listening": "Alice is listening"
+    },
+    {
+      "display_name": "  Alice  ",
+      "session": "Alice's listening session",
+      "listening": "Alice is listening"
+    },
+    {
+      "display_name": "",
+      "session": "Someone's listening session",
+      "listening": "Someone is listening"
+    },
+    {
+      "display_name": "  ",
+      "session": "Someone's listening session",
+      "listening": "Someone is listening"
+    },
+    {
+      "display_name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "session": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx's listening session",
+      "listening": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx is listening"
+    }
+  ]
+}

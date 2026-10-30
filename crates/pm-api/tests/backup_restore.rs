@@ -157,12 +157,7 @@ fn snapshot(s: &NodeState) -> serde_json::Value {
         .map(|p| p.json)
         .collect();
     playlists.sort();
-    let favs: Vec<String> = lib
-        .list_favourites()
-        .unwrap()
-        .into_iter()
-        .map(|f| f.uri)
-        .collect();
+    let favs: Vec<String> = lib.list_bookmarks().unwrap().into_iter().map(|f| f.uri).collect();
     let mut tags: Vec<String> = lib
         .tag_ids()
         .unwrap()
@@ -211,8 +206,8 @@ async fn a_backup_rebuilds_the_node() {
         assert!(lib
             .set_identity(t.id.unwrap().0, &confirmed_uri, Confidence::ConfirmedByUser, None)
             .unwrap());
-        lib.add_favourite(
-            &pm_pubky::Favourite::id_for(&MusicUri::parse(&song).unwrap()),
+        lib.add_bookmark(
+            &pm_pubky::Bookmark::id_for(&MusicUri::parse(&song).unwrap()),
             &song,
             1_700_000_000_000_000,
         )

@@ -34,6 +34,7 @@ pub mod apps;
 pub mod audiobookshelf;
 pub mod backup;
 pub mod bandcamp;
+pub mod bookmarks;
 pub mod bundled;
 pub mod dash;
 pub mod deezer;
@@ -42,7 +43,6 @@ pub mod discover;
 pub mod downloads;
 pub mod drives;
 pub mod events;
-pub mod favourites;
 pub mod files;
 pub mod first_run;
 pub mod first_steps;
@@ -60,6 +60,7 @@ pub mod lastfm;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod listens;
 pub mod loudness;
 pub mod lrclib;
 pub mod mbproxy;
@@ -196,6 +197,17 @@ async fn plain_errors(resp: Response) -> Response {
     (st, Json(serde_json::json!({ "error": error, "detail": raw }))).into_response()
 }
 
+/// Marks a response from a deprecated path (RFC 9745 `Deprecation`, and the path to use).
+async fn deprecated(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert("deprecation", axum::http::HeaderValue::from_static("true"));
+    h.insert(
+        axum::http::header::LINK,
+        axum::http::HeaderValue::from_static("</v1/bookmarks>; rel=\"successor-version\""),
+    );
+    resp
+}
+
 pub fn router(state: Arc<NodeState>) -> Router {
     let v1 = Router::new()
         .route("/info", get(info))
@@ -279,6 +291,31 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
+        // Collections: the same resource as /playlists (playlists.rs)
+        .route("/collections", get(playlists::list).post(playlists::create))
+        .route(
+            "/collections/{id}",
+            get(playlists::get)
+                .put(playlists::update)
+                .delete(playlists::delete),
+        )
+        .route("/collections/{id}/items", post(playlists::add_items))
+        .route(
+            "/collections/{id}/items/{index}",
+            axum::routing::delete(playlists::remove_item),
+        )
+        .route(
+            "/collections/{id}/local/{index}",
+            axum::routing::delete(playlists::remove_local),
+        )
+        .route("/collections/{id}/play", post(playlists::play))
+        .route("/collections/{id}/play-from", get(play_from::playlist_play_from))
+        .route("/collections/{id}/order", put(playlists::set_order))
+        .route("/collections/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/collections/{id}/items/{index}/source",
+            put(playlists::pin_source),
+        )
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
@@ -286,10 +323,16 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/import/roon", post(roon_import::import))
         .route("/activity", get(activity::list).post(activity::record))
         .route(
+            "/bookmarks",
+            get(bookmarks::list).put(bookmarks::put).delete(bookmarks::delete),
+        )
+        // The name before social v1 bookmarks, for one release (docs/api.md, Deprecated)
+        .route(
             "/favourites",
-            get(favourites::list)
-                .put(favourites::put)
-                .delete(favourites::delete),
+            get(bookmarks::list)
+                .put(bookmarks::put)
+                .delete(bookmarks::delete)
+                .layer(middleware::map_response(deprecated)),
         )
         .route("/tags", get(tags::list).put(tags::put).delete(tags::delete))
         .route("/tags/bulk", post(tags::bulk))
@@ -320,7 +363,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/shared/resolve", get(shared::resolve))
         .route("/shared/{user}/playlists", get(shared::list))
         .route("/shared/{user}/playlists/{id}", get(shared::get))
-        .route("/shared/{user}/playlists/{id}/copy", post(shared::copy))
+        .route("/shared/{user}/playlists/{id}/copy", post(shared::duplicate))
+        .route("/shared/{user}/collections", get(shared::list_collections))
+        .route("/shared/{user}/collections/{id}", get(shared::get_collection))
+        .route(
+            "/shared/{user}/collections/{id}/duplicate",
+            post(shared::duplicate),
+        )
         .route("/play-order", get(play_from::get_order).put(play_from::set_order))
         .route("/discover/trends", get(discover::trends))
         .route("/discover/charts", get(discover::charts))
@@ -623,6 +672,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/prefs", get(prefs::get).put(prefs::put))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route("/me/listens", get(listens::list).delete(listens::delete_all))
+        .route("/me/listens/stats", get(listens::get_stats))
+        .route(
+            "/me/listens/settings",
+            get(listens::get_settings).put(listens::put_settings),
+        )
+        .route("/me/listens/visibility", post(listens::move_all))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/people", get(people::list))
         .route("/devices", get(devices::list))
@@ -808,6 +864,12 @@ async fn auth(
     };
     if let Some(why) = refusal {
         return accounts::refused(why).into_response();
+    }
+    // Who changed a zone last decides whether its plays are the owner's listens (listens.rs)
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        if let Some(zone) = listens::zone_of_path(req.uri().path()) {
+            listens::zone_changed_by(&state, zone, caller.role == accounts::Role::Owner);
+        }
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
     let not_owner = caller.role != accounts::Role::Owner;
@@ -2390,9 +2452,9 @@ async fn record_play(State(s): State<Arc<NodeState>>, Json(req): Json<RecordPlay
 async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<HomePage> {
     let limit = p.limit.unwrap_or(12).min(100);
     let lib = s.library.lock().expect("library poisoned");
-    let favs = favourites::collect(&lib)?;
-    let favourite_albums = favs.albums.into_iter().take(limit as usize).collect();
-    // Forgotten favourites: hearted, then not played for two months
+    let favs = bookmarks::collect(&lib)?;
+    let bookmarked_albums: Vec<_> = favs.albums.into_iter().take(limit as usize).collect();
+    // Forgotten bookmarks: bookmarked, then not played for two months
     let cutoff = pm_library::db::now_unix() - 60 * 86_400;
     let mut forgotten: Vec<(i64, pm_model::Track)> = favs
         .tracks
@@ -2412,7 +2474,8 @@ async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiRes
         .collect();
     Ok(Json(HomePage {
         forgotten,
-        favourite_albums,
+        favourite_albums: bookmarked_albums.clone(),
+        bookmarked_albums,
         recently_added: lib.recent_albums(0, limit)?,
         recently_played: lib.recently_played_albums(limit)?,
         most_played_albums: lib.most_played_albums(limit)?,
@@ -5234,7 +5297,7 @@ mod tests {
         let (st, r) = call(&app, "POST", "/v1/sources/jamendo/collection/import", None).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["imported"], 2, "two tracks, one listed twice");
-        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert!(
             favs.to_string().contains("https://www.jamendo.com/track/1427344"),
             "{favs}"
@@ -7260,7 +7323,7 @@ mod tests {
         call(
             &app,
             "PUT",
-            "/v1/favourites",
+            "/v1/bookmarks",
             Some(serde_json::json!({"track_id": ids[1]})),
         )
         .await;
@@ -7290,8 +7353,11 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(titles(&r), ["Fast", "Faster"]);
-        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"rules": [{"field": "genre", "value": "techno"}, {"field": "favourite", "value": true}]}))).await;
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"rules": [{"field": "genre", "value": "techno"}, {"field": "bookmark", "value": true}]}))).await;
         assert_eq!(titles(&r), ["Fast"], "all rules");
+        // A rule saved under the older name still works
+        let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"rules": [{"field": "genre", "value": "techno"}, {"field": "favourite", "value": true}]}))).await;
+        assert_eq!(titles(&r), ["Fast"], "favourite is bookmark");
         let (_, r) = call(&app, "POST", "/v1/smart/preview", Some(serde_json::json!({"matches": "any", "rules": [{"field": "tag", "value": "#sleep"}, {"field": "plays", "op": "at_least", "value": 2}]}))).await;
         assert_eq!(titles(&r), ["Calm", "Faster"], "any rule");
         let (_, r) = call(
@@ -8967,7 +9033,7 @@ mod tests {
             (serde_json::json!(2), serde_json::json!(0)),
             "{r}"
         );
-        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert!(
             favs.to_string().contains("soundcloud.com/someone/night-drive"),
             "{favs}"
@@ -10585,7 +10651,7 @@ exec sleep 300
         let (st, r) = call(&app, "POST", "/v1/sources/tidal/collection/import", None).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["imported"], 2);
-        let (_, favs) = call(&app, "GET", "/v1/favourites", None).await;
+        let (_, favs) = call(&app, "GET", "/v1/bookmarks", None).await;
         let uris: Vec<&str> = favs["uris"]
             .as_array()
             .unwrap()
@@ -11770,6 +11836,40 @@ exec sleep 300
         assert_eq!(r["chosen"], "paste");
         assert!(!r.to_string().contains("my-refresh"), "{r}");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// Bookmarks (social v1 naming, 2026-10-26): `/v1/favourites` answers the same as
+    /// `/v1/bookmarks` for one release, marked deprecated.
+    #[tokio::test]
+    async fn favourites_is_a_deprecated_name_for_bookmarks() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/favourites",
+            Some(serde_json::json!({"uri": uri})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            (r["bookmarked"].as_bool(), r["favourite"].as_bool()),
+            (Some(true), Some(true))
+        );
+        let (_, new) = call(&app, "GET", "/v1/bookmarks", None).await;
+        let (_, old) = call(&app, "GET", "/v1/favourites", None).await;
+        assert_eq!(new, old);
+        assert_eq!(new["uris"], serde_json::json!([uri]));
+        let get = |path: &'static str| Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(get("/v1/favourites")).await.unwrap();
+        assert_eq!(resp.headers()["deprecation"], "true");
+        assert!(resp.headers()["link"].to_str().unwrap().contains("/v1/bookmarks"));
+        let resp = app.clone().oneshot(get("/v1/bookmarks")).await.unwrap();
+        assert!(resp.headers().get("deprecation").is_none());
+        let (st, r) = call(&app, "DELETE", &format!("/v1/bookmarks?uri={uri}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["bookmarked"], false);
     }
 
     /// Sources › Qobuz, YouTube, Spotify and Settings › Last.fm have the same Sign in chooser
