@@ -9,9 +9,11 @@ app in the background: the foreground service (PlayerService.kt) keeps the
 process alive.
 
 The emulator is behind its own NAT, so the node cannot reach the address the
-app registers itself under. This script forwards a host port to the phone's
-player with `adb forward` and registers that instead; the registration call
-itself is the desktop app's, tested there.
+app registers itself under (the emulator's own, 10.0.2.15). This script makes
+that address reach the phone: it adds it to the runner's loopback and relays it
+through `adb forward` to the player's port. The app's own registration (its
+address and the player's key, which only it and the node know) then works as on
+a phone on a home network; the node plays only with that key (protocol 2).
 
 Then, as a phone does on later days:
 - on Android 13+ the app is installed without granting anything, and the notification
@@ -26,8 +28,10 @@ Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import wave
@@ -173,6 +177,62 @@ def rate_over(zid, seconds):
     return rate, tr
 
 
+# The address the app registers: the emulator's own, on the player's usual port
+GUEST = "10.0.2.15:7790"
+# The host end of `adb forward` to the player
+FORWARD = 17790
+relays = {}
+
+
+def relay(address):
+    """Make `address` (the emulator's, as the app registers it) reach the phone's player: add its
+    IP to the runner's loopback, forward a host port to the player's port with adb, and relay
+    connections to the address there."""
+    if address in relays:
+        return
+    ip, port = address.rsplit(":", 1)
+    r = subprocess.run(["sudo", "ip", "addr", "add", f"{ip}/32", "dev", "lo"], capture_output=True, text=True)
+    if r.returncode != 0 and "exists" not in r.stderr:
+        raise RuntimeError(f"cannot add {ip} to the loopback: {r.stderr.strip()}")
+    adb("forward", f"tcp:{FORWARD}", f"tcp:{port}")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((ip, int(port)))
+    srv.listen(16)
+
+    def pipe(a, b):
+        try:
+            while True:
+                data = a.recv(65536)
+                if not data:
+                    break
+                b.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for x in (a, b):
+                try:
+                    x.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def serve():
+        while True:
+            c, _ = srv.accept()
+            try:
+                up = socket.create_connection(("127.0.0.1", FORWARD), timeout=10)
+                up.settimeout(None)
+            except OSError:
+                c.close()
+                continue
+            threading.Thread(target=pipe, args=(c, up), daemon=True).start()
+            threading.Thread(target=pipe, args=(up, c), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    relays[address] = srv
+    log(f"{address} relays to the phone's player (adb forward tcp:{FORWARD} -> tcp:{port})")
+
+
 def main():
     (out / "music").mkdir(parents=True, exist_ok=True)
     (out / "data").mkdir(exist_ok=True)
@@ -224,6 +284,8 @@ def run(node):
     log(f"Android API {sdk}")
     # Android 13+: nothing granted up front; the notification prompt is refused below
     log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
+    # Before the app starts: the address it will register reaches its player
+    relay(GUEST)
     adb("logcat", "-c")
     lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
                           stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
@@ -285,38 +347,83 @@ def run(node):
         shot("2b-dark")
         adb("shell", "cmd", "uimode", "night", "no")
         until("the player service", lambda: "player service started" in logcat(), timeout=90)
-        m = until("the player's port", lambda: re.search(r"player ready port=(\d+)", logcat()), timeout=10)
-        port = m.group(1)
-        log(f"app connected; player on port {port}; service started")
+
+        def registered():
+            """`(True, address)` once the app registered its player with the node, `(False,
+            address)` when the node could not reach it."""
+            text = logcat()
+            ok = re.search(r"player registered with the node address=(\S+)", text)
+            if ok:
+                return (True, ok.group(1))
+            bad = re.search(r"player not registered[^\n]*address=(\S+)", text)
+            return (False, bad.group(1)) if bad else None
+
+        done, address = until("the player's registration", registered, timeout=60)
+        if not done:
+            # The emulator gave it another address or port: relay that one, and start the app
+            # again so it registers once more (with a new key)
+            log(f"the player registered as {address}, not {GUEST}: relaying that and starting the app again")
+            relay(address)
+            adb("shell", "am", "force-stop", PKG)
+            (out / "logcat.txt").write_text("")
+            adb("logcat", "-c")
+            adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+            wait_page("the node's page after starting again", relaunch=True)
+            done, address = until("the player's registration", registered, timeout=90)
+            assert done, f"the node cannot reach the player at {address}"
+        log(f"app connected; player registered with the node as {address}; service started")
         shot("2-connected")
 
-        adb("forward", "tcp:17790", f"tcp:{port}")
-        outs = api("POST", "/v1/outputs/endpoints", {"address": "127.0.0.1:17790"})
-        log("phone outputs: " + ", ".join(o["name"] for o in outs))
-        want = os.environ.get("PM_TEST_OUTPUT", "Speaker or headphones")
-        phone = next((o for o in outs if want.lower() in o["name"].lower()), None)
-        assert phone, f"no output named like {want!r}"
-        zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
-        zid = zone["id"]
-        api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
-        until("playback", lambda: position(zid)[1], timeout=30)
-        z = zone_state(zid)
-        np = z["now_playing"]
-        log(f"playing on {z['name']}: {np['source_format']} -> {np['output_format']}")
+        def phone_outputs():
+            return [o for o in api("GET", "/v1/outputs") if o["id"].startswith(f"net:{address}/")]
 
-        rate, tr = rate_over(zid, 10)
-        assert tr == "playing" and 0.8 < rate < 1.2, f"foreground: {rate:.2f}x ({tr})"
+        def play_here():
+            outs = until("the phone's outputs on the node", phone_outputs, timeout=30)
+            log("phone outputs: " + ", ".join(o["name"] for o in outs))
+            want = os.environ.get("PM_TEST_OUTPUT", "Speaker or headphones")
+            phone = next((o for o in outs if want.lower() in o["name"].lower()), None)
+            assert phone, f"no output named like {want!r}"
+            zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
+            zid = zone["id"]
+            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
+            until("playback", lambda: position(zid)[1], timeout=30)
+            z = zone_state(zid)
+            np = z["now_playing"]
+            log(f"playing on {z['name']}: {np['source_format']} -> {np['output_format']}")
 
-        adb("shell", "input", "keyevent", "3")  # HOME: the app goes to the background
-        log("app in the background")
-        time.sleep(15)
-        rate, tr = rate_over(zid, 15)
-        services = adb("shell", "dumpsys", "activity", "services", PKG)
-        (out / "services.txt").write_text(services)
-        assert "PlayerService" in services and "isForeground=true" in services, "the player service is not in the foreground"
-        assert tr == "playing" and 0.8 < rate < 1.2, f"background: {rate:.2f}x ({tr})"
-        shot("3-background")
-        api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
+            rate, tr = rate_over(zid, 10)
+            assert tr == "playing" and 0.8 < rate < 1.2, f"foreground: {rate:.2f}x ({tr})"
+
+            adb("shell", "input", "keyevent", "3")  # HOME: the app goes to the background
+            log("app in the background")
+            time.sleep(15)
+            rate, tr = rate_over(zid, 15)
+            services = adb("shell", "dumpsys", "activity", "services", PKG)
+            (out / "services.txt").write_text(services)
+            assert "PlayerService" in services and "isForeground=true" in services, "the player service is not in the foreground"
+            assert tr == "playing" and 0.8 < rate < 1.2, f"background: {rate:.2f}x ({tr})"
+            shot("3-background")
+            api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
+
+        # Android may kill the app while it plays when Play services restarts on the emulator
+        # (the WebView depends on its fonts provider): that is the system's doing, not the app's,
+        # so the app is started again, registers again (a new key) and plays once more
+        for attempt in (1, 2):
+            seen = len(system_kills())
+            try:
+                play_here()
+                break
+            except (AssertionError, RuntimeError) as e:
+                kills = system_kills()
+                if attempt == 2 or len(kills) == seen:
+                    raise
+                log(f"Android killed the app while it played, not a crash ({kills[-1]}); starting it again ({e})")
+                (out / "logcat.txt").write_text("")
+                adb("logcat", "-c")
+                adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+                wait_page("the node's page after Android killed the app", relaunch=True)
+                done, address = until("the player's registration", registered, timeout=90)
+                assert done, f"the node cannot reach the player at {address}"
         log("the phone is a zone, plays in real time, and keeps playing in the background")
 
         # Started again with the node saved: it reconnects and the service starts again
