@@ -1,0 +1,396 @@
+{
+  "description": "pubky-music-specs music feeds (music v1, `/{priv,pub}/music/v1/feeds/{id}.json`, id a timestamp id). `valid` feeds pass the writer's rules (strict) and read back byte for byte as JSON values. `reader_only` feeds use a value this version doesn't know: a reader keeps them (and leaves that part out), a writer refuses them. `invalid` feeds are refused by both, with an error naming `error`. `canonical` gives what a writer stores for the tags it was given.",
+  "id": "0035Y0C10FNRP",
+  "valid": [
+    {
+      "about": "tags from people you follow, most tagged first",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000,
+        "icon": "disc"
+      }
+    },
+    {
+      "about": "everything a smart playlist has",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "all",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "rules": [
+            {
+              "field": "year",
+              "op": "between",
+              "value": 1990,
+              "to": 1999
+            },
+            {
+              "field": "genre",
+              "op": "contains",
+              "value": "techno"
+            },
+            {
+              "field": "last_played",
+              "op": "not_within_days",
+              "value": 30
+            }
+          ],
+          "leave_out": {
+            "artists": [
+              "Nobody"
+            ],
+            "uris": [
+              "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
+            ],
+            "played_within_days": 7
+          },
+          "limit": {
+            "songs": 50,
+            "minutes": 120
+          },
+          "seeds": [
+            "https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56"
+          ]
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "no tag filter: the person's own library rules, shuffled",
+      "feed": {
+        "feed": {
+          "tags": null,
+          "match": "any",
+          "reach": "me",
+          "sort": "random",
+          "content": "albums",
+          "layout": "cards"
+        },
+        "name": "Albums to revisit",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "sessions from friends",
+      "feed": {
+        "feed": {
+          "tags": null,
+          "match": "any",
+          "reach": "friends",
+          "sort": "recent",
+          "content": "sessions",
+          "layout": "wide"
+        },
+        "name": "Who is playing",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "an unknown member is kept",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000,
+        "future": {
+          "x": 1
+        }
+      }
+    }
+  ],
+  "reader_only": [
+    {
+      "about": "a reach from a later version",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "nearby",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "a rule field from a later version",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "rules": [
+            {
+              "field": "bpm",
+              "op": "between",
+              "value": 120,
+              "to": 130
+            }
+          ]
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "a content kind from a later version",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "podcasts",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "about": "tags not canonical",
+      "feed": {
+        "feed": {
+          "tags": [
+            "techno",
+            "deep-house"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "canonical"
+    },
+    {
+      "about": "an empty tag list (none is null)",
+      "feed": {
+        "feed": {
+          "tags": [],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "tags"
+    },
+    {
+      "about": "six tags",
+      "feed": {
+        "feed": {
+          "tags": [
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+            "f"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "tags"
+    },
+    {
+      "about": "a blank name",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "   ",
+        "created_at": 1792540800000000
+      },
+      "error": "name"
+    },
+    {
+      "about": "a between rule without its upper end",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "rules": [
+            {
+              "field": "year",
+              "op": "between",
+              "value": 1990
+            }
+          ]
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "between"
+    },
+    {
+      "about": "a limit of 0 songs",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "limit": {
+            "songs": 0
+          }
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "limit"
+    },
+    {
+      "about": "two days of minutes",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "limit": {
+            "minutes": 2880
+          }
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "limit"
+    },
+    {
+      "about": "a seed that is no URI",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "seeds": [
+            "not a link"
+          ]
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000
+      },
+      "error": "seeds"
+    },
+    {
+      "about": "an icon with capitals",
+      "feed": {
+        "feed": {
+          "tags": [
+            "deep-house",
+            "techno"
+          ],
+          "match": "any",
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list"
+        },
+        "name": "Late techno",
+        "created_at": 1792540800000000,
+        "icon": "Disc"
+      },
+      "error": "icon"
+    }
+  ],
+  "canonical": [
+    {
+      "given": [
+        "Techno",
+        "Deep-House",
+        "techno"
+      ],
+      "stored": [
+        "deep-house",
+        "techno"
+      ]
+    }
+  ]
+}

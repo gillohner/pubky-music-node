@@ -14,7 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, Favourite, MusicPost, Playlist, Review, Visibility};
+use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
 use pubky::{Pubky, PubkySession, PublicKey};
 use serde::Serialize;
 
@@ -55,6 +55,24 @@ pub enum HomeserverError {
 
 /// Reads in flight at once during a sync.
 pub const FETCH_AT_ONCE: usize = 8;
+
+/// A tag read from a homeserver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTag {
+    pub path: String,
+    pub id: String,
+    pub uri: String,
+    pub label: String,
+    pub created_at: i64,
+}
+
+/// What [`NodeHomeserver::read_music_tags_in`] found.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTags {
+    pub tags: Vec<RemoteTag>,
+    /// Ids of social v1 tags that are not on music (another app's): skip them next time.
+    pub not_music: Vec<String>,
+}
 
 /// Default page size for listings; the homeserver may cap it.
 pub const LIST_LIMIT: u16 = 100;
@@ -171,23 +189,23 @@ impl NodeHomeserver {
         self.fetch(&user, path, visibility, session).await
     }
 
-    /// The signed-in user's v1 bookmarks of music URLs: `(path, uri, created_at)`. Bookmarks of
-    /// anything else, and invalid ones, are skipped.
-    pub async fn read_v1_favourites(
+    /// The signed-in user's v1 bookmarks of music URLs and public posts: `(path, uri, created_at)`.
+    /// Bookmarks of anything else, and invalid ones, are skipped.
+    pub async fn read_v1_bookmarks(
         &self,
         session: &PubkySession,
-    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
-        self.read_v1_favourites_except(session, &Default::default()).await
+    ) -> Result<Vec<(String, String, i64)>, HomeserverError> {
+        self.read_v1_bookmarks_except(session, &Default::default()).await
     }
 
     /// The same, without downloading the bookmarks the caller already knows: `known` maps a
-    /// bookmark's file name to its music URL and time, and a listed file of that name is taken
-    /// from it. A sync then costs a listing, not one request per favourite.
-    pub async fn read_v1_favourites_except(
+    /// bookmark's file name to its URI and time, and a listed file of that name is taken
+    /// from it. A sync then costs a listing, not one request per bookmark.
+    pub async fn read_v1_bookmarks_except(
         &self,
         session: &PubkySession,
-        known: &std::collections::HashMap<String, (pm_model::MusicUri, i64)>,
-    ) -> Result<Vec<(String, pm_model::MusicUri, i64)>, HomeserverError> {
+        known: &std::collections::HashMap<String, (String, i64)>,
+    ) -> Result<Vec<(String, String, i64)>, HomeserverError> {
         let user = session.public_key();
         let mut out = Vec::new();
         let mut unknown = Vec::new();
@@ -209,7 +227,7 @@ impl NodeHomeserver {
             .fetch_many(&user, unknown, Visibility::Private, Some(session))
             .await?
         {
-            if let Some((uri, created_at)) = crate::v1::favourite_from_bookmark(&path, &bytes) {
+            if let Some((uri, created_at)) = crate::v1::music_bookmark(&path, &bytes) {
                 out.push((path, uri, created_at));
             }
         }
@@ -331,23 +349,23 @@ impl NodeHomeserver {
         Ok(out)
     }
 
-    /// The user's favourites (music bookmarks) under `visibility`; other
+    /// The user's older `pubky.app` bookmarks of music URLs under `visibility`; other
     /// bookmarks (of posts) are skipped.
-    pub async fn read_favourites(
+    pub async fn read_legacy_bookmarks(
         &self,
         user_z32: &str,
         visibility: Visibility,
         session: Option<&PubkySession>,
-    ) -> Result<Vec<(String, Favourite)>, HomeserverError> {
+    ) -> Result<Vec<(String, Bookmark)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        let dir = Favourite::dir(visibility);
+        let dir = Bookmark::dir(visibility);
         let mut out = Vec::new();
         let paths = self.list_dir(&user, &dir, visibility, session).await?;
         for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
             match serde_json::from_slice::<pubky_app_specs::PubkyAppBookmark>(&bytes) {
                 Ok(b) => {
-                    if let Some(f) = Favourite::from_bookmark(&id, &b) {
+                    if let Some(f) = Bookmark::from_bookmark(&id, &b) {
                         out.push((path, f));
                     }
                 }
@@ -357,50 +375,72 @@ impl NodeHomeserver {
         Ok(out)
     }
 
-    /// A user's public tags on music URLs: `(path, tag)`; other tags skipped.
-    /// Reads the node's namespace and the legacy `pubky.app/tags/` (until
-    /// the sync has moved those).
-    pub async fn read_music_tags(
-        &self,
-        user_z32: &str,
-    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
-        self.read_music_tags_except(user_z32, &Default::default()).await
+    /// A user's public tags on music URLs; other tags skipped. Reads `/pub/social/v1/tags/`
+    /// and the two older folders.
+    pub async fn read_music_tags(&self, user_z32: &str) -> Result<RemoteTags, HomeserverError> {
+        self.read_music_tags_in(user_z32, &Default::default(), true, true)
+            .await
     }
 
-    /// The music tags whose id (file name) is not in `known`: the ones the caller does not have
-    /// yet. Known tags are listed but not downloaded.
-    pub async fn read_music_tags_except(
-        &self,
-        user_z32: &str,
-        known: &std::collections::HashSet<String>,
-    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
-        self.read_music_tags_in(user_z32, known, true).await
-    }
-
-    /// The same; `legacy`: also the old `pubky.app/tags/` folder, which once the node has moved
-    /// its tags out holds only other apps' tags (hundreds for an active user: skip it then).
+    /// The music tags whose id is not in `known` (the ones the caller has, or knows are not
+    /// music): listed, never downloaded again. Reads `/pub/social/v1/tags/`; with `app_dir` also
+    /// `/pub/pubky.music/tags/`, and with `legacy_dir` `/pub/pubky.app/tags/`: the folders the
+    /// node wrote to before, until it has moved its tags out (the legacy one holds other apps'
+    /// tags too: hundreds for an active user).
     pub async fn read_music_tags_in(
         &self,
         user_z32: &str,
         known: &std::collections::HashSet<String>,
-        legacy: bool,
-    ) -> Result<Vec<(String, pubky_app_specs::PubkyAppTag)>, HomeserverError> {
+        app_dir: bool,
+        legacy_dir: bool,
+    ) -> Result<RemoteTags, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        let mut out = Vec::new();
-        let mut paths = self
-            .list_dir(&user, crate::schemas::TAG_DIR, Visibility::Public, None)
-            .await
-            .unwrap_or_default();
-        if legacy {
-            paths.extend(
+        let mut out = RemoteTags::default();
+        let v1_paths: Vec<String> = self
+            .list_dir(&user, &crate::v1::tags_dir(), Visibility::Public, None)
+            .await?
+            .into_iter()
+            .filter(|p| crate::v1::tag_id_of(p).is_some_and(|id| !known.contains(id)))
+            .collect();
+        for (path, bytes) in self.fetch_many(&user, v1_paths, Visibility::Public, None).await? {
+            match crate::v1::music_tag_from(&path, &bytes) {
+                Some((id, t)) => out.tags.push(RemoteTag {
+                    path,
+                    id,
+                    uri: t.uri,
+                    label: t.label,
+                    created_at: t.created_at,
+                }),
+                // Another app's tag (on a post, a link): never fetched again
+                None => out
+                    .not_music
+                    .extend(crate::v1::tag_id_of(&path).map(str::to_string)),
+            }
+        }
+        let mut old = Vec::new();
+        if app_dir {
+            old.extend(
+                self.list_dir(&user, crate::schemas::TAG_DIR, Visibility::Public, None)
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+        if legacy_dir {
+            old.extend(
                 self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
                     .await?,
             );
         }
-        paths.retain(|p| !known.contains(file_name(p)));
-        for (path, bytes) in self.fetch_many(&user, paths, Visibility::Public, None).await? {
+        old.retain(|p| !known.contains(file_name(p)));
+        for (path, bytes) in self.fetch_many(&user, old, Visibility::Public, None).await? {
             match serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) {
-                Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.push((path, t)),
+                Ok(t) if pm_model::MusicUri::parse(&t.uri).is_ok() => out.tags.push(RemoteTag {
+                    id: file_name(&path).to_string(),
+                    path,
+                    uri: t.uri,
+                    label: t.label,
+                    created_at: t.created_at,
+                }),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%path, error = %e, "skipping invalid tag"),
             }
@@ -415,22 +455,21 @@ impl NodeHomeserver {
         self.list_dir(&user, dir, Visibility::Public, None).await
     }
 
-    /// Move the user's tags on external links from the legacy
-    /// `/pub/pubky.app/tags/` to `/pub/pubky.music/tags/` (same id, same
-    /// body), so Nexus indexes them. Tags on `pubky://` objects stay. Safe to
-    /// run again: a tag already at the new path is only deleted at the old.
-    /// Returns (moved, kept).
-    pub async fn migrate_music_tags(
+    /// Move the user's tags on external links out of `dir` (an older folder of `PubkyAppTag`s:
+    /// `/pub/pubky.app/tags/` or `/pub/pubky.music/tags/`) to social v1 tags in
+    /// `/pub/social/v1/tags/` (same id, uri, label and time). Tags on `pubky://` objects, and
+    /// ones v1 refuses, stay. Safe to run again: a tag already moved is written again and
+    /// deleted at the old path. Returns (moved, kept).
+    pub async fn move_tags_to_v1(
         &self,
         session: &PubkySession,
+        dir: &str,
     ) -> Result<(usize, usize), HomeserverError> {
         let user = session.public_key();
-        let legacy = self
-            .list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
-            .await?;
+        let paths = self.list_dir(&user, dir, Visibility::Public, None).await?;
         let (mut moved, mut kept) = (0, 0);
-        // The old folder also holds other apps' tags: read 8 at a time (a node runs this once)
-        for (path, bytes) in self.fetch_many(&user, legacy, Visibility::Public, None).await? {
+        // The legacy folder also holds other apps' tags: read 8 at a time (a node runs this once)
+        for (path, bytes) in self.fetch_many(&user, paths, Visibility::Public, None).await? {
             let Ok(tag) = serde_json::from_slice::<pubky_app_specs::PubkyAppTag>(&bytes) else {
                 kept += 1;
                 continue;
@@ -439,9 +478,12 @@ impl NodeHomeserver {
                 kept += 1;
                 continue;
             }
-            let id = path.rsplit('/').next().unwrap_or("").to_string();
-            self.write_object(session, &crate::schemas::music_tag_path(&id), &tag)
-                .await?;
+            let Ok((v1_tag, _, v1_path)) = crate::v1::music_tag(&tag.uri, &tag.label, tag.created_at) else {
+                tracing::warn!(%path, "a tag social v1 refuses stays where it is");
+                kept += 1;
+                continue;
+            };
+            self.write_object(session, &v1_path, &v1_tag).await?;
             self.delete(session, &path).await?;
             moved += 1;
         }
@@ -512,15 +554,6 @@ impl NodeHomeserver {
         meta: &crate::schemas::Meta,
     ) -> Result<(), HomeserverError> {
         self.write_object(session, &meta.path, &post.post).await
-    }
-
-    pub async fn write_tag(
-        &self,
-        session: &PubkySession,
-        tag: &pubky_app_specs::PubkyAppTag,
-        meta: &crate::schemas::Meta,
-    ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, tag).await
     }
 
     /// Delete an object the user wrote (remove a playlist, retract a review).

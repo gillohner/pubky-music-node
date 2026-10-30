@@ -9,7 +9,7 @@
 //!   once.
 //!
 //! Each request carries a [`Caller`] (an extension) for handlers that care who is asking.
-//! Listeners' own playlists, favourites and history (on their own homeserver) come with the
+//! Listeners' own playlists, bookmarks and history (on their own homeserver) come with the
 //! node agent's per-person sync; until then a listener's writes to them are refused.
 
 use crate::state::NodeState;
@@ -126,6 +126,8 @@ pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
 
 /// Routes a listener may never use (reads included): the owner's settings and data.
 const OWNER_ONLY: &[&str] = &[
+    // The owner's listen history (under /me, which a listener may otherwise use)
+    "/me/listens",
     "/people",
     "/vault",
     "/party",
@@ -145,7 +147,7 @@ const OWNER_ONLY: &[&str] = &[
 ];
 
 /// What a listener may read: the shared library, public catalogues and directories, their
-/// zones, and who they are. Everything else (the owner's favourites, playlists, tags, reviews,
+/// zones, and who they are. Everything else (the owner's bookmarks, playlists, tags, reviews,
 /// history, podcast subscriptions and streaming accounts) stays the owner's.
 const LISTENER_READS: &[&str] = &[
     "/me",
@@ -238,7 +240,7 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     if path.starts_with("/devices/") {
         return None;
     }
-    Some("listeners' own playlists, favourites and history are not built yet; this change would land in the owner's")
+    Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")
 }
 
 /// The request's caller, from its token: the API token is the owner; a listener's personal

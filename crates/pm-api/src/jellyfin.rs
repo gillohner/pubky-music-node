@@ -630,6 +630,7 @@ pub(crate) async fn import_playlist(
             uris,
             track_ids: Vec::new(),
             sources: Vec::new(),
+            ..Default::default()
         }),
     )
     .await?;
