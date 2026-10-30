@@ -196,9 +196,12 @@ pub struct MusicFeedConfig {
     pub content: MusicFeedContent,
     /// The social feed's layouts.
     pub layout: PubkySocialFeedLayout,
-    /// Field rules, all of which an item meets.
+    /// Field rules: an item meets all of them, or any with `rules_match`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<MusicFeedRule>,
+    /// `any` when an item meets any of `rules`; left out (the default) for all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_match: Option<MusicFeedMatch>,
     /// What to leave out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leave_out: Option<MusicFeedLeaveOut>,
@@ -338,6 +341,7 @@ impl MusicFeed {
         }
         if strict {
             let unknown = matches!(f.tags_match, MusicFeedMatch::Unknown(_))
+                || matches!(f.rules_match, Some(MusicFeedMatch::Unknown(_)))
                 || matches!(f.reach, PubkySocialFeedReach::Unknown(_))
                 || matches!(f.sort, MusicFeedSort::Unknown(_))
                 || matches!(f.content, MusicFeedContent::Unknown(_))

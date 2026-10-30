@@ -64,6 +64,7 @@ the social v1 feed. It is not a post: it embeds no music.
 | `feed.content` | `songs`, `albums`, `artists`, `playlists`, `sessions` |
 | `feed.layout` | the social feed's layouts |
 | `feed.rules` | up to 50 `{field, op, value, to?}`: `genre`, `artist`, `album`, `year`, `format`, `tag`, `plays`, `last_played`, `bookmarked`; `is`, `contains`, `between`, `at_least`, `at_most`, `within_days`, `not_within_days` |
+| `feed.rules_match` | `any` when an item meets any of the rules; left out (the default) when it meets all of them |
 | `feed.leave_out` | `artists`, `genres`, `uris` (canonical), `played_within_days` |
 | `feed.limit` | `songs` (1–1000) and/or `minutes` (1–1440) |
 | `feed.seeds` | up to 500 canonical URIs to start from |

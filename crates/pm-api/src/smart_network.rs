@@ -13,7 +13,7 @@ use crate::state::NodeState;
 use crate::types::PlaysFrom;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ pub struct Tagger {
     pub key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Their labels on it, in the request's tag order.
+    /// Their labels on it, in the tags' canonical (sorted) order.
     pub labels: Vec<String>,
 }
 
@@ -115,6 +115,9 @@ fn raw_key(z32: &str) -> &str {
     z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
 }
 
+/// Who tagged an item, each with the labels they used.
+type TaggedBy = Vec<(String, Vec<String>)>;
+
 /// The music people in the rules' reach tagged with the rules' tags; `Err` says in plain words
 /// why there is none (no Pubky sign-in for a personal reach, Pinakes unreachable).
 pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<NetworkItem>, String> {
@@ -161,16 +164,34 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
     let cards: Vec<_> = found.items.into_iter().filter(|c| c.is_music()).collect();
     let items = crate::discover::items_for(s, cards);
     // Who tagged each, with which of the labels (Nexus, by URI)
-    let nexus = d.nexus();
-    let views =
-        futures_util::future::join_all(items.iter().take(100).map(|it| nexus.resource_by_uri(&it.uri))).await;
-    let mut out: Vec<NetworkItem> = Vec::new();
-    let mut everyone: Vec<String> = Vec::new();
-    for (it, view) in items.into_iter().zip(views) {
-        let mut by: Vec<(String, Vec<String>)> = Vec::new();
-        if let Ok(v) = view {
+    // At most 8 at a time, each cut short: a slow Nexus never holds the preview long
+    let nexus: pm_pubky::nexus::NexusClient = d.nexus().clone();
+    let uris: Vec<String> = items.iter().take(100).map(|it| it.uri.clone()).collect();
+    let views: Vec<Option<pm_pubky::nexus::ResourceView>> = {
+        use futures_util::StreamExt;
+        let lookups = uris.into_iter().map(|uri: String| {
+            let nexus = nexus.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(1500),
+                    nexus.resource_by_uri(&uri),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+            }
+        });
+        futures_util::stream::iter(lookups).buffered(8).collect().await
+    };
+    // Who tagged what, per item: (tagger, labels), and the most taggers any one label has
+    let mut found: Vec<(TaggedBy, u64)> = Vec::new();
+    for view in &views {
+        let mut by: TaggedBy = Vec::new();
+        let mut most = 0;
+        if let Some(v) = view {
             for label in &tags {
                 if let Some(t) = v.tags.iter().find(|t| &t.label == label) {
+                    most = most.max(t.taggers_count.max(t.taggers.len() as u64));
                     for who in &t.taggers {
                         match by.iter_mut().find(|(k, _)| k == who) {
                             Some((_, ls)) => ls.push(label.clone()),
@@ -180,7 +201,54 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
                 }
             }
         }
-        let taggers_count = by.len();
+        found.push((by, most));
+    }
+    // Only people in the reach are named: Nexus's tagger lists are everyone's
+    let in_reach: Option<HashSet<String>> = match (r.reach.as_str(), viewer.as_deref()) {
+        ("following" | "friends", Some(me)) => {
+            let mut ids: Vec<String> = found
+                .iter()
+                .flat_map(|(by, _)| by.iter().map(|(k, _)| k.clone()))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids.truncate(500);
+            let users = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                nexus.users_by_ids(&ids, Some(me)),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            Some(
+                users
+                    .into_iter()
+                    .filter(|u| {
+                        u.relationship
+                            .as_ref()
+                            .is_some_and(|rel| rel.following && (r.reach == "following" || rel.followed_by))
+                    })
+                    .map(|u| u.details.id)
+                    .collect(),
+            )
+        }
+        _ => None,
+    };
+    let mut out: Vec<NetworkItem> = Vec::new();
+    let mut everyone: Vec<String> = Vec::new();
+    let mut found = found.into_iter();
+    for it in items.into_iter() {
+        let (mut by, most) = found.next().unwrap_or_default();
+        // In a reach: the people in it who tagged it; everyone: the label's own count (Nexus
+        // lists only some of the taggers)
+        let taggers_count = match &in_reach {
+            Some(keep) => {
+                by.retain(|(k, _)| keep.contains(k));
+                by.len()
+            }
+            None => (most as usize).max(by.len()),
+        };
         let shown: Vec<Tagger> = by
             .into_iter()
             .take(TAGGERS_SHOWN)
@@ -282,20 +350,9 @@ pub(crate) fn as_feed(
         extra: Default::default(),
     });
     drop(lib);
-    let rules = r
-        .rules
-        .iter()
-        .map(|x| MusicFeedRule {
-            field: match x.field.as_str() {
-                "bookmark" | "favourite" => "bookmarked".into(),
-                f => f.into(),
-            },
-            op: x.op.clone(),
-            value: x.value.clone(),
-            to: x.to.clone(),
-            extra: Default::default(),
-        })
-        .collect();
+    let rules: Vec<MusicFeedRule> = r.rules.iter().map(feed_rule).collect();
+    // Any of several rules: said so, or a reader would apply them all
+    let rules_match = (r.matches == "any" && rules.len() > 1).then_some(MusicFeedMatch::Any);
     let config = MusicFeedConfig {
         tags: Some(r.tags.clone()).filter(|t| !t.is_empty()),
         tags_match: if r.tags_match == "all" {
@@ -312,6 +369,7 @@ pub(crate) fn as_feed(
         content: MusicFeedContent::Songs,
         layout: PubkySocialFeedLayout::List,
         rules,
+        rules_match,
         leave_out,
         limit: Some(MusicFeedLimit {
             songs: Some(r.limit.clamp(1, 1000) as u32),
@@ -322,6 +380,44 @@ pub(crate) fn as_feed(
     };
     let feed = pubky_music_specs::MusicFeed::new(config, &p.name, Some("list-music"), created_at)?;
     Ok(feed)
+}
+
+/// A rule as the feed says it, with the op the node applies: the node takes a rule without one
+/// (or a range with no upper end), the spec doesn't, and a save must not fail on it.
+fn feed_rule(x: &crate::smart::Rule) -> pubky_music_specs::MusicFeedRule {
+    let field = match x.field.as_str() {
+        "bookmark" | "favourite" => "bookmarked".to_string(),
+        f => f.to_string(),
+    };
+    let to = x.to.clone().filter(|t| !t.is_null());
+    let (op, value, to) = match (field.as_str(), x.op.as_str()) {
+        // A year range: both ends, from, or up to
+        ("year", "" | "between" | "at_least" | "at_most") => match (x.value.is_null(), to) {
+            (false, Some(to)) => ("between", x.value.clone(), Some(to)),
+            (true, Some(to)) => ("at_most", to, None),
+            _ if x.op == "at_most" => ("at_most", x.value.clone(), None),
+            _ => ("at_least", x.value.clone(), None),
+        },
+        (_, "between") if to.is_none() => ("at_least", x.value.clone(), None),
+        (_, "") => (
+            match field.as_str() {
+                "bookmarked" | "tag" | "format" => "is",
+                "plays" => "at_least",
+                "last_played" => "within_days",
+                _ => "contains",
+            },
+            x.value.clone(),
+            to,
+        ),
+        (_, op) => (op, x.value.clone(), to),
+    };
+    pubky_music_specs::MusicFeedRule {
+        field,
+        op: op.to_string(),
+        value,
+        to,
+        extra: Default::default(),
+    }
 }
 
 /// Writes (or rewrites) the smart playlist's music feed; answers where it is.
@@ -361,4 +457,83 @@ pub(crate) async fn delete_feed(s: &NodeState, f: &FeedRef) -> Result<(), String
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::feed_rule;
+    use crate::smart::Rule;
+    use serde_json::json;
+
+    fn rule(v: serde_json::Value) -> Rule {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// Review of #159, M1: a rule the node takes (no op; a range with no upper end) is one the
+    /// spec takes too, with the op the node applies, so a save doesn't fail.
+    #[test]
+    fn every_rule_the_node_takes_is_one_the_feed_takes() {
+        for (given, op, value, to) in [
+            (
+                json!({"field": "genre", "value": "techno"}),
+                "contains",
+                json!("techno"),
+                None,
+            ),
+            (
+                json!({"field": "favourite", "value": true}),
+                "is",
+                json!(true),
+                None,
+            ),
+            (json!({"field": "plays", "value": 3}), "at_least", json!(3), None),
+            (
+                json!({"field": "last_played", "value": 30}),
+                "within_days",
+                json!(30),
+                None,
+            ),
+            (
+                json!({"field": "year", "op": "between", "value": 1990, "to": null}),
+                "at_least",
+                json!(1990),
+                None,
+            ),
+            (
+                json!({"field": "year", "op": "between", "value": 1990, "to": 1999}),
+                "between",
+                json!(1990),
+                Some(json!(1999)),
+            ),
+            (
+                json!({"field": "year", "value": null, "to": 1999}),
+                "at_most",
+                json!(1999),
+                None,
+            ),
+            (
+                json!({"field": "plays", "op": "between", "value": 2}),
+                "at_least",
+                json!(2),
+                None,
+            ),
+            (
+                json!({"field": "plays", "op": "at_most", "value": 2}),
+                "at_most",
+                json!(2),
+                None,
+            ),
+        ] {
+            let r = feed_rule(&rule(given.clone()));
+            assert_eq!((r.op.as_str(), &r.value, &r.to), (op, &value, &to), "{given}");
+            let feed: pubky_music_specs::MusicFeed = serde_json::from_value(json!({
+                "feed": {"reach": "following", "sort": "random", "content": "songs", "layout": "list",
+                         "tags": ["night"], "rules": [r]},
+                "name": "x", "created_at": 1
+            }))
+            .unwrap();
+            feed.validate(None, true)
+                .unwrap_or_else(|e| panic!("{given}: {e}"));
+        }
+    }
 }

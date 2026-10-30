@@ -12429,7 +12429,7 @@ exec sleep 300
 
     /// Smart playlists with tags from the network (TASK-pinakes-social-ux.md E2): `reach` other than
     /// `me` asks Pinakes' generic search for music tagged with the tags in that reach, and Nexus by
-    /// URI for who tagged it (five named, the rest counted, labels in the request's order). Items
+    /// URI for who tagged it (five named, the rest counted, labels in canonical (sorted) order). Items
     /// that play here come first; the answer is cached; a personal reach needs a Pubky sign-in; a
     /// plain smart playlist is unchanged.
     #[tokio::test]
@@ -12463,7 +12463,8 @@ exec sleep 300
                         let taggers: Vec<String> = (0..7).map(|i| if i == 0 { a.to_string() } else { format!("tagger{i}") }).collect();
                         Json(serde_json::json!({"resource": {"id": "r", "uri": q["uri"]}, "tags": [
                             {"label": "house", "taggers": [a], "taggers_count": 1, "relationship": false},
-                            {"label": "techno", "taggers": taggers, "taggers_count": 7, "relationship": false},
+                            // Nexus lists some of the taggers; the label says how many there are
+                            {"label": "techno", "taggers": taggers, "taggers_count": 9, "relationship": false},
                             {"label": "other", "taggers": ["x"], "taggers_count": 1, "relationship": false}
                         ]}))
                     }),
@@ -12501,7 +12502,10 @@ exec sleep 300
         assert_eq!(tidal["site"], "tidal.com");
         let by = &tidal["tagged_by"];
         assert_eq!(by.as_array().unwrap().len(), 5);
-        assert_eq!(tidal["taggers_count"], 7);
+        assert_eq!(
+            tidal["taggers_count"], 9,
+            "the label's count, not the listed taggers"
+        );
         assert_eq!(
             by[0],
             serde_json::json!({"key": a, "name": "Ann", "labels": ["house", "techno"]})
@@ -12511,6 +12515,20 @@ exec sleep 300
         // The same answer again comes from the cache
         call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
         assert_eq!(searches.lock().unwrap().len(), 1);
+        // One query, as the feed says (review of #159): with a rule, what the network found meets
+        // it too; a card nothing can check it on (no genre known) is left out
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(
+                serde_json::json!({"reach": "all", "tags": ["Techno", "house"], "network_limit": 5,
+                                    "rules": [{"field": "genre", "value": "techno"}]}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r.get("network").is_none(), "{r}");
         // People you follow need a Pubky sign-in: said in plain words, not an error
         let (st, r) = call(
             &app,
