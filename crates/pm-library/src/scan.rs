@@ -357,10 +357,16 @@ impl<'a> Scanner<'a> {
 
     fn write_queued(&self, w: &mut Writes, scan_id: i64, report: &mut ScanReport) -> Result<()> {
         let (seen, read) = w.take();
+        // Taken out of the library since it was read: its row stays missing
         for path in seen {
-            self.lib.mark_file_seen(&path, scan_id)?;
+            if !self.lib.is_hidden(&path)? {
+                self.lib.mark_file_seen(&path, scan_id)?;
+            }
         }
         for f in read {
+            if self.lib.is_hidden(&f.path)? {
+                continue;
+            }
             let existing = f.existing;
             match f
                 .read

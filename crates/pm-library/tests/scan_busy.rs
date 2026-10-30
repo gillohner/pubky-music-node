@@ -145,9 +145,7 @@ fn a_slow_read_never_keeps_another_writer_waiting() {
             (n, longest)
         })
     };
-    let report = Scanner::new(&lib)
-        .scan_remote(&root, entries, &open)
-        .unwrap();
+    let report = Scanner::new(&lib).scan_remote(&root, entries, &open).unwrap();
     stop.store(true, Ordering::Relaxed);
     let (writes, longest) = writer.join().unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);

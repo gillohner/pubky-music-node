@@ -462,8 +462,8 @@ async fn lookup(
 const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// A library write that waits through a busy database instead of ending the run (it stopped at
-/// the first "database is locked" while a scan ran): tried again every second, for up to
-/// [`BUSY_PATIENCE`].
+/// the first "database is locked" while a scan ran): tried again once the scan is done (or a
+/// second later, when no scan runs), for up to [`BUSY_PATIENCE`].
 async fn write_waiting<T>(
     s: &NodeState,
     write: impl Fn(&Library) -> pm_library::Result<T>,
@@ -474,7 +474,14 @@ async fn write_waiting<T>(
         match r {
             Err(e) if e.is_busy() && start.elapsed() < BUSY_PATIENCE => {
                 tracing::info!("identify waits for the library (another writer holds it): {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                // Without the library meanwhile: a try holds it through SQLite's busy wait, and
+                // every request that reads the library would wait with it
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if !s.is_scanning() || start.elapsed() >= BUSY_PATIENCE {
+                        break;
+                    }
+                }
             }
             Err(e) if e.is_busy() => {
                 return Err(ApiError::new(

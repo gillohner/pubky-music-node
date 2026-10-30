@@ -13929,8 +13929,8 @@ exec sleep 300
     }
 
     /// Identify while another connection holds the library's write lock longer than the busy
-    /// timeout (a scan writing): the run waits and carries on, no song ends in "error" because
-    /// of the lock, and every song is checked.
+    /// timeout (a scan writing): the first song's state write is turned away, tried again and
+    /// the run carries on; no song ends in "error" because of the lock, and every song is checked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn identify_waits_for_a_busy_library_and_checks_every_song() {
         let dir = tempfile::tempdir().unwrap();
@@ -13941,8 +13941,13 @@ exec sleep 300
         for i in 1..=3 {
             let path = music.join(format!("{i:02} song.wav"));
             tone_wav(&path, 10 + i);
+            // Looked up before (an empty answer): the job's first write is the song's state
+            let key = Library::file_key(&path).unwrap();
             let t = untagged_track(path, &format!("Song {i}"), "Band");
-            ids.push(s.library.lock().unwrap().upsert_track(&t).unwrap().0);
+            let lib = s.library.lock().unwrap();
+            lib.save_fingerprint(&key, 10 + i as u64, "AQfake").unwrap();
+            lib.save_lookup(&key, r#"{"status":"ok","results":[]}"#).unwrap();
+            ids.push(lib.upsert_track(&t).unwrap().0);
         }
         // Another connection takes the write lock and keeps it past the busy timeout
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
