@@ -16,6 +16,10 @@ Newest first. Dates are when the change landed on `main`.
 - **The owner edits the node's library without touching files.** A song's ⋯ menu has **Edit tags…** (title, artist, album, album artist; kept on the node and applied again whenever the file is read) and **Remove from library** (the file stays and scans skip it; Node library brings it back); an album's ⋯ menu has **Rename album…**. `PUT/DELETE /v1/library/tracks/{id}/edit`, `PUT /v1/library/albums/{id}/edit`, `DELETE /v1/library/tracks/{id}`, `GET /v1/library/hidden`, `POST /v1/library/hidden/restore`, and `GET /v1/me/music` for My music. The library database moves to schema 17.
 - **Search: more groups, facets, `tag:`, the keyboard.** Results group into artists, albums, songs, playlists (your own included), people and posts on Pubky (when the node has its Pubky setup), podcasts and concerts. Chips under the scope chips narrow them by source, quality (library files say `FLAC 16/44.1`, hi-res, lossless or lossy), decade and site. `tag:chill` works like `#chill`, and `GET /v1/search` takes `tags` (several tags: all of them). On the search box, ↑/↓ walk the results, Enter opens the one in focus, Shift+Enter plays it.
 
+### 2026-10-30
+
+- **The app's players on Wi-Fi keep up in a group.** Each write to a player waited for its answer, and a group writes its players one after another, so every block cost the sum of their round trips: three players at 30 ms each took 9 s to get one second of audio and their DACs ran dry. A write now goes out without waiting (the answers are read on their own thread, stamped as they arrive), as long as at most 100 ms of audio is unacknowledged; the players still pace the zone. A player's answers still keep it in time with the others.
+
 ## 0.2.2
 
 ### 2026-10-30

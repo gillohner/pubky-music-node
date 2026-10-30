@@ -133,6 +133,8 @@ fn a_block_larger_than_a_frame_arrives_whole() {
     let frames = (pm_stream::MAX_FRAME as usize * 5 / 2) / 32;
     let block = pm_model::AudioBlock::pcm_i32(fmt, vec![7; frames * 8]);
     sink.write(&block).unwrap();
+    // A write doesn't wait for the endpoint's answers; a drain does
+    sink.drain().unwrap();
     assert_eq!(sink.frames_written(), frames as u64);
 }
 
