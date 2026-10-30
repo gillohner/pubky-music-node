@@ -551,6 +551,9 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
+      - name: comments on item pages (post, replies, delete your own; desktop and phone)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-comments.js ci-token http://127.0.0.1:7788
       - name: service apps (built in or your own, limits, Advanced form, the secret kept back)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-service-apps.js ci-token http://127.0.0.1:7788

@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
+
 ### 2026-10-30
 
 - **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.

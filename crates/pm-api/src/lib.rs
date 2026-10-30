@@ -36,6 +36,7 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
+pub mod comments;
 pub mod dash;
 pub mod deezer;
 pub mod devices;
@@ -325,6 +326,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route(
             "/bookmarks",
             get(bookmarks::list).put(bookmarks::put).delete(bookmarks::delete),
+        )
+        .route(
+            "/comments",
+            get(comments::list)
+                .post(comments::create)
+                .delete(comments::delete),
         )
         // The name before social v1 bookmarks, for one release (docs/api.md, Deprecated)
         .route(
@@ -12169,6 +12176,150 @@ exec sleep 300
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// Comments (TASK-pinakes-social-ux.md B1) are read from Nexus by parent: the item's Resource
+    /// replies, newest first, with the authors' names; a rating that names the item as its parent
+    /// is not a comment; an item Nexus doesn't know has none; a comment's replies come by its post.
+    /// Writing needs a Pubky sign-in (the testnet test covers writing and deleting).
+    #[tokio::test]
+    async fn comments_are_read_from_nexus_by_parent() {
+        let a = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let b = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+        let song = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let view = |author: &str, id: &str, kind: &str, content: &str, at: i64, replies: u64| {
+            serde_json::json!({"details": {"id": id, "author": author, "kind": kind, "content": content,
+                "uri": format!("pubky://{author}/pub/social/v1/posts/{id}"), "indexed_at": at,
+                "attachments": null}, "counts": {"replies": replies, "tags": 0}, "tags": [],
+                "relationships": {"replied": song, "mentioned": []}, "bookmark": null})
+        };
+        let replies = serde_json::json!([
+            view(a, "0034A", "note", "Older", 1_000, 2),
+            view(b, "0034C", "note", "Newest", 3_000, 0),
+            view(b, "0034R", "rating", "", 2_500, 0),
+        ]);
+        let thread = serde_json::json!([view(b, "0034D", "note", "A reply", 4_000, 0)]);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let seen = seen.clone();
+            Router::new()
+                .route(
+                    "/nexus/v0/resource/by-uri",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        if q["uri"].contains("b1a9c0e9") {
+                            Json(serde_json::json!({"resource": {"id": "r1", "uri": q["uri"]}, "tags": []})).into_response()
+                        } else {
+                            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response()
+                        }
+                    }),
+                )
+                .route("/nexus/v0/resource/{id}/replies", get(move || async move { Json(replies) }))
+                .route(
+                    "/nexus/v0/stream/posts",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.lock().unwrap().push(format!("{}/{}/{}", q["source"], q["author_id"], q["post_id"]));
+                            Json(thread)
+                        }
+                    }),
+                )
+                .route(
+                    "/nexus/v0/stream/users/by_ids",
+                    post(move || async move { Json(serde_json::json!([{"details": {"id": a, "name": "Ann"}}])) }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let q = format!(
+            "/v1/comments?uri={}",
+            url::form_urlencoded::byte_serialize(song.as_bytes()).collect::<String>()
+        );
+        let (st, t) = call(&app, "GET", &q, None).await;
+        assert_eq!(st, StatusCode::OK, "{t}");
+        assert_eq!(t["indexed"], true);
+        assert_eq!(t["parent"], song);
+        let c = t["comments"].as_array().unwrap();
+        assert_eq!(
+            c.iter()
+                .map(|x| x["content"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["Newest", "Older"]
+        );
+        assert_eq!(c[1]["name"], "Ann");
+        assert_eq!(c[1]["replies"], 2);
+        assert_eq!(c[1]["post"], format!("pubky://{a}/pub/social/v1/posts/0034A"));
+        assert_eq!(c[1]["mine"], false, "not signed in: nothing is mine");
+        // A comment's replies, by its post
+        let (st, r) = call(
+            &app,
+            "GET",
+            &format!("/v1/comments?post=pubky://{a}/pub/social/v1/posts/0034A"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["comments"][0]["content"], "A reply");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [format!("post_replies/{a}/0034A")]
+        );
+        // An item Nexus has no Resource for has no comments yet
+        let (_, none) = call(
+            &app,
+            "GET",
+            "/v1/comments?uri=https%3A%2F%2Ftidal.com%2Ftrack%2F1",
+            None,
+        )
+        .await;
+        assert_eq!(
+            (
+                none["indexed"].as_bool(),
+                none["comments"].as_array().map(Vec::len)
+            ),
+            (Some(true), Some(0))
+        );
+        // Writing needs a Pubky sign-in; a bad link or a missing item is a 400
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/comments",
+            Some(serde_json::json!({"uri": song, "content": "Hi"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        assert_eq!(
+            call(&app, "GET", "/v1/comments", None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/comments?post=https://example.org/x", None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("/v1/comments?post=pubky://{a}/pub/social/v1/posts/0034A"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::PRECONDITION_FAILED
+        );
     }
 
     /// A node at `public_url`, which the binary guessed (none configured) or the owner set.

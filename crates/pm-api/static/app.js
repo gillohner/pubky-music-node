@@ -280,6 +280,47 @@
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
+  // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
+  // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
+  const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
+  const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm" disabled>Post</button></form>`;
+  const mountComments = (sec) => {
+    const uri = sec.dataset.curi; const body = $('.comments-body', sec);
+    const show = async () => {
+      let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+      if (!sec.isConnected) return;
+      body.innerHTML = `${commentForm('Add a comment')}${t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : `<p class="muted small">No comments yet.</p>`}<p class="muted small">A comment is a public post on your homeserver, so every Pubky app shows it.</p>`;
+    };
+    const replies = async (li, post) => {
+      let t; try { t = await api('GET', `/comments?post=${encodeURIComponent(post)}`); } catch (e) { toast(e.message, 'error'); return; }
+      $('.comment-sub', li).innerHTML = t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : '<p class="muted small">No replies yet.</p>';
+    };
+    // Post wakes up once there is something to post
+    sec.addEventListener('input', (e) => { const f = e.target.closest('form.comment-form'); if (f) f.querySelector('button').disabled = !f.elements.content.value.trim(); });
+    sec.addEventListener('submit', async (e) => {
+      const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
+      const content = f.elements.content.value.trim(); if (!content) return;
+      const b = f.querySelector('button'); b.disabled = true;
+      try {
+        await api('POST', '/comments', f.dataset.replyTo ? { reply_to: f.dataset.replyTo, content } : { uri, content });
+        toast(f.dataset.replyTo ? 'Reply posted' : 'Comment posted');
+        if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
+      } catch (err) { b.disabled = false; toast(err.message, 'error'); }
+    });
+    sec.addEventListener('click', async (e) => {
+      const r = e.target.closest('[data-creply]');
+      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); const f = $(':scope > form', sub); f.dataset.replyTo = r.dataset.creply; f.elements.content.focus(); } return; }
+      const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
+      const d = e.target.closest('[data-cdel]');
+      if (d) {
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true }, { label: 'Keep', value: false }] });
+        if (!go) return;
+        d.disabled = true;
+        try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
+      }
+    });
+    show();
+  };
   // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
   const importPlaylist = async (b, service, id) => {
     const name = SERVICE_NAMES[service] || service;
@@ -4161,6 +4202,8 @@
           const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
           const songs = pg.songs || [];
           const target = pg.target;
+          // What comments are about: the song's own link, else this item's (a web link only)
+          const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3)
           const songRef = target.track_id != null || target.album_id != null || target.artist_id != null ? target : pg.song_uri ? { uri: pg.song_uri } : target;
@@ -4223,6 +4266,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
+            + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
@@ -4273,6 +4317,7 @@
           const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+          const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
           break;
