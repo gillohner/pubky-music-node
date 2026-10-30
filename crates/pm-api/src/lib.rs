@@ -13927,4 +13927,47 @@ exec sleep 300
             "an unmatched song takes tags that wait: {tg}"
         );
     }
+
+    /// Identify while another connection holds the library's write lock longer than the busy
+    /// timeout (a scan writing): the run waits and carries on, no song ends in "error" because
+    /// of the lock, and every song is checked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identify_waits_for_a_busy_library_and_checks_every_song() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        let mut ids = Vec::new();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            let t = untagged_track(path, &format!("Song {i}"), "Band");
+            ids.push(s.library.lock().unwrap().upsert_track(&t).unwrap().0);
+        }
+        // Another connection takes the write lock and keeps it past the busy timeout
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
+        let other = {
+            let db = dir.path().join("lib.sqlite");
+            std::thread::spawn(move || {
+                let other = Library::open(&db).unwrap();
+                other.begin_batch().unwrap();
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(held);
+                other.commit_batch().unwrap();
+            })
+        };
+        locked_rx.recv().unwrap();
+        identify::run(&s, false).await.unwrap();
+        other.join().unwrap();
+        let p = s.identify.lock().unwrap().clone();
+        assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .tracks_to_identify(false)
+            .unwrap()
+            .is_empty());
+    }
 }

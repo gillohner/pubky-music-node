@@ -43,6 +43,8 @@ pub struct Scanner<'a> {
     /// Per album folder: for each album title (lower case) among its files without an album
     /// artist, their main artists (lower case). Read once per folder in a scan.
     folders: Mutex<HashMap<PathBuf, HashMap<String, HashSet<String>>>>,
+    /// Per folder: its cover image, looked for once in a scan.
+    covers: Mutex<HashMap<PathBuf, Option<(PathBuf, String)>>>,
 }
 
 /// Folder image names tried, in order, when a file has no embedded picture.
@@ -62,6 +64,7 @@ impl<'a> Scanner<'a> {
             lib,
             art_dir: None,
             folders: Mutex::new(HashMap::new()),
+            covers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -75,6 +78,16 @@ impl<'a> Scanner<'a> {
     /// Give the album its cover if it has none yet: the file's embedded
     /// picture, else an image in the file's folder.
     fn cover_for(&self, path: &Path, album_id: i64, tags: &TagSet) -> Result<()> {
+        self.cover_from(album_id, tags, || folder_cover(path))
+    }
+
+    /// [`Self::cover_for`] with the folder's image (`folder`) looked for already.
+    fn cover_from(
+        &self,
+        album_id: i64,
+        tags: &TagSet,
+        folder: impl FnOnce() -> Option<(PathBuf, String)>,
+    ) -> Result<()> {
         let Some(art_dir) = &self.art_dir else {
             return Ok(());
         };
@@ -101,7 +114,7 @@ impl<'a> Scanner<'a> {
                 source: "embedded".into(),
             });
         }
-        if let Some((file, mime)) = folder_cover(path) {
+        if let Some((file, mime)) = folder() {
             return self.lib.set_album_art(&crate::db::AlbumArt {
                 album_id,
                 file,
@@ -180,11 +193,9 @@ impl<'a> Scanner<'a> {
         } else {
             split_album_files(self.lib.album_files_under(&root)?)
         };
-        // Writes go in batches of a few hundred files (or half a second), not one commit each.
-        let batch = Batch::new(self.lib)?;
-        // Files a busy database turned away: tried again after the walk, before files not seen
-        // count as removed.
-        let mut busy: Vec<(PathBuf, u64, i64, Option<TrackId>)> = Vec::new();
+        // Files are read with no transaction open (over a share the reading is the slow part);
+        // their writes are queued and made in short transactions (see [`Writes`]).
+        let mut writes = Writes::default();
 
         for entry in WalkDir::new(&root).follow_links(true).into_iter() {
             let entry = match entry {
@@ -202,7 +213,7 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             report.files_seen += 1;
-            batch.tick()?;
+            self.flush(&mut writes, scan_id, &mut report, false)?;
             let path = entry.path().to_path_buf();
             // Taken out of the library: not read, and its row stays missing
             if self.lib.is_hidden(&path)? {
@@ -229,61 +240,21 @@ impl<'a> Scanner<'a> {
             let existing = self.lib.file_by_path(&path)?;
             if let Some(row) = &existing {
                 if row.size_bytes == size && row.mtime_unix == mtime && !regroup.contains(&path) {
-                    self.lib.mark_file_seen(&path, scan_id)?;
+                    writes.seen(path);
                     report.files_unchanged += 1;
                     continue;
                 }
             }
-            match self.index_file(&path, size, mtime, existing.as_ref().map(|r| r.track_id)) {
-                Ok(_) => {
-                    self.lib.mark_file_seen(&path, scan_id)?;
-                    if existing.is_some() {
-                        report.files_updated += 1;
-                    } else {
-                        report.files_added += 1;
-                    }
-                }
-                Err(e) if e.is_busy() => {
-                    tracing::debug!(path = %path.display(), "database busy; trying this file again later: {e}");
-                    busy.push((path, size, mtime, existing.map(|r| r.track_id)));
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), "skipping file: {e}");
-                    report.errors.push((path, e.to_string()));
-                }
-            }
+            let read = tags::probe_and_read(&path).map(|p| self.prepare(&path, p));
+            writes.read(ReadFile {
+                path,
+                size,
+                mtime,
+                existing: existing.map(|r| r.track_id),
+                read,
+            });
         }
-        for (path, size, mtime, existing) in busy {
-            let mut tries = 0;
-            let outcome = loop {
-                batch.restart()?;
-                match self.index_file(&path, size, mtime, existing) {
-                    Err(e) if e.is_busy() && tries < BUSY_RETRIES => {
-                        tries += 1;
-                        std::thread::sleep(std::time::Duration::from_millis(250 * tries as u64));
-                    }
-                    other => break other,
-                }
-            };
-            match outcome {
-                Ok(_) => {
-                    self.lib.mark_file_seen(&path, scan_id)?;
-                    if existing.is_some() {
-                        report.files_updated += 1;
-                    } else {
-                        report.files_added += 1;
-                    }
-                }
-                Err(e) => {
-                    // Not marked seen, but a busy database is not a missing file: keep its row
-                    self.lib.mark_file_seen(&path, scan_id).ok();
-                    tracing::warn!(path = %path.display(), "skipping file: {e}");
-                    report.errors.push((path, e.to_string()));
-                }
-            }
-        }
-
-        batch.finish()?;
+        self.flush(&mut writes, scan_id, &mut report, true)?;
         report.files_removed = self.lib.mark_missing_under(&root, scan_id)?;
         self.lib.prune_empty_albums()?;
         self.lib.set_setting(&rules_key, ALBUM_RULES)?;
@@ -302,59 +273,184 @@ impl<'a> Scanner<'a> {
         Ok(report)
     }
 
-    fn index_file(&self, path: &Path, size: u64, mtime: i64, existing: Option<TrackId>) -> Result<TrackId> {
-        let probed = tags::probe_and_read(path)?;
-        self.index_probed(path, size, mtime, existing, probed)
+    /// What a file's write needs from disk besides its tags, read before the write (with no
+    /// transaction open): whether its folder is a mix of artists, its `.lrc`, the folder's cover.
+    fn prepare(&self, path: &Path, (probe, mut tags): (tags::FileProbe, TagSet)) -> Prepared {
+        // No album artist, and the album's other files name other artists: "Various Artists",
+        // so the album stays one album (local files; a remote share's folders aren't read).
+        if tags.album_artist.is_none() && !tags.compilation {
+            if let Some(album) = &tags.album {
+                if path.is_absolute() && self.folder_artist_count(path, album) > 1 {
+                    tags.album_artist = Some(VARIOUS_ARTISTS.into());
+                }
+            }
+        }
+        // A sidecar .lrc (usually synchronised) wins over embedded text.
+        let lyrics = crate::lyrics::sidecar(path)
+            .map(|t| (t, "lrc"))
+            .or_else(|| tags.lyrics.clone().map(|t| (t, "tag")));
+        let folder_cover = match (path.parent(), &tags.album, &tags.picture, &self.art_dir) {
+            (Some(dir), Some(_), None, Some(_)) => self
+                .covers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| folder_cover(path))
+                .clone(),
+            _ => None,
+        };
+        Prepared {
+            probe,
+            tags,
+            lyrics,
+            folder_cover,
+        }
     }
 
-    /// Indexes a file whose probe is done (local or remote).
-    fn index_probed(
+    /// Writes a file read by [`Self::prepare`] (local or remote).
+    fn write_file(
         &self,
         path: &Path,
         size: u64,
         mtime: i64,
         existing: Option<TrackId>,
-        (probe, mut tagset): (tags::FileProbe, TagSet),
+        p: Prepared,
     ) -> Result<TrackId> {
-        let has_album = tagset.album.is_some();
-        // No album artist, and the album's other files name other artists: "Various Artists",
-        // so the album stays one album (local files; a remote share's folders aren't read).
-        if tagset.album_artist.is_none() && !tagset.compilation {
-            if let Some(album) = &tagset.album {
-                if path.is_absolute() && self.folder_artist_count(path, album) > 1 {
-                    tagset.album_artist = Some(VARIOUS_ARTISTS.into());
-                }
-            }
-        }
         let file = AudioFile {
             path: path.to_path_buf(),
             size_bytes: size,
             mtime_unix: mtime,
-            container: probe.container,
-            format: probe.format,
-            duration_ms: probe.duration_ms,
+            container: p.probe.container,
+            format: p.probe.format,
+            duration_ms: p.probe.duration_ms,
         };
-        let mut track = track_from_tags(file, &tagset);
+        let mut track = track_from_tags(file, &p.tags);
         track.id = existing;
         // The owner's edit of this file's tags stays on top of what the file says
         if let Some(o) = self.lib.refresh_override(&track)? {
             o.apply(&mut track);
         }
         let id = self.lib.upsert_track(&track)?;
-        // A sidecar .lrc (usually synchronised) wins over embedded text.
-        let lyrics = crate::lyrics::sidecar(path)
-            .map(|t| (t, "lrc"))
-            .or_else(|| tagset.lyrics.clone().map(|t| (t, "tag")));
         self.lib
-            .set_lyrics(id, lyrics.as_ref().map(|(t, s)| (t.as_str(), *s)))?;
-        if has_album && self.art_dir.is_some() {
+            .set_lyrics(id, p.lyrics.as_ref().map(|(t, s)| (t.as_str(), *s)))?;
+        if p.tags.album.is_some() && self.art_dir.is_some() {
             if let Some(album_id) = self.lib.get_track(id)?.and_then(|t| t.album.and_then(|a| a.id)) {
-                if let Err(e) = self.cover_for(path, album_id, &tagset) {
+                if let Err(e) = self.cover_from(album_id, &p.tags, || p.folder_cover.clone()) {
                     tracing::warn!(path = %path.display(), "cover art: {e}");
                 }
             }
         }
         Ok(id)
+    }
+
+    /// Makes the queued writes in one transaction when they are due ([`Writes::due`]) or `now`.
+    fn flush(&self, w: &mut Writes, scan_id: i64, report: &mut ScanReport, now: bool) -> Result<()> {
+        if w.is_empty() || !(now || w.due()) {
+            return Ok(());
+        }
+        begin_waiting(self.lib)?;
+        let written = self.write_queued(w, scan_id, report);
+        // What was written stays, also when a write failed
+        let committed = self.lib.commit_batch();
+        written.and(committed)
+    }
+
+    fn write_queued(&self, w: &mut Writes, scan_id: i64, report: &mut ScanReport) -> Result<()> {
+        let (seen, read) = w.take();
+        for path in seen {
+            self.lib.mark_file_seen(&path, scan_id)?;
+        }
+        for f in read {
+            let existing = f.existing;
+            match f
+                .read
+                .and_then(|p| self.write_file(&f.path, f.size, f.mtime, existing, p))
+            {
+                Ok(_) => {
+                    self.lib.mark_file_seen(&f.path, scan_id)?;
+                    if existing.is_some() {
+                        report.files_updated += 1;
+                    } else {
+                        report.files_added += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %f.path.display(), "skipping file: {e}");
+                    report.errors.push((f.path, e.to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A file read for the scan, with what its write needs.
+struct Prepared {
+    probe: tags::FileProbe,
+    tags: TagSet,
+    lyrics: Option<(String, &'static str)>,
+    folder_cover: Option<(PathBuf, String)>,
+}
+
+/// A changed file the scan read (or failed to), waiting for its write.
+struct ReadFile {
+    path: PathBuf,
+    size: u64,
+    mtime: i64,
+    existing: Option<TrackId>,
+    read: Result<Prepared>,
+}
+
+/// A scan's writes, queued while it reads files and made in one short transaction (see
+/// [`Scanner::flush`]). Reading a file, over a network share above all, can take seconds; a
+/// transaction held meanwhile kept every other writer (Identify, the API) waiting until it gave
+/// up with "database is locked".
+#[derive(Default)]
+struct Writes {
+    seen: Vec<PathBuf>,
+    read: Vec<ReadFile>,
+    /// Bytes of embedded pictures the queued files hold.
+    picture_bytes: usize,
+    since: Option<std::time::Instant>,
+}
+
+impl Writes {
+    /// Unchanged files (a rescan): one commit per this many.
+    const FILES: usize = 250;
+    /// Changed files read, held with their tags (and pictures) until written.
+    const READ: usize = 64;
+    const PICTURE_BYTES: usize = 32 << 20;
+    /// New files appear in the library at least this often.
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    fn seen(&mut self, path: PathBuf) {
+        self.since.get_or_insert_with(std::time::Instant::now);
+        self.seen.push(path);
+    }
+
+    fn read(&mut self, f: ReadFile) {
+        self.since.get_or_insert_with(std::time::Instant::now);
+        if let Ok(p) = &f.read {
+            self.picture_bytes += p.tags.picture.as_ref().map_or(0, |pic| pic.data.len());
+        }
+        self.read.push(f);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.seen.is_empty() && self.read.is_empty()
+    }
+
+    fn due(&self) -> bool {
+        self.seen.len() + self.read.len() >= Self::FILES
+            || self.read.len() >= Self::READ
+            || self.picture_bytes >= Self::PICTURE_BYTES
+            || self.since.is_some_and(|t| t.elapsed() >= Self::MAX_AGE)
+    }
+
+    fn take(&mut self) -> (Vec<PathBuf>, Vec<ReadFile>) {
+        self.picture_bytes = 0;
+        self.since = None;
+        (std::mem::take(&mut self.seen), std::mem::take(&mut self.read))
     }
 }
 
@@ -384,43 +480,34 @@ impl<'a> Scanner<'a> {
             scan_id,
             ..Default::default()
         };
-        let batch = Batch::new(self.lib)?;
+        let mut writes = Writes::default();
         for e in entries {
             if !tags::is_supported(&e.path) {
                 continue;
             }
             report.files_seen += 1;
-            batch.tick()?;
+            self.flush(&mut writes, scan_id, &mut report, false)?;
             if self.lib.is_hidden(&e.path)? {
                 continue;
             }
             let existing = self.lib.file_by_path(&e.path)?;
             if let Some(row) = &existing {
                 if row.size_bytes == e.size && row.mtime_unix == e.mtime {
-                    self.lib.mark_file_seen(&e.path, scan_id)?;
+                    writes.seen(e.path.clone());
                     report.files_unchanged += 1;
                     continue;
                 }
             }
-            let probed = tags::probe_and_read_from(&e.path, &|| open(&e));
-            match probed.and_then(|p| {
-                self.index_probed(&e.path, e.size, e.mtime, existing.as_ref().map(|r| r.track_id), p)
-            }) {
-                Ok(_) => {
-                    self.lib.mark_file_seen(&e.path, scan_id)?;
-                    if existing.is_some() {
-                        report.files_updated += 1;
-                    } else {
-                        report.files_added += 1;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(path = %e.path.display(), "skipping remote file: {err}");
-                    report.errors.push((e.path.clone(), err.to_string()));
-                }
-            }
+            let read = tags::probe_and_read_from(&e.path, &|| open(&e)).map(|p| self.prepare(&e.path, p));
+            writes.read(ReadFile {
+                path: e.path.clone(),
+                size: e.size,
+                mtime: e.mtime,
+                existing: existing.map(|r| r.track_id),
+                read,
+            });
         }
-        batch.finish()?;
+        self.flush(&mut writes, scan_id, &mut report, true)?;
         report.files_removed = self.lib.mark_missing_under(root, scan_id)?;
         self.lib.finish_scan(
             scan_id,
@@ -435,14 +522,6 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// A scan's write batch: committed every [`Batch::FILES`] files or [`Batch::MAX_AGE`], and when
-/// dropped (an error ends the scan early, what was written stays).
-struct Batch<'a> {
-    lib: &'a Library,
-    files: std::cell::Cell<u32>,
-    since: std::cell::Cell<std::time::Instant>,
-}
-
 /// `._name.flac`: the resource fork a Mac writes next to each file on a share (AppleDouble), not
 /// audio. Reading them failed every one and filled the scan's errors.
 fn is_apple_double(path: &Path) -> bool {
@@ -451,8 +530,8 @@ fn is_apple_double(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with("._"))
 }
 
-/// How often a file (or a batch) is tried again while another connection keeps the database
-/// busy; each try waits up to the connection's busy timeout.
+/// How often a batch is tried again while another connection keeps the database busy; each try
+/// waits up to the connection's busy timeout.
 const BUSY_RETRIES: u32 = 4;
 
 /// Begin a batch, waiting through a busy database (each try waits the busy timeout).
@@ -465,51 +544,6 @@ fn begin_waiting(lib: &Library) -> Result<()> {
                 tracing::info!("scan waits for the database (another writer holds it): {e}");
             }
             other => return other,
-        }
-    }
-}
-
-impl<'a> Batch<'a> {
-    const FILES: u32 = 250;
-    const MAX_AGE: std::time::Duration = std::time::Duration::from_millis(500);
-
-    fn new(lib: &'a Library) -> Result<Self> {
-        begin_waiting(lib)?;
-        Ok(Self {
-            lib,
-            files: 0.into(),
-            since: std::time::Instant::now().into(),
-        })
-    }
-
-    fn tick(&self) -> Result<()> {
-        self.files.set(self.files.get() + 1);
-        if self.files.get() >= Self::FILES || self.since.get().elapsed() >= Self::MAX_AGE {
-            self.restart()?;
-        }
-        Ok(())
-    }
-
-    /// Commit what is batched and start a new batch (other writers get their turn).
-    fn restart(&self) -> Result<()> {
-        self.lib.commit_batch()?;
-        // A moment without the lock: another writer waiting for it gets its turn
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        begin_waiting(self.lib)?;
-        self.files.set(0);
-        self.since.set(std::time::Instant::now());
-        Ok(())
-    }
-
-    fn finish(self) -> Result<()> {
-        self.lib.commit_batch()
-    }
-}
-
-impl Drop for Batch<'_> {
-    fn drop(&mut self) {
-        if let Err(e) = self.lib.commit_batch() {
-            tracing::warn!("scan batch: {e}");
         }
     }
 }

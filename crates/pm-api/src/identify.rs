@@ -44,6 +44,9 @@ pub struct IdentifyProgress {
     pub errors: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Why the run ended before its last song (the next run carries on from there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,7 +255,7 @@ pub(crate) async fn start(
     tokio::spawn(async move {
         if let Err(e) = run(&st, retry).await {
             tracing::warn!("identify: {}", e.message);
-            st.identify.lock().expect("identify lock").last_error = Some(e.message);
+            st.identify.lock().expect("identify lock").stopped = Some(e.message);
         }
         let mut p = st.identify.lock().expect("identify lock");
         p.running = false;
@@ -318,16 +321,15 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                         confidence,
                         acoustid,
                     } => {
-                        let lib = s.library.lock().expect("library poisoned");
-                        lib.set_identity(
-                            id,
-                            &MusicUri::Recording { mbid: recording },
-                            confidence,
-                            Some(&acoustid),
-                        )?;
-                        lib.set_identify_state(id, "identified", Some(confidence.label()))?;
+                        let uri = MusicUri::Recording { mbid: recording };
+                        write_waiting(s, |lib| lib.set_identity(id, &uri, confidence, Some(&acoustid)))
+                            .await?;
+                        write_waiting(s, |lib| {
+                            lib.set_identify_state(id, "identified", Some(confidence.label()))
+                        })
+                        .await?;
                         if let Some(r) = release {
-                            lib.set_identify_release(id, &r)?;
+                            write_waiting(s, |lib| lib.set_identify_release(id, &r)).await?;
                         }
                         identified_now.push(id);
                         Outcome::Identified
@@ -344,22 +346,26 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                 },
                 o => o,
             };
-            let mut p = s.identify.lock().expect("identify lock");
-            p.done += 1;
-            let lib = s.library.lock().expect("library poisoned");
-            match outcome {
-                Outcome::Identified => p.identified += 1,
+            match &outcome {
+                Outcome::Identified => {}
                 Outcome::Suggest(c) => {
-                    lib.add_suggestions(id, &c)?;
-                    lib.set_identify_state(id, "suggested", None)?;
-                    p.suggested += 1;
+                    write_waiting(s, |lib| lib.add_suggestions(id, c)).await?;
+                    write_waiting(s, |lib| lib.set_identify_state(id, "suggested", None)).await?;
                 }
                 Outcome::Unknown => {
-                    lib.set_identify_state(id, "unknown", None)?;
-                    p.unknown += 1;
+                    write_waiting(s, |lib| lib.set_identify_state(id, "unknown", None)).await?
                 }
                 Outcome::Error(e) => {
-                    lib.set_identify_state(id, "error", Some(&e))?;
+                    write_waiting(s, |lib| lib.set_identify_state(id, "error", Some(e))).await?
+                }
+            }
+            let mut p = s.identify.lock().expect("identify lock");
+            p.done += 1;
+            match outcome {
+                Outcome::Identified => p.identified += 1,
+                Outcome::Suggest(_) => p.suggested += 1,
+                Outcome::Unknown => p.unknown += 1,
+                Outcome::Error(e) => {
                     p.errors += 1;
                     p.last_error = Some(e);
                 }
@@ -421,11 +427,14 @@ async fn lookup(
                 .await
                 .map_err(|e| e.to_string())?
                 .map_err(|e| format!("fingerprint: {e}"))?;
-            s.library
-                .lock()
-                .expect("library poisoned")
-                .save_fingerprint(&key, f.duration_secs, &f.fingerprint)
-                .map_err(|e| e.to_string())?;
+            // The cache saves work, nothing more: a busy library doesn't fail the song
+            if let Err(e) = s.library.lock().expect("library poisoned").save_fingerprint(
+                &key,
+                f.duration_secs,
+                &f.fingerprint,
+            ) {
+                tracing::debug!("identify: fingerprint not cached: {e}");
+            }
             (f.duration_secs, f.fingerprint, None)
         }
     };
@@ -437,12 +446,48 @@ async fn lookup(
         return Ok(Vec::new());
     };
     let (raw, results) = client.lookup(&fp, duration).await.map_err(|e| e.to_string())?;
-    s.library
+    if let Err(e) = s
+        .library
         .lock()
         .expect("library poisoned")
         .save_lookup(&key, &raw)
-        .map_err(|e| e.to_string())?;
+    {
+        tracing::debug!("identify: AcoustID answer not cached: {e}");
+    }
     Ok(results)
+}
+
+/// How long the job waits for a write while another connection holds the library (a scan
+/// writing) before it stops; each try waits the connection's busy timeout first.
+const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A library write that waits through a busy database instead of ending the run (it stopped at
+/// the first "database is locked" while a scan ran): tried again every second, for up to
+/// [`BUSY_PATIENCE`].
+async fn write_waiting<T>(
+    s: &NodeState,
+    write: impl Fn(&Library) -> pm_library::Result<T>,
+) -> Result<T, ApiError> {
+    let start = std::time::Instant::now();
+    loop {
+        let r = write(&s.library.lock().expect("library poisoned"));
+        match r {
+            Err(e) if e.is_busy() && start.elapsed() < BUSY_PATIENCE => {
+                tracing::info!("identify waits for the library (another writer holds it): {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) if e.is_busy() => {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "the library stayed busy for {} minutes (a scan writing?): {e}",
+                        BUSY_PATIENCE.as_secs() / 60
+                    ),
+                ))
+            }
+            r => return r.map_err(ApiError::from),
+        }
+    }
 }
 
 /// MusicBrainz recordings matching the tags' artist and title (± 2 s): suggestions only, ranked
