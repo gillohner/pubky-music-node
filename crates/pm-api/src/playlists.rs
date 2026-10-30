@@ -271,10 +271,34 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Playl
 
 /// Every playlist of the node's, as the list shows them (search lists them too).
 pub(crate) fn summaries(lib: &Library) -> Result<Vec<PlaylistSummary>, ApiError> {
+    summaries_where(lib, |_| true, usize::MAX)
+}
+
+/// The playlists whose name contains `needle` (lowercase), at most `max`: the name is checked
+/// before the song counts and covers are read (search asks on every keystroke).
+pub(crate) fn summaries_named(
+    lib: &Library,
+    needle: &str,
+    max: usize,
+) -> Result<Vec<PlaylistSummary>, ApiError> {
+    summaries_where(lib, |name| name.to_lowercase().contains(needle), max)
+}
+
+fn summaries_where(
+    lib: &Library,
+    keep: impl Fn(&str) -> bool,
+    max: usize,
+) -> Result<Vec<PlaylistSummary>, ApiError> {
     let mut out = Vec::new();
     for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
+        if out.len() >= max {
+            break;
+        }
         if let Ok((row, p)) = load(lib, &row.id) {
             let mut sm = summary(&row, &p);
+            if !keep(&sm.name) {
+                continue;
+            }
             sm.items += local_ids(lib, &row.id).len();
             sm.covers = covers(lib, &row.id, &p);
             out.push(sm);

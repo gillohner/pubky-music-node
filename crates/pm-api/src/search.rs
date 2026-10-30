@@ -103,12 +103,9 @@ pub struct SearchParams {
     pub scope: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Tag labels, comma-separated: the same as `#label` words in `q`.
+    /// Tag labels, comma-separated: the same as `#label` words in `q` (several: all of them).
     #[serde(default)]
     pub tags: Option<String>,
-    /// `any` (default) or `all`: how several tags combine.
-    #[serde(default, rename = "match")]
-    pub match_: Option<String>,
 }
 
 /// `q` with the `tags` parameter folded in as `#label` words, so one grammar serves both.
@@ -168,16 +165,22 @@ fn cache() -> &'static AnswerCache {
 }
 
 /// `GET /v1/search?q=&in=`: NDJSON, one line per source as it answers.
-pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<SearchParams>) -> Response {
+pub(crate) async fn search(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<crate::accounts::Caller>,
+    Query(p): Query<SearchParams>,
+) -> Response {
+    let owner = c.role == crate::accounts::Role::Owner;
     let q = query_with_tags(&p);
     let scope = p.scope.clone().unwrap_or_default();
     let limit = p.limit.unwrap_or(20).clamp(1, 50);
     let sources = if q.is_empty() {
         Vec::new()
     } else if !hash_tags(&q).is_empty() {
-        // `#tag`: tags only, yours and everyone's (posts carrying the tag too)
+        // `#tag`: tags only, yours and everyone's (posts carrying the tag too, unless the scope is
+        // the library)
         let mut v = vec!["library".to_string(), "pubky".to_string()];
-        if s.discovery().is_some() {
+        if s.discovery().is_some() && matches!(scope.as_str(), "" | "everywhere" | "pubky") {
             v.push("posts".to_string());
         }
         v
@@ -189,7 +192,15 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
     for src in sources {
         let (s, q, tx) = (s.clone(), q.clone(), tx.clone());
         tokio::spawn(async move {
-            let key = (q.to_lowercase(), src.clone());
+            // The library's answer differs for a listener (no owner's playlists): cached apart
+            let key = (
+                q.to_lowercase(),
+                if owner {
+                    src.clone()
+                } else {
+                    format!("{src}|listener")
+                },
+            );
             let hit = cache()
                 .lock()
                 .expect("search cache")
@@ -203,7 +214,8 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
                 }
                 None => {
                     let started = Instant::now();
-                    let res = tokio::time::timeout(SOURCE_TIMEOUT, one_source(&s, &src, &q, limit)).await;
+                    let res =
+                        tokio::time::timeout(SOURCE_TIMEOUT, one_source(&s, &src, &q, limit, owner)).await;
                     let ms = started.elapsed().as_millis() as u64;
                     let a = match res {
                         Ok(Ok((hits, counts))) => SourceAnswer {
@@ -262,9 +274,18 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
 
 type Found = (Vec<SearchHit>, Vec<(String, i64)>);
 
-async fn one_source(s: &Arc<NodeState>, src: &str, q: &str, limit: u32) -> Result<Found, String> {
+async fn one_source(
+    s: &Arc<NodeState>,
+    src: &str,
+    q: &str,
+    limit: u32,
+    owner: bool,
+) -> Result<Found, String> {
     match src {
-        "library" => Ok((library(s, q, limit).map_err(|e| e.to_string())?, Vec::new())),
+        "library" => Ok((
+            library(s, q, limit, owner).map_err(|e| e.to_string())?,
+            Vec::new(),
+        )),
         "pubky" => pubky(s, q, limit).await,
         "people" => people(s, q, limit).await,
         "posts" => posts(s, q, limit).await,
@@ -335,10 +356,7 @@ pub(crate) fn file_format(f: &pm_model::AudioFile) -> String {
 /// `hi_res`, `lossless` or `lossy`, from the container and the sample format.
 pub(crate) fn file_quality(f: &pm_model::AudioFile) -> &'static str {
     let fm = &f.format;
-    let lossy = matches!(
-        f.container.to_lowercase().as_str(),
-        "mp3" | "aac" | "m4a" | "mp4" | "ogg" | "oga" | "opus" | "wma" | "webm"
-    );
+    let lossy = pm_library::tags::is_lossy_container(&f.container.to_lowercase());
     if lossy {
         "lossy"
     } else if matches!(fm.kind, pm_model::SampleKind::Dsd) || fm.bits > 16 || fm.rate_hz > 48_000 {
@@ -404,7 +422,8 @@ fn library_tagged(
     Ok(out)
 }
 
-fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchHit>> {
+/// `owner`: the node's own playlists are the owner's; a listener's search leaves them out.
+fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Result<Vec<SearchHit>> {
     let lib = s.library.lock().expect("library poisoned");
     let hashed = hash_tags(q);
     if !hashed.is_empty() {
@@ -427,12 +446,12 @@ fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchH
             ..Default::default()
         });
     }
-    for pl in crate::playlists::summaries(&lib)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| p.name.to_lowercase().contains(&needle))
-        .take(6)
-    {
+    let own_playlists = if owner {
+        crate::playlists::summaries_named(&lib, &needle, 6).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for pl in own_playlists {
         out.push(SearchHit {
             kind: "playlist".into(),
             title: pl.name.clone(),
@@ -555,7 +574,35 @@ pub(crate) fn card_hit(c: &pm_pubky::pinakes::Card) -> Option<SearchHit> {
 }
 
 /// People on Pubky whose name starts with the term (Nexus).
+/// Until when Nexus asked the node to wait (a 429): people and posts aren't asked meanwhile, so a
+/// search per keystroke doesn't keep it busy.
+fn nexus_wait() -> &'static Mutex<Option<Instant>> {
+    static WAIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    WAIT.get_or_init(|| Mutex::new(None))
+}
+
+const NEXUS_BUSY: &str = "Pubky search is busy: try again in a few seconds";
+
+fn nexus_ready() -> Result<(), String> {
+    match *nexus_wait().lock().expect("nexus wait") {
+        Some(until) if Instant::now() < until => Err(NEXUS_BUSY.into()),
+        _ => Ok(()),
+    }
+}
+
+fn nexus_error(e: pm_pubky::nexus::NexusError) -> String {
+    if let pm_pubky::nexus::NexusError::RateLimited(after) = e {
+        let wait = after
+            .unwrap_or(Duration::from_secs(10))
+            .min(Duration::from_secs(120));
+        *nexus_wait().lock().expect("nexus wait") = Some(Instant::now() + wait);
+        return NEXUS_BUSY.into();
+    }
+    e.to_string()
+}
+
 async fn people(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String> {
+    nexus_ready()?;
     let d = s
         .discovery()
         .ok_or_else(|| "People on Pubky need the upstream contact (Settings)".to_string())?;
@@ -563,11 +610,14 @@ async fn people(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String
     if term.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let users = d
-        .nexus()
-        .users_by_name(&term, limit.min(10))
-        .await
-        .map_err(|e| e.to_string())?;
+    if term.chars().count() < 2 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let users = match d.nexus().users_by_name(&term, limit.min(10)).await {
+        Ok(u) => u,
+        Err(pm_pubky::nexus::NexusError::NotFound) => Vec::new(),
+        Err(e) => return Err(nexus_error(e)),
+    };
     let hits = users
         .into_iter()
         .map(|u| {
@@ -599,25 +649,33 @@ async fn people(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String
 
 /// Posts on Pubky whose text matches the term, or that carry the `#tag` (Nexus).
 async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String> {
+    nexus_ready()?;
     let d = s
         .discovery()
         .ok_or_else(|| "Posts on Pubky need the upstream contact (Settings)".to_string())?;
     let nexus = d.nexus();
-    let keys = match hash_tags(q).first() {
-        Some(label) => nexus
-            .posts_by_tag(label, limit.min(10))
-            .await
-            .map_err(|e| e.to_string())?,
+    let found = match hash_tags(q).first() {
+        Some(label) => nexus.posts_by_tag(label, limit.min(10)).await,
         None => {
-            let term = text_words(q);
-            if term.is_empty() {
+            // Nexus searches 2 to 30 characters and at most 4 words
+            let term: String = text_words(q)
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(30)
+                .collect();
+            if term.trim().chars().count() < 2 {
                 return Ok((Vec::new(), Vec::new()));
             }
-            nexus
-                .posts_by_content(&term, limit.min(10))
-                .await
-                .map_err(|e| e.to_string())?
+            nexus.posts_by_content(term.trim(), limit.min(10)).await
         }
+    };
+    let keys = match found {
+        Ok(k) => k,
+        Err(pm_pubky::nexus::NexusError::NotFound) => Vec::new(),
+        Err(e) => return Err(nexus_error(e)),
     };
     let views = nexus.posts_by_ids(&keys).await.map_err(|e| e.to_string())?;
     let authors: Vec<String> = {

@@ -2079,29 +2079,47 @@
   };
   // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
   // groups, Enter opens the one in focus, Shift+Enter plays it; the box keeps the focus and says
-  // which row is active (aria-activedescendant).
+  // which row is active (aria-activedescendant on the combobox, and a polite line naming it).
+  // Typing drops the position; a source answering later keeps it on the same search.
   const searchKeys = {
     at: -1,
+    q: null,
     items: () => $$('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow'),
-    reset() { this.at = -1; search.removeAttribute('aria-activedescendant'); },
+    reset() {
+      this.at = -1; search.removeAttribute('aria-activedescendant');
+      $$('#sresults .kfocus').forEach((el) => el.classList.remove('kfocus'));
+    },
+    // After a re-render: the same search keeps its row (or the last one, if fewer came back)
+    keep(q) {
+      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
+      const n = this.items().length; if (!n) { this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
+      this.at = Math.min(this.at, n - 1); this.show(false);
+    },
+    show(scroll) {
+      const items = this.items(); const el = items[this.at]; if (!el) return;
+      items.forEach((x) => x.classList.remove('kfocus'));
+      el.classList.add('kfocus');
+      if (!el.id) el.id = `sres-${this.at}`;
+      search.setAttribute('aria-activedescendant', el.id);
+      if (scroll) el.scrollIntoView({ block: 'nearest' });
+    },
     move(d) {
       const items = this.items(); if (!items.length) return;
-      items.forEach((el) => el.classList.remove('kfocus'));
       this.at = Math.max(0, Math.min(items.length - 1, this.at + d));
-      const el = items[this.at]; el.classList.add('kfocus'); if (!el.id) el.id = `sres-${this.at}`; search.setAttribute('aria-activedescendant', el.id);
-      el.scrollIntoView({ block: 'nearest' });
+      this.show(true);
+      const said = $('#sresults-said'); if (said) said.textContent = `${(items[this.at].innerText || '').split('\n').filter(Boolean).slice(0, 2).join(', ')} (${this.at + 1} of ${items.length})`;
     },
+    // Shift+Enter plays; a row with nothing to play (a person, a post) opens instead
     act(play) {
-      const el = this.items()[this.at]; if (!el) return false;
-      const target = play ? $('[data-splay], [data-tileplay], [data-splaytop]', el) : ($('.name .lnk, [data-sopen]', el) || el);
-      if (target) target.click(); else if (play) return false;
-      return true;
+      const el = this.items()[this.at]; if (!el) return;
+      const playBtn = play && $('[data-splay], [data-tileplay], [data-splaytop]', el);
+      (playBtn || $('.name .lnk, [data-sopen]', el) || el).click();
     },
   };
   search.addEventListener('keydown', (e) => {
     if (state.view !== 'search') return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); searchKeys.move(e.key === 'ArrowDown' ? 1 : -1); }
-    else if (e.key === 'Enter' && searchKeys.at >= 0) { if (searchKeys.act(e.shiftKey)) { e.preventDefault(); e.stopImmediatePropagation(); } }
+    else if (e.key === 'Enter' && searchKeys.at >= 0) { e.preventDefault(); e.stopImmediatePropagation(); clearTimeout(searchTimer); searchKeys.act(e.shiftKey); }
   }, true);
   const isLink = (q) => /^https?:\/\/\S+$/i.test(q);
   const linkKind = (u) => (/\/(artist|artists)\//.test(u) ? 'artist' : /\/(album|albums|release|release-group)\//.test(u) ? 'album' : 'song');
@@ -2117,7 +2135,7 @@
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
-  search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
+  search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
 
   document.addEventListener('keydown', (e) => {
@@ -2915,8 +2933,15 @@
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
     box.innerHTML = notes + facetBar + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
-    $$('[data-facet]', box).forEach((b) => b.onclick = () => { const [f, ...rest] = b.dataset.facet.split(':'); const v = rest.join(':'); if (!f) run.facets = {}; else run.facets[f] = run.facets[f] === v ? null : v; renderSearchBody(run); });
-    searchKeys.reset();
+    // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
+    $$('[data-facet]', box).forEach((b) => b.onclick = () => {
+      const key = b.dataset.facet; const [f, ...rest] = key.split(':'); const v = rest.join(':');
+      if (!f) run.facets = {}; else run.facets[f] = run.facets[f] === v ? null : v;
+      renderSearchBody(run);
+      const chips = $$('#sresults [data-facet]'); const again = chips.find((x) => x.dataset.facet === key && key) || chips[0];
+      if (again) again.focus(); else search.focus();
+    });
+    searchKeys.keep(`${run.q}|${run.scope}`);
     $$('[data-stag]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.stag }));
     const sa = $('[data-sallsongs]', box); if (sa) sa.onclick = () => { run.allSongs = true; renderSearchBody(run); };
     // Bind: rows and tiles use the shared components.
@@ -3208,6 +3233,8 @@
 
   // ---- render --------------------------------------------------------------
   const render = async () => {
+    // The search box is a combobox over the results page only
+    if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
     const v = state.view;
     // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
     document.body.classList.toggle('kiosk', v === 'dashboard');
@@ -3510,7 +3537,8 @@
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
           const run = startSearch(a.q, scope);
-          main.innerHTML = `<div class="page-head"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div>`;
+          main.innerHTML = `<div class="page-head"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
+          search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
           renderSearchBody(run);
           break;
         }

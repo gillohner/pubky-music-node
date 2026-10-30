@@ -12217,6 +12217,8 @@ exec sleep 300
         assert_eq!(z["queue"].as_array().unwrap().len(), 1);
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
+    }
+
     /// Search groups (TASK-pinakes-social-ux A1/A2): own playlists, people and posts from Nexus,
     /// `tag:` as `#`, the `tags` parameter, and a library file's format and quality on its row.
     #[tokio::test]
@@ -12351,11 +12353,26 @@ exec sleep 300
         assert_eq!(posts["hits"][0]["title"], "Great music tonight");
         assert_eq!(posts["hits"][0]["subtitle"], "Author One");
         assert_eq!(posts["hits"][0]["page"], "https://pubky.app/post/author1/0033");
-        // `tag:` is `#`: tags only, posts carrying the tag included
-        let (sources, _) = lines(app.clone(), "/v1/search?q=tag%3Achill".into()).await;
+        // `tag:` is `#`: tags only, posts carrying the tag included (a tag no other test searches:
+        // answers are cached per process)
+        let (sources, _) = lines(app.clone(), "/v1/search?q=tag%3Alofi".into()).await;
         assert_eq!(sources, "library,pubky,posts");
-        let (sources2, _) = lines(app.clone(), "/v1/search?tags=chill".into()).await;
+        let (sources2, ans) = lines(app.clone(), "/v1/search?tags=lofi".into()).await;
         assert_eq!(sources2, sources);
+        // the tag reaches the posts search (Nexus's by_tag answers the post)
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(posts["status"], "ok", "{posts}");
+        assert_eq!(posts["hits"][0]["title"], "Great music tonight");
+        // One letter is no search for Nexus: people and posts answer with nothing, not an error
+        let (_, ans) = lines(app.clone(), "/v1/search?q=a".into()).await;
+        for src in ["people", "posts"] {
+            let a = ans.iter().find(|a| a["source"] == src).expect("answered");
+            assert_eq!(a["status"], "ok", "{a}");
+            assert_eq!(a["hits"].as_array().map(Vec::len), Some(0), "{a}");
+        }
         assert_eq!(search::hash_tags("rock tag:chill #90s"), vec!["chill", "90s"]);
         assert_eq!(search::text_words("rock tag:chill #90s"), "rock");
         let (sources, _) = lines(app.clone(), "/v1/search?q=sat&in=library".into()).await;

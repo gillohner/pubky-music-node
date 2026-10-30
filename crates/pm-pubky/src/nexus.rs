@@ -316,7 +316,10 @@ impl NexusClient {
     pub async fn posts_by_tag(&self, label: &str, limit: u32) -> Result<Vec<String>, NexusError> {
         let resp = self
             .http
-            .get(self.url(&format!("/search/posts/by_tag/{label}")))
+            .get(self.url(&format!(
+                "/search/posts/by_tag/{}",
+                url::form_urlencoded::byte_serialize(label.as_bytes()).collect::<String>()
+            )))
             .query(&[("limit", &limit.to_string())])
             .send()
             .await?;

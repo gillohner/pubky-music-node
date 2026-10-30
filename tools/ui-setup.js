@@ -341,11 +341,19 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(songsNow.includes('New Song') && songsNow.includes('Shared Song') && !songsNow.includes('Old Song') && (await p.locator('#sresults [data-skind="album"]').count()) === 0, `a facet narrows every group (${songsNow.join(', ')})`);
     await p.click('#sresults [data-facet=""]'); await p.waitForTimeout(200);
     check((await p.$$eval('#sresults [data-skind="song"] .srow', (els) => els.length)) === 3, 'Clear brings them all back');
+    check(await p.evaluate(() => !!document.activeElement && document.activeElement.matches('#sresults [data-facet]')), 'a facet chip keeps the keyboard focus across the re-render');
+    check(await p.evaluate(() => { const s = document.querySelector('#search'); return s.getAttribute('role') === 'combobox' && s.getAttribute('aria-controls') === 'sresults' && s.getAttribute('aria-expanded') === 'true'; }), 'the search box is a combobox over the results');
     // the keyboard: ↓ ↓ walk the results, the box says where it is, Enter opens the person's page
     await p.focus('#search');
     await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
     const k = await p.evaluate(() => { const el = document.querySelector('#sresults .kfocus'); return { has: !!el, id: el && el.id, active: document.querySelector('#search').getAttribute('aria-activedescendant'), focusStays: document.activeElement && document.activeElement.id === 'search' }; });
     check(k.has && k.id && k.active === k.id && k.focusStays, `↓ walks the results while the box keeps focus (${k.id})`);
+    check(/\(2 of \d+\)/.test(await p.textContent('#sresults-said')), 'the active row is said politely');
+    // typing drops the position: Enter then searches the new words, not the old row
+    await p.keyboard.type('u');
+    check(await p.evaluate(() => !document.querySelector('#search').hasAttribute('aria-activedescendant') && !document.querySelector('#sresults .kfocus')), 'typing drops the highlighted row');
+    await p.keyboard.press('Backspace'); await p.waitForTimeout(400);
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
     const n = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => e.classList.contains('kfocus')));
     const total = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.length);
     const personAt = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => (e.dataset.sother || '').startsWith('person:')));
