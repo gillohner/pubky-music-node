@@ -809,6 +809,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
                 // A party guest's link: the page, and joining it (party.rs)
                 .route("/party/{code}", get(party_page))
                 .route("/v1/party/join", post(party::join))
@@ -892,6 +893,7 @@ async fn auth(
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
     let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
+        // The web page knows this answer (app.js NODE_REFUSED): it means "log in again"
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
     let refusal = match caller.role {
@@ -3103,7 +3105,7 @@ async fn controller_login_start(
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     drop(logins);
     let qr_svg = qr_svg(&url);
-    let owner_face = profiles::login_face(&s, &owner).await;
+    let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
     Ok(Json(ControllerLoginStarted {
         id,
         url,
@@ -3153,8 +3155,12 @@ async fn controller_login_poll(
                 let key = who.trim_start_matches("pubky");
                 let known = people::load(&s).people.iter().any(|p| p.key == key);
                 tracing::warn!(%who, %owner, known, "controller sign-in by a different identity refused");
-                let (approver, owner_face) =
-                    tokio::join!(profiles::login_face(&s, &who), profiles::login_face(&s, &owner));
+                // The approver may be anyone: their profile from the cache or Nexus only, never
+                // fetched from a homeserver they name
+                let (approver, owner_face) = tokio::join!(
+                    profiles::login_face(&s, &who, profiles::FaceFrom::Nexus),
+                    profiles::login_face(&s, &owner, profiles::FaceFrom::Owner)
+                );
                 return Ok(Json(ControllerLoginStatus {
                     user: Some(who),
                     reason: Some(if known { "no_access" } else { "not_owner" }.into()),
@@ -5306,15 +5312,63 @@ mod tests {
         assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
         let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(st, StatusCode::OK);
-        // An owner's browser session is for the node's own Pubky identity: a node without one
-        // lets none in (the Ring log in itself is in tests/bundled_homeserver.rs)
+        // An owner's browser session (the Ring log in itself is in tests/bundled_homeserver.rs):
+        // the owner while the node's Pubky session isn't loaded (no identity to tell apart here);
+        // Log out ends it; a made-up one never works
         let session =
             accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
         assert!(session.starts_with(accounts::OWNER_PREFIX));
-        let (st, _) = send("GET", "/v1/me".into(), session, None).await;
+        let (_, me) = send("GET", "/v1/me".into(), session.clone(), None).await;
+        assert_eq!(me["role"], "owner", "{me}");
+        let (st, v) = send("DELETE", "/v1/me/token".into(), session.clone(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
+        let (st, v) = send("GET", "/v1/me".into(), session, None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            v["error"], "missing or wrong bearer token",
+            "the page logs in again on exactly this"
+        );
         let (st, _) = send("GET", "/v1/me".into(), "pmo_madeup".into(), None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_log_in_screen_gets_names_and_small_pictures_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        const ALICE: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const BOB: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let view = |id: &str, name: &str| {
+            serde_json::from_value::<pm_pubky::nexus::UserView>(serde_json::json!({
+                "details": {"id": id, "name": name, "image": format!("pubky://{id}/pub/pubky.app/files/1")}
+            }))
+            .unwrap()
+        };
+        profiles::cache_view(ALICE, Some(view(ALICE, "Alice")));
+        profiles::cache_view(BOB, Some(view(BOB, "Bob")));
+        let people = s.art_dir.join("people");
+        std::fs::create_dir_all(&people).unwrap();
+        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        std::fs::write(people.join(ALICE), png(100)).unwrap();
+        std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
+        // Someone who approved: name and a small picture inline (the screen has no token)
+        let a = profiles::login_face(&s, &format!("pubky{ALICE}"), profiles::FaceFrom::Nexus).await;
+        assert_eq!((a.id.as_str(), a.name.as_str()), (ALICE, "Alice"));
+        assert!(
+            a.avatar
+                .as_deref()
+                .is_some_and(|u| u.starts_with("data:image/png;base64,")),
+            "{a:?}"
+        );
+        // A big picture stays off the screen (initials instead)
+        let b = profiles::login_face(&s, BOB, profiles::FaceFrom::Nexus).await;
+        assert_eq!((b.name.as_str(), b.avatar), ("Bob", None));
+        // The owner's picture by its own address, not inline
+        let o = profiles::login_face(&s, ALICE, profiles::FaceFrom::Owner).await;
+        assert_eq!(o.avatar.as_deref(), Some(profiles::OWNER_AVATAR));
+        // Not a key: its short form, nothing looked up
+        let x = profiles::login_face(&s, "nonsense", profiles::FaceFrom::Nexus).await;
+        assert_eq!(x.avatar, None);
     }
 
     #[tokio::test]

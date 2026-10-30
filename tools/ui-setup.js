@@ -724,6 +724,13 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         await c.close();
       }
 
+      // A service refusing a sign-in (a 401 of its own) isn't the node refusing this browser
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      await c.route(/\/v1\/health$/, (r) => r.fulfill({ status: 401, json: { error: 'ListenBrainz refused this token' } }));
+      await p.goto(BASE + '/'); await visible(p, '#me', 20000); await p.waitForTimeout(3000);
+      check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'a service\u2019s 401 leaves you logged in');
+      await c.close();
+
       // A session that ended: the same Log in screen, saying so
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, 'pml_' + 'x'.repeat(43)); p = await c.newPage();
       poll = { status: 'pending' };

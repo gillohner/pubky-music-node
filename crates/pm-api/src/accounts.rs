@@ -133,13 +133,19 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
 }
 
 /// An owner's browser session that is still open, for the identity the node is signed in as now
-/// (a node signed in as someone else no longer lets the old owner's browsers in).
+/// (a node signed in as someone else no longer lets the old owner's browsers in). While the
+/// node's Pubky session isn't loaded (its homeserver didn't answer at start), sessions stay valid:
+/// they were made for the owner, and nobody can log in with Ring meanwhile.
 fn owner_session(s: &NodeState, token: &str, owner: Option<&str>) -> bool {
-    let Some(owner) = owner else { return false };
     let h = hash(token);
     load(s, OWNER_SESSIONS)
         .iter()
-        .any(|t| t.hash == h && t.key == owner)
+        .any(|t| t.hash == h && owner.is_none_or(|o| t.key == o))
+}
+
+/// Ends every browser session of the owner (a new API token: the answer to a leak).
+pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
+    store(s, OWNER_SESSIONS, &[])
 }
 
 /// Whose token this is, when it is a listener's that still has music access.

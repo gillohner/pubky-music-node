@@ -54,6 +54,8 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
         )
     })?;
     *s.token.write().expect("token lock") = Some(token.clone());
+    // A new token is the answer to a leak: the owner's browser sessions end with the old token
+    crate::accounts::end_owner_sessions(&s)?;
     // Event sockets opened with the old token end now
     s.token_changed.send_modify(|n| *n += 1);
     tracing::info!("API token replaced by the owner; the old one no longer works");

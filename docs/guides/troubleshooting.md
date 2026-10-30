@@ -39,8 +39,8 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 - To give the node a new token: with a token the node made, **Settings › About and updates ›
   Make a new token** (shown once; the old one stops working at once). With `PM_TOKEN` or on
   Linux, change the token there and restart (Docker also needs `PM_REWRITE_CONFIG`, as above).
-  Every app, and a browser given the token by hand, then needs the new one; browsers logged in
-  with Pubky Ring stay logged in.
+  Every app then needs the new one, and every browser of yours is logged out (log in again with
+  Pubky Ring); people you invited stay logged in.
 
 ## The library stays empty
 

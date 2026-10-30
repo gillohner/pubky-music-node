@@ -182,20 +182,21 @@
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
-    let r;
+    let r; const sent = state.token;
     try {
       r = await fetch('/v1' + path, {
         method,
-        headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) },
+        headers: { 'content-type': 'application/json', ...(sent ? { authorization: 'Bearer ' + sent } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch { linkHint(); throw new Error("Can't reach the node."); }
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
-    if (r.status === 401) { sessionEnded(); throw new Error('Log in to use the node.'); }
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
+    // The node refused this browser's token (its own answer, not a service refusing a sign-in typed here)
+    if (r.status === 401 && json && json.error === NODE_REFUSED) { sessionEnded(sent); throw new Error('Log in to use the node.'); }
     if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; throw err; }
     return json;
   };
@@ -681,18 +682,23 @@
   const LOGIN_WHY = { ended: 'Your session ended. Log in again.', out: 'You logged out.' };
   // This browser's own state that belongs to the account, not the device (theme and layout stay)
   const ACCOUNT_KEYS = ['pm.token', 'pm.zone', 'pm.browserQueue', 'pm.browserAt', 'pm.setupHidden'];
+  // The auth middleware's answer to a missing or wrong token (lib.rs `auth`)
+  const NODE_REFUSED = 'missing or wrong bearer token';
   const forgetAccount = () => {
-    state.token = '';
+    const mine = state.token; state.token = '';
     try {
+      // Another tab may have logged in again meanwhile: its token stays
+      if (localStorage.getItem('pm.token') !== mine) return;
       ACCOUNT_KEYS.forEach((k) => localStorage.removeItem(k));
       Object.keys(localStorage).filter((k) => k.startsWith('pm.up.')).forEach((k) => localStorage.removeItem(k));
     } catch { /* no storage */ }
   };
   const ringFirst = () => matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-  const loginFace = (f, cls = '') => (f && f.avatar && /^data:image\//.test(f.avatar)
+  const loginFace = (f, cls = '') => (f && f.avatar && (/^data:image\//.test(f.avatar) || f.avatar === '/v1/auth/pubky/owner/avatar')
     ? `<img class="face ${cls}" src="${esc(f.avatar)}" alt="">`
     : `<span class="face mono ${cls}" style="background:hsl(${hue(f && f.id)} 35% 34%)">${esc(initials((f && f.name) || '?'))}</span>`);
-  const lg = { flow: null, timer: null, showQr: false, gen: 0 };
+  // One poll at a time: `timer` is a poll waiting to run, `asking` one under way
+  const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0 };
   const loginStop = () => { clearTimeout(lg.timer); lg.timer = null; lg.gen += 1; };
   const drawLoginFlow = () => {
     const f = lg.flow; if (!f) return;
@@ -721,11 +727,12 @@
     $('#loginagain').onclick = () => { $('#loginwhy').hidden = true; loginStart(); };
     $('#loginagain').focus();
   };
-  const loginPoll = (gen) => {
+  const loginPoll = (gen, wait = 2000) => {
     lg.timer = setTimeout(async () => {
+      lg.timer = null;
       if (gen !== lg.gen) return;
-      let p;
-      try { const r = await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(lg.flow.id)}`); p = await r.json(); if (!r.ok) throw new Error(p.error || `HTTP ${r.status}`); } catch { if (gen === lg.gen) loginPoll(gen); return; }
+      let p; lg.asking = true;
+      try { const r = await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(lg.flow.id)}`); p = await r.json(); if (!r.ok) throw new Error(p.error || `HTTP ${r.status}`); } catch { lg.asking = false; if (gen === lg.gen) loginPoll(gen); return; } finally { lg.asking = false; }
       if (gen !== lg.gen) return;
       if (p.status === 'pending') return loginPoll(gen);
       if (p.status === 'ok' && p.token) {
@@ -734,7 +741,7 @@
       }
       if (p.status === 'denied') { loginStop(); drawRefused(p); return; }
       loginStart(); // the sign-in expired (ten minutes): a fresh one, quietly
-    }, 2000);
+    }, wait);
   };
   const loginStart = async () => {
     loginStop(); const gen = lg.gen;
@@ -755,7 +762,7 @@
     }
   };
   // Back from Pubky Ring: ask at once instead of waiting for the next tick (phones pause timers)
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && lg.flow && lg.timer) { clearTimeout(lg.timer); loginPoll(lg.gen); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && lg.flow && lg.timer && !lg.asking) { clearTimeout(lg.timer); loginPoll(lg.gen, 0); } });
   const showLogin = (why) => {
     if (signedOut()) return;
     dropSocket(); clearTimeout(link.retry); link.retry = null;
@@ -770,7 +777,8 @@
   // The node refused this browser's token (401): the session ended (or there was none). Start
   // over from a fresh page, so nothing of the old session lingers; it says why.
   const signedOut = () => document.body.classList.contains('signedout');
-  const sessionEnded = () => {
+  const sessionEnded = (sent = state.token) => {
+    if (sent !== state.token) return; // an answer to an older token: this one may be fine
     if (!state.token) { let why; try { why = sessionStorage.getItem('pm.loginWhy'); sessionStorage.removeItem('pm.loginWhy'); } catch { /* no reason */ } showLogin(why); return; }
     forgetAccount();
     try { sessionStorage.setItem('pm.loginWhy', 'ended'); } catch { /* the screen just doesn't say why */ }
@@ -3699,8 +3707,10 @@
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
   // them (one approval, no separate sign-in), so the way there is Log out
   const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.';
-  const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : ''}</div>` : '';
-  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = logOut);
+  const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : '<button class="btn sm primary" data-resign>Approve in Pubky Ring</button>'}</div>` : '';
+  // With a token: Log out, as the next log in asks for the folders. A node without one has no log
+  // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
@@ -5362,7 +5372,7 @@
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           const accounts = group('Pubky', pk ? (
               (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
-              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? '' : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
+              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? (pk.needs_resign && !state.token ? '<button class="btn primary" id="pklogin">Approve in Pubky Ring</button>' : '') : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
               + (pk.needs_resign ? resignNotice(pk).replace('<div class="notice warn resign"', '<div id="pkresign" class="notice warn resign"') : '')
               + '<div id="pkurl"></div>'
               + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
@@ -5379,7 +5389,7 @@
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', (state.token ? row('This browser', 'Log out ends this browser’s session and brings back the Log in screen. The node’s token for apps stays as it is.', `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
               + (ns.token_replaceable
-                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and so does a browser given the token by hand. Browsers logged in with Pubky Ring and people you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
+                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
                 : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
@@ -5480,14 +5490,14 @@
           };
           const lo = $('#logout'); if (lo) lo.onclick = logOut;
           const tn = $('#tokennew'); if (tn) tn.onclick = async () => {
-            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app and Subsonic app then needs the new one; browsers logged in with Pubky Ring stay logged in.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
+            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app and Subsonic app then needs the new one, and your other browsers are logged out; this one switches to the new token now.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
             if (!go) return;
             tn.disabled = true;
             try {
               const r = await api('POST', '/node/token');
               // Every later call (and a reconnect of the event socket) uses it
-              // A browser given the old token by hand moves to the new one; a Pubky Ring session stays
-              if (!/^pm[ol]_/.test(state.token)) { state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ } }
+              // The old token and every Pubky Ring browser session end: this browser takes the new token
+              state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
               $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
               $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
             } catch (e) { toast(e.message, 'error'); tn.disabled = false; }

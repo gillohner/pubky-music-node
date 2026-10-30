@@ -761,7 +761,7 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     assert_eq!(started["owner_face"]["id"], owner_key, "{started}");
     let v = ring_sign_in(&app, &owner).await;
     assert_eq!(v["role"], "owner", "{v}");
-    let (_, pk) = call_auth(&app, "GET", "/v1/pubky/status", API, None).await;
+    let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
     assert_eq!(pk["needs_resign"], false, "{pk}");
     assert_eq!(
         pk["user"].as_str().map(|u| u.trim_start_matches("pubky")),
