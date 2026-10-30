@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **The position of the app's players is right again (review of the entry below).** Audio sent to a player and not answered yet (up to 100 ms) counts as written and still held, so a zone on one of them no longer runs that much ahead after a gapless change or a crossfade, nor a group the app's players lead.
 - **The app's players on Wi-Fi keep up in a group.** Each write to a player waited for its answer, and a group writes its players one after another, so every block cost the sum of their round trips: three players at 30 ms each took 9 s to get one second of audio and their DACs ran dry. A write now goes out without waiting (the answers are read on their own thread, stamped as they arrive), as long as at most 100 ms of audio is unacknowledged; the players still pace the zone. A player's answers still keep it in time with the others.
 
 ## 0.2.2

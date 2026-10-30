@@ -278,12 +278,40 @@ struct NetSink {
     answers: Arc<Answers>,
     /// Audio parts sent so far.
     parts: u64,
-    /// Writes not fully acknowledged: (parts sent once this write was out, its frames).
-    sent: std::collections::VecDeque<(u64, u64)>,
+    /// Writes not fully acknowledged, oldest first.
+    sent: std::collections::VecDeque<Sent>,
     fmt: AudioFormat,
 }
 
+/// One write on its way: its audio parts end at `end` (counting from the session's first), and
+/// it has `frames`, `per_part` in each of its parts but the last.
+struct Sent {
+    end: u64,
+    parts: u64,
+    frames: u64,
+    per_part: u64,
+}
+
+impl Sent {
+    /// Its frames the endpoint has not acknowledged after `acks` answers.
+    fn unacked(&self, acks: u64) -> u64 {
+        let done = acks.saturating_sub(self.end - self.parts).min(self.parts);
+        if done == self.parts {
+            0
+        } else {
+            self.frames - done * self.per_part
+        }
+    }
+}
+
 impl NetSink {
+    /// Audio sent that the endpoint has not acknowledged yet: it is written and held all the
+    /// same, a network away. Leaving it out would put the position ahead by that much (a zone
+    /// counts from `frames_written` when a track starts, a group from the leader's level).
+    fn unacked(&self, st: &AckState) -> u64 {
+        self.sent.iter().map(|s| s.unacked(st.acks)).sum()
+    }
+
     fn window(&self) -> u64 {
         let per_s = match self.fmt.kind {
             SampleKind::Pcm => self.fmt.rate_hz as u64,
@@ -349,16 +377,22 @@ impl AudioSink for NetSink {
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
         // A block larger than a frame goes out in parts, each acknowledged
-        self.parts += write_audio(&mut self.w, block).map_err(io_err)? as u64;
-        self.sent.push_back((self.parts, block.frames() as u64));
+        let parts = write_audio(&mut self.w, block).map_err(io_err)? as u64;
+        self.parts += parts;
+        self.sent.push_back(Sent {
+            end: self.parts,
+            parts,
+            frames: block.frames() as u64,
+            per_part: pm_stream::frames_per_part(self.fmt),
+        });
         // Wait only while too much is unacknowledged (one write is always on its way)
         let window = self.window();
         let mut sent = std::mem::take(&mut self.sent);
         let r = self.wait(|st| {
-            while sent.front().is_some_and(|(end, _)| *end <= st.acks) {
+            while sent.front().is_some_and(|s| s.end <= st.acks) {
                 sent.pop_front();
             }
-            let in_flight: u64 = sent.iter().map(|(_, f)| f).sum();
+            let in_flight: u64 = sent.iter().map(|s| s.unacked(st.acks)).sum();
             (sent.len() <= 1 || in_flight <= window).then_some(())
         });
         self.sent = sent;
@@ -366,8 +400,9 @@ impl AudioSink for NetSink {
     }
 
     /// What the endpoint holds now: its level at the last `Ack`, less what its device has
-    /// played since. A group compares members at one instant, and a member whose `Ack` came
-    /// later (a slower network) would otherwise seem ahead by the difference.
+    /// played since, plus what is on its way. A group compares members at one instant, and a
+    /// member whose `Ack` came later (a slower network) would otherwise seem ahead by the
+    /// difference.
     fn buffer_level(&self) -> BufferLevel {
         let st = self.answers.state.lock().expect("answers");
         let played = st.at.map_or(0, |at| {
@@ -378,7 +413,7 @@ impl AudioSink for NetSink {
             (at.elapsed().as_micros() * per_s / 1_000_000) as u64
         });
         BufferLevel {
-            queued_frames: st.level.queued_frames.saturating_sub(played),
+            queued_frames: st.level.queued_frames.saturating_sub(played) + self.unacked(&st),
             ..st.level
         }
     }
@@ -396,7 +431,8 @@ impl AudioSink for NetSink {
     }
 
     fn frames_written(&self) -> u64 {
-        self.answers.state.lock().expect("answers").written
+        let st = self.answers.state.lock().expect("answers");
+        st.written + self.unacked(&st)
     }
 }
 
@@ -405,5 +441,25 @@ impl Drop for NetSink {
         let _ = write_frame(&mut self.w, &Frame::Close);
         // The endpoint plays what it has, then closes; the answer thread reads to the end
         let _ = self.stream.shutdown(std::net::Shutdown::Write);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sent;
+
+    /// A block sent in three parts (parts 5 to 7) counts down part by part as they are answered.
+    #[test]
+    fn a_write_in_parts_is_acknowledged_part_by_part() {
+        let s = Sent {
+            end: 7,
+            parts: 3,
+            frames: 250,
+            per_part: 100,
+        };
+        assert_eq!(
+            [3, 4, 5, 6, 7, 8].map(|acks| s.unacked(acks)),
+            [250, 250, 150, 50, 0, 0]
+        );
     }
 }
