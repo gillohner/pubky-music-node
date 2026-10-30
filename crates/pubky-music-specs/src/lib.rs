@@ -10,6 +10,8 @@
 //!   [`MusicPostKind::Review`], [`MusicPostKind::Listen`] (one play), [`MusicPostKind::Listening`]
 //!   (now playing, until it expires) and [`MusicPostKind::Session`] (a listening session others
 //!   join). The path decides who sees a post: `/priv/` or `/pub/`;
+//! - the music feed ([`MusicFeed`], `/{priv,pub}/music/v1/feeds/{id}.json`): a saved query for
+//!   music modelled on the social v1 feed, with a smart playlist's rules;
 //! - the `ext.music` hints a playlist carries on its items and on the collection ([`ext`]), and the
 //!   readers that treat them as hostile input. `music`, the spec's namespace, is also its key in
 //!   `ext`.
@@ -37,6 +39,7 @@
 
 mod content;
 pub mod ext;
+mod feed;
 mod kind;
 
 pub use content::{
@@ -45,7 +48,13 @@ pub use content::{
     LISTEN_DURATION_MAX_MS, LIVE_NAME_MAX_LENGTH, LIVE_WINDOW_MAX_MICROS, MILLIS_BEFORE, REVIEW_RATING_MAX,
     REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH, SERVICE_MAX_LENGTH, SERVICE_NAMES, TIME_MIN_MICROS,
 };
+pub use feed::{
+    feed_tags, MusicFeed, MusicFeedConfig, MusicFeedContent, MusicFeedLeaveOut, MusicFeedLimit,
+    MusicFeedMatch, MusicFeedRule, MusicFeedSort, FEED_MINUTES_MAX, FEED_RULES_MAX, FEED_RULE_FIELDS,
+    FEED_RULE_OPS, FEED_SONGS_MAX, FEED_URIS_MAX,
+};
 pub use kind::MusicPostKind;
+pub use pubky_social_specs::{PubkySocialFeedLayout, PubkySocialFeedReach};
 
 pub use pubky_social_specs::{MintedVersion, PostEnvelope, PubkyId, Root, ValidationCtx};
 
