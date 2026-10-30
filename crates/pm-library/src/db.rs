@@ -107,6 +107,19 @@ pub struct IdentityCounts {
     pub unknown: u64,
     /// Tracks identification has not looked at yet.
     pub unchecked: u64,
+    /// How the identified ones were identified.
+    #[serde(default)]
+    pub by: IdentifiedBy,
+}
+
+/// Identified tracks by how: IDs in the tags, the folder as an album, the fingerprint, or the
+/// owner's choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentifiedBy {
+    pub tags: u64,
+    pub album: u64,
+    pub fingerprint: u64,
+    pub you: u64,
 }
 
 /// A bookmark as stored locally (a social v1 bookmark of a canonical music URL).
@@ -2278,6 +2291,11 @@ impl Library {
         self.tracks_where(clause, String::new())
     }
 
+    /// Every track, in one query (identification groups them by folder).
+    pub fn all_tracks(&self) -> Result<Vec<Track>> {
+        self.tracks_where("?1 = ''", String::new())
+    }
+
     /// Audio files in the folder of `path` that the library knows.
     pub fn tracks_in_folder(&self, dir: &std::path::Path) -> Result<Vec<Track>> {
         let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
@@ -2419,6 +2437,12 @@ impl Library {
             unchecked: q(
                 "SELECT COUNT(*) FROM tracks t WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)",
             )?,
+            by: IdentifiedBy {
+                tags: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('tagged_mbid','tagged_isrc')")?,
+                album: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'album_fit'")?,
+                fingerprint: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release')")?,
+                you: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'confirmed_by_user'")?,
+            },
         })
     }
 
@@ -2861,6 +2885,7 @@ fn confidence_source(c: &Confidence) -> &'static str {
         Confidence::TaggedIsrc => "tagged_isrc",
         Confidence::Fingerprint { .. } => "fingerprint",
         Confidence::FingerprintRelease { .. } => "fingerprint+release",
+        Confidence::AlbumFit { .. } => "album_fit",
         Confidence::ConfirmedByUser => "confirmed_by_user",
         Confidence::Fuzzy { .. } => "fuzzy",
     }
@@ -2872,6 +2897,7 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
         "tagged_isrc" => Confidence::TaggedIsrc,
         "fingerprint" => Confidence::Fingerprint { score: score as f32 },
         "fingerprint+release" => Confidence::FingerprintRelease { score: score as f32 },
+        "album_fit" => Confidence::AlbumFit { score: score as f32 },
         "confirmed_by_user" => Confidence::ConfirmedByUser,
         "fuzzy" => Confidence::Fuzzy { score: score as f32 },
         other => {
