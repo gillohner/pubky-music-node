@@ -47,7 +47,7 @@ const SETTING: &str = "listens.history";
 /// When the owner last deleted the history (microseconds): listens the sync still finds on the
 /// homeserver that were **written** before then (their newest version's edit id) are deleted,
 /// not imported. A listen written later stays, whenever it was played (an import of old plays).
-const CLEARED: &str = "listens.cleared_before";
+pub(crate) const CLEARED: &str = "listens.cleared_before";
 /// A node play and a listen post this close (seconds) are the same play.
 const TWIN_SECS: i64 = 5;
 
@@ -61,6 +61,19 @@ pub(crate) fn history(lib: &Library) -> ListenHistory {
 
 pub(crate) fn cleared_before(lib: &Library) -> Option<i64> {
     lib.get_setting(CLEARED).ok().flatten()?.parse().ok()
+}
+
+/// A history delete made on another node at `theirs` (microseconds; from the settings copy):
+/// when it is later than this node's own, it becomes this node's, and the listens this node
+/// has that were written by then are deleted (here, and from the homeserver with the next
+/// push), as on the node that deleted them. Returns how many went.
+pub(crate) fn adopt_cleared(lib: &Library, theirs: i64) -> Result<usize, ApiError> {
+    if cleared_before(lib).is_some_and(|mine| mine >= theirs) {
+        return Ok(0);
+    }
+    lib.set_setting(CLEARED, &theirs.to_string())?;
+    let up_to = pm_pubky::ids::timestamp_id(theirs);
+    Ok(lib.delete_music_posts_of_kind_up_to(TYPE_ACTIVITY, &up_to, pm_pubky::ids::now_micros())?)
 }
 
 /// Record one play as a listen post where the setting says; `None` when the history is off.
@@ -253,60 +266,78 @@ pub(crate) fn page(lib: &Library, before: Option<i64>, limit: u32) -> Result<Lis
     Ok(ListenPageResult { listens: out, next })
 }
 
-/// Top songs and artists of the history since `since` (microseconds).
+/// A listen post's song and when it was played (microseconds), without reading the track.
+fn activity_of(row: &MusicPostRow) -> Option<(String, i64)> {
+    let post = serde_json::from_str::<pubky_app_specs::PubkyAppPost>(&row.json).ok()?;
+    let music = MusicPost::from_post(post, Some(&row.id)).ok()??;
+    let a = music.as_activity()?;
+    Some((a.uri.clone(), a.played_at))
+}
+
+/// Top songs and artists of the history since `since` (microseconds). Only the period is read
+/// (plays as `(track, time)` pairs, filtered in SQL), and each song is looked up once, not once
+/// per play: the stats hold the library a short while even for a long history.
 pub(crate) fn stats(
     lib: &Library,
     period: &str,
     since: Option<i64>,
     limit: usize,
 ) -> Result<ListenStats, ApiError> {
-    let listens: Vec<ListenEntry> = lib
+    let listens: Vec<(String, i64)> = lib
         .music_posts_between(TYPE_ACTIVITY, since.unwrap_or(i64::MIN), i64::MAX)?
         .iter()
-        .filter_map(|r| listen_entry(lib, r))
+        .filter_map(activity_of)
         .collect();
-    // Node plays without a listen twin, matched in memory
-    let mut twins: HashMap<&str, Vec<i64>> = HashMap::new();
-    for l in &listens {
-        twins
-            .entry(l.uri.as_str())
-            .or_default()
-            .push(l.played_at / 1_000_000);
-    }
     let since_secs = since.map(|t| t.div_euclid(1_000_000));
-    let plays: Vec<ListenEntry> = lib
-        .plays_before(None, u32::MAX)?
-        .into_iter()
-        .filter(|p| since_secs.is_none_or(|s| p.played_at >= s))
-        .filter(|p| {
-            let uri = p.track.publishable_uri().map(|u| u.to_url());
-            !uri.as_deref()
-                .and_then(|u| twins.get(u))
-                .is_some_and(|ts| ts.iter().any(|t| (t - p.played_at).abs() <= TWIN_SECS))
-        })
-        .map(play_entry)
-        .collect();
-    let all: Vec<&ListenEntry> = listens.iter().chain(plays.iter()).collect();
-    let mut by_track: HashMap<&str, (u64, Option<&Track>)> = HashMap::new();
-    let mut by_artist: HashMap<String, (u64, Option<i64>)> = HashMap::new();
-    for e in &all {
-        let slot = by_track.entry(e.uri.as_str()).or_insert((0, None));
-        slot.0 += 1;
-        if slot.1.is_none() {
-            slot.1 = e.track.as_ref();
+    let plays = lib.play_times_since(since_secs)?;
+    // Each song once: a play's by its track id, a listen's by its link
+    let mut by_id: HashMap<i64, (String, Option<Track>)> = HashMap::new();
+    for (tid, _) in &plays {
+        by_id.entry(*tid).or_insert_with(|| {
+            let track = lib.get_track(pm_model::TrackId(*tid)).ok().flatten();
+            let uri = track
+                .as_ref()
+                .and_then(|t| t.publishable_uri().map(|u| u.to_url()))
+                .unwrap_or_else(|| format!("{}{tid}", crate::sources::TRACK_SCHEME));
+            (uri, track)
+        });
+    }
+    // Node plays without a listen twin (the same song within TWIN_SECS)
+    let mut twins: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (uri, at) in &listens {
+        twins.entry(uri.as_str()).or_default().push(at / 1_000_000);
+    }
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    for (uri, _) in &listens {
+        *counts.entry(uri.clone()).or_default() += 1;
+    }
+    let mut total = listens.len() as u64;
+    for (tid, at) in &plays {
+        let uri = &by_id[tid].0;
+        let twin = twins
+            .get(uri.as_str())
+            .is_some_and(|ts| ts.iter().any(|t| (t - at).abs() <= TWIN_SECS));
+        if !twin {
+            *counts.entry(uri.clone()).or_default() += 1;
+            total += 1;
         }
-        if let Some(t) = &e.track {
+    }
+    let mut tracks: HashMap<String, Option<Track>> = by_id.into_values().collect();
+    let mut by_artist: HashMap<String, (u64, Option<i64>)> = HashMap::new();
+    for (uri, n) in &counts {
+        let track = tracks.entry(uri.clone()).or_insert_with(|| track_of(lib, uri));
+        if let Some(t) = track {
             for a in &t.artists {
                 let slot = by_artist.entry(a.name.clone()).or_insert((0, a.id));
-                slot.0 += 1;
+                slot.0 += n;
             }
         }
     }
-    let mut top_tracks: Vec<TopTrack> = by_track
+    let mut top_tracks: Vec<TopTrack> = counts
         .into_iter()
-        .map(|(uri, (plays, track))| TopTrack {
-            uri: uri.to_string(),
-            track: track.cloned(),
+        .map(|(uri, plays)| TopTrack {
+            track: tracks.get(&uri).cloned().flatten(),
+            uri,
             plays,
         })
         .collect();
@@ -325,7 +356,7 @@ pub(crate) fn stats(
     Ok(ListenStats {
         period: period.to_string(),
         since,
-        listens: all.len() as u64,
+        listens: total,
         top_tracks,
         top_artists,
     })
@@ -438,4 +469,46 @@ pub(crate) async fn delete_all(
         deleted,
         plays_cleared,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use pm_library::{Library, MusicPostRow};
+    use pm_pubky::ids::timestamp_id;
+
+    /// Review of #111: a history deleted on another node reaches this one through the settings
+    /// copy, and the listens this node wrote before then go too (or a later move here would
+    /// publish them again). An older delete changes nothing.
+    #[test]
+    fn a_history_deleted_elsewhere_goes_here_too() {
+        let lib = Library::open_in_memory().unwrap();
+        let listen = |at: i64| MusicPostRow {
+            id: timestamp_id(at),
+            kind: super::TYPE_ACTIVITY.into(),
+            visibility: "public".into(),
+            json: "{}".into(),
+            created_at: at,
+            updated_at: at,
+            synced_at: Some(at),
+            deleted: false,
+        };
+        for at in [1_000, 2_000, 3_000] {
+            lib.upsert_music_post(&listen(at)).unwrap();
+        }
+        assert_eq!(super::adopt_cleared(&lib, 2_000).unwrap(), 2);
+        assert_eq!(super::cleared_before(&lib), Some(2_000));
+        let left = lib.music_posts_page(super::TYPE_ACTIVITY, None, 10).unwrap();
+        assert_eq!(left.iter().map(|r| r.updated_at).collect::<Vec<_>>(), [3_000]);
+        assert_eq!(
+            lib.unsynced_music_posts().unwrap().len(),
+            2,
+            "the deletes go to the homeserver"
+        );
+        assert_eq!(
+            super::adopt_cleared(&lib, 1_500).unwrap(),
+            0,
+            "an older delete is no news"
+        );
+        assert_eq!(super::cleared_before(&lib), Some(2_000));
+    }
 }

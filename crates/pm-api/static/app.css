@@ -704,6 +704,14 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .toprow .art img { width: 100%; height: 100%; object-fit: cover; }
 .toprow .name.big { font-size: 22px; font-weight: 700; }
 .list-row .src-badges { margin-right: 6px; }
+/* Search facets: one row of small chips under the scope chips; the row or tile the keyboard is on */
+.facets { margin: 2px 0 14px; gap: 6px 14px; align-items: center; }
+.facets .facet { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.facets .facet > .small { margin-right: 2px; }
+.chip.sm { padding: 3px 9px; font-size: 12px; }
+.kfocus { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.list-row .thumb.round { border-radius: 50%; }
+.list-row .ic.right { transform: rotate(-90deg); color: var(--muted); }
 .snotes { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
 .snote { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .snote .src-badge.ico { width: 18px; height: 18px; }
@@ -1371,3 +1379,12 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 .smreach { margin-top: 14px; }
 .nethead { font-weight: 600; margin: 16px 0 8px; }
 .reachby { font-style: normal; color: var(--fg-2); align-self: center; }
+
+/* Your library: tabs under the head, a one-line status, file rows with their size */
+.libtabs { margin: 10px 0 14px; }
+.libstatus + .muted.small { margin: -6px 0 14px; }
+.libstatus { font-size: 13px; color: var(--fg-2); margin: 0 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.libstatus .spin { margin-right: 4px; }
+.mrow .thumb { margin-right: 0; }
+.mrow .msize { min-width: 64px; text-align: right; }
+@media (max-width: 600px) { .mrow .msize { display: none; } }

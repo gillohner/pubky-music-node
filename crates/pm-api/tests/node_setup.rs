@@ -655,3 +655,165 @@ async fn get_started_goes_away_when_its_steps_are_done_or_the_owner_hides_it() {
     assert_eq!(v["show"], false, "only optional steps left: {v}");
     assert_eq!(v["hidden"], false);
 }
+
+/// Library › Node library: the owner edits a song's tags on the node (the file untouched), the
+/// edit survives a rescan of a changed file and is undone; an album is renamed in place; a song
+/// taken out stays out across scans and comes back on restore. Listeners may do none of it, and
+/// My music needs a Pubky session.
+#[tokio::test]
+async fn the_owner_edits_and_removes_songs_without_touching_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let file = music.join("one.wav");
+    write_wav(&file);
+    let s = node(dir.path(), vec![music.clone()], just_null());
+    s.scan_config_folders();
+    scanned(&s).await;
+    let app = router(s.clone());
+    let (_, t) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    let id = t["tracks"][0]["id"].as_i64().unwrap();
+    let before = std::fs::read(&file).unwrap();
+    // Edit: title and artist; blank fields keep the file's value
+    let (st, t) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/library/tracks/{id}/edit"),
+        Some(json!({"title": "Morning", "artist": "The Band", "album": "  "})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["title"], "Morning");
+    assert_eq!(t["artists"][0]["name"], "The Band");
+    assert_eq!(std::fs::read(&file).unwrap(), before, "the file is not touched");
+    // The file changes: the next scan reads it again and the edit stays on top
+    write_wav(&file);
+    let mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    assert!(s.start_scan(vec![music.clone()]).unwrap());
+    let sc = scanned(&s).await;
+    assert_eq!(sc.updated, 1, "{sc:?}");
+    let (_, t) = call(&app, OWNER, "GET", &format!("/v1/library/tracks/{id}"), None).await;
+    assert_eq!(t["title"], "Morning", "{t}");
+    // Undo
+    let (st, t) = call(
+        &app,
+        OWNER,
+        "DELETE",
+        &format!("/v1/library/tracks/{id}/edit"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["title"], "One", "{t}");
+    // An album: renamed in place
+    let (_, t) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/library/tracks/{id}/edit"),
+        Some(json!({"album": "Mornings"})),
+    )
+    .await;
+    let album = t["album"]["id"].as_i64().unwrap();
+    let (st, a) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/library/albums/{album}/edit"),
+        Some(json!({"title": "Mornings, Vol. 1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    let (_, t) = call(&app, OWNER, "GET", &format!("/v1/library/tracks/{id}"), None).await;
+    assert_eq!(t["album"]["id"], album);
+    assert_eq!(t["album"]["title"], "Mornings, Vol. 1");
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/library/albums/{album}/edit"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // The edit and what the file says, for the dialog
+    let (_, e) = call(&app, OWNER, "GET", &format!("/v1/library/tracks/{id}/edit"), None).await;
+    assert_eq!(e["edit"]["album"], "Mornings, Vol. 1", "{e}");
+    assert_eq!(e["file"]["title"], "One", "{e}");
+    // Listeners: none of it
+    let l = listener(&s);
+    for (m, uri, body) in [
+        (
+            "PUT",
+            format!("/v1/library/tracks/{id}/edit"),
+            Some(json!({"title": "x"})),
+        ),
+        ("GET", format!("/v1/library/tracks/{id}/edit"), None),
+        ("DELETE", format!("/v1/library/tracks/{id}/edit"), None),
+        (
+            "PUT",
+            format!("/v1/library/albums/{album}/edit"),
+            Some(json!({"title": "x"})),
+        ),
+        ("DELETE", format!("/v1/library/tracks/{id}"), None),
+        ("GET", "/v1/library/hidden".to_string(), None),
+        (
+            "POST",
+            "/v1/library/hidden/restore".to_string(),
+            Some(json!({"path": "/x"})),
+        ),
+        ("GET", "/v1/me/music".to_string(), None),
+    ] {
+        let (st, e) = call(&app, &l, m, &uri, body).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{m} {uri}: {e}");
+    }
+    // My music needs a Pubky session
+    let (st, e) = call(&app, OWNER, "GET", "/v1/me/music", None).await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+    // Out of the library: gone from the list, listed as hidden, not read again by a scan
+    let (st, _) = call(&app, OWNER, "DELETE", &format!("/v1/library/tracks/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, t) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    assert_eq!(t["tracks"].as_array().unwrap().len(), 0, "{t}");
+    assert!(s.start_scan(vec![music.clone()]).unwrap());
+    scanned(&s).await;
+    let (_, t) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    assert_eq!(
+        t["tracks"].as_array().unwrap().len(),
+        0,
+        "a scan does not bring it back: {t}"
+    );
+    let (_, h) = call(&app, OWNER, "GET", "/v1/library/hidden", None).await;
+    let path = h[0]["path"].as_str().unwrap().to_string();
+    assert!(path.ends_with("one.wav"), "{h}");
+    assert!(file.exists(), "the file stays");
+    // Restore: the folder is read again and the song is back
+    let (st, r) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/library/hidden/restore",
+        Some(json!({"path": path})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["scan_started"], true, "{r}");
+    scanned(&s).await;
+    let mut back = 0;
+    for _ in 0..200 {
+        let (_, t) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+        back = t["tracks"].as_array().unwrap().len();
+        if back == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(back, 1);
+}

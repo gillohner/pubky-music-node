@@ -576,11 +576,24 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
-    Snapshot { zones: Vec<ZoneState> },
-    Zone { state: ZoneState },
-    ZoneEvent { zone: ZoneId, event: ZoneEvent },
-    ZoneRemoved { zone: ZoneId },
+    Snapshot {
+        zones: Vec<ZoneState>,
+    },
+    Zone {
+        state: ZoneState,
+    },
+    ZoneEvent {
+        zone: ZoneId,
+        event: ZoneEvent,
+    },
+    ZoneRemoved {
+        zone: ZoneId,
+    },
     LibraryChanged,
+    /// The homeserver refused the owner's listening post: "Share what I'm listening to" is off.
+    ListeningStopped {
+        error: String,
+    },
 }
 
 // ---- playlists (ADR 0006) ----
@@ -1960,6 +1973,10 @@ pub struct SharedPlaylist {
     pub summary: SharedPlaylistSummary,
     /// Where each song plays from on this node.
     pub play_from: PlaylistPlayFrom,
+    /// Every item with its kind, in the same order: a web page or a post shows as its card, not
+    /// as a song that doesn't play.
+    #[serde(default)]
+    pub entries: Vec<CollectionEntry>,
 }
 
 /// `GET /v1/sources/jamendo/status`.
