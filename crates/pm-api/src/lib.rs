@@ -1538,6 +1538,7 @@ async fn queue(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRe
 async fn enqueue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
@@ -1556,6 +1557,9 @@ async fn enqueue(
     for it in body.items {
         if it.uri.trim().is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
+        }
+        if caller.role != accounts::Role::Owner {
+            accounts::check_listener_uri(&it.uri)?;
         }
         items.push(it);
     }
@@ -1866,6 +1870,7 @@ async fn load_zone(
 async fn load(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<ZoneState> {
     if body.items.is_empty() {
@@ -1873,6 +1878,11 @@ async fn load(
     }
     if body.items.iter().any(|it| it.uri.trim().is_empty()) {
         return Err(ApiError::bad_request("item uri is empty"));
+    }
+    if caller.role != accounts::Role::Owner {
+        for it in &body.items {
+            accounts::check_listener_uri(&it.uri)?;
+        }
     }
     let to = zone_of(&s, &id)?;
     Ok(Json(
@@ -2783,6 +2793,47 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Sign-ins waiting at once, in all and from one address (security review 2026-10-30, #4).
+const MAX_LOGINS: usize = 64;
+const MAX_LOGINS_PER_ORIGIN: usize = 6;
+
+/// Whether `origin` may start another sign-in while `waiting` (their origins) are open.
+fn may_start_login<'a>(waiting: impl Iterator<Item = &'a str>, origin: &str) -> bool {
+    let (mut all, mut mine) = (0, 0);
+    for o in waiting {
+        all += 1;
+        mine += (o == origin) as usize;
+    }
+    all < MAX_LOGINS && mine < MAX_LOGINS_PER_ORIGIN
+}
+
+/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: the address a proxy or tunnel names
+/// (Cloudflare's, then `X-Forwarded-For`'s first), iroh for the remote tunnel, else the
+/// connection's own. A forged header only picks another bucket; [`MAX_LOGINS`] still holds.
+fn login_origin(req: &axum::extract::Request) -> String {
+    if req.extensions().get::<peer::Remote>().is_some() {
+        return "iroh".into();
+    }
+    let h = req.headers();
+    let named = h
+        .get("cf-connecting-ip")
+        .or_else(|| h.get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            h.get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .map(|v| v.trim().to_string())
+        });
+    named
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string())
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
 
 /// A QR code of `text` as an SVG string (dark modules on a light tile, a
 /// quiet zone of four modules), for Pubky Ring sign-ins.
@@ -2808,7 +2859,22 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
 /// Pubky Ring. Only the node's owner (the identity the node itself is signed
 /// in as) is accepted; approval hands out the API token, so nothing is typed
 /// or pasted. 412 until the node has a Pubky session.
-async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<ControllerLoginStarted> {
+async fn controller_login_start(
+    State(s): State<Arc<NodeState>>,
+    req: axum::extract::Request,
+) -> ApiResult<ControllerLoginStarted> {
+    // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
+    let origin = login_origin(&req);
+    {
+        let mut logins = s.controller_logins.lock().await;
+        logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+        if !may_start_login(logins.values().map(|(_, _, o)| o.as_str()), &origin) {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many sign-ins are waiting; finish one or try again in a few minutes",
+            ));
+        }
+    }
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -2827,8 +2893,14 @@ async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<Co
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
     let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    logins.insert(id.clone(), (flow, std::time::Instant::now()));
+    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    if logins.len() >= MAX_LOGINS {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many sign-ins are waiting; try again in a few minutes",
+        ));
+    }
+    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     let qr_svg = qr_svg(&url);
     Ok(Json(ControllerLoginStarted {
         id,
@@ -2846,7 +2918,7 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at)) = logins.get(&id) else {
+    let Some((flow, at, _)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus {
             status: "expired".into(),
             token: None,
@@ -8005,6 +8077,46 @@ mod tests {
         assert_eq!(v["status"], "expired");
     }
 
+    /// Anyone may start a Pubky Ring sign-in, so few wait at once: six from one address, 64 in
+    /// all (security review 2026-10-30, #4).
+    #[test]
+    fn sign_ins_waiting_are_capped_per_address_and_in_all() {
+        let six = ["1.2.3.4"; MAX_LOGINS_PER_ORIGIN];
+        assert!(!may_start_login(six.iter().copied(), "1.2.3.4"));
+        assert!(may_start_login(six.iter().copied(), "5.6.7.8"));
+        let many: Vec<String> = (0..MAX_LOGINS).map(|i| format!("10.0.0.{i}")).collect();
+        assert!(!may_start_login(many.iter().map(String::as_str), "9.9.9.9"));
+        assert!(may_start_login(many[1..].iter().map(String::as_str), "9.9.9.9"));
+        let req = |h: Option<(&str, &str)>, from: Option<&str>| {
+            let mut b = Request::builder().uri("/v1/auth/pubky/start");
+            if let Some((k, v)) = h {
+                b = b.header(k, v);
+            }
+            let mut r = b.body(Body::empty()).unwrap();
+            if let Some(a) = from {
+                r.extensions_mut().insert(axum::extract::ConnectInfo(
+                    a.parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
+            r
+        };
+        assert_eq!(login_origin(&req(None, Some("192.168.1.9:5000"))), "192.168.1.9");
+        assert_eq!(
+            login_origin(&req(
+                Some(("cf-connecting-ip", "203.0.113.7")),
+                Some("127.0.0.1:1")
+            )),
+            "203.0.113.7"
+        );
+        assert_eq!(
+            login_origin(&req(Some(("x-forwarded-for", "198.51.100.2, 10.0.0.1")), None)),
+            "198.51.100.2"
+        );
+        let mut tunnel = req(None, Some("127.0.0.1:1"));
+        tunnel.extensions_mut().insert(peer::Remote);
+        assert_eq!(login_origin(&tunnel), "iroh");
+    }
+
     #[tokio::test]
     async fn the_musicbrainz_proxy_needs_a_contact_and_rejects_bad_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -8033,6 +8145,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The MusicBrainz proxy stops reading an answer past 4 MiB (it used to read it all first),
+    /// and passes a small one on (security review 2026-10-30, low).
+    #[tokio::test]
+    async fn the_musicbrainz_proxy_refuses_an_oversized_answer_as_it_streams() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/ws/2/big",
+                get(|| async {
+                    // No Content-Length: chunks until 8 MiB
+                    let chunks = futures_util::stream::iter(
+                        (0..128).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 64 * 1024])),
+                    );
+                    Body::from_stream(chunks)
+                }),
+            )
+            .route(
+                "/ws/2/small",
+                get(|| async { Json(serde_json::json!({"ok": true})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        let app = router(s.clone());
+        let get_ = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(get_("/mb/ws/2/big").await, StatusCode::BAD_GATEWAY);
+        assert_eq!(get_("/mb/ws/2/small").await, StatusCode::OK);
     }
 
     #[tokio::test]

@@ -114,13 +114,16 @@ impl Host for ZoneRenderers {
     async fn act(&self, zone: &str, act: Act) -> Result<(), String> {
         let z = self.zone(zone).ok_or("no such zone")?;
         match act {
-            Act::SetUri { uri, meta } => {
+            // Fetched only where the controller could reach itself, every redirect and address
+            Act::SetUri { uri, meta, peer } => {
+                crate::sources::guard(&uri, crate::sources::Reach { peer, lan: true })?;
                 z.stop();
                 z.clear();
                 z.enqueue(vec![item(uri, meta)], Insert::End);
             }
-            Act::SetNextUri { uri, meta } => {
+            Act::SetNextUri { uri, meta, peer } => {
                 if !uri.is_empty() {
+                    crate::sources::guard(&uri, crate::sources::Reach { peer, lan: true })?;
                     z.enqueue(vec![item(uri, meta)], Insert::Next);
                 }
             }

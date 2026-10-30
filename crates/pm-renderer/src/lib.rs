@@ -94,6 +94,14 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn allowed(ip: IpAddr, peer: Option<IpAddr>) -> bool {
+    ip_allowed(ip, peer, true)
+}
+
+/// Whether the node may connect to `ip` for someone at `peer` (a controller, or nobody on this
+/// network: a listener's request): never link-local (169.254.169.254, the cloud metadata
+/// service), unspecified, multicast or broadcast; loopback only for a peer on this machine;
+/// private and shared (CGNAT) addresses only with `lan`.
+pub fn ip_allowed(ip: IpAddr, peer: Option<IpAddr>, lan: bool) -> bool {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         v4 => v4,
@@ -103,6 +111,13 @@ fn allowed(ip: IpAddr, peer: Option<IpAddr>) -> bool {
         IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
     };
     if ip.is_unspecified() || ip.is_multicast() || link_local {
+        return false;
+    }
+    let private = match ip {
+        IpAddr::V4(v4) => v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+    };
+    if private && !lan {
         return false;
     }
     if ip.is_loopback() {
@@ -154,15 +169,19 @@ pub struct View {
 /// What a controller asks of a zone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
-    /// Replace what the zone plays with this URI (stopped until `Play`).
+    /// Replace what the zone plays with this URI (stopped until `Play`). `peer` is the
+    /// controller: every fetch of the URI (each redirect, each address) must be one it could
+    /// reach itself ([`ip_allowed`]).
     SetUri {
         uri: String,
         meta: Meta,
+        peer: Option<IpAddr>,
     },
     /// Play this right after the current item (gapless where the formats allow).
     SetNextUri {
         uri: String,
         meta: Meta,
+        peer: Option<IpAddr>,
     },
     Play,
     Pause,
@@ -191,6 +210,8 @@ pub trait Host: Send + Sync + 'static {
 struct Sub {
     zone: String,
     service: String,
+    /// The controller that subscribed (for [`MAX_SUBS_PER_PEER`]).
+    peer: Option<IpAddr>,
     callbacks: Vec<String>,
     expires: Instant,
     seq: u32,
@@ -207,6 +228,12 @@ pub struct Renderer {
 
 /// Subscriptions last this long unless renewed (controllers ask for 300-1800 s).
 const MAX_TIMEOUT: u64 = 1800;
+/// Subscriptions at once, in all and from one controller, and callbacks per subscription: each
+/// costs work every [`EVENT_EVERY`] (security review 2026-10-30, #5). Controllers take one per
+/// service of the zones they show.
+const MAX_SUBS: usize = 256;
+const MAX_SUBS_PER_PEER: usize = 32;
+const MAX_CALLBACKS: usize = 4;
 /// How often zone state is compared for events.
 const EVENT_EVERY: Duration = Duration::from_millis(500);
 
@@ -399,7 +426,7 @@ async fn control(
                 Err((716, format!("Resource not found: {e}")))
             } else {
                 let meta = xml::parse_didl(call.arg("CurrentURIMetaData"));
-                act(Act::SetUri { uri, meta })
+                act(Act::SetUri { uri, meta, peer })
                     .await
                     .map(|_| ok(&[]))
                     .map_err(|e| (501, e))
@@ -416,7 +443,7 @@ async fn control(
                 Err((716, format!("Resource not found: {e}")))
             } else {
                 let meta = xml::parse_didl(call.arg("NextURIMetaData"));
-                act(Act::SetNextUri { uri, meta })
+                act(Act::SetNextUri { uri, meta, peer })
                     .await
                     .map(|_| ok(&[]))
                     .map_err(|e| (501, e))
@@ -549,11 +576,21 @@ async fn events(
                     None => StatusCode::PRECONDITION_FAILED.into_response(),
                 };
             }
+            {
+                let mut subs = r.subs.lock().expect("subs");
+                let now = Instant::now();
+                subs.retain(|_, s| s.expires > now);
+                let mine = subs.values().filter(|s| s.peer == peer).count();
+                if subs.len() >= MAX_SUBS || mine >= MAX_SUBS_PER_PEER {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
             let mut callbacks: Vec<String> = Vec::new();
             for c in h("callback")
                 .split('>')
                 .filter_map(|c| c.trim().strip_prefix('<'))
                 .filter(|c| c.starts_with("http://"))
+                .take(MAX_CALLBACKS)
             {
                 // NOTIFY goes only where the subscriber could send it itself
                 if reachable_for(c, peer).await.is_ok() {
@@ -572,6 +609,7 @@ async fn events(
                 Sub {
                     zone,
                     service,
+                    peer,
                     callbacks,
                     expires: Instant::now() + Duration::from_secs(timeout),
                     // The first event (SEQ 0) carries the full state; it goes out on the next tick.

@@ -463,6 +463,135 @@ pub fn open_http_stream_with(
     headers: &[(String, String)],
     ext_hint: Option<&str>,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
+    open_http_stream_via(http_client(), uri, headers, ext_hint)
+}
+
+/// Where someone other than the owner may make the node fetch: a UPnP controller (`peer`, its
+/// LAN) or a listener (no peer, public addresses only). See `pm_renderer::ip_allowed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reach {
+    pub peer: Option<std::net::IpAddr>,
+    /// LAN (private) addresses too.
+    pub lan: bool,
+}
+
+impl Reach {
+    pub fn allows(&self, ip: std::net::IpAddr) -> bool {
+        pm_renderer::ip_allowed(ip, self.peer, self.lan)
+    }
+
+    /// The stricter of two: a URI two people gave keeps to what both may reach.
+    fn and(self, other: Reach) -> Reach {
+        Reach {
+            peer: (self.peer == other.peer).then_some(self.peer).flatten(),
+            lan: self.lan && other.lan,
+        }
+    }
+}
+
+/// http(s) items someone other than the owner put in a queue, and where their fetches may go.
+/// Kept until the node restarts (queues are, too); full, it takes no more such items rather
+/// than forget one, which would then be fetched unchecked.
+static GUARDED: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Reach>>> =
+    std::sync::LazyLock::new(Default::default);
+const MAX_GUARDED: usize = 10_000;
+
+/// Fetch `uri` only within `reach` whenever it plays: each redirect and each address it
+/// resolves to, checked when the connection is made (no DNS rebinding).
+pub fn guard(uri: &str, reach: Reach) -> Result<(), String> {
+    let mut g = GUARDED.lock().expect("guarded");
+    if let Some(r) = g.get_mut(uri) {
+        *r = r.and(reach);
+        return Ok(());
+    }
+    if g.len() >= MAX_GUARDED {
+        return Err("too many links were queued here; restart the node".into());
+    }
+    g.insert(uri.to_string(), reach);
+    Ok(())
+}
+
+fn reach_of(uri: &str) -> Option<Reach> {
+    GUARDED.lock().expect("guarded").get(uri).copied()
+}
+
+/// DNS for a guarded fetch: only the addresses its [`Reach`] allows.
+struct GuardResolver(Reach);
+
+impl reqwest::dns::Resolve for GuardResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let (reach, host) = (self.0, name.as_str().to_string());
+        Box::pin(async move {
+            let found: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let ok: Vec<std::net::SocketAddr> = found.into_iter().filter(|a| reach.allows(a.ip())).collect();
+            if ok.is_empty() {
+                return Err(format!("{host} is not an address this stream may be fetched from").into());
+            }
+            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Whether a URL's host is allowed when it is an address (names go through [`GuardResolver`]).
+fn literal_ok(url: &url::Url, reach: Reach) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => reach.allows(ip.into()),
+        Some(url::Host::Ipv6(ip)) => reach.allows(ip.into()),
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    }
+}
+
+/// A client for one guarded stream: its resolver and every redirect keep to `reach`; no proxy
+/// (a proxy would resolve the name itself).
+fn guarded_client(reach: Reach) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(None)
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(GuardResolver(reach)))
+        .redirect(reqwest::redirect::Policy::custom(move |a| {
+            let url = a.url().clone();
+            if a.previous().len() >= 5 {
+                a.error("too many redirects")
+            } else if !matches!(url.scheme(), "http" | "https") || !literal_ok(&url, reach) {
+                a.error(format!(
+                    "a redirect to {} is not allowed here",
+                    url.host_str().unwrap_or("?")
+                ))
+            } else {
+                a.follow()
+            }
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// [`open_http_stream`] for an item someone other than the owner queued ([`guard`]).
+pub fn open_http_stream_guarded(uri: &str, reach: Reach) -> Result<Box<dyn FrameSource>, SourceError> {
+    let err = |reason: String| SourceError::Open {
+        uri: uri.to_string(),
+        reason,
+    };
+    let url = url::Url::parse(uri).map_err(|e| err(e.to_string()))?;
+    if !literal_ok(&url, reach) {
+        return Err(err(
+            "that address is not one this stream may be fetched from".into()
+        ));
+    }
+    let client = guarded_client(reach).map_err(err)?;
+    open_http_stream_via(&client, uri, &[], None)
+}
+
+fn open_http_stream_via(
+    client: &reqwest::blocking::Client,
+    uri: &str,
+    headers: &[(String, String)],
+    ext_hint: Option<&str>,
+) -> Result<Box<dyn FrameSource>, SourceError> {
     {
         let err = |reason: String| SourceError::Open {
             uri: uri.to_string(),
@@ -470,7 +599,7 @@ pub fn open_http_stream_with(
         };
         let mut url = uri.to_string();
         for hop in 0..2 {
-            let mut rb = http_client().get(&url).header("Icy-MetaData", "1");
+            let mut rb = client.get(&url).header("Icy-MetaData", "1");
             for (k, v) in headers {
                 rb = rb.header(k.as_str(), v.as_str());
             }
@@ -563,7 +692,10 @@ impl SourceFactory for NodeSources {
             });
         }
         if is_http_uri(&item.uri) {
-            return open_http_stream(&item.uri);
+            return match reach_of(&item.uri) {
+                Some(reach) => open_http_stream_guarded(&item.uri, reach),
+                None => open_http_stream(&item.uri),
+            };
         }
         if item.uri == crate::librespot::LIVE_URI {
             return crate::librespot::open_live();
@@ -776,5 +908,132 @@ mod tests {
             parse_icy_title(b"StreamTitle='It's Alright - X';StreamUrl='';").as_deref(),
             Some("It's Alright - X")
         );
+    }
+
+    /// A tiny server: `/ok` is a WAV, `/to-metadata` redirects to the cloud metadata address,
+    /// `/to-name` to `localhost` by name.
+    fn redirecting_server() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let mut wav = std::io::Cursor::new(Vec::new());
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44_100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::new(&mut wav, spec).unwrap();
+            for _ in 0..4410 {
+                w.write_sample(0i16).unwrap();
+                w.write_sample(0i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let wav = wav.into_inner();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for s in l.incoming() {
+                let Ok(mut s) = s else { break };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let redirect = |to: String| {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                match path.as_str() {
+                    "/ok" => {
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len());
+                        let _ = s.write_all(&wav);
+                    }
+                    "/to-metadata" => {
+                        let _ = s
+                            .write_all(redirect("http://169.254.169.254/latest/meta-data".into()).as_bytes());
+                    }
+                    "/to-name" => {
+                        let _ = s.write_all(redirect(format!("http://localhost:{port}/ok")).as_bytes());
+                    }
+                    _ => {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                }
+            }
+        });
+        port
+    }
+
+    /// Someone other than the owner (a listener, a UPnP controller) can't make the node fetch
+    /// what they couldn't reach themselves: not by an address, not through a redirect, not by a
+    /// name that resolves there (security review 2026-10-30, #1 and #3).
+    #[test]
+    fn guarded_streams_keep_to_where_their_sender_may_reach() {
+        let port = redirecting_server();
+        let here = Reach {
+            peer: Some("127.0.0.1".parse().unwrap()),
+            lan: true,
+        };
+        let lan = Reach {
+            peer: Some("192.168.1.5".parse().unwrap()),
+            lan: true,
+        };
+        let public = Reach {
+            peer: None,
+            lan: false,
+        };
+        let reason = |r: Result<Box<dyn FrameSource>, SourceError>| match r {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        // A controller on this machine may use loopback, by address or by name
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/ok"),
+                here
+            )),
+            ""
+        );
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/to-name"),
+                here
+            )),
+            ""
+        );
+        // Never the metadata service, even through a redirect
+        let r = reason(open_http_stream_guarded(
+            &format!("http://127.0.0.1:{port}/to-metadata"),
+            here,
+        ));
+        assert!(r.contains("redirect"), "{r}");
+        // A LAN controller or a listener: not this machine, by address or by a name for it
+        for reach in [lan, public] {
+            let r = reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/ok"),
+                reach,
+            ));
+            assert!(
+                r.contains("not one this stream may be fetched from"),
+                "{reach:?}: {r}"
+            );
+            let r = reason(open_http_stream_guarded(
+                &format!("http://localhost:{port}/ok"),
+                reach,
+            ));
+            assert!(!r.is_empty(), "{reach:?}: a name for this machine was fetched");
+        }
+        // Queued URIs remember who sent them; the stricter wins
+        let uri = format!("http://127.0.0.1:{port}/ok?guard-test");
+        guard(&uri, here).unwrap();
+        guard(&uri, public).unwrap();
+        assert_eq!(reach_of(&uri), Some(public));
+        assert!(public.allows("93.184.216.34".parse().unwrap()));
+        assert!(!public.allows("10.1.2.3".parse().unwrap()));
+        assert!(!public.allows("100.64.0.1".parse().unwrap()));
+        assert!(!public.allows("fd00::1".parse().unwrap()));
+        assert!(lan.allows("10.1.2.3".parse().unwrap()));
+        assert!(!lan.allows("169.254.169.254".parse().unwrap()));
     }
 }

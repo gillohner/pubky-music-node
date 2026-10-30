@@ -128,6 +128,7 @@ pub struct Announced {
 pub(crate) async fn announce(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Json(req): Json<AnnounceRequest>,
 ) -> ApiResult<Announced> {
     let zone = s
@@ -141,6 +142,15 @@ pub(crate) async fn announce(
     if let Some(u) = uri {
         if !(u.starts_with("http://") || u.starts_with("https://") || u.starts_with('/')) {
             return Err(ApiError::bad_request("uri is an http(s) URL or a file path"));
+        }
+        // A listener's clip is a public web link, fetched only there (no files, no LAN)
+        if caller.role != crate::accounts::Role::Owner {
+            if !(u.starts_with("http://") || u.starts_with("https://")) {
+                return Err(crate::accounts::refused(
+                    "a listener announces a web link, not a file",
+                ));
+            }
+            crate::accounts::check_listener_uri(u)?;
         }
     }
     if let Some(v) = req.volume_percent {
