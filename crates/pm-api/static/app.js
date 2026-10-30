@@ -363,7 +363,7 @@
             const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
             matched += r.matched;
             const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
-            const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
+            const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
             parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
               + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
               + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
@@ -546,7 +546,7 @@
     ] });
     if (!how) return;
     b.disabled = true;
-    try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
+    try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.kept ? `, ${countOf(r.kept, 'kept as links')}` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
     catch (e) { toast(e.message, 'error'); }
     b.disabled = false;
   };
@@ -3208,7 +3208,12 @@
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
   // A collection item that doesn't play (a web page, a post): its Pinakes card in the list, with
   // Open instead of Play; filled in by fillCards (GET /v1/cards).
-  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="More: ${esc(t.title)}">${icon('more')}</button></div>`;
+  // An import's line that matched nothing is a MusicBrainz search for its words: shown with its
+  // words, and never asked of Pinakes (they are a private playlist's)
+  const MB_SEARCH = 'https://musicbrainz.org/search?type=recording&query=';
+  const mbSearchWords = (uri) => { if (!String(uri || '').startsWith(MB_SEARCH)) return null; try { return new URL(uri).searchParams.get('query') || null; } catch { return null; } };
+  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="More: ${esc(t.title)}">${icon('more')}</button></div>`;
+  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="More: ${esc(t.title)}">${icon('more')}</button></div>`;
   // At most two at a time: the node's other calls (play, the zone) must not wait behind them
   const fillCards = (box) => {
     const rows = $$('[data-card]', box); let next = 0;
@@ -3287,10 +3292,11 @@
     io.observe(hero);
   };
   const bindSongRows = (box, all, ctx = {}) => {
-    // Cards (web pages, posts) don't play: play the songs only, from the one clicked
+    // Cards (web pages, posts) and unmatched lines don't play: play the songs only, from the one
+    // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
-    $$('[data-srow]:not([data-card])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
+    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
     fillCards(box);
     // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
     $$('[data-cmore]', box).forEach((b) => b.onclick = (e) => {
@@ -4149,7 +4155,7 @@
             try {
               const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status);
-              toast(`Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.unresolved.length ? ` · unmatched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`);
+              toast(`Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${j.unresolved.length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`);
               render();
             } catch (er) { toast(er.message, 'error'); }
           };
@@ -4231,6 +4237,7 @@
           const songs = d.playlist.items.map((it, k) => {
             // A web page or a post plays nowhere: it shows as its card, in its place (B3)
             const kind = d.entries && d.entries[k] && d.entries[k].kind;
+            if (kind === 'link' && mbSearchWords(it.uri)) return { no: k + 1, card: true, search: true, title: mbSearchWords(it.uri), page: it.uri };
             if (kind === 'link' || kind === 'post') return { no: k + 1, card: true, title: (() => { try { return new URL(it.uri).hostname.replace(/^www\./, ''); } catch { return it.uri; } })(), page: it.uri };
             const t = d.tracks[k]; const r = pf && pf.items[k];
             const base = r ? { plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), pinLost: !!r.pin_unavailable, unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services'), sources: r.sources, connect: r.connect } : {};

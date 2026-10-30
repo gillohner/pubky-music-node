@@ -560,7 +560,13 @@ pub(crate) async fn describe_uris(s: &Arc<NodeState>, uris: &[String]) -> Vec<Di
             }
         }
     }
-    let missing: Vec<String> = uris.iter().filter(|u| !found.contains_key(*u)).cloned().collect();
+    // An import's search link holds a private playlist's words: never asked of Pinakes (nor read,
+    // nor named); it stays a bare row
+    let missing: Vec<String> = uris
+        .iter()
+        .filter(|u| !found.contains_key(*u) && !crate::activity::is_search_link(u))
+        .cloned()
+        .collect();
     let mut fresh: Vec<(String, DiscoverItem)> = Vec::new();
     if !missing.is_empty() {
         if let Some(d) = s.discovery() {
