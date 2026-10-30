@@ -222,6 +222,10 @@ impl Output for AirPlayOutput {
         format!("{} (AirPlay)", self.device.name)
     }
 
+    fn model(&self) -> Option<String> {
+        self.device.model.clone().filter(|m| !m.trim().is_empty())
+    }
+
     fn caps(&self) -> &OutputCaps {
         &self.caps
     }
