@@ -2828,8 +2828,11 @@
         const what = b.dataset.sel;
         if (what === 'cancel') return endSelect();
         if (what === 'all') { if (sel.size === songs.length) sel.clear(); else songs.forEach((_, k) => sel.add(k)); $$('.selbox input', section).forEach((c) => { c.checked = sel.has(Number(c.dataset.k)); }); return draw(); }
-        if (what === 'play') { await playSongs(picked, 0, 'replace', opts.plays_from, b, opts.fallback); return endSelect(); }
-        if (what === 'queue') { await playSongs(picked, 0, 'end', opts.plays_from, b, opts.fallback); return endSelect(); }
+        // Picked cards (web pages, posts) don't play: the songs among the picked ones do
+        const songsPicked = picked.filter((t) => !t.card);
+        if ((what === 'play' || what === 'queue') && !songsPicked.length) { toast('Nothing to play: links and posts open, they don’t play'); return; }
+        if (what === 'play') { await playSongs(songsPicked, 0, 'replace', opts.plays_from, b, opts.fallback); return endSelect(); }
+        if (what === 'queue') { await playSongs(songsPicked, 0, 'end', opts.plays_from, b, opts.fallback); return endSelect(); }
         if (what === 'playlist') {
           if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
           const ids = picked.filter((t) => t.track_id != null).map((t) => t.track_id); const uris = picked.filter((t) => t.track_id == null).map((t) => t.page || (t.id && uriOf('song', t.id))).filter(Boolean);
@@ -3806,7 +3809,8 @@
           enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
           $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
-          const playable = (list) => list.filter((t) => !t.unavailable);
+          // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
+          const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
           const playAll = (shuffle, anchorEl) => { const list = [...playable(songs), ...localSongs]; return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl); };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           stickyHead(d.summary.name, (el) => (isBrowser() ? playAll(false, el) : playPlaylist(d.summary.id)));

@@ -57,5 +57,27 @@ const api = async (method, path, body) => {
     await browser.close();
     await api('DELETE', `/collections/${encodeURIComponent(id)}`).catch(() => {});
   }
-  console.log('collection cards: one list in order, cards with Open, counts apart');
+  // A card first (review of #155, M1): Play and Shuffle skip it; the web page is never sent to
+  // be played
+  const first = await api('POST', '/collections', { name: 'Card first', uris: [LINK, SONG] });
+  const b2 = await chromium.launch();
+  try {
+    const ctx = await b2.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+    await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
+    const page = await ctx.newPage();
+    const errors = []; page.on('pageerror', (e) => errors.push(e.message));
+    const sentToPlay = [];
+    await page.route(/\/v1\/discover\/play\?/, (r) => { sentToPlay.push(new URL(r.request().url()).searchParams.get('uri')); return r.continue(); });
+    await page.route(/\/v1\/cards\?/, (r) => r.fulfill({ json: { uri: new URL(r.request().url()).searchParams.get('uri'), status: 'unknown' } }));
+    await page.goto(`${BASE}/playlist/${encodeURIComponent(first.summary.id)}`);
+    await page.locator('#plsongs .card-row').first().waitFor();
+    for (const b of ['#plplay', '#plshuffle']) { await page.click(b); await page.waitForTimeout(800); }
+    assert.ok(!sentToPlay.includes(LINK), `the web page was sent to be played: ${JSON.stringify(sentToPlay)}`);
+    assert.deepEqual(errors, []);
+    await ctx.close();
+  } finally {
+    await b2.close();
+    await api('DELETE', `/collections/${encodeURIComponent(first.summary.id)}`).catch(() => {});
+  }
+  console.log('collection cards: one list in order, cards with Open, counts apart; a card first plays nothing of it');
 })().catch((e) => { console.error(e); process.exit(1); });
