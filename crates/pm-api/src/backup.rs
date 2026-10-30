@@ -231,11 +231,11 @@ fn remove_db(path: &Path) {
     }
 }
 
-/// What a backup holds: the library's counts, with the favourites kept on this node only (songs,
-/// albums and artists without an identity live in settings, not in the favourites table).
+/// What a backup holds: the library's counts, with the bookmarks kept on this node only (songs,
+/// albums and artists without an identity live in settings, not in the bookmarks table).
 fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
     let mut c = lib.backup_counts()?;
-    c.favourites += crate::favourites::local_count(lib);
+    c.bookmarks += crate::bookmarks::local_count(lib);
     Ok(c)
 }
 

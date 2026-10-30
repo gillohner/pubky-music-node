@@ -91,7 +91,7 @@ pub(crate) fn local_ids(lib: &Library) -> Vec<i64> {
     local_of(lib, LOCAL_KEY)
 }
 
-/// How many hearts are kept on this node only (songs, albums and artists without an identity).
+/// How many bookmarks are kept on this node only (songs, albums and artists without an identity).
 pub(crate) fn local_count(lib: &Library) -> u64 {
     [LOCAL_KEY, LOCAL_ALBUMS, LOCAL_ARTISTS]
         .iter()
