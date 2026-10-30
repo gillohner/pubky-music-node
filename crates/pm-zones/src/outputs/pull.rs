@@ -162,6 +162,15 @@ pub struct PullOutput {
     controlled: bool,
 }
 
+/// Where a pull output's stream generations start: milliseconds of the clock, so they don't
+/// repeat across restarts of the node.
+fn first_generation() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Why [`PullOutput::take_stream_for`] gave no stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missed {
@@ -185,7 +194,12 @@ impl PullOutput {
             name: name.to_string(),
             caps,
             shared: Arc::new(Shared {
-                slot: Mutex::new(Slot::default()),
+                // Generations start from the clock, so a URL naming one from before a restart
+                // never names one after it
+                slot: Mutex::new(Slot {
+                    generation: first_generation(),
+                    ..Slot::default()
+                }),
                 notify: tokio::sync::Notify::new(),
             }),
             paced: true,
@@ -238,8 +252,9 @@ impl PullOutput {
     }
 
     /// [`Self::take_stream`], saying why there is none. `generation`: the stream the request is
-    /// for (the node puts it in the URL it gives a renderer, [`Self::generation`]); a newer one
-    /// is not for it, whenever the request comes (a renderer polling its old URI). Without one,
+    /// for (the node puts it in the URL it gives a renderer, [`Self::generation`]); no other is
+    /// for it, whenever the request comes (a renderer polling its old URI, also from before a
+    /// restart). Without one,
     /// on a [`Self::controlled`] output, a stream opened after the request began waiting is not
     /// for it.
     pub async fn take_stream_for(
@@ -257,7 +272,13 @@ impl PullOutput {
             notified.as_mut().enable();
             {
                 let mut slot = self.shared.slot.lock().expect("pull lock");
-                if checked && slot.generation > since {
+                // A request naming its stream gets that one only (older, newer, or from before a
+                // restart: answered); one that doesn't, none opened after it began
+                let other = match generation {
+                    Some(g) => slot.generation != g,
+                    None => slot.generation > since,
+                };
+                if checked && other {
                     return Err(Missed::Superseded);
                 }
                 // A stream whose sink closed with nothing left to hear is no stream
@@ -697,6 +718,30 @@ mod tests {
         let sink = open.open_now(fmt).unwrap();
         assert!(waiting.await.unwrap(), "the waiting player gets it");
         drop(sink);
+    }
+
+    /// A renderer's URL names its stream: a request for another one, older or from before a
+    /// restart (a higher number than any now), is answered and never takes the stream; the
+    /// one it names, it gets (review of #181).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_naming_another_stream_never_takes_this_one() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = PullOutput::controlled("named");
+        let sink = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        for other in [g - 1, g + 1_000_000, 5] {
+            assert_eq!(
+                out.take_stream_for(Duration::from_secs(1), Some(other))
+                    .await
+                    .err(),
+                Some(Missed::Superseded),
+                "g={other}"
+            );
+        }
+        assert!(out.take_stream_for(Duration::from_secs(1), Some(g)).await.is_ok());
+        drop(sink);
+        // A new node (a restart) does not start where the old one did
+        assert_ne!(PullOutput::controlled("named").generation(), 0);
     }
 
     /// Nobody comes back: the sink fails soon after the listener left, not after the full

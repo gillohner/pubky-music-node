@@ -550,7 +550,10 @@ mod tests {
             actions,
             vec![
                 "Stop".to_string(),
-                "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav?g=1".into(),
+                format!(
+                    "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav?g={}",
+                    pull.generation()
+                ),
                 "Play".into(),
                 "Stop".into()
             ]

@@ -419,13 +419,14 @@ mod tests {
         }
         drop(sink);
         let l = log.lock().unwrap().clone();
+        let g = out_b.pull().generation();
         assert_eq!(
             l,
             vec![
-                "A Stop",
-                "A SetAVTransportURI http://node/v1/outputs/pull/b/stream.wav?k=1&g=1",
-                "A Play",
-                "A Stop"
+                "A Stop".to_string(),
+                format!("A SetAVTransportURI http://node/v1/outputs/pull/b/stream.wav?k=1&g={g}"),
+                "A Play".into(),
+                "A Stop".into()
             ],
             "B's transport went to A"
         );
@@ -433,9 +434,10 @@ mod tests {
         // Now both stand alone; a node zone of A and B groups them the Sonos way.
         *state.lock().unwrap() = String::new();
         log.lock().unwrap().clear();
+        let pull_a = Arc::new(PullOutput::new("a"));
         let out_a = Arc::new(UpnpOutput::new(
             player("RINCON_A", &a),
-            Arc::new(PullOutput::new("a")),
+            pull_a.clone(),
             "http://node/v1/outputs/pull/a/stream.wav?k=2".into(),
         ));
         let group = SonosGroup::new("Downstairs", out_a, vec![out_b]);
@@ -452,12 +454,15 @@ mod tests {
         assert_eq!(
             l,
             vec![
-                "B SetAVTransportURI x-rincon:RINCON_A",
-                "A Stop",
-                "A SetAVTransportURI http://node/v1/outputs/pull/a/stream.wav?k=2&g=1",
-                "A Play",
-                "A Stop",
-                "B BecomeCoordinatorOfStandaloneGroup"
+                "B SetAVTransportURI x-rincon:RINCON_A".to_string(),
+                "A Stop".into(),
+                format!(
+                    "A SetAVTransportURI http://node/v1/outputs/pull/a/stream.wav?k=2&g={}",
+                    pull_a.generation()
+                ),
+                "A Play".into(),
+                "A Stop".into(),
+                "B BecomeCoordinatorOfStandaloneGroup".into()
             ]
         );
     }
