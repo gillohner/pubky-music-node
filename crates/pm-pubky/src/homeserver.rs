@@ -448,6 +448,34 @@ impl NodeHomeserver {
         Ok(out)
     }
 
+    /// The newest `limit` public paths under `dir` of a user, newest first (one page): with
+    /// `shallow`, the folders and files directly in it. Timestamp ids sort by time, so the newest
+    /// posts of a `/pub/…/posts/` folder, or the newest version of one post.
+    pub async fn newest_public_paths(
+        &self,
+        user_z32: &str,
+        dir: &str,
+        limit: u16,
+        shallow: bool,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let user = Self::parse_key(user_z32)?;
+        let page = match self
+            .pubky
+            .public_storage()
+            .list((&user, dir))?
+            .limit(limit)
+            .shallow(shallow)
+            .reverse(true)
+            .send()
+            .await
+        {
+            Ok(p) => p,
+            Err(e) if is_not_found(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(page.into_iter().map(|e| e.path.to_string()).collect())
+    }
+
     /// The public paths under `dir` of a user (`/pub/...`), e.g. to check
     /// where tags live.
     pub async fn public_paths(&self, user_z32: &str, dir: &str) -> Result<Vec<String>, HomeserverError> {

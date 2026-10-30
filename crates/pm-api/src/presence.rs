@@ -136,6 +136,22 @@ pub fn zone_written(method: &axum::http::Method, path: &str) -> Option<String> {
     matches!(what, "queue" | "transport" | "load" | "radio" | "shuffle").then(|| zone.to_string())
 }
 
+/// Whether someone other than `me` plays on `zone` now (whatever they let others see): a zone
+/// listening along takes over is never one of those.
+pub(crate) fn someone_else_plays(s: &NodeState, zone: &str, me: &str) -> bool {
+    let busy = s.zones.get(&ZoneId::new(zone)).is_some_and(|z| {
+        let st = z.state();
+        st.transport != Transport::Stopped && st.now_playing.is_some()
+    });
+    busy && s
+        .presence
+        .players
+        .lock()
+        .expect("presence lock")
+        .get(zone)
+        .is_some_and(|p| p.key != me)
+}
+
 /// `c` plays on `zone` now. A listen-along group stays its host's, whoever pauses it.
 pub fn played(s: &NodeState, zone: &str, c: &Caller) {
     let Some(key) = who(c) else { return };
@@ -588,18 +604,7 @@ pub async fn join(
     }
     // Your zone stops to join: never one where someone else's music plays (whether or not they
     // let you see them)
-    let busy = {
-        let st = mine.state();
-        st.transport != Transport::Stopped && st.now_playing.is_some()
-    };
-    let someone_else = s
-        .presence
-        .players
-        .lock()
-        .expect("presence lock")
-        .get(&body.zone)
-        .is_some_and(|p| p.key != me);
-    if busy && someone_else {
+    if someone_else_plays(&s, &body.zone, &me) {
         return Err(conflict(
             "someone else is listening on that zone: listen along from yours",
         ));

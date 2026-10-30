@@ -249,8 +249,9 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     if path.starts_with("/devices/") {
         return None;
     }
-    // Listening along (presence.rs checks the zones)
-    if path == "/presence/along" {
+    // Listening along, here or with a listening post (presence.rs and along_post.rs check the
+    // zones)
+    if path == "/presence/along" || path == "/presence/post" {
         return None;
     }
     Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")

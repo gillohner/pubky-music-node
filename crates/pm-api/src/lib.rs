@@ -12,6 +12,7 @@
 pub mod about;
 pub mod access_token;
 pub mod activity;
+pub mod along_post;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
@@ -675,6 +676,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/profiles", get(profiles::list))
         .route("/profiles/{id}", get(profiles::page))
         .route("/profiles/{id}/avatar", get(profiles::avatar))
+        .route("/profiles/{id}/listening", get(along_post::listening))
         .route(
             "/profiles/{id}/follow",
             axum::routing::put(profiles::follow).delete(profiles::unfollow),
@@ -702,6 +704,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/presence", get(presence::list))
         .route("/presence/along", post(presence::join).delete(presence::leave))
+        .route(
+            "/presence/post",
+            get(along_post::list)
+                .post(along_post::follow)
+                .delete(along_post::leave),
+        )
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route(
@@ -14278,5 +14286,38 @@ exec sleep 300
         assert_eq!(st["progress"]["done"], 10, "{st}");
         assert_eq!(st["progress"]["unknown"], 3, "{st}");
         assert_eq!(st["progress"]["suggested"], 1, "{st}");
+    }
+
+    /// Listening along with a listening post (L4) refuses what isn't a key or a zone before it
+    /// asks anyone, and lists nothing while nothing follows.
+    #[tokio::test]
+    async fn listening_along_with_a_post_checks_what_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let key = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        for (body, want) in [
+            (
+                serde_json::json!({"key": "nobody", "zone": "z"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"key": key, "zone": "no-such-zone"}),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (st, r) = call(&app, "POST", "/v1/presence/post", Some(body)).await;
+            assert_eq!(st, want, "{r}");
+        }
+        assert_eq!(
+            call(&app, "GET", "/v1/profiles/nobody/listening", None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, all) = call(&app, "GET", "/v1/presence/post", None).await;
+        assert_eq!(all, serde_json::json!([]));
+        assert_eq!(
+            call(&app, "DELETE", "/v1/presence/post?zone=z", None).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 }

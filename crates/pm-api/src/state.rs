@@ -222,6 +222,8 @@ pub struct NodeState {
     pub(crate) search_answers: crate::search::AnswerCache,
     /// Who on this node listens where, and the listen-along groups (presence.rs).
     pub presence: crate::presence::Presence,
+    /// Zones listening along with someone's listening post (along_post.rs).
+    pub(crate) along_posts: crate::along_post::AlongPosts,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
@@ -444,6 +446,7 @@ impl NodeState {
             identify: Mutex::new(Default::default()),
             pinakes_reader: Default::default(),
             presence: Default::default(),
+            along_posts: Default::default(),
             search_answers: Default::default(),
             tidal,
             http: Mutex::new(None),

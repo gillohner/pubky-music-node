@@ -468,7 +468,7 @@
   });
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
-  const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
+  const commentRow = (c) => `<li class="comment" data-cpost="${esc(c.post)}"><div class="comment-head"><b>${esc(c.name || `${c.author.slice(0, 8)}…`)}</b> <span class="muted small">${c.at ? esc(ago(Math.floor(c.at / 1000))) : ''}</span></div><p class="comment-text">${esc(c.content)}</p><div class="toolbar">${c.embed ? `<button class="btn ghost sm" data-cplay="${esc(c.embed)}" aria-label="Play the suggested song">${icon('play')} Play it</button>` : ''}${c.replies ? `<button class="btn ghost sm" data-creplies="${esc(c.post)}">${countOf(c.replies, 'replies')}</button>` : ''}<button class="btn ghost sm" data-creply="${esc(c.post)}">Reply</button>${c.mine ? `<button class="btn ghost sm" data-cdel="${esc(c.post)}">Delete</button>` : ''}</div><div class="comment-sub"></div></li>`;
   const commentForm = (label) => `<form class="comment-form"><textarea class="input" name="content" rows="2" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}" required></textarea><button class="btn primary sm" disabled>Post</button></form>`;
   // "Post about this" (B2): a public social v1 note with the item as its embed, so any Pubky app
   // (pubky.app among them) shows it with the item's card.
@@ -491,7 +491,7 @@
       return $(':scope > form', sub);
     };
     const show = async () => {
-      let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+      let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}${sec.dataset.cembeds ? '&embeds=1' : ''}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
       if (!sec.isConnected) return;
       body.innerHTML = `${commentForm('Add a comment')}${t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : `<p class="muted small">No comments yet.</p>`}<p class="muted small">A comment is a public post on your homeserver, so every Pubky app shows it.</p>`;
       fill($('form.comment-form', body), commentDrafts.get(`${uri}|`));
@@ -523,6 +523,7 @@
       } catch (err) { b.disabled = false; toast(err.message, 'error'); }
     });
     sec.addEventListener('click', async (e) => {
+      const sp = e.target.closest('[data-cplay]'); if (sp) { discoverPlay({ uri: sp.dataset.cplay, page: sp.dataset.cplay }, null, sp); return; }
       const r = e.target.closest('[data-creply]');
       if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) openReply(r.closest('li.comment'), r.dataset.creply).elements.content.focus(); return; }
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
@@ -1390,9 +1391,13 @@
   // sees what you play. The node keeps it; the page asks every 20 s and when zones come or go.
   const personName = (l) => l.name || (l.key === 'owner' ? 'the owner' : shortKey(l.key));
   const VISIBLE = [['hidden', 'Nobody', 'what you play stays yours'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
+  // Or along with someone's listening post (L4): their song from your own sources, on your zone
+  const POST_ALONG = { paused: ' · paused', missing: ' · not on your sources', ended: ' · they stopped' };
   const renderAlong = () => {
-    const a = state.along; $('#along').hidden = !a;
+    const a = state.along; const p = !a && state.alongPost;
+    $('#along').hidden = !a && !p; $('#alongchat').hidden = !p;
     if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
+    else if (p) $('#alongtext').textContent = `Along with ${p.who}${POST_ALONG[p.status] || ''}`;
   };
   // Follow your music: into the group it plays on (you host it or listen along) from your own
   // zone, and back to your own zone once that group is gone. A zone you picked yourself stays.
@@ -1414,6 +1419,7 @@
       state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null; state.presence = ls;
       if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
     } catch { return; }
+    try { state.alongPost = (await api('GET', '/presence/post')).find((f) => f.mine && f.zone === state.zone) || null; } catch { state.alongPost = null; }
     renderAlong(); followAlong(); renderListening();
   };
   // Home's "Listening now" (TASK-pinakes-social-ux L3): who else on this node is listening, what and
@@ -1472,7 +1478,9 @@
     }
   };
   const leaveAlong = async () => {
-    const a = state.along; const b = $('#alongleave'); if (!a) return;
+    const a = state.along; const b = $('#alongleave');
+    if (!a && state.alongPost) return leavePost();
+    if (!a) return;
     b.disabled = true;
     try {
       const zs = await api('DELETE', '/presence/along'); state.zones[zs.id] = zs;
@@ -1483,6 +1491,60 @@
   };
   $('#alongleave').onclick = leaveAlong;
   setInterval(refreshAlong, 20000);
+  // Following a post: its status (paused, their next song, the end) shows within seconds
+  setInterval(() => { if (state.alongPost && state.alongPost.status !== 'ended') refreshAlong(); }, 5000);
+  // Listen along with someone's listening post on a zone of this node (This browser can't: the
+  // node plays it). The zone in use when it is one, else a menu; a zone where someone else's
+  // music plays is refused (409) and the menu offers the others.
+  const followPost = async (key, b, zone, skip = new Set()) => {
+    if (!zone) {
+      const free = zoneList().filter((z) => z.id !== BROWSER && !String(z.id).startsWith('group:') && !skip.has(z.id));
+      if (!skip.size && free.some((z) => z.id === state.zone)) zone = state.zone;
+      else if (!free.length) { toast(skip.size ? 'Someone else is listening on your other zones too.' : 'Listening along plays on one of this node’s zones: This browser can’t follow a post.', 'error'); return; }
+      else { showMenu(b, [{ title: skip.size ? 'Someone listens there: listen from' : 'Listen from' }, ...free.map((z) => ({ label: z.name, icon: 'zone', run: () => followPost(key, b, z.id, skip) }))], { all: true }); return; }
+    }
+    b.disabled = true;
+    try {
+      const f = await api('POST', '/presence/post', { key, zone });
+      state.zone = zone; try { localStorage.setItem('pm.zone', zone); } catch { /* storage unavailable */ }
+      state.alongPost = f; renderAlong(); renderZoneName(); renderBar(); refreshQueue();
+      toast(f.status === 'missing' ? `Listening along with ${f.who}: this song isn’t on your sources, their next one may be` : `Listening along with ${f.who}`);
+    } catch (e) {
+      if (e.status === 409) { skip.add(zone); toast(e.message, 'error'); b.disabled = false; followPost(key, b, null, skip); return; }
+      toast(ALONG_ERRORS[e.status] || e.message, 'error');
+    } finally { b.disabled = false; }
+  };
+  const leavePost = async () => {
+    const p = state.alongPost; const b = $('#alongleave'); if (!p) return;
+    b.disabled = true;
+    try { await api('DELETE', `/presence/post?zone=${encodeURIComponent(p.zone)}`); state.alongPost = null; renderAlong(); toast(`You stopped listening along with ${p.who}: what plays stays`); } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+  };
+  // Suggest a song to whoever you listen along with: a public comment on their listening post
+  // with the song attached (its embed)
+  const suggestAlong = async (t, link) => {
+    const p = state.alongPost; if (!p) return;
+    const r = await choiceDialog({ title: `Suggest to ${p.who}`, text: `A public comment on their listening post with “${t.title}” attached.`, field: { label: 'Say something (optional)', value: '' }, choices: [{ label: 'Suggest', value: true, primary: true }] });
+    if (!r || !r.value) return;
+    try { await api('POST', '/comments', { uri: p.post, content: r.text || `Suggesting ${t.title}${t.artist ? ` by ${t.artist}` : ''}`, embed: link }); toast(`Suggested to ${p.who}`); } catch (e) { toast(e.message, 'error'); }
+  };
+  // Their listening post: what plays, Leave, and its comments (suggestions play from here)
+  const alongPanel = () => {
+    const p = state.alongPost; if (!p) return;
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>${esc(p.name)}</h2><p class="muted" id="alnow">${POST_ALONG[p.status] ? esc(POST_ALONG[p.status].slice(3)) : 'Playing here from your own sources'}</p><div class="toolbar"><button class="btn" data-alleave>Leave</button><button class="btn ghost" data-alclose>Close</button></div>
+      <section class="section" data-curi="${esc(p.post)}" data-cembeds="1"><div class="section-head"><h3>Comments</h3><span class="muted small">Suggest a song from its ⋯ menu</span></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>`;
+    document.body.appendChild(d);
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); };
+    transients.push(tr); pushTransient();
+    $('[data-alclose]', d).onclick = () => done();
+    $('[data-alleave]', d).onclick = async () => { await leavePost(); done(); };
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    mountComments($('section', d));
+    api('GET', `/profiles/${encodeURIComponent(p.key)}/listening`).then((lv) => { const n = $('#alnow', d); if (n && lv.live && lv.title) n.textContent = `Now: ${[lv.title, lv.artist].filter(Boolean).join(' · ')}${lv.paused ? ' · paused' : ''}`; }).catch(() => {});
+  };
+  $('#alongchat').onclick = alongPanel;
   const setVisible = async (v) => {
     try { state.presenceVisible = (await api('PUT', '/me/presence', { visible: v })).visible; toast(v === 'hidden' ? 'Nobody sees what you play' : `${VISIBLE.find((x) => x[0] === v)[1]} can see what you play`); } catch (e) { toast(e.message, 'error'); }
   };
@@ -3193,6 +3255,7 @@
       ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav); render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
+      ...(single && uris.length === 1 && state.alongPost && state.pubkyUser ? [{ label: `Suggest to ${state.alongPost.who}`, icon: 'plus', run: () => suggestAlong(single, uris[0]) }] : []),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
       ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
       ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => openWeb(v.url) })),
@@ -4178,6 +4241,12 @@
           $$('[data-ptag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.ptag }));
           $$('[data-ptagged]', main).forEach((r) => r.onclick = () => { const h = tagged[Number(r.dataset.ptagged)]; setView('item', { kind: h.kind === 'artist' ? 'artist' : h.kind === 'album' ? 'album' : 'song', id: h.id }); });
           $$('[data-pshared]', main).forEach((r) => r.onclick = () => setView('shared', { user: pid, id: r.dataset.pshared }));
+          // Listening now, from their listening post: Listen along plays it here from your sources
+          api('GET', `/profiles/${pid}/listening`).then((lv) => {
+            const hero = $('.hero.person', main); if (!lv.live || !hero || state.view !== 'person' || state.viewArg !== pid) return;
+            hero.insertAdjacentHTML('afterend', `<section class="section" id="plive"><div class="section-head"><h3>Listening now</h3></div><div class="list"><div class="list-row listening">${lv.image ? `<img class="thumb" src="${esc(imgSrc(lv.image))}" alt="" loading="lazy" data-err="hide">` : ''}<div class="grow"><div class="name">${esc(lv.name)}</div><div class="sub">${esc([lv.title, lv.artist].filter(Boolean).join(' · ') || 'A song')}${lv.paused ? ' · paused' : ''}</div></div>${pg.you ? '' : `<button class="btn sm" data-plive aria-label="Listen along with ${esc(pg.name)}">${icon('zone')} Listen along</button>`}</div></div></section>`);
+            const lb = $('[data-plive]', main); if (lb) lb.onclick = () => followPost(pid, lb);
+          }).catch(() => {});
           const fb = $('#pfollow'); if (fb) fb.onclick = async () => { const on = fb.getAttribute('aria-pressed') !== 'true'; fb.disabled = true; try { await api(on ? 'PUT' : 'DELETE', `/profiles/${pid}/follow`); profileCache.delete(pid); toast(on ? `Following ${pg.name}` : `Not following ${pg.name} any more`); render(); } catch (e) { toast(e.message, 'error'); fb.disabled = false; } };
           break;
         }
