@@ -760,11 +760,11 @@ async fn playlist_lifecycle() {
             .is_empty()
     );
 
-    // Reviews: one per target, edits keep the id, a rating alone is fine.
+    // Ratings: one per target, edits keep the id, a rating alone is fine, private until published.
     let (st, r) = call(
         &app,
         "PUT",
-        "/v1/reviews",
+        "/v1/ratings",
         Some(serde_json::json!({"track_id": tagged_id, "rating": 4})),
     )
     .await;
@@ -774,17 +774,40 @@ async fn playlist_lifecycle() {
     let (st, r2) = call(
         &app,
         "PUT",
-        "/v1/reviews",
+        "/v1/ratings",
         Some(serde_json::json!({"track_id": tagged_id, "rating": 5, "text": "  Desert island.  "})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{r2}");
     assert_eq!(r2["id"], rid, "editing keeps the post id");
     assert_eq!(r2["text"], "Desert island.");
+    assert_eq!(r2["public"], false);
+    // Published, and an edit that leaves `public` out keeps it so
+    let (_, r3) = call(
+        &app,
+        "PUT",
+        "/v1/ratings",
+        Some(
+            serde_json::json!({"track_id": tagged_id, "rating": 5, "text": "Desert island.", "public": true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        (r3["id"].as_str(), &r3["public"]),
+        (Some(rid.as_str()), &serde_json::json!(true))
+    );
+    let (_, r3) = call(
+        &app,
+        "PUT",
+        "/v1/ratings",
+        Some(serde_json::json!({"track_id": tagged_id, "rating": 5, "text": "Desert island."})),
+    )
+    .await;
+    assert_eq!(r3["public"], true, "{r3}");
     let (st, _) = call(
         &app,
         "PUT",
-        "/v1/reviews",
+        "/v1/ratings",
         Some(serde_json::json!({"track_id": tagged_id, "rating": 11})),
     )
     .await;
@@ -792,7 +815,7 @@ async fn playlist_lifecycle() {
     let (st, _) = call(
         &app,
         "PUT",
-        "/v1/reviews",
+        "/v1/ratings",
         Some(serde_json::json!({"track_id": tagged_id})),
     )
     .await;
@@ -801,21 +824,25 @@ async fn playlist_lifecycle() {
         let (st, _) = call(
             &app,
             "PUT",
-            "/v1/reviews",
+            "/v1/ratings",
             Some(serde_json::json!({"track_id": u["id"], "rating": 3})),
         )
         .await;
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
     }
-    let (_, mine) = call(&app, "GET", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
-    assert_eq!(mine["reviews"].as_array().unwrap().len(), 1);
-    assert_eq!(mine["reviews"][0]["rating"], 5);
-    let (_, all) = call(&app, "GET", "/v1/reviews", None).await;
-    assert_eq!(all["reviews"].as_array().unwrap().len(), 1);
-    let (st, _) = call(&app, "DELETE", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
+    let (_, mine) = call(&app, "GET", &format!("/v1/ratings?track_id={tagged_id}"), None).await;
+    assert_eq!(mine["ratings"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["ratings"][0]["rating"], 5);
+    let (_, all) = call(&app, "GET", "/v1/ratings", None).await;
+    assert_eq!(all["ratings"].as_array().unwrap().len(), 1);
+    // The older name answers the same, for one release
+    let (_, old) = call(&app, "GET", "/v1/reviews", None).await;
+    assert_eq!(old["ratings"], all["ratings"]);
+    assert_eq!(old["reviews"], all["ratings"]);
+    let (st, _) = call(&app, "DELETE", &format!("/v1/ratings?track_id={tagged_id}"), None).await;
     assert_eq!(st, StatusCode::OK);
-    let (_, mine) = call(&app, "GET", &format!("/v1/reviews?track_id={tagged_id}"), None).await;
-    assert!(mine["reviews"].as_array().unwrap().is_empty());
+    let (_, mine) = call(&app, "GET", &format!("/v1/ratings?track_id={tagged_id}"), None).await;
+    assert!(mine["ratings"].as_array().unwrap().is_empty());
 
     // Search spans tracks, albums, artists and genres.
     let (st, sr) = call(&app, "GET", "/v1/library/search?q=lists", None).await;

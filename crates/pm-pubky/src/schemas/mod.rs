@@ -7,7 +7,7 @@
 //! | Object | Envelope `type` | Legacy path (read for the move) | Written today |
 //! | :-- | :-- | :-- | :-- |
 //! | [`Playlist`] (a collection) | `pubky.music/playlist` | `/priv/pubky.app/posts/<id>` | social `collection` |
-//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` | music `review` or social note |
+//! | [`Review`] | `pubky.music/review` | `/priv/pubky.app/posts/<id>` | social `rating`, or a `note` replying to the music URL |
 //! | [`Activity`] (a play) | `pubky.music/activity` | `/priv/pubky.app/posts/<id>` | music `listen` |
 //! | music tag | — | `/pub/pubky.app/tags/<id>`, then [`TAG_DIR`] | social v1 tag ([`crate::v1::music_tag`]) |
 //! | [`Bookmark`] | `PubkyAppBookmark` | `/priv/pubky.app/bookmarks/<hash id>` | social v1 bookmark |

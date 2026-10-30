@@ -99,8 +99,8 @@ What this repository does with each item of the steward's note:
 - **Matching the owner's own library:** `POST /v1/tags/bulk` (Settings → Pubky → "Tag my whole library on
   Pubky") writes one tag per identified track on its canonical MusicBrainz URL; Pinakes then joins each to
   its group. What the node writes is pubky-social-specs v1 (ADR 0014): social v1
-  tags in `/pub/social/v1/tags/`, bookmarks, `collection` posts for playlists, and `pubky-music-specs`
-  `review` and `listen` posts. The "posts with custom content" (ADR 0006) were the older envelope, not v1;
+  tags in `/pub/social/v1/tags/`, bookmarks, `collection` posts for playlists, social `rating`s (1.1)
+  whose `parent` is the music URL, and `pubky-music-specs` `listen` posts. The "posts with custom content" (ADR 0006) were the older envelope, not v1;
   the node only reads them for the one-time move.
 
 - **Which build the fixtures come from:** 8092 serves pubky/pinakes#21 or later (merged 17:09 UTC as

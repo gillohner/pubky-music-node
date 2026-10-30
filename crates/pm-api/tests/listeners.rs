@@ -142,6 +142,7 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
         "/v1/activity",
         "/v1/playlists",
         "/v1/tags",
+        "/v1/ratings",
         "/v1/reviews",
         "/v1/library/history",
         "/v1/library/home",

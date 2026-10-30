@@ -34,7 +34,7 @@ directions, and the node's apps set once by the admin.
 | **Library** | a set of files with one owner. `person:<z32>`: their files on their homeserver (`/priv/pubky.music/files/`). `local`: the admin library (folders, mounts, WebDAV, drives; the owner's NAS) | node DB `libraries` |
 | **Share** | `(library, person, level)`, level `listen` or `listen+download`; revocable, never implied | node DB `shares`, the node's own record. **Also on the sharer's homeserver** (`/priv/pubky.music/shares.json`) **only when that is the node's own bundled homeserver**, so a reinstalled node gets them back. For a person on a remote homeserver the node keeps them locally and never writes them there |
 | **Grant** | the Ring session a person gives the node: read their files, write their own data | node data dir, one file per person, 0600; deleted when they leave |
-| **Person's data** | favourites, tags, plays, playlists, reviews, interface settings | on **their** homeserver (ADR 0014 paths); the node DB caches them per person |
+| **Person's data** | bookmarks, tags, listens, collections, ratings, interface settings | on **their** homeserver (ADR 0014 paths: `/priv/music/v1/` and `/pub|priv/social/v1/`; the interface settings in `/priv/pubky.music/prefs.json`); the node DB caches them per person |
 
 - **The admin has no special read right.** They see a member's library only if the member shares it. The
   admin does keep the node's controls: people, zones, node apps, and removing a person.
@@ -44,16 +44,19 @@ directions, and the node's apps set once by the admin.
 ### 2. How the node reads each person's files
 - **On the node's bundled homeserver:** straight from its files folder (`<files>/<z32>/…`), as today.
 - **On a remote homeserver:**
-  - When the person joins, they approve the node in Ring with `/priv/pubky.music/files/:r`. That is read
-    only, and narrower than the brief's `/priv/pubky.music/:r`, which would also cover the vault and history.
-    Their data capabilities come with it (the private folder's parts, without the vault, and the
+  - When the person joins, they approve the node in Ring with `/priv/pubky.music/files/:r`. Their files
+    are read only, and narrower than the brief's `/priv/pubky.music/:r`, which would also cover the vault,
+    the node record and the settings backup. (Their listen history is not there: it is in
+    `/priv/music/v1/`.) Their data capabilities come with it, and those are read and write, so the node
+    can sync the person's own data (the private folder's parts, without the vault, and the
     social/music folders, as LOGIN_CAPABILITIES lists them; since #117 the private folder is asked for
     by its parts, so that normalising the set can't drop the vault). A new part, such as `shares.json`
     below, has to be added to LOGIN_CAPABILITIES, and sessions approved before are then asked again.
   - The node lists the files through that session, reads tags with ranged GETs (FLAC and ID3 metadata sit at
     the start; MP4 may need the end too), and fetches the audio when it plays or a device downloads (#97).
   - It keeps a capped cache, not a master copy.
-  - **The node never uploads or writes files to a remote homeserver.** Its session there is read only.
+  - **The node never uploads or writes files to a remote homeserver.** Its session there reads the
+    files folder only; it writes nothing but the person's own data (the folders above).
     A person adding music to their own remote homeserver does it from their own client, with their own
     session. On the node's bundled homeserver the node may write for them (uploads, "Copy to my
     homeserver").

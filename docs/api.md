@@ -134,9 +134,10 @@ Without one, a node listening beyond localhost makes its own on first start (`<d
 | GET | `/v1/tags` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, tags: [{uri, label, created_at, synced}]}`: my tags, social v1 tags in `/pub/social/v1/tags/<id>.json` (ADR 0011, 0014) |
 | PUT | `/v1/tags` | `{uri|track_id|album_id|artist_id, label}` | `{uri, label, tagged: true}`; label trimmed and lowercased, 1–20 chars; 422 without a canonical identity |
 | DELETE | `/v1/tags` | `?…&label=` | `{uri, label, tagged: false}` |
-| GET | `/v1/reviews` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, reviews: [{id, uri, rating?, text, created_at, updated_at, synced}]}`: my private reviews (v1 `pubky.music/review` posts) |
-| PUT | `/v1/reviews` | `{uri|track_id|album_id|artist_id, rating?: 1–10, text?}` (rating in half stars: 7 is three and a half) | creates or replaces my review of that object (same post id); 400 with neither rating nor text, 422 without a canonical identity |
-| DELETE | `/v1/reviews` | `?…` | removes it (tombstoned until the delete is pushed) |
+| GET | `/v1/ratings` | none, or `?uri=` / `?track_id=` / `?album_id=` / `?artist_id=` | `{uri?, ratings: [{id, uri, rating?, text, public, created_at, updated_at, synced}], reviews}`: my ratings, one per object, newest first. With `rating` it is a social v1.1 `rating`; text alone is a comment, a social `note`; both have `parent` = the music URL (ADR 0014). `reviews` is the deprecated copy of `ratings` |
+| PUT | `/v1/ratings` | `{uri|track_id|album_id|artist_id, rating?: 1–10, text?, public?}` (rating in half stars: 7 is three and a half) | creates or replaces my rating of that object (same post id); `public` publishes or unpublishes it (left out: a new one is private, an edit keeps its visibility); 400 with neither rating nor text, 422 without a canonical identity |
+| DELETE | `/v1/ratings` | `?…` | removes it, the public copy too (tombstoned until the delete is pushed) |
+| GET / PUT / DELETE | `/v1/reviews` | as `/v1/ratings` | **deprecated** (one release): the same answers, with `Deprecation: true` and a `Link` to `/v1/ratings` |
 | POST | `/v1/playlists/from-queue` | `{zone?, uris?, name?}` | `{playlist: PlaylistDetail, skipped: [label]}`; a new private playlist from a zone's queue (or the given queue URIs: `track:<id>`, local paths, canonical URLs); entries without a canonical identity are listed in `skipped`; 422 when nothing qualifies |
 | POST | `/v1/playlists/import` | `{name, description?, tracks: [{title, artist?, album?, uri?, path?}]}` | `{id, name, parsed, imported, unresolved}`; items resolve through the library (canonical URL, exact path, file name, title + artist) to canonical URLs |
 | POST | `/v1/import/roon` | `?file=&dry_run=true&bookmarks=true&playlist=true&tags=false`, the Roon export (xlsx or csv) as the body (`favourites=` is the deprecated name of `bookmarks=`) | `{kind, name, rows, matched, unmatched, not_identified, bookmarks, favourites, tags_added, tags_skipped, tags_found, misses: [{what, reason}], playlist?, dry_run}` (`favourites` is the deprecated copy of `bookmarks`): Roon favourites become bookmarks |
@@ -296,11 +297,13 @@ Without one, a node listening beyond localhost makes its own on first start (`<d
 | GET | `/upnp/node.xml` | | (no token) the UPnP device description the SSDP announcement points at: name, version, `uuid:<node id>`, `presentationURL` `/`. See `docs/CONNECTION.md` |
 | GET | `/v1/events` | WebSocket | first `{"type":"snapshot","seq","boot","library_rev","zones":[...]}`, then numbered (`seq`) `zone` (full state; also sent when a zone is created), `zone_event` (`{"zone","event":{"type",…}}`: track started/ended, skipped, paused, resumed, seeked, stopped, queue, `stream_title` for radio, `{"type":"error","message"}`; the zone's `error` field keeps the last one until the next track starts), `zone_removed`, `library_changed`. Send `{"type":"ping","id":n}` for `{"type":"pong","id":n}`, `{"type":"resync"}` for a fresh snapshot. See `docs/CONNECTION.md` A listener gets only the zones open to listeners: the snapshot leaves the others out, and an event about one of them arrives as `{"seq","type":"hidden"}` (ignore it; it keeps `seq` without gaps). |
 
-Collections, reviews, listens, bookmarks and tags live in the node and sync to the user's homeserver as
+Collections, ratings, listens, bookmarks and tags live in the node and sync to the user's homeserver as
 pubky-social-specs v1 objects (ADR 0014) when the node has a session: a collection is a social
-`collection` (private draft, also published while public; no size cap), a rated review a music `review`,
-a text-only review a social note, a play a music `listen` under the root the history setting picks, a
-bookmark a v1 bookmark, a tag a v1 tag. Collection items are music URLs or public Pubky posts. Times in
+`collection` (private draft, also published while public; no size cap), a rating a social `rating`
+(1.1) and a comment a social `note`, both replying to the music URL and published like a collection,
+a play a music `listen` under the root the history setting picks, a bookmark a v1 bookmark, a tag a v1
+tag. The sync rewrites older ratings (music `review`s) and comments (notes embedding the music URL) once,
+keeping their ids. Collection items are music URLs or public Pubky posts. Times in
 the music objects are microseconds; durations (`*_ms`) milliseconds.
 
 Queues (items and repeat mode) are saved per zone on every change and restored, stopped, when the node restarts. Queue item URIs: `track:<library id>`, a local path, `file://`, or `http(s)://` (internet radio and direct file URLs; M3U/PLS playlist URLs are followed to their first stream; lossy streams mark the decode stage `Lossy`; ICY titles arrive as `now_playing.stream_title`). Subscription streaming services add schemes later.
@@ -318,6 +321,8 @@ Each stays for one release after it was renamed, then goes.
 | 2026-10-26 | `favourite_albums` in `/v1/library/home` | `bookmarked_albums` |
 | 2026-10-26 | `favourites=` and the report's `favourites` in `/v1/import/roon` | `bookmarks` |
 | 2026-10-26 | the smart playlist rule field `favourite` | `bookmark` |
+| 2026-10-27 | `/v1/reviews` (answers carry `Deprecation: true`) | `/v1/ratings` |
+| 2026-10-27 | `reviews` in a ratings answer | `ratings` |
 
 Backups keep `favourites` in their counts: the manifest is a file format, not the API.
 

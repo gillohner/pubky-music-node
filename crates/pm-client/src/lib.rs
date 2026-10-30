@@ -840,10 +840,10 @@ impl NodeClient {
         }
     }
 
-    // ---- reviews ----
+    // ---- ratings ----
 
-    /// My review of one object (`Some(r)`) or all my reviews (`None`).
-    pub async fn reviews(&self, r: Option<&ItemRef>) -> Result<Reviews> {
+    /// My rating of one object (`Some(r)`) or all my ratings (`None`).
+    pub async fn ratings(&self, r: Option<&ItemRef>) -> Result<Ratings> {
         let mut q: Vec<(&str, String)> = Vec::new();
         if let Some(r) = r {
             if let Some(u) = &r.uri {
@@ -859,24 +859,32 @@ impl NodeClient {
                 q.push(("artist_id", i.to_string()));
             }
         }
-        self.get("reviews", &q).await
+        self.get("ratings", &q).await
     }
 
-    /// Create or replace my review of an object.
-    pub async fn set_review(&self, r: &ItemRef, rating: Option<u8>, text: &str) -> Result<ReviewEntry> {
-        let req = ReviewRef {
+    /// Create or replace my rating of an object; `public` publishes or unpublishes it (`None`
+    /// keeps an edit's visibility, a new one private).
+    pub async fn set_rating(
+        &self,
+        r: &ItemRef,
+        rating: Option<u8>,
+        text: &str,
+        public: Option<bool>,
+    ) -> Result<RatingEntry> {
+        let req = RatingRef {
             uri: r.uri.clone(),
             track_id: r.track_id,
             album_id: r.album_id,
             artist_id: r.artist_id,
             rating,
             text: Some(text.to_string()),
+            public,
         };
-        self.send(reqwest::Method::PUT, "reviews", Some(&req)).await
+        self.send(reqwest::Method::PUT, "ratings", Some(&req)).await
     }
 
-    pub async fn delete_review(&self, r: &ItemRef) -> Result<()> {
-        let mut url = self.url("reviews");
+    pub async fn delete_rating(&self, r: &ItemRef) -> Result<()> {
+        let mut url = self.url("ratings");
         {
             let mut q = url.query_pairs_mut();
             if let Some(u) = &r.uri {
@@ -893,7 +901,7 @@ impl NodeClient {
             }
         }
         let resp = self.authed(self.http.delete(url)).send().await?;
-        Self::finish::<Reviews>(resp).await.map(|_| ())
+        Self::finish::<Ratings>(resp).await.map(|_| ())
     }
 
     // ---- bookmarks ----

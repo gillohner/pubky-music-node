@@ -17,7 +17,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0011](0011-tags-are-public.md) | Tags are public v1 `PubkyAppTag`s on canonical URLs, written only on explicit action |
 | [0012](0012-one-client-tauri-shell.md) | One client: the node's web UI in a Tauri 2 shell for desktops and Android; the egui app is retired (owner, 2026-10-21) |
 | [0013](0013-remote-access-over-iroh.md) | Remote access over iroh: the node dialed by its own key (found through the private node record), a tunnel to its HTTP API, relay fallback |
-| [0014](0014-music-on-social-v1.md) | Music data on pubky-social-specs v1: social tags, bookmarks and collections, plus music `review` and `listen` kinds in a separate `pubky-music-specs` crate (supersedes 0006, and 0010 for paths) |
+| [0014](0014-music-on-social-v1.md) | Music data on pubky-social-specs v1: social tags, bookmarks and collections, plus music `listen` kinds in a separate `pubky-music-specs` crate (ratings: social `rating`, amended 2026-10-27) (supersedes 0006, and 0010 for paths) |
 | [0015](0015-where-playlist-songs-play-from.md) | Where playlist songs play from: per-item pins (`ext.music.source`), the playlist's and the node's play order, one resolution for chip, queue and browser |
 | [0016](0016-many-people-one-node.md) | One node, many people. A library each (files on their homeserver, data and interface their own), shared with listen or listen+download permissions; node apps set by the admin, personal sign-ins in each person's vault |
 

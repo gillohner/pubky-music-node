@@ -6,11 +6,16 @@
 //! | Node object | v1 object | Path |
 //! | :-- | :-- | :-- |
 //! | [`Playlist`] (a collection: songs, albums, artists, posts) | social `collection` with its `layout` | `/{root}/social/v1/posts/{id}/{editId}.json` |
-//! | [`Review`] with a rating | music `review` (rating 1–10) | `/{root}/music/v1/posts/…` |
-//! | [`Review`] without a rating | social `note` embedding the music URL | `/{root}/social/v1/posts/…` |
+//! | [`Review`] with a rating | social `rating` (1.1, 1–10) whose `parent` is the music URL | `/{root}/social/v1/posts/…` |
+//! | [`Review`] without a rating (a comment) | social `note` whose `parent` is the music URL | `/{root}/social/v1/posts/…` |
 //! | [`Activity`] | music `listen` | `/{root}/music/v1/posts/…` (the listen history setting picks the root) |
 //! | [`Bookmark`](crate::Bookmark) | social `bookmark` | `/priv/social/v1/bookmarks/{filename}.json` |
 //! | a tag (library `tags` row) | social `tag` (id = hash of `uri:label`) | `/pub/social/v1/tags/{id}.json` |
+//!
+//! A rating or comment is private (`/priv/`) until its owner publishes it, like a collection.
+//! Before pubky-social-specs 1.1 a rated review was a music `review` under `/priv/music/v1/` and
+//! a comment a note *embedding* the music URL; both are read once more and rewritten in place
+//! ([`from_music`], [`from_embed_note`]).
 //!
 //! The local id (a timestamp id of the creation time) is the v1 post id, so a migrated object
 //! keeps its identity. Creation writes `editId == id`; every later write is a new version above
@@ -27,7 +32,7 @@ use pubky_social_specs::traits::{HasIdPath, HashId, Validatable};
 use pubky_social_specs::{
     bookmark_target, create_bookmark, namespace_path, validate_timestamp_id_format, PubkySocialBookmark,
     PubkySocialCollectionContent, PubkySocialCollectionItem, PubkySocialCollectionLayout, PubkySocialPost,
-    PubkySocialPostKind, PubkySocialTag, VALIDATION_LIMITS,
+    PubkySocialPostKind, PubkySocialRatingContent, PubkySocialTag, VALIDATION_LIMITS,
 };
 use std::collections::BTreeMap;
 
@@ -311,20 +316,21 @@ fn playlist_to_collection(p: &Playlist) -> Result<PubkySocialPost, NotV1> {
 }
 
 fn review_to_v1(r: &Review) -> V1Post {
-    match r.rating {
-        Some(rating) => V1Post::Music(pubky_music_specs::review(
-            rating,
-            Some(r.text.clone()),
+    V1Post::Social(match r.rating {
+        Some(rating) => PubkySocialPost::new_rating(
             r.target_uri.clone(),
-        )),
-        None => V1Post::Social(PubkySocialPost::new(
+            i64::from(rating),
+            Some(r.text.clone()),
+            Vec::new(),
+        ),
+        None => PubkySocialPost::new(
             r.text.clone(),
             PubkySocialPostKind::Note,
-            None,
             Some(r.target_uri.clone()),
+            None,
             Vec::new(),
-        )),
-    }
+        ),
+    })
 }
 
 fn activity_to_listen(a: &Activity) -> MusicPost {
@@ -375,8 +381,10 @@ pub fn read_public_playlist(bytes: &[u8], id: &str, edit_id: &str, owner: &Pubky
 }
 
 /// A node object read back from a v1 social post (`id` and `edit_id` from its path): a playlist
-/// from a music collection, a text review from a note that embeds a music URL. `None` for
-/// anything else, or anything that does not validate.
+/// from a music collection, a rated review from a `rating` of a music URL, a comment from a note
+/// replying to one. `None` for anything else, or anything that does not validate: other notes,
+/// and a rating or comment carrying what the node cannot keep (an embed, attachments, a lock),
+/// so editing it never drops them.
 pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<MusicContent> {
     let created_at = micros_of(id)?;
     match post.kind {
@@ -424,16 +432,19 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
                 original,
             }))
         }
-        PubkySocialPostKind::Note => {
-            let target = MusicUri::parse(post.embed.as_deref()?).ok()?;
-            let text = post.content.trim();
-            if text.is_empty() {
+        PubkySocialPostKind::Rating | PubkySocialPostKind::Note => {
+            if post.embed.is_some() || !post.attachments.is_empty() || post.lock.is_some() {
                 return None;
             }
+            let target = MusicUri::parse(post.parent.as_deref()?).ok()?.to_url();
+            if post.kind == PubkySocialPostKind::Note {
+                return comment(target, &post.content, created_at);
+            }
+            let rating: PubkySocialRatingContent = serde_json::from_str(&post.content).ok()?;
             Some(MusicContent::Review(Review {
-                target_uri: target.to_url(),
-                rating: None,
-                text: text.to_string(),
+                target_uri: target,
+                rating: Some(u8::try_from(rating.rating).ok()?),
+                text: rating.text.unwrap_or_default().trim().to_string(),
                 created_at,
             }))
         }
@@ -441,22 +452,37 @@ pub fn from_social(post: &PubkySocialPost, id: &str, edit_id: &str) -> Option<Mu
     }
 }
 
-/// A node object read back from a music post: a review from a `review`, a play from a `listen`.
+fn comment(target_uri: String, text: &str, created_at: i64) -> Option<MusicContent> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| {
+        MusicContent::Review(Review {
+            target_uri,
+            rating: None,
+            text: text.to_string(),
+            created_at,
+        })
+    })
+}
+
+/// A comment as the node wrote it before pubky-social-specs 1.1: a private note *embedding* the
+/// music URL. Any app can write such a note, so the caller asks only for a post the node already
+/// holds as a review (its own); the next write turns it into a reply ([`to_v1`]).
+pub fn from_embed_note(post: &PubkySocialPost, id: &str) -> Option<MusicContent> {
+    if post.kind != PubkySocialPostKind::Note || post.parent.is_some() {
+        return None;
+    }
+    let target = MusicUri::parse(post.embed.as_deref()?).ok()?;
+    comment(target.to_url(), &post.content, micros_of(id)?)
+}
+
+/// A node object read back from a music post: a play from a `listen`, and a rated review from a
+/// retired music `review` (it is written again as a social `rating` with the same id).
 pub fn from_music(post: &MusicPost, id: &str) -> Option<MusicContent> {
     if post.kind == MusicPostKind::Listen {
         return listen_to_activity(post);
     }
-    if post.kind != MusicPostKind::Review {
-        return None;
-    }
-    let review = pubky_music_specs::read_review(post).ok()?;
-    let target = MusicUri::parse(post.embed.as_deref()?).ok()?;
-    Some(MusicContent::Review(Review {
-        target_uri: target.to_url(),
-        rating: Some(review.rating),
-        text: review.text.unwrap_or_default(),
-        created_at: micros_of(id)?,
-    }))
+    let rating = pubky_music_specs::retired::rating_from_review(post).ok()?;
+    from_social(&rating, id, id)
 }
 
 /// A play read back from a `listen` post (the node's id is the post id, its time the play time).
@@ -551,6 +577,7 @@ pub fn id_of(micros: i64) -> String {
 mod tests {
     use super::*;
     use crate::schemas::MusicContent;
+    use pubky_social_specs::PubkySocialAttachment;
 
     const OWNER: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
     const SONG: &str = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
@@ -732,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn rated_reviews_are_music_reviews_and_text_only_ones_are_notes() {
+    fn ratings_are_social_ratings_and_comments_reply_to_the_music() {
         let created = t0();
         let id = id_of(created);
         let rated = Review {
@@ -742,12 +769,19 @@ mod tests {
             created_at: created,
         };
         let v1 = to_v1(&MusicContent::Review(rated.clone())).unwrap();
-        assert_eq!(v1.namespace(), "music");
-        let path = v1.version_path(&id, None, Root::Pub, &owner()).unwrap();
-        assert_eq!(path, format!("/pub/music/v1/posts/{id}/{id}.json"));
-        let V1Post::Music(post) = &v1 else { panic!() };
-        assert_eq!(pubky_music_specs::read_review(post).unwrap().rating, 4);
-        let MusicContent::Review(back) = from_music(post, &id).unwrap() else {
+        assert_eq!(v1.namespace(), "social");
+        // Private, and publishable like a collection
+        let path = v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
+        assert_eq!(path, format!("/priv/social/v1/posts/{id}/{id}.json"));
+        let V1Post::Social(post) = &v1 else { panic!() };
+        assert_eq!(post.kind, PubkySocialPostKind::Rating);
+        assert_eq!(
+            (post.parent.as_deref(), post.embed.as_deref()),
+            (Some(SONG), None)
+        );
+        assert_eq!(post.content, r#"{"rating":4,"text":"Lovely"}"#);
+        publish_plan(post, &id, &id, &owner()).unwrap();
+        let MusicContent::Review(back) = from_social(post, &id, &id).unwrap() else {
             panic!()
         };
         assert_eq!(back, rated);
@@ -757,24 +791,100 @@ mod tests {
             ..rated.clone()
         };
         let v1 = to_v1(&MusicContent::Review(plain.clone())).unwrap();
-        assert_eq!(v1.namespace(), "social");
         v1.version_path(&id, None, Root::Priv, &owner()).unwrap();
         let V1Post::Social(note) = &v1 else { panic!() };
-        assert_eq!(note.embed.as_deref(), Some(SONG));
+        assert_eq!(note.kind, PubkySocialPostKind::Note);
+        assert_eq!(
+            (note.parent.as_deref(), note.embed.as_deref()),
+            (Some(SONG), None)
+        );
         let MusicContent::Review(back) = from_social(note, &id, &id).unwrap() else {
             panic!()
         };
         assert_eq!(back, plain);
 
         // A rating alone, from another client
-        let seven = pubky_music_specs::review(7, None, SONG.into());
-        let MusicContent::Review(r) = from_music(&seven, &id).unwrap() else {
+        let seven = PubkySocialPost::new_rating(SONG.into(), 7, None, Vec::new());
+        let MusicContent::Review(r) = from_social(&seven, &id, &id).unwrap() else {
             panic!()
         };
         assert_eq!((r.rating, r.text.as_str()), (Some(7), ""));
         crate::schemas::MusicPost::new(MusicContent::Review(r))
             .validate(Some(&id))
             .unwrap();
+    }
+
+    #[test]
+    fn the_old_review_forms_read_once_more() {
+        let created = t0();
+        let id = id_of(created);
+        // A rated review: a music `review`, read as a rating
+        let old: MusicPost = serde_json::from_value(serde_json::json!({
+            "content": r#"{"rating":9,"text":"Old"}"#, "kind": "review", "parent": null,
+            "embed": SONG, "attachments": []}))
+        .unwrap();
+        let MusicContent::Review(r) = from_music(&old, &id).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (r.rating, r.text.as_str(), r.created_at),
+            (Some(9), "Old", created)
+        );
+        // A comment: a note embedding the music URL, read only through from_embed_note (the
+        // caller asks for the node's own)
+        let note = PubkySocialPost::new(
+            "Nice".into(),
+            PubkySocialPostKind::Note,
+            None,
+            Some(SONG.into()),
+            Vec::new(),
+        );
+        assert_eq!(from_social(&note, &id, &id), None);
+        let MusicContent::Review(r) = from_embed_note(&note, &id).unwrap() else {
+            panic!()
+        };
+        assert_eq!((r.rating, r.text.as_str()), (None, "Nice"));
+        let V1Post::Social(again) = to_v1(&MusicContent::Review(r)).unwrap() else {
+            panic!()
+        };
+        assert_eq!((again.parent.as_deref(), again.embed), (Some(SONG), None));
+    }
+
+    #[test]
+    fn what_the_node_cannot_keep_is_not_a_review() {
+        let id = id_of(t0());
+        // Ratings and replies of something that is not music
+        let place = "https://www.openstreetmap.org/way/481516234";
+        let rated = PubkySocialPost::new_rating(place.into(), 8, None, Vec::new());
+        assert_eq!(from_social(&rated, &id, &id), None);
+        let reply = PubkySocialPost::new(
+            "hi".into(),
+            PubkySocialPostKind::Note,
+            Some(place.into()),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(from_social(&reply, &id, &id), None);
+        // A rating with a photo, a reply quoting something: an edit would drop it
+        let photo = PubkySocialAttachment::new(
+            format!("pubky://{OWNER}/pub/social/v1/files/PZBQ010FF079VVZPQG1RNFN6DR.png"),
+            None,
+            None,
+        );
+        let rated = PubkySocialPost::new_rating(SONG.into(), 8, None, vec![photo]);
+        assert_eq!(from_social(&rated, &id, &id), None);
+        let reply = PubkySocialPost::new(
+            "hi".into(),
+            PubkySocialPostKind::Note,
+            Some(SONG.into()),
+            Some(place.into()),
+            Vec::new(),
+        );
+        assert_eq!(from_social(&reply, &id, &id), None);
+        // A rating off the scale
+        let mut rated = PubkySocialPost::new_rating(SONG.into(), 8, None, Vec::new());
+        rated.content = r#"{"rating":300}"#.into();
+        assert_eq!(from_social(&rated, &id, &id), None);
     }
 
     #[test]

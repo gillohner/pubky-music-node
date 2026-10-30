@@ -2,9 +2,10 @@ use super::{canonical_uri, chars, limits, sanitize_uri, SchemaError, Validatable
 use crate::ids::{self, validate_timestamp_id};
 use serde::{Deserialize, Serialize};
 
-/// The `pubky.music/review` envelope of a post. Posts carry Timestamp IDs,
-/// so "one review per target" is a reader rule: the newest review of a
-/// target by an author wins.
+/// The `pubky.music/review` envelope of a post: the node's working copy of a rating, or of a
+/// comment when it has no rating. On the homeserver it is a social `rating` or a `note` replying to
+/// the target ([`crate::v1`]). Posts carry Timestamp IDs, so "one rating per target" is a reader
+/// rule: the newest of a target by an author wins.
 ///
 /// `rating` is 1–10: five stars in halves (7 is three and a half). It is optional so a text-only
 /// review is valid; text is optional when there is a rating.

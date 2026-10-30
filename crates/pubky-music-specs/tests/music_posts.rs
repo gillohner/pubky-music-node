@@ -1,14 +1,17 @@
-//! Reviews, listens and the playlist `ext.music` hints against the v1 envelope.
+//! Listens, the retired review and the playlist `ext.music` hints against the v1 envelope.
 
 use pubky_music_specs::ext::{
     item_source, set_item_source, set_source_order, source_order, SOURCE_ORDER_MAX,
 };
 use pubky_music_specs::{
-    create_version, listen, read_listen, read_review, review, MusicPost, MusicPostKind, MusicSource, PubkyId,
-    Root, ValidationCtx,
+    create_version, listen, read_listen, retired, MusicPost, MusicPostKind, MusicSource, PubkyId, Root,
+    ValidationCtx,
 };
 use pubky_social_specs::traits::Validatable;
-use pubky_social_specs::{PubkySocialCollectionContent, PubkySocialCollectionItem};
+use pubky_social_specs::{
+    PubkySocialCollectionContent, PubkySocialCollectionItem, PubkySocialPost, PubkySocialPostKind,
+    PubkySocialRatingContent,
+};
 use serde_json::json;
 
 const OWNER: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
@@ -30,74 +33,95 @@ fn written(post: &MusicPost, root: Root) -> Result<MusicPost, String> {
     <MusicPost as Validatable>::try_from(&bytes, &minted.id, &ctx)
 }
 
-#[test]
-fn review_round_trips_under_the_music_namespace() {
-    let post = review(7, Some("  Still great.  ".into()), SONG.into());
-    let minted = create_version(&post, Root::Pub, &owner()).unwrap();
-    assert!(minted.path.starts_with("/pub/music/v1/posts/"), "{}", minted.path);
-    assert!(minted
-        .path
-        .ends_with(&format!("{}/{}.json", minted.id, minted.id)));
+/// A review as the 1.0 drafts wrote it: `kind = review`, the music URL in `embed`.
+fn old_review(content: serde_json::Value) -> MusicPost {
+    serde_json::from_value(
+        json!({"content": content.to_string(), "kind": "review", "parent": null,
+        "embed": SONG, "attachments": []}),
+    )
+    .unwrap()
+}
 
-    let back = written(&post, Root::Pub).unwrap();
-    assert_eq!(back.kind, MusicPostKind::Review);
-    let content = read_review(&back).unwrap();
-    assert_eq!(content.rating, 7);
-    assert_eq!(content.text.as_deref(), Some("Still great."));
-    let wire: serde_json::Value = serde_json::to_value(&back).unwrap();
-    assert_eq!(wire["kind"], "review");
-    assert_eq!(wire["embed"], SONG);
-
-    // A private draft is a review too
-    written(&post, Root::Priv).unwrap();
+/// The rating as it would be written: validated under `root` with its author, read back.
+fn written_rating(post: &PubkySocialPost, root: Root) -> Result<PubkySocialPost, String> {
+    let minted = post.create_version(root, &owner(), None)?;
+    let ctx = ValidationCtx { root };
+    let bytes = serde_json::to_vec(post).unwrap();
+    <PubkySocialPost as Validatable>::try_from(&bytes, &minted.id, &ctx)
 }
 
 #[test]
-fn review_rules() {
-    for rating in [0, 11, 255] {
-        let err = written(&review(rating, None, SONG.into()), Root::Pub).unwrap_err();
-        assert!(err.contains("rating"), "{rating}: {err}");
-    }
-    for rating in [1, 10] {
-        written(&review(rating, None, SONG.into()), Root::Pub).unwrap();
-    }
-    // A blank text is left out by the builder, refused on the wire
-    assert_eq!(
-        read_review(&review(5, Some("  ".into()), SONG.into()))
-            .unwrap()
-            .text,
-        None
-    );
-    let mut post = review(5, None, SONG.into());
-    post.content = json!({"rating": 5, "text": " "}).to_string();
-    assert!(written(&post, Root::Pub).unwrap_err().contains("blank"));
-    post.content = json!({"rating": 5, "text": "x".repeat(2001)}).to_string();
-    assert!(written(&post, Root::Pub).unwrap_err().contains("2000"));
+fn a_review_is_retired_and_becomes_a_social_rating() {
+    let old = old_review(json!({"rating": 7, "text": "  Still great.  "}));
+    // The music spec no longer has the kind: it reads, keeps its spelling, and fails validation
+    assert_eq!(old.kind, MusicPostKind::Unknown("review".into()));
+    assert!(retired::is_review(&old));
+    assert!(written(&old, Root::Priv).unwrap_err().contains("unknown"));
 
-    // No embed, a parent, or no JSON envelope
-    let mut post = review(5, None, SONG.into());
-    post.embed = None;
-    assert!(written(&post, Root::Pub).unwrap_err().contains("embed"));
-    let mut post = review(5, None, SONG.into());
-    post.parent = Some(format!("pubky://{OWNER}/pub/social/v1/posts/0033SCZXVEPNG"));
-    assert!(written(&post, Root::Pub).unwrap_err().contains("parent"));
-    let mut post = review(5, None, SONG.into());
-    post.content = "five stars".into();
-    assert!(written(&post, Root::Pub).unwrap_err().contains("JSON"));
+    let rating = retired::rating_from_review(&old).unwrap();
+    assert_eq!(rating.kind, PubkySocialPostKind::Rating);
+    assert_eq!(rating.parent.as_deref(), Some(SONG));
+    assert_eq!(rating.embed, None);
+    let content: PubkySocialRatingContent = serde_json::from_str(&rating.content).unwrap();
+    assert_eq!(
+        (content.rating, content.text.as_deref()),
+        (7, Some("Still great."))
+    );
+    // Private, as every review was, and public once someone chooses it
+    let minted = rating.create_version(Root::Priv, &owner(), None).unwrap();
+    assert!(
+        minted.path.starts_with("/priv/social/v1/posts/"),
+        "{}",
+        minted.path
+    );
+    assert_eq!(written_rating(&rating, Root::Priv).unwrap(), rating);
+    written_rating(&rating, Root::Pub).unwrap();
+
+    // A blank text is left out; the scale is the same, 1 to 10
+    let rating = retired::rating_from_review(&old_review(json!({"rating": 10, "text": " "}))).unwrap();
+    assert_eq!(rating.content, r#"{"rating":10}"#);
+    for bad in [0, 11] {
+        let rating = retired::rating_from_review(&old_review(json!({ "rating": bad }))).unwrap();
+        let err = written_rating(&rating, Root::Priv).unwrap_err();
+        assert!(err.contains("half stars"), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn a_retired_review_keeps_what_it_does_not_know() {
+    let mut old = old_review(json!({"rating": 8, "mood": "rainy"}));
+    old.extra.insert("ext".into(), json!({"music": {"x": 1}}));
+    let rating = retired::rating_from_review(&old).unwrap();
+    let content: PubkySocialRatingContent = serde_json::from_str(&rating.content).unwrap();
+    assert_eq!(content.extra["mood"], "rainy");
+    assert_eq!(rating.extra["ext"]["music"]["x"], 1);
+    written_rating(&rating, Root::Priv).unwrap();
+
+    // Not a review, no music URL, no JSON envelope, a text over the cap: no rating
+    let listen = listen(PLAYED, None, None, SONG.into());
+    assert!(retired::rating_from_review(&listen).is_err());
+    let mut old = old_review(json!({"rating": 8}));
+    old.embed = None;
+    assert!(retired::rating_from_review(&old).unwrap_err().contains("embed"));
+    let mut old = old_review(json!({"rating": 8}));
+    old.content = "five stars".into();
+    assert!(retired::rating_from_review(&old).unwrap_err().contains("JSON"));
+    let old = old_review(json!({"rating": 8, "text": "x".repeat(2001)}));
+    assert!(retired::rating_from_review(&old).unwrap_err().contains("2000"));
 }
 
 #[test]
 fn unknown_members_are_kept_but_may_not_shadow_or_overflow() {
-    let mut post = review(8, None, SONG.into());
-    post.content = json!({"rating": 8, "mood": "rainy", "ext": {"x": 1}}).to_string();
+    let mut post = listen(PLAYED, None, None, SONG.into());
+    post.content = json!({"played_at": PLAYED, "mood": "rainy", "ext": {"x": 1}}).to_string();
     let back = written(&post, Root::Pub).unwrap();
-    let content = read_review(&back).unwrap();
+    let content = read_listen(&back).unwrap();
     assert_eq!(content.extra["mood"], "rainy");
     // Re-serialized, the unknown members are still there
     let again = serde_json::to_value(&content).unwrap();
     assert_eq!(again["ext"]["x"], 1);
 
-    post.content = json!({"rating": 8, "big": 9_007_199_254_740_993_u64}).to_string();
+    post.content = json!({"played_at": PLAYED, "big": 9_007_199_254_740_993_u64}).to_string();
     assert!(written(&post, Root::Pub).unwrap_err().contains("JSON-safe"));
 }
 
@@ -135,7 +159,6 @@ fn listen_is_private_or_public() {
     let back = written(&post, Root::Priv).unwrap();
     assert_eq!(read_listen(&back).unwrap().source.unwrap().uri, None);
     written(&post, Root::Pub).unwrap();
-    assert!(read_review(&back).is_err());
 }
 
 #[test]
