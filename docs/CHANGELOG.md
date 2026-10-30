@@ -84,7 +84,7 @@ Newest first. Dates are when the change landed on `main`.
   - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
   - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
 
-- **Collections** (STEWARD-SOCIAL-V1-MUSIC.md Part A.2): a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
+- **Collections**: a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
   - Each has a layout: `list`, `grid` or `visual`.
   - `/v1/collections` and `/v1/playlists` are the same resource. Answers add `layout`, `tracks_only` and `entries`: each item with its kind and what the library has of it.
   - Playing one queues its songs and the library's albums; artists and posts are listed as `missing`.
@@ -111,7 +111,7 @@ Newest first. Dates are when the change landed on `main`.
   - new kinds `listening` (now playing, until it expires; an ordinary kind, no feed-only tier) and `session` (`host` a pubky user), each with an optional `name` (trimmed, 1–100 code points; absent, clients write and readers show the generic "<display name>'s listening session" / "<display name> is listening"; vectors in `tests/vectors/live-v1.json`, documented in the crate README);
   - a hyphenated service vocabulary (`SERVICE_NAMES`, `service_name`);
   - `ext.music.original` on a duplicate.
-- **Bookmarks, by name** (STEWARD-SOCIAL-V1-MUSIC.md Part A.1): favourites are called bookmarks, as in social specs v1.
+- **Bookmarks, by name**: favourites are called bookmarks, as in social specs v1.
   - The API is `/v1/bookmarks`; answers say `bookmarked`. `/v1/favourites` answers the same for one release, with a `Deprecation` header (docs/api.md, Deprecated).
   - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
   - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.
