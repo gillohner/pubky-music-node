@@ -1,18 +1,18 @@
 # Pubky Music Node
 
 Your own music server for the whole home. It runs on a computer that is always on: a NAS, a mini
-PC, a Raspberry Pi or an Umbrel box. It reads your music folder and plays it on the speakers you
+PC or a Raspberry Pi. It reads your music folder and plays it on the speakers you
 already have. That includes network streamers, Chromecast, AirPlay, Sonos, a DAC on a Raspberry
 Pi, and your computer or phone. You control it from a web page, the Pubky Music app, or Subsonic
 apps on your phone. Playlists, favourites and tags can be kept in your own Pubky account, so
 they follow you to a new node.
 
-It is for people who are comfortable installing an app on a NAS or Umbrel and following a few
+It is for people who are comfortable installing an app on a NAS and following a few
 steps. You don't need to be a developer.
 
 ## What you need
 
-- **A computer that stays on**, on your home network: a NAS, an Umbrel box, a mini PC, a
+- **A computer that stays on**, on your home network: a NAS, a mini PC, a
   Raspberry Pi 4 or 5 (64-bit), or any Linux machine. Docker makes it easiest.
 - **Your music as files** (FLAC, ALAC, WAV, AIFF, DSD, MP3, AAC, Ogg) in a folder that computer
   can read: a local disk, a USB drive, or a network share mounted on it.
@@ -24,24 +24,22 @@ steps. You don't need to be a developer.
 
 | You have | Use | Guide |
 | :-- | :-- | :-- |
-| An Umbrel box | the Umbrel community app store | [Install on Umbrel](docs/guides/install-umbrel.md) |
 | A NAS or server with Docker (Synology, QNAP, Unraid, TrueNAS, any Linux) | the Docker image | [Install with Docker](docs/guides/install-docker.md) |
 | A Raspberry Pi or Linux machine without Docker | the release download and a system service | [Install on Linux without Docker](docs/guides/install-linux.md) |
 | A Mac, Windows PC, Linux desktop or Android phone | the Pubky Music app, to control a node and play on that device | [The desktop and Android app](docs/guides/desktop-app.md) |
 | A Raspberry Pi with a DAC, as a speaker for your node | squeezelite | [Speakers](docs/guides/speakers.md#a-raspberry-pi-with-a-dac-squeezelite) |
 
-The app and squeezelite don't run a node themselves: install the node with one of the first
-three, then connect them to it.
+The app and squeezelite don't run a node themselves: install the node with Docker or on Linux,
+then connect them to it. Umbrel isn’t supported right now; use Docker or the Linux install.
 
 ## First steps after installing
 
 1. **Open the web page.** In a browser on the same network, go to `http://<node address>:7788`
-   (for example `http://192.168.1.10:7788`). On Umbrel, open the app from the home screen.
+   (for example `http://192.168.1.10:7788`).
 2. **Enter the access token.** Click **Or paste the API token**, paste it and press **Connect**.
    Where the token is:
    - Docker: `docker exec pubky-music cat /data/api-token`, the token the node made (unless
      you set `PM_TOKEN`).
-   - Umbrel: the password umbrelOS shows for the app.
    - Linux without Docker: the token the install printed, also in `/etc/pubky-music/node.toml`.
 
    The browser remembers it. Sign-in with Pubky Ring works once the node itself is signed in
@@ -49,7 +47,7 @@ three, then connect them to it.
    Home's **Get started** card lists what is left to do on this node, and only that. It goes
    when those steps are done; **Hide these steps** hides it for everyone, and **Settings › Home
    for everyone** shows it again.
-3. **Add your music.** With Docker and Umbrel, the node reads your music folder (`/music`) by
+3. **Add your music.** With Docker, the node reads your music folder (`/music`) by
    itself when it starts. Otherwise, in **Settings › Library folders** (or on the Get started
    card), type the music folder's path and press **Add folder**. The node keeps watching its
    folders: new files show up about 15 seconds after they land.
@@ -75,8 +73,7 @@ Cloudflare Tunnel. See [Remote access](docs/guides/remote-access.md).
 
 ## Updating and backups
 
-- **Update:** Docker: pull the new image and recreate the container. Umbrel: update from the App
-  Store. The desktop app asks when a new version is out (a `.deb` is updated by installing the new one).
+- **Update:** Docker: pull the new image and recreate the container. The desktop app asks when a new version is out (a `.deb` is updated by installing the new one).
 - **Back up:** **Settings › Backup** makes one file with your library, playlists, favourites,
   history and settings (never your music files), and can do it every day or week to a folder.
   With the node's own homeserver, `deploy/bundle/backup.sh` backs up the node and the homeserver
@@ -96,7 +93,6 @@ Details: [Backups and updates](docs/guides/backup-and-update.md).
 | Android and Google TV | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-android-arm64.apk) |
 | The node, without Docker | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz`, `…-windows-x86_64.zip`, `…-macos-arm64.tar.gz` | same names under edge |
 | Docker image | `ghcr.io/gillohner/pubky-music-node:latest` (amd64, arm64) | `…:edge` |
-| Umbrel | community app store [gillohner/pubky-music-umbrel](https://github.com/gillohner/pubky-music-umbrel) | |
 
 Every release has a `SHA256SUMS` file to check downloads against.
 

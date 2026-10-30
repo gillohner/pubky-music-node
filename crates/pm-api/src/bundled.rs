@@ -1,5 +1,5 @@
-//! The Pubky homeserver bundled with the node (STEWARD-BUNDLED-HOMESERVER.md): the compose and
-//! Umbrel installs in `deploy/bundle` run pubky-homeserver next to the node, and the node manages
+//! The Pubky homeserver bundled with the node (STEWARD-BUNDLED-HOMESERVER.md): the compose
+//! install in `deploy/bundle` and the bare-metal one run pubky-homeserver next to the node, and the node manages
 //! it through the homeserver's admin API (`X-Admin-Password`), reachable only on the compose
 //! network. The password stays in the node's config or environment: it is never logged, never
 //! returned by the API, and never sent anywhere but the admin endpoint.

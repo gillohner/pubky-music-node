@@ -34,5 +34,5 @@ implemented with automated tests but not yet exercised outside this repository's
 
 ## Deployment shapes
 
-Directly on hardware, Docker, Umbrel (`docs/deploy.md`); endpoints on other machines; the Pubky
+Directly on hardware, Docker (`docs/deploy.md`; Umbrel isn't supported right now); endpoints on other machines; the Pubky
 Music app on desktops and Android; any OpenSubsonic client on phones.
