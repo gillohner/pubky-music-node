@@ -6477,6 +6477,10 @@ mod tests {
                     let single = single.clone();
                     let calls = c2.clone();
                     async move {
+                        // Saving a key checks it with one lookup
+                        if body.contains("client=OwnKey42") {
+                            return ([(header::CONTENT_TYPE, "application/json")], r#"{"status":"ok","results":[]}"#.to_string());
+                        }
                         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         assert!(body.contains("client=test-key") && body.contains("fingerprint=AQ"), "{body}");
                         ([(header::CONTENT_TYPE, "application/json")], single)
@@ -13926,5 +13930,103 @@ exec sleep 300
             tg.get("needs_match").is_none(),
             "an unmatched song takes tags that wait: {tg}"
         );
+    }
+
+    /// A key AcoustID refuses (code 4, "invalid API key"): saving it is refused with a plain
+    /// message; a run with it stops fingerprinting after the first refusal (no more decoding),
+    /// carries on with the search by tags, and the status says why.
+    #[tokio::test]
+    async fn an_acoustid_key_acoustid_refuses_is_refused_and_stops_fingerprinting() {
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let lookups = lookups.clone();
+            Router::new().route(
+                "/v2/lookup",
+                post(move |body: String| {
+                    lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        if body.contains("client=GoodKey") {
+                            Json(serde_json::json!({"status": "ok", "results": []}))
+                        } else {
+                            Json(serde_json::json!({"status": "error",
+                                "error": {"code": 4, "message": "invalid API key"}}))
+                        }
+                    }
+                }),
+            )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: String::new(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        let app = router(s.clone());
+        let key = |k: &str| Some(serde_json::json!({ "acoustid_key": k }));
+        let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("BadKey1")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+        assert!(
+            b["error"]
+                .as_str()
+                .unwrap()
+                .contains("AcoustID refused this key (invalid API key)"),
+            "{b}"
+        );
+        assert_eq!(s.acoustid.read().unwrap().api_key, "", "not saved");
+        let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("GoodKey")).await;
+        assert_eq!(
+            (st, b["acoustid_own"].clone()),
+            (StatusCode::OK, true.into()),
+            "{b}"
+        );
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one check per key"
+        );
+
+        // A key that stopped working (or a configured one AcoustID refuses), three songs
+        s.acoustid.write().unwrap().api_key = "BadKey1".into();
+        let mut paths = Vec::new();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            let t = untagged_track(path.clone(), &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+            paths.push(path);
+        }
+        lookups.store(0, std::sync::atomic::Ordering::SeqCst);
+        identify::run(&s, false).await.unwrap();
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one refusal, then no more lookups"
+        );
+        let decoded: Vec<bool> = paths
+            .iter()
+            .map(|p| {
+                let k = Library::file_key(p).unwrap();
+                s.library
+                    .lock()
+                    .unwrap()
+                    .cached_fingerprint(&k)
+                    .unwrap()
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(decoded, [true, false, false], "only the first song was decoded");
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["progress"]["acoustid_refused"], "invalid API key", "{st}");
+        assert_eq!(st["progress"]["errors"], 0, "the songs go on to the search: {st}");
+        assert_eq!(st["progress"]["unknown"], 3, "{st}");
+        // A new key clears it
+        let (_, b) = call(&app, "PUT", "/v1/library/identify/settings", key("GoodKey")).await;
+        assert!(b["progress"]["acoustid_refused"].is_null(), "{b}");
     }
 }

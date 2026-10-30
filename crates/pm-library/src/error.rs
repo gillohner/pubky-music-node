@@ -28,6 +28,10 @@ pub enum LibraryError {
     #[cfg(feature = "musicbrainz")]
     #[error("acoustid: {0}")]
     AcoustId(String),
+    /// AcoustID refused the application key (error code 4): no lookup works until it changes.
+    #[cfg(feature = "musicbrainz")]
+    #[error("AcoustID refused the key: {0}")]
+    AcoustIdKey(String),
 }
 
 pub type Result<T> = std::result::Result<T, LibraryError>;

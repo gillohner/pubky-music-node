@@ -44,6 +44,10 @@ pub struct IdentifyProgress {
     pub errors: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// AcoustID refused the key during this run (why, in its words): nothing more was
+    /// fingerprinted. Cleared when the key changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acoustid_refused: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,6 +184,17 @@ pub(crate) async fn put_settings(
                 "That doesn't look like an AcoustID key (letters and digits, from acoustid.org/new-application)",
             ));
         }
+        // One lookup with the new key: one AcoustID doesn't know is refused here, not found out
+        // song by song (an AcoustID out of reach doesn't stop the key being saved)
+        if !k.is_empty() {
+            let base = s.acoustid.read().expect("acoustid lock").base_url.clone();
+            if let Some(why) = acoustid_client(&s, &k, &base)?.key_refused().await {
+                return Err(ApiError::bad_request(format!(
+                    "AcoustID refused this key ({why}). Copy the API key of your application on acoustid.org, or register one at acoustid.org/new-application"
+                )));
+            }
+        }
+        s.identify.lock().expect("identify lock").acoustid_refused = None;
         {
             let lib = s.library.lock().expect("library poisoned");
             if k.is_empty() {
@@ -279,9 +294,7 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
     let client = if settings.api_key.is_empty() {
         None
     } else {
-        let mut cfg = pm_library::identify::AcoustIdConfig::new(settings.api_key.clone(), s.user_agent());
-        cfg.base_url = settings.base_url.clone();
-        Some(pm_library::identify::AcoustIdClient::new(cfg).map_err(ApiError::from)?)
+        Some(acoustid_client(s, &settings.api_key, &settings.base_url)?)
     };
     let mut identified_now: Vec<i64> = Vec::new();
     for (dir, tracks) in by_folder {
@@ -299,7 +312,15 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
                 disc_no: t.disc_no,
                 duration_secs: t.duration_ms.or(t.file.duration_ms).map(|ms| ms as f64 / 1000.0),
             };
-            let r = lookup(s, client.as_ref(), &t).await;
+            // Once AcoustID refused the key, nothing more is fingerprinted (the search by tags
+            // still runs)
+            let refused = s
+                .identify
+                .lock()
+                .expect("identify lock")
+                .acoustid_refused
+                .is_some();
+            let r = lookup(s, client.as_ref().filter(|_| !refused), &t).await;
             looked.push((t, facts, r));
         }
         let pairs: Vec<(FileFacts, &[AcoustIdResult])> = looked
@@ -390,7 +411,8 @@ enum Outcome {
 }
 
 /// Fingerprint (cached by file key) and look up (cached answer, else
-/// AcoustID when a key is set; without one, no results).
+/// AcoustID when a key is set; without one, or once AcoustID refused it,
+/// no results and nothing decoded).
 async fn lookup(
     s: &NodeState,
     client: Option<&pm_library::identify::AcoustIdClient>,
@@ -410,8 +432,16 @@ async fn lookup(
         .expect("library poisoned")
         .cached_fingerprint(&key)
         .map_err(|e| e.to_string())?;
-    let (duration, fp, json) = match cached {
-        Some(c) => c,
+    if let Some((_, _, Some(j))) = &cached {
+        let r: pm_library::identify::LookupResponse = serde_json::from_str(j).map_err(|e| e.to_string())?;
+        return Ok(r.results);
+    }
+    // Without a key (or one AcoustID refused) a fingerprint answers nothing: not decoded
+    let Some(client) = client else {
+        return Ok(Vec::new());
+    };
+    let (duration, fp) = match cached {
+        Some((d, fp, _)) => (d, fp),
         None => {
             if t.file.format.kind == pm_model::SampleKind::Dsd {
                 return Err("DSD files are not fingerprinted".into());
@@ -426,23 +456,34 @@ async fn lookup(
                 .expect("library poisoned")
                 .save_fingerprint(&key, f.duration_secs, &f.fingerprint)
                 .map_err(|e| e.to_string())?;
-            (f.duration_secs, f.fingerprint, None)
+            (f.duration_secs, f.fingerprint)
         }
     };
-    if let Some(j) = json {
-        let r: pm_library::identify::LookupResponse = serde_json::from_str(&j).map_err(|e| e.to_string())?;
-        return Ok(r.results);
-    }
-    let Some(client) = client else {
-        return Ok(Vec::new());
+    let (raw, results) = match client.lookup(&fp, duration).await {
+        Ok(r) => r,
+        Err(pm_library::LibraryError::AcoustIdKey(why)) => {
+            tracing::warn!("identify: AcoustID refused the key ({why}); nothing more is fingerprinted");
+            s.identify.lock().expect("identify lock").acoustid_refused = Some(why);
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e.to_string()),
     };
-    let (raw, results) = client.lookup(&fp, duration).await.map_err(|e| e.to_string())?;
     s.library
         .lock()
         .expect("library poisoned")
         .save_lookup(&key, &raw)
         .map_err(|e| e.to_string())?;
     Ok(results)
+}
+
+fn acoustid_client(
+    s: &NodeState,
+    key: &str,
+    base_url: &str,
+) -> Result<pm_library::identify::AcoustIdClient, ApiError> {
+    let mut cfg = pm_library::identify::AcoustIdConfig::new(key, s.user_agent());
+    cfg.base_url = base_url.to_string();
+    pm_library::identify::AcoustIdClient::new(cfg).map_err(ApiError::from)
 }
 
 /// MusicBrainz recordings matching the tags' artist and title (± 2 s): suggestions only, ranked
