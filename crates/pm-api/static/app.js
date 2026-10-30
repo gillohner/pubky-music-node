@@ -363,13 +363,15 @@
         }
         out.innerHTML = (dry ? '<p class="muted small">Checked: nothing changed yet.</p>' : '<p class="small">Imported.</p>') + parts.join('');
         $('#roongo').disabled = !dry || !matched;
-        if (dry && !matched) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Library folders below), then check again.</p>');
+        if (dry && !matched) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then check again.</p>');
         if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
       };
       $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
       $('#rooncheck').onclick = () => roonRun(true);
       $('#roongo').onclick = () => roonRun(false);
   };
+  // The chosen tab's content, as the tab panel the tabs control
+  const libPanel = (tab, html) => `<div id="libpanel" role="tabpanel" aria-labelledby="libtab-${tab}">${html}</div>`;
   // "Saved · 2 min ago": where saving to the homeserver stands, in a few words
   const savedWords = (sv, pk) => (!sv ? ''
     : pk && pk.sync && pk.sync.running ? `<span class="spin"></span> ${esc(pk.sync.step || 'Saving')}…`
@@ -378,14 +380,14 @@
           : sv.pending ? `${countOf(sv.pending, 'changes')} to save`
             : `Saved${sv.last_saved_at ? ` · ${ago(sv.last_saved_at)}` : ''}`);
   // Edit a song's tags on the node (the file is not touched)
-  const editTagsDialog = (t) => new Promise((resolve) => {
+  // `e`: GET /library/tracks/{id}/edit: the song's edit (in the fields) and what the file says
+  // (shown as each field's placeholder); an empty field is the file's value
+  const editTagsDialog = (e) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    const artist = (t.artists || []).map((a) => a.name).join(', ');
-    d.innerHTML = `<h2>Edit tags</h2><p class="muted small">Kept on this node; the file stays as it is. Leave a field empty for what the file says.</p>
-      <label class="field"><span>Title</span><input class="input" data-k="title" value="${esc(t.title || '')}"></label>
-      <label class="field"><span>Artist</span><input class="input" data-k="artist" value="${esc(artist)}"></label>
-      <label class="field"><span>Album</span><input class="input" data-k="album" value="${esc((t.album && t.album.title) || '')}"></label>
-      <label class="field"><span>Album artist</span><input class="input" data-k="album_artist" value="${esc((t.album && t.album.album_artist) || '')}"></label>
+    const f = e.file || {}; const ed = e.edit || {};
+    const field = (k, label) => `<label class="field"><span>${label}</span><input class="input" data-k="${k}" value="${esc(ed[k] || '')}" placeholder="${esc(f[k] || '')}"></label>`;
+    d.innerHTML = `<h2>Edit tags</h2><p class="muted small">Kept on this node; the file stays as it is. An empty field shows what the file says.</p>
+      ${field('title', 'Title')}${field('artist', 'Artist')}${field('album', 'Album')}${field('album_artist', 'Album artist')}
       <div class="dialog-actions"><button class="btn ghost" data-undo>Back to the file’s tags</button><button class="btn ghost" data-close>Cancel</button><button class="btn primary" data-save>Save</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
@@ -399,8 +401,8 @@
     $('[data-k]', d).focus();
   });
   const editTrackTags = async (id) => {
-    let t; try { t = await api('GET', `/library/tracks/${id}`); } catch (e) { return toast(e.message, 'error'); }
-    const v = await editTagsDialog(t); if (!v) return;
+    let cur; try { cur = await api('GET', `/library/tracks/${id}/edit`); } catch (e) { return toast(e.message, 'error'); }
+    const v = await editTagsDialog(cur); if (!v) return;
     try {
       if (v.undo) await api('DELETE', `/library/tracks/${id}/edit`); else await api('PUT', `/library/tracks/${id}/edit`, v);
       toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
@@ -4539,15 +4541,14 @@
         case 'library': {
           const owner = isOwner();
           const tab = !owner ? 'mine' : state.viewArg === 'node' || state.viewArg === 'import' ? state.viewArg : 'mine';
-          const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
-          const head = pageHead('Your library', null, `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>`) + tabsHtml;
+          const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" aria-controls="libpanel" id="libtab-${k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
+          const head = pageHead('Your library', null, owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '') + tabsHtml;
           if (tab === 'mine') {
             if (!owner) {
-              main.innerHTML = head + '<div class="card"><p>Your own music lives on your Pubky homeserver: the Pubky Music app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>';
-              $('#libadd').onclick = addMusicDialog;
+              main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Pubky Music app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
               break;
             }
-            const [st, pk] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/pubky').catch(() => null)]);
+            const [st, pk, ns] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/pubky').catch(() => null), api('GET', '/node/settings').catch(() => ({}))]);
             const mine = pk && pk.user ? await api('GET', '/me/music').catch((er) => ({ error: er.message })) : null;
             if (state.view !== 'library') return;
             const hs = (st && st.homeserver) || { mode: 'none' };
@@ -4555,7 +4556,7 @@
             const room = hs.quota_mb && hs.quota_mb !== 'unlimited' && hs.used_bytes != null ? ` of ${fmtBytes(hs.quota_mb * 1e6)}` : '';
             const used = mine && !mine.error ? `${countOf(mine.count, 'files')} · ${fileSize(mine.bytes)}${room} used` : '';
             // Saving: a failed save offers Try again; otherwise Save now (a full sync, off while the node needs re-approval)
-            const saveBtn = !sv || (pk.sync && pk.sync.running) || sv.state === 'saving' ? ''
+            const saveBtn = !sv || !pk || (pk.sync && pk.sync.running) || sv.state === 'saving' ? ''
               : sv.state === 'error' ? ' · <button class="lnk" id="stsave">Try again</button>'
                 : ` · <button class="lnk" id="sync" ${pk.needs_resign ? `disabled title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Save now</button>`;
             const status = pk && pk.user ? `${resignNotice(pk)}<div class="libstatus" role="status"><span id="libsaved">${savedWords(sv, pk)}</span>${saveBtn}${used ? ` · <span class="muted">${used}</span>` : ''}</div>` : '';
@@ -4573,16 +4574,16 @@
               const loose = mine.files.filter((f) => !f.song);
               const cover = (f) => (f.song.album_id ? `<img class="thumb" src="${esc(imgSrc(`/v1/library/albums/${f.song.album_id}/cover`))}" alt="" loading="lazy" data-err="hide">` : '<span class="thumb"></span>');
               const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
-              const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">Not in the library yet: it is read with the next scan.</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}">Delete</button></div>`;
+              const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">Not in the library yet: it is read with the next scan.</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}" aria-label="Delete ${esc(f.name)} from your homeserver">Delete</button></div>`;
               body = (songs.length ? `<section class="section"><div class="section-head"><h3>On your homeserver</h3><span class="muted small">${countOf(songs.length, 'songs')}</span></div><div class="list">${songs.map((f) => songRow(f, mine.files.indexOf(f))).join('')}</div></section>` : `<div class="card"><p>No music on your homeserver yet.</p><button class="btn primary" data-libup>${icon('upload')} Upload files</button></div>`)
                 + (loose.length ? `<section class="section"><div class="section-head"><h3>Being added</h3></div><div class="list">${loose.map((f) => looseRow(f, mine.files.indexOf(f))).join('')}</div></section>` : '')
                 + sGroup('Tag my library', sBlock('', 'One public tag on every identified song, so the music index matches your songs across services (saved to your homeserver with your other changes).', '<div class="toolbar"><input class="input" id="bulklabel" value="library" aria-label="Tag label"><button class="btn" id="bulktag">Tag</button></div><p class="muted small" id="bulkout" aria-live="polite"></p>'))
-                + (hs.mode !== 'bundled' ? `<details class="set-adv"><summary>Copy between this node and your homeserver</summary>${sRow('Copy this node’s library to your homeserver', 'Files already there are skipped.', `<button class="btn ghost" id="pkcopyall">${icon('upload')} Copy</button>`)}${sRow('Bring files here', 'Files on your homeserver this node doesn’t have yet.', `<button class="btn ghost" id="pkmirror">${icon('download')} Bring them</button>`)}</details>` : '');
+                + (hs.mode !== 'bundled' ? `<details class="set-adv"><summary>Copy between this node and your homeserver</summary>${sRow('Copy this node’s library to your homeserver', 'Files already there are skipped.', `<button class="btn ghost" id="pkcopyall">${icon('upload')} Copy</button>`)}${sRow('Bring files here', 'Files on your homeserver this node doesn’t have yet.', `<button class="btn ghost" id="pkmirror">${icon('download')} Bring them</button>`)}${sRow('Copy speed', 'Copies share your internet upload with this node\u2019s pages and the music it streams to you away from home. Gentler leaves more room.', `<select class="input" id="copyrate" aria-label="Copy speed">${[[1000000, 'Gentle (1 MB/s)'], [2500000, 'Normal (2.5 MB/s)'], [0, 'As fast as possible']].map(([v, l]) => `<option value="${v}" ${Number(ns.copy_rate ?? 2500000) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}</details>` : '');
             }
-            main.innerHTML = head + status + upload + body;
+            main.innerHTML = head + libPanel(tab, status + upload + body);
             // Files: play, edit, download, delete
             const files = (mine && mine.files) || [];
-            $$('[data-mplay]', main).forEach((b) => b.onclick = async () => { try { playTracks([await api('GET', `/library/tracks/${b.dataset.mplay}`)], true); } catch (er) { toast(er.message, 'error'); } });
+            $$('[data-mplay]', main).forEach((b) => b.onclick = async () => { b.classList.add('starting'); try { await playTracks([await api('GET', `/library/tracks/${b.dataset.mplay}`)], true); } catch (er) { toast(er.message, 'error'); } finally { b.classList.remove('starting'); } });
             const delFile = async (f) => {
               const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${hs.mode === 'bundled' ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
               if (!ok) return;
@@ -4595,6 +4596,7 @@
             bindResign(main);
             if ((sv && sv.state === 'saving') || (pk && pk.sync && pk.sync.running)) { clearTimeout(state.savePoll); state.savePoll = setTimeout(() => { if (state.view === 'library' && (state.viewArg || 'mine') === 'mine') render(); }, 3000); }
             $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
+            const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
         const bt = $('#bulktag'); if (bt) bt.onclick = async () => {
           const label = $('#bulklabel').value.trim(); if (!label) return; bt.disabled = true;
           try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'tracks')} tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
@@ -4638,20 +4640,24 @@
             const lsc = info.last_scan;
             const scanLine = info.scanning ? `<span class="spin"></span> Scanning… ${countOf(info.library.tracks, 'songs')} so far`
               : `${countOf(info.library.tracks, 'songs')} in the library${lsc ? ` · last scan ${ago(lsc.finished_at)}${lsc.error_count ? ` · ${countOf(lsc.error_count, 'files')} could not be read` : ''}` : ''}`;
-            main.innerHTML = head + `<div class="libstatus" role="status">${scanLine}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
+            main.innerHTML = head + libPanel(tab, `<div class="libstatus" role="status">${scanLine}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
-              + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : '');
+              + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
             bindNodeLibrary();
             $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
             if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
           } else {
-            main.innerHTML = head + importHtml();
+            main.innerHTML = head + libPanel(tab, importHtml());
             bindImport();
           }
-          $$('[data-libtab]', main).forEach((b) => b.onclick = () => setView('library', b.dataset.libtab === 'mine' ? null : b.dataset.libtab, 'replace'));
+          $$('[data-libtab]', main).forEach((b) => b.onclick = () => { if (document.activeElement === b) state.libTabFocus = true; setView('library', b.dataset.libtab === 'mine' ? null : b.dataset.libtab, 'replace'); });
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
-          $('#libadd').onclick = addMusicDialog;
-          if (state.libAsk) { state.libAsk = false; addMusicDialog(); }
+          const la = $('#libadd'); if (la) la.onclick = addMusicDialog;
+          if (state.libAsk) { state.libAsk = false; if (owner) addMusicDialog(); }
+          // Tabs: arrow keys move between them; the chosen tab keeps the keyboard after the page draws
+          const tabBtns = $$('[data-libtab]', main);
+          tabBtns.forEach((b, k) => { b.tabIndex = b.classList.contains('on') ? 0 : -1; b.onkeydown = (ev) => { if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return; ev.preventDefault(); const n = tabBtns[(k + (ev.key === 'ArrowRight' ? 1 : tabBtns.length - 1)) % tabBtns.length]; state.libTabFocus = true; n.click(); }; });
+          if (state.libTabFocus) { state.libTabFocus = false; const on = $('[data-libtab].on', main); if (on) on.focus(); }
           break;
         }
         case 'downloads': {
@@ -4818,7 +4824,6 @@
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
           const fst = $('#firststeps'); if (fst) fst.onchange = async () => { try { await api('PUT', '/node/settings', { first_steps_hidden: !fst.checked }); toast(fst.checked ? 'First steps show on Home again' : 'First steps are hidden for everyone'); render(); } catch (e) { toast(e.message, 'error'); fst.checked = !fst.checked; } };
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
-          const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
           // The first sync after a sign-in runs in the background: follow it here
           if (pk && pk.sync && pk.sync.running) { clearTimeout(state.syncPoll); state.syncPoll = setTimeout(() => { if (state.view === 'settings' && state.settingsTab === 'accounts') render(); }, 2000); }
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) state.zone = BROWSER; render(); } catch (e) { toast(e.message, 'error'); } });
@@ -5222,7 +5227,7 @@
     // A scan that ends says so, with what it could not read (fresh-eyes review)
     if (was && info && !info.scanning && info.library) {
       const ls = info.last_scan; const n = info.library.tracks;
-      toast(`Library up to date: ${n.toLocaleString()} ${n === 1 ? 'track' : 'tracks'}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Settings › Library folders)` : ''}`, ls && ls.error_count ? 'error' : '');
+      toast(`Library up to date: ${n.toLocaleString()} ${n === 1 ? 'track' : 'tracks'}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Your library › Node library)` : ''}`, ls && ls.error_count ? 'error' : '');
       state.albums = null;
       if (state.view === 'settings' || state.view === 'albums' || state.view === 'tracks') render();
     }

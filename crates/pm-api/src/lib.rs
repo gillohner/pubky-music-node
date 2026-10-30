@@ -240,7 +240,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route(
             "/library/tracks/{id}/edit",
-            put(library_edit::edit_track).delete(library_edit::undo_edit),
+            get(library_edit::get_edit)
+                .put(library_edit::edit_track)
+                .delete(library_edit::undo_edit),
         )
         .route("/library/albums/{id}/edit", put(library_edit::edit_album))
         .route("/library/hidden", get(library_edit::hidden))

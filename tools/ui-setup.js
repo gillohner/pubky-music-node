@@ -342,10 +342,12 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     // Edit tags: on the node, the file untouched; then back to the file's tags
     await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Edit tags…' }).click();
     await p.waitForSelector('dialog[open] [data-k="title"]');
-    check(await p.inputValue('dialog[open] [data-k="title"]') === lt0.title, 'the edit dialog starts from the song’s tags');
+    check(await p.inputValue('dialog[open] [data-k="title"]') === '' && await p.getAttribute('dialog[open] [data-k="title"]', 'placeholder') === lt0.title, 'the edit dialog shows what the file says (an empty field keeps it)');
     await p.fill('dialog[open] [data-k="title"]', 'Edited by ui-setup'); await p.click('dialog[open] [data-save]');
     await p.waitForTimeout(600);
     check((await api('GET', `/library/tracks/${lt0.id}`)).title === 'Edited by ui-setup', 'Save edits the song on the node');
+    const ed = await api('GET', `/library/tracks/${lt0.id}/edit`);
+    check(ed.edit && ed.edit.title === 'Edited by ui-setup' && !ed.edit.artist && !ed.edit.album, `only the changed field is pinned (${JSON.stringify(ed.edit)})`);
     await api('DELETE', `/library/tracks/${lt0.id}/edit`);
     check((await api('GET', `/library/tracks/${lt0.id}`)).title === lt0.title, 'and it goes back to the file’s tags');
     // Delete a file from the homeserver, after asking
@@ -381,8 +383,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();
     await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
-    await p.goto(BASE + '/library'); await p.waitForSelector('#libadd');
-    check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]', 'a listener gets My music only');
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
+    check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
     await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     const lItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));

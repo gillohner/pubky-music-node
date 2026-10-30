@@ -110,7 +110,10 @@ pub(crate) async fn my_music(
     let s2 = s.clone();
     let out = tokio::task::spawn_blocking(move || -> Result<MyMusic, ApiError> {
         let lib = s2.library.lock().expect("library poisoned");
+        // By file name (the bundled homeserver's folder, the node's own copy) or by the content
+        // hash the homeserver names files with (songs this node saved there from its folders)
         let ids = lib.track_ids_by_file_name()?;
+        let by_hash = lib.track_ids_by_hash_prefix()?;
         let mut files = Vec::with_capacity(remote.len());
         let mut bytes = 0;
         for f in remote {
@@ -118,7 +121,11 @@ pub(crate) async fn my_music(
             let name = crate::files::split_remote_name(&file_name)
                 .map(|(_, n)| n.to_string())
                 .unwrap_or_else(|| file_name.clone());
-            let song = match ids.get(&file_name) {
+            let hash = crate::files::split_remote_name(&file_name).map(|(h, _)| h.to_string());
+            let found = ids
+                .get(&file_name)
+                .or_else(|| hash.as_ref().and_then(|h| by_hash.get(h)));
+            let song = match found {
                 Some(id) => lib.get_track(*id)?.and_then(|t| {
                     let edited = lib.track_override(&t.file.path).ok().flatten().is_some();
                     FileSong::of(&t, edited)
@@ -194,6 +201,44 @@ pub(crate) async fn undo_edit(
     Ok(Json(t))
 }
 
+/// `GET /v1/library/tracks/{id}/edit`: the owner's edit of the song (`null` when none) and what
+/// its file says, for the edit dialog (an empty field means the file's value).
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackEdit {
+    pub edit: Option<TrackOverride>,
+    pub file: TrackOverride,
+}
+
+pub(crate) async fn get_edit(
+    State(s): State<Arc<NodeState>>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<i64>,
+) -> ApiResult<TrackEdit> {
+    owner(&c)?;
+    let lib = s.library.lock().expect("library poisoned");
+    let t = lib
+        .get_track(TrackId(id))?
+        .ok_or_else(|| ApiError::not_found("no such song"))?;
+    let edit = lib.track_override(&t.file.path)?;
+    let file = match lib.file_tags(&t.file.path)? {
+        Some(f) => f,
+        None => TrackOverride {
+            title: Some(t.title.clone()),
+            artist: Some(
+                t.artists
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+            .filter(|a| !a.is_empty()),
+            album: t.album.as_ref().map(|a| a.title.clone()),
+            album_artist: t.album.as_ref().and_then(|a| a.album_artist.clone()),
+        },
+    };
+    Ok(Json(TrackEdit { edit, file }))
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AlbumEdit {
     #[serde(default)]
@@ -226,8 +271,15 @@ pub(crate) async fn edit_album(
                 .map(|a| Some(a.as_str()).filter(|a| !a.is_empty())),
         )?
     };
-    if !done {
-        return Err(ApiError::not_found("no such album"));
+    match done {
+        pm_library::AlbumEdit::Done => {}
+        pm_library::AlbumEdit::NotFound => return Err(ApiError::not_found("no such album")),
+        pm_library::AlbumEdit::NameTaken => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Another album already has that name: pick a different one",
+            ))
+        }
     }
     let _ = s.events.send(ApiEvent::LibraryChanged);
     Ok(Json(serde_json::json!({ "id": id })))
@@ -287,8 +339,12 @@ pub(crate) async fn restore(
     if !s.library.lock().expect("library poisoned").unhide(&body.path)? {
         return Err(ApiError::not_found("That file was not taken out of the library"));
     }
+    // Stored paths are the scanner's (resolved); a folder may be given through a link
     let file = std::path::Path::new(&body.path);
-    let folder = s.all_folders().into_iter().find(|f| file.starts_with(f));
+    let folder = s
+        .all_folders()
+        .into_iter()
+        .find(|f| file.starts_with(f) || std::fs::canonicalize(f).is_ok_and(|c| file.starts_with(c)));
     let scan_started = match folder {
         Some(f) => s.start_scan(vec![f]).unwrap_or(false),
         None => false,

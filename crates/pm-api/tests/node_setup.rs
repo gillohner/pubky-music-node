@@ -743,6 +743,10 @@ async fn the_owner_edits_and_removes_songs_without_touching_files() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+    // The edit and what the file says, for the dialog
+    let (_, e) = call(&app, OWNER, "GET", &format!("/v1/library/tracks/{id}/edit"), None).await;
+    assert_eq!(e["edit"]["album"], "Mornings, Vol. 1", "{e}");
+    assert_eq!(e["file"]["title"], "One", "{e}");
     // Listeners: none of it
     let l = listener(&s);
     for (m, uri, body) in [
@@ -751,8 +755,20 @@ async fn the_owner_edits_and_removes_songs_without_touching_files() {
             format!("/v1/library/tracks/{id}/edit"),
             Some(json!({"title": "x"})),
         ),
+        ("GET", format!("/v1/library/tracks/{id}/edit"), None),
+        ("DELETE", format!("/v1/library/tracks/{id}/edit"), None),
+        (
+            "PUT",
+            format!("/v1/library/albums/{album}/edit"),
+            Some(json!({"title": "x"})),
+        ),
         ("DELETE", format!("/v1/library/tracks/{id}"), None),
         ("GET", "/v1/library/hidden".to_string(), None),
+        (
+            "POST",
+            "/v1/library/hidden/restore".to_string(),
+            Some(json!({"path": "/x"})),
+        ),
         ("GET", "/v1/me/music".to_string(), None),
     ] {
         let (st, e) = call(&app, &l, m, &uri, body).await;
