@@ -54,14 +54,17 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   await until('latency shown', async () => /\d+ ms/.test(await A.$eval('#conn', (e) => e.textContent)), 15000);
   console.log('      connected, latency:', await A.$eval('#conn', (e) => e.textContent));
 
-  // 1. Short outage: kill during playback, press pause on A while down, restore within the hold time.
+  // 1. Short outage: paused, kill, press play on A while down, restore within the hold time. (The button
+  // sends what it shows: play while paused, pause while playing.)
+  await A.click('#toggle');
+  for (const p of pages) await until(`${p.name} shows paused`, async () => (await toggleLabel(p)) === 'Play', 5000);
   let t0 = Date.now();
   await killNode();
   const noticed = await Promise.all(pages.map((p) => until(`${p.name} notices`, async () => (await connState(p)) !== 'connected', 30000)));
   check(Math.max(...noticed) < 2000, `both controllers notice the node is gone (${noticed.join(' / ')} ms)`);
   await sleep(2600 - (Date.now() - t0));
   for (const p of pages) await p.screenshot({ path: `${OUT}/conn-reconnecting-${p.name}.png` });
-  const pressed = A.click('#toggle'); // held until the node is back
+  const pressed = A.click('#toggle'); // play, held until the node is back
   await sleep(500);
   await startNode();
   const tUp = Date.now();
@@ -73,8 +76,8 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   check(tUp - t0 < 18000, `the outage stays inside the controllers' fast retry phase (${tUp - t0} ms)`);
   check(Math.max(...resync) < 3000, `both controllers resync after the restart (${resync.join(' / ')} ms after the node was back; ${tUp - t0} ms outage)`);
   await pressed;
-  // The node restores the queue stopped; the held toggle starts it again, and both controllers show it.
-  const played = await Promise.all(pages.map((p) => until(`${p.name} sees the held toggle`, async () => (await toggleLabel(p)) === 'Pause', 10000).catch(() => -1)));
+  // The node restores the queue stopped; the held play starts it again, and both controllers show it.
+  const played = await Promise.all(pages.map((p) => until(`${p.name} sees the held play`, async () => (await toggleLabel(p)) === 'Pause', 10000).catch(() => -1)));
   const z = (await api('GET', `/zones/${ZONE}`));
   check(z.transport === 'playing' && played.every((t) => t >= 0), `the change held during the outage went through and both show it (node: ${z.transport})`);
   for (const p of pages) check((await barTitle(p)) === tracks[0].title, `${p.name} shows the same track as the node`);
