@@ -47,7 +47,7 @@ const SETTING: &str = "listens.history";
 /// When the owner last deleted the history (microseconds): listens the sync still finds on the
 /// homeserver that were **written** before then (their newest version's edit id) are deleted,
 /// not imported. A listen written later stays, whenever it was played (an import of old plays).
-const CLEARED: &str = "listens.cleared_before";
+pub(crate) const CLEARED: &str = "listens.cleared_before";
 /// A node play and a listen post this close (seconds) are the same play.
 const TWIN_SECS: i64 = 5;
 
@@ -61,6 +61,19 @@ pub(crate) fn history(lib: &Library) -> ListenHistory {
 
 pub(crate) fn cleared_before(lib: &Library) -> Option<i64> {
     lib.get_setting(CLEARED).ok().flatten()?.parse().ok()
+}
+
+/// A history delete made on another node at `theirs` (microseconds; from the settings copy):
+/// when it is later than this node's own, it becomes this node's, and the listens this node
+/// has that were written by then are deleted (here, and from the homeserver with the next
+/// push), as on the node that deleted them. Returns how many went.
+pub(crate) fn adopt_cleared(lib: &Library, theirs: i64) -> Result<usize, ApiError> {
+    if cleared_before(lib).is_some_and(|mine| mine >= theirs) {
+        return Ok(0);
+    }
+    lib.set_setting(CLEARED, &theirs.to_string())?;
+    let up_to = pm_pubky::ids::timestamp_id(theirs);
+    Ok(lib.delete_music_posts_of_kind_up_to(TYPE_ACTIVITY, &up_to, pm_pubky::ids::now_micros())?)
 }
 
 /// Record one play as a listen post where the setting says; `None` when the history is off.
@@ -438,4 +451,46 @@ pub(crate) async fn delete_all(
         deleted,
         plays_cleared,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use pm_library::{Library, MusicPostRow};
+    use pm_pubky::ids::timestamp_id;
+
+    /// Review of #111: a history deleted on another node reaches this one through the settings
+    /// copy, and the listens this node wrote before then go too (or a later move here would
+    /// publish them again). An older delete changes nothing.
+    #[test]
+    fn a_history_deleted_elsewhere_goes_here_too() {
+        let lib = Library::open_in_memory().unwrap();
+        let listen = |at: i64| MusicPostRow {
+            id: timestamp_id(at),
+            kind: super::TYPE_ACTIVITY.into(),
+            visibility: "public".into(),
+            json: "{}".into(),
+            created_at: at,
+            updated_at: at,
+            synced_at: Some(at),
+            deleted: false,
+        };
+        for at in [1_000, 2_000, 3_000] {
+            lib.upsert_music_post(&listen(at)).unwrap();
+        }
+        assert_eq!(super::adopt_cleared(&lib, 2_000).unwrap(), 2);
+        assert_eq!(super::cleared_before(&lib), Some(2_000));
+        let left = lib.music_posts_page(super::TYPE_ACTIVITY, None, 10).unwrap();
+        assert_eq!(left.iter().map(|r| r.updated_at).collect::<Vec<_>>(), [3_000]);
+        assert_eq!(
+            lib.unsynced_music_posts().unwrap().len(),
+            2,
+            "the deletes go to the homeserver"
+        );
+        assert_eq!(
+            super::adopt_cleared(&lib, 1_500).unwrap(),
+            0,
+            "an older delete is no news"
+        );
+        assert_eq!(super::cleared_before(&lib), Some(2_000));
+    }
 }

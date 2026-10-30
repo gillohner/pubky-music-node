@@ -752,10 +752,11 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
+            // Only if it is still what was pushed: a move or an edit meanwhile goes next pass
             library
                 .lock()
                 .expect("library poisoned")
-                .mark_music_post_synced(&row.id, now_micros())?;
+                .mark_music_post_synced_if_unchanged(&row, now_micros())?;
         }
         Ok(())
     }
@@ -842,6 +843,21 @@ impl PubkySync {
         heads: &Heads,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
+        // A history deleted on another node: its time is in the settings copy (every node
+        // backs up `listens.cleared_before`); this node's own listens written before it go too,
+        // or a later move here would publish them again
+        if let Some(theirs) = self.cleared_elsewhere().await {
+            let lib = library.lock().expect("library poisoned");
+            match crate::listens::adopt_cleared(&lib, theirs) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(listens = n, "history deleted on another node: removed here too")
+                }
+                Ok(_) => {}
+                Err(e) => report
+                    .errors
+                    .push(format!("history deleted elsewhere: {}", e.message)),
+            }
+        }
         let cleared_before = crate::listens::cleared_before(&library.lock().expect("library poisoned"));
         let mut reads = 0;
         for ns in [v1::SOCIAL_NAMESPACE, pubky_music_specs::MUSIC_NAMESPACE] {
@@ -1311,6 +1327,14 @@ impl PubkySync {
         if let Err(e) = self.homeserver.write_node_settings(&self.session, &v).await {
             tracing::warn!("settings backup failed: {e}");
         }
+    }
+
+    /// When the history was deleted, as the settings copy on the homeserver says (another node
+    /// may have done it). `None` when there is no copy, it can't be read, or no delete.
+    async fn cleared_elsewhere(&self) -> Option<i64> {
+        let v = self.homeserver.read_node_settings(&self.session).await.ok()??;
+        let backup: SettingsBackup = serde_json::from_value(v).ok()?;
+        backup.settings.get(crate::listens::CLEARED)?.parse().ok()
     }
 
     /// Bring the owner's settings onto this node from the private folder.
