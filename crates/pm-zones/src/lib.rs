@@ -24,7 +24,7 @@ pub mod sink;
 pub mod source;
 pub mod zone;
 
-pub use queue::{Insert, Queue, QueueItem, Repeat};
+pub use queue::{FetchLimit, Insert, Queue, QueueItem, Repeat};
 pub use registry::OutputRegistry;
 pub use sink::{
     AudioSink, BufferLevel, ClockSource, Describe, MemberStatus, Output, OutputId, OutputInfo, SinkError,
