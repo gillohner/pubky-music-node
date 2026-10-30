@@ -72,6 +72,7 @@ pub mod playlists;
 pub mod plex;
 pub mod podcasts;
 pub mod prefs;
+pub mod presence;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
@@ -617,6 +618,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
         .route("/me/prefs", get(prefs::get).put(prefs::put))
+        .route(
+            "/me/presence",
+            get(presence::setting_get).put(presence::setting_put),
+        )
+        .route("/presence", get(presence::list))
+        .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
@@ -807,8 +814,13 @@ async fn auth(
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
     let not_owner = caller.role != accounts::Role::Owner;
+    // Who listens where (presence.rs): whoever plays on a zone
+    let played = presence::zone_written(req.method(), req.uri().path()).map(|z| (z, caller.clone()));
     req.extensions_mut().insert(caller);
     let resp = next.run(req).await;
+    if let Some((zone, caller)) = played.filter(|_| resp.status().is_success()) {
+        presence::played(&state, &zone, &caller);
+    }
     if not_owner {
         accounts::listener_response(resp).await
     } else {
@@ -1451,8 +1463,21 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
     if ids.is_empty() {
         return Err(ApiError::bad_request("give `output` or `outputs`"));
     }
+    let output = zone_output(&s, body.name.trim(), &ids).await?;
+    let zone = s.create_zone(body.name.trim(), output);
+    Ok(Json(zone.state()))
+}
+
+/// The output a zone named `name` plays on: the one output, or a group of them (the first leads),
+/// grouped by the speakers' own system when they all share one (Sonos, BluOS, HEOS), else in
+/// sync by the node.
+pub(crate) async fn zone_output(
+    s: &NodeState,
+    name: &str,
+    ids: &[String],
+) -> Result<Arc<dyn pm_zones::Output>, ApiError> {
     let mut members = Vec::with_capacity(ids.len());
-    for id in &ids {
+    for id in ids {
         let out = s
             .outputs
             .get(&OutputId(id.clone()))
@@ -1492,28 +1517,26 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             heos.clear();
         }
     }
-    let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
+    Ok(if members.len() == 1 {
         members.remove(0)
     } else if sonos.len() == ids.len() {
         let mut sonos = sonos;
         let lead = sonos.remove(0);
-        Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+        Arc::new(pm_out_upnp::sonos::SonosGroup::new(name, lead, sonos))
     } else if bluos.len() == ids.len() {
         let mut bluos = bluos;
         let lead = bluos.remove(0);
-        Arc::new(pm_out_bluos::BluosGroup::new(body.name.trim(), lead, bluos))
+        Arc::new(pm_out_bluos::BluosGroup::new(name, lead, bluos))
     } else if heos.len() == ids.len() {
         let mut heos = heos;
         let lead = heos.remove(0);
-        Arc::new(pm_out_upnp::heos::HeosGroup::new(body.name.trim(), lead, heos))
+        Arc::new(pm_out_upnp::heos::HeosGroup::new(name, lead, heos))
     } else {
         Arc::new(
-            pm_zones::outputs::GroupOutput::new(body.name.trim(), members)
+            pm_zones::outputs::GroupOutput::new(name, members)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?,
         )
-    };
-    let zone = s.create_zone(body.name.trim(), output);
-    Ok(Json(zone.state()))
+    })
 }
 
 async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<ZoneState> {
@@ -1797,6 +1820,7 @@ async fn transfer(
     let position_ms = st.now_playing.as_ref().map(|n| n.position_ms).unwrap_or(0);
     from.stop();
     from.clear();
+    presence::played(&s, &body.to, &c);
     let moved = load_zone(
         &to,
         st.queue,
@@ -1814,7 +1838,7 @@ async fn transfer(
 /// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat` and `radio`;
 /// `index` plays from `position_ms` (paused when the source was paused; nothing starts when it
 /// was stopped). Seeking needs the track open, so it waits for that (bounded) first.
-async fn load_zone(
+pub(crate) async fn load_zone(
     to: &Zone,
     queue: Vec<QueueItem>,
     index: Option<usize>,

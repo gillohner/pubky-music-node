@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Who's listening on this node, and listening along.** `GET /v1/presence` shows who on the node listens to what, as each person chooses (`PUT /v1/me/presence`: everyone, the people they follow on Pubky, or hidden, the default). Listening along (`POST /v1/presence/along`) joins your zone's speakers to theirs as one synced group, so you hear their music at the same moment, quality and DSP; leaving moves it back to their zone. Nothing is published.
+
 ## 0.2.1
 
 ### 2026-10-29
