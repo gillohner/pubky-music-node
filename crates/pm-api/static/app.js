@@ -4190,10 +4190,12 @@
           const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
           const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
           // Artists and albums (TASK-pinakes-social-ux F6): "Also on" is a row of service icons next to
-          // Play/Shuffle. One opens the service's page here when the node can play from it (Play is
-          // there), else the service's site. Songs keep the source line with its play buttons.
+          // Play/Shuffle, the working services first. One opens the service's page here when the node
+          // plays from it (on and working: Play is there), else the service's site (every link has a
+          // page here, so `page` alone says nothing). Songs keep the source line with its play buttons.
           const iconAlso = kind === 'artist' || kind === 'album';
-          const alsoIcon = ({ v, k }) => { const name = instName(v); return v.page ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
+          const playsHereFrom = (v) => !!v.page && (rk ? rk.healthy.has(alsoSvc(v)) : alsoSvc(v) === 'library');
+          const alsoIcon = ({ v, k }) => { const name = instName(v); return playsHereFrom(v) || (v.page && !webUrl(v.url)) ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
           const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-label="Also on">${alsoAll.map(alsoIcon).join('')}</span>` : '';
           const [lineFirst, lineMore] = iconAlso ? [[], []] : [alsoFirst, alsoMore];
           const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
@@ -4212,7 +4214,7 @@
           const extLink = (href, text) => (webUrl(href) ? `<a href="${esc(webUrl(href))}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text));
           const textCredit = at ? [webUrl(at.url) ? extLink(at.url, `Read more on ${at.source}`) : '', `Text: ${esc(at.source)}${at.licence ? `, ${extLink(at.licence_url, at.licence)}` : ''}`].filter(Boolean).join(' · ') : '';
           const photoCredit = ic ? `Photo: ${[ic.author ? esc(ic.author) : '', ic.licence ? extLink(ic.licence_url, ic.licence) : '', extLink(ic.file_page, ic.source || 'Wikimedia Commons')].filter(Boolean).join(', ')}` : '';
-          const aboutTop = !!(at && at.text);
+          const aboutTop = !!(at && at.text); // artist, album and song (F5: the same About everywhere)
           const blurbText = (at && at.text) || pg.blurb;
           const aboutHtml = `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${aboutTop ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${aboutTop ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${textCredit || photoCredit ? `<p class="credit small muted">${[textCredit, photoCredit].filter(Boolean).join(' · ')}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
@@ -4230,9 +4232,14 @@
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + (aboutTop ? '' : aboutHtml);
           $('[data-back]', main).onclick = () => goBack(pg.section);
-          // The article's opening is clamped to a few lines; More shows it all (only when it is longer)
+          // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
+          // is measured again when its width or the text size changes (zoom, rotation, a late font)
           { const bl = $('#iblurb', main); const bm = $('#iblurbmore', main);
-            if (bl && bm && bl.scrollHeight > bl.clientHeight + 2) { bm.hidden = false; bm.onclick = () => { const open = bl.classList.toggle('clamp') === false; bm.textContent = open ? 'Less' : 'More'; bm.setAttribute('aria-expanded', String(open)); }; } }
+            if (bl && bm) {
+              const sync = () => { if (bl.classList.contains('clamp')) bm.hidden = !(bl.scrollHeight > bl.clientHeight + 2); };
+              bm.onclick = () => { const open = bl.classList.toggle('clamp') === false; bm.textContent = open ? 'Less' : 'More'; bm.setAttribute('aria-expanded', String(open)); };
+              sync(); if (window.ResizeObserver) new ResizeObserver(sync).observe(bl);
+            } }
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
             const same = bk && $$('[data-crumb-id]', main).find((c) => bk.textContent.trim().endsWith(c.textContent.trim()));
