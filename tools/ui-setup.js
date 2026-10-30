@@ -302,6 +302,49 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#np .warn-text'), 'a node that refuses: the bar says so');
       check(/refused the stream/.test(await p.textContent('#np')), 'in the node’s words');
       await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      // A refused play from the transport: the wait ends at once with the node's words
+      await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [(await api('GET', '/library/tracks?limit=1')).tracks[0].id], replace: true, play: false });
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');
+      await p.click('#zonebtn'); await p.waitForSelector(`#zonepop:not([hidden]) [data-zone="${nz.id}"]`); await p.click(`#zonepop [data-zone="${nz.id}"]`);
+      await p.waitForTimeout(800);
+      await p.route(/\/v1\/zones\/[^/]+\/transport$/, (r) => r.fulfill({ status: 409, json: { error: 'the zone is busy' } }));
+      await p.click('#toggle'); await p.waitForTimeout(500);
+      const np2 = await p.textContent('#np');
+      check(!/Starting on/.test(np2) && /zone is busy/.test(np2), `a refused play ends the wait at once (${np2.trim().replace(/\s+/g, ' ')})`);
+      await p.unroute(/\/v1\/zones\/[^/]+\/transport$/);
+      // The DSP switches keep what was set: EQ's switched-off band, crossfeed's values
+      await api('PUT', `/zones/${encodeURIComponent(nz.id)}/dsp`, { dither: true, resample: true, dsd_mode: 'auto', loudness: 'off', eq: [{ kind: 'peaking', freq_hz: 100, gain_db: 2, q: 1, enabled: true }, { kind: 'peaking', freq_hz: 1000, gain_db: -2, q: 1, enabled: false }], crossfeed: { level_db: -9, cutoff_hz: 650, delay_us: 280, enabled: true } });
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
+      const flip = async (k) => { await p.locator(`#qpanel [data-dsp="${k}"]`).click({ force: true }); await p.waitForSelector(`#qpanel [data-dsp="${k}"]:not([disabled])`); await p.waitForTimeout(200); };
+      await flip('eq'); await flip('eq');
+      const dsp = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);
+      check(JSON.stringify(dsp.eq.map((b) => b.enabled)) === '[true,false]', `EQ off and on keeps the band that was off (${JSON.stringify(dsp.eq.map((b) => b.enabled))})`);
+      await flip('crossfeed');
+      const cf1 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      await flip('crossfeed');
+      const cf2 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      check(cf1 && cf1.enabled === false && cf1.level_db === -9 && cf2 && cf2.enabled === true && cf2.level_db === -9 && cf2.cutoff_hz === 650, `crossfeed off and on keeps its values (${JSON.stringify(cf1)} → ${JSON.stringify(cf2)})`);
+      check(await p.evaluate(() => document.activeElement && document.activeElement.dataset && document.activeElement.dataset.dsp === 'crossfeed'), 'the switch keeps the keyboard focus');
+      await p.click('#scrim');
+      // Move to… from the Queue page: a song this browser can't play is not moved into it
+      await p.route(/\/v1\/zones\/[^/?]+$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { id: nz.id, name: nz.name, output: nz.output, queue: [{ id: 1, uri: 'spotify:track:abc', title: 'Spot' }], queue_index: 0, now_playing: { index: 0, item: { id: 1, uri: 'spotify:track:abc', title: 'Spot' }, position_ms: 0 }, transport: 'paused' } }) : r.continue()));
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'This browser' }).click();
+      check(await visible(p, '.toast.error', 4000) && /plays on the node’s zones only/.test(await p.textContent('#toast')), 'a song this browser can’t play is not moved into it (the zone keeps it)');
+      await p.unroute(/\/v1\/zones\/[^/?]+$/);
+      // and out of This browser, Move to… says “Moving to …” at once
+      await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-zone="browser"]'); await p.click('#zonepop [data-zone="browser"]');
+      await p.click('.nav-item[data-view="tracks"]'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]'); await p.waitForTimeout(800);
+      await p.evaluate(() => document.querySelector('audio').pause());
+      await p.route(/\/v1\/zones\/[^/]+\/load$/, async (r) => { await new Promise((res) => setTimeout(res, 1500)); return r.fulfill({ status: 409, json: { error: 'not now' } }); });
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: nz.name }).first().click();
+      await p.waitForTimeout(150);
+      check(/Moving to/.test(await p.textContent('#toast')), `Move to… says “Moving to …” at once (${(await p.textContent('#toast')).trim()})`);
+      await p.waitForTimeout(1800);
+      await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
       await c.close();
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
@@ -396,7 +439,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/');
     await p.waitForSelector('#login[open]');
     const hint = await p.textContent('#login details');
-    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && /Umbrel/.test(hint), 'the login dialog says where the token is');
+    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint), 'the login dialog says where the token is');
     check(await p.locator('#login a[href*="troubleshooting.md"]').count() === 1, 'and links the guide');
     await c.close();
   } finally {

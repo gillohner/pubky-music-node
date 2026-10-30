@@ -1,5 +1,5 @@
-//! The Pubky homeserver bundled with the node (STEWARD-BUNDLED-HOMESERVER.md): the compose and
-//! Umbrel installs in `deploy/bundle` run pubky-homeserver next to the node, and the node manages
+//! The Pubky homeserver bundled with the node (STEWARD-BUNDLED-HOMESERVER.md): the compose
+//! install in `deploy/bundle` and the bare-metal one run pubky-homeserver next to the node, and the node manages
 //! it through the homeserver's admin API (`X-Admin-Password`), reachable only on the compose
 //! network. The password stays in the node's config or environment: it is never logged, never
 //! returned by the API, and never sent anywhere but the admin endpoint.
@@ -137,10 +137,11 @@ pub(crate) fn status_from_info(v: &Value) -> BundledStatus {
 }
 
 /// `GET /v1/homeserver/bundled`: whether the node has a bundled homeserver and how it is doing.
-/// 404 without one, so Settings can hide "This homeserver" with one cheap call.
+/// `{configured: false}` without one, so pages hide "This homeserver" with one cheap call (and
+/// no error on every page).
 pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<BundledStatus> {
     if s.bundled_homeserver().is_none() {
-        return Err(ApiError::not_found("this node has no bundled homeserver"));
+        return Ok(Json(BundledStatus::default()));
     }
     Ok(Json(match admin(&s, reqwest::Method::GET, "/info", None).await {
         Ok(v) => status_from_info(&v),

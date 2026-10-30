@@ -873,6 +873,7 @@ fn token_ok(
 const WEB_VIEWS: [&str; 14] = [
     "library",
     "add-music",
+    "downloads",
     "favourites",
     "albums",
     "artists",
@@ -12136,13 +12137,13 @@ exec sleep 300
     }
 
     /// The LAN address the node picks for speakers when public_url is empty is not where the
-    /// browser is: sign-in callbacks follow the request (localhost, umbrel.local, a proxy). A
+    /// browser is: sign-in callbacks follow the request (localhost, a `.local` name, a proxy). A
     /// public_url the owner set is used as it is.
     #[tokio::test]
     async fn a_guessed_public_url_leaves_sign_in_callbacks_to_the_request() {
         let dir = tempfile::tempdir().unwrap();
         let lan = "http://192.168.1.10:7788";
-        for host in ["localhost:7788", "umbrel.local:7788"] {
+        for host in ["localhost:7788", "nas.local:7788"] {
             let s = state_at(dir.path(), lan, true).await;
             assert_eq!(
                 tidal_redirect(s, host).await,
@@ -12674,5 +12675,76 @@ exec sleep 300
         assert_eq!(z["queue"].as_array().unwrap().len(), 1);
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
+    }
+
+    /// Every view the page navigates to by path (NAV_VIEWS in app.js) is served on a reload or a
+    /// shared link, not a 404.
+    #[tokio::test]
+    async fn every_page_view_is_served_by_its_path() {
+        let js = include_str!("../static/app.js");
+        let start = js.find("const NAV_VIEWS = [").expect("NAV_VIEWS");
+        let end = start + js[start..].find("];").expect("end of NAV_VIEWS");
+        let views: Vec<&str> = js[start..end].split('\'').skip(1).step_by(2).collect();
+        assert!(views.len() > 5, "{views:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        for v in views {
+            // Home is the root path (pathFor in app.js)
+            let v = if v == "home" { "" } else { v };
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/{v}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "/{v}");
+        }
+    }
+
+    /// An album with no MusicBrainz id yet can't take tags or a review: the reads say so
+    /// (`needs_match`) instead of a 422; an unmatched song's tags still wait for a match.
+    #[tokio::test]
+    async fn unmatched_items_say_they_need_a_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (tid, album) = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("a.flac"), "Song", "Someone");
+            tr.album = Some(pm_model::Album {
+                id: None,
+                title: "No Id".into(),
+                album_artist: Some("Someone".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let tid = lib.upsert_track(&tr).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (tid.0, t.album.unwrap().id.unwrap())
+        };
+        let app = router(s.clone());
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?album_id={album}"), None).await;
+        assert_eq!(
+            (st, tg["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{tg}"
+        );
+        let (st, rv) = call(&app, "GET", &format!("/v1/reviews?album_id={album}"), None).await;
+        assert_eq!(
+            (st, rv["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{rv}"
+        );
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tg}");
+        assert!(
+            tg.get("needs_match").is_none(),
+            "an unmatched song takes tags that wait: {tg}"
+        );
     }
 }

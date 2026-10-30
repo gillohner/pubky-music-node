@@ -6,7 +6,6 @@ First look at the node's log; most problems are named there.
 | :-- | :-- |
 | Docker | `docker logs --tail 200 pubky-music` |
 | Linux without Docker | `journalctl -u pubky-music-node -n 200` |
-| Umbrel | right-click the app's icon › **Troubleshoot** |
 
 ## The web page doesn't open
 
@@ -26,7 +25,6 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 | :-- | :-- |
 | Docker | `docker exec pubky-music cat /data/api-token`, or `PM_TOKEN` if you set one |
 | Docker bundle | `PM_TOKEN` in `deploy/bundle/.env` |
-| Umbrel | the password umbrelOS shows for the app (`PM_TOKEN` is set to it) |
 | Linux without Docker | `token` in `/etc/pubky-music/node.toml` |
 
 - **Sign in with Pubky Ring** says the node is not signed in yet: use the token the first time,
@@ -38,11 +36,11 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 - To give the node a new token: with a token the node made, **Settings › About and updates ›
   Make a new token** (shown once; the old one stops working at once). With `PM_TOKEN` or on
   Linux, change the token there and restart (Docker also needs `PM_REWRITE_CONFIG`, as above).
-  Every app and browser then needs the new one. On Umbrel the token is the app's password.
+  Every app and browser then needs the new one.
 
 ## The library stays empty
 
-- **Your library › Node library** lists the folders. In Docker and Umbrel, `/music` (your mounted
+- **Your library › Node library** lists the folders. In Docker, `/music` (your mounted
   music folder) is there by itself, marked **From config**, and read at every start. "Not found
   on this computer" means the folder isn't mounted or the path is wrong.
 - Another folder: type its path there and press **Add folder**. In Docker the path is the one
@@ -113,14 +111,10 @@ The data folder must be writable by user id 1000. With a folder instead of a Doc
 | TCP 7790 on the computer running the app (another port if that one is taken) | the app's own player: the node connects to it (not needed when the node runs on that computer) | your home network |
 | UDP 1900 | UPnP search (SSDP) | your home network |
 | UDP 5353 | mDNS: Chromecast, AirPlay, BluOS, the apps finding the node | your home network |
-| TCP 6287 | Pubky homeserver (Umbrel and the bundle only) | your home network, or forwarded for your own domain |
+| TCP 6287 | Pubky homeserver (the bundle only) | your home network, or forwarded for your own domain |
 
 None of these needs to be open to the internet. Away from home, use
 [Remote access](remote-access.md).
-
-## Umbrel: the app won't install or start
-
-Pubky's own "Pubky Homeserver" app and this app both use port 6287. Install only one of them.
 
 ## Discover is empty
 
