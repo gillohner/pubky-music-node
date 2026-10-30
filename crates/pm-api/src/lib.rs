@@ -9,6 +9,7 @@
 //! trusts whoever can reach the socket, so bind to localhost. Remote access
 //! by pubkey (M5) wraps this API rather than replacing it.
 
+pub mod about;
 pub mod access_token;
 pub mod activity;
 pub mod archive;
@@ -56,6 +57,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod lastfm;
+pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
 pub mod listens;
@@ -268,6 +270,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/search", get(search))
         .route("/library/loudness", get(loudness::get))
         .route("/library/loudness/measure", post(loudness::measure))
+        .route("/library/matches", get(library_match::status))
         .route("/library/artists", get(artists))
         .route("/library/artists/{id}", get(artist))
         .route("/library/artists/{id}/tracks", get(artist_tracks))
@@ -2295,7 +2298,12 @@ async fn artist(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
 }
 
 /// Biography, links and whether a portrait is cached (fetched on first request).
-async fn artist_info_handler(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<ArtistInfo> {
+async fn artist_info_handler(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    Query(q): Query<item::LangQuery>,
+    headers: HeaderMap,
+) -> ApiResult<ArtistInfo> {
     if s.library
         .lock()
         .expect("library poisoned")
@@ -2304,14 +2312,15 @@ async fn artist_info_handler(State(s): State<Arc<NodeState>>, Path(id): Path<i64
     {
         return Err(ApiError::not_found(format!("no artist {id}")));
     }
-    Ok(Json(artist_info::artist_info(&s, id).await?))
+    let lang = about::language(q.lang.as_deref(), &headers);
+    Ok(Json(artist_info::artist_info(&s, id, &lang).await?))
 }
 
 async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
     let path = artist_info::image_path(&s, id);
     if !path.is_file() {
         // The first request may have to fetch it.
-        let info = artist_info::artist_info(&s, id).await?;
+        let info = artist_info::artist_info(&s, id, "en").await?;
         if !info.image {
             // Else the picture of the service artist the owner matched it to
             let matched = s
@@ -12483,6 +12492,448 @@ exec sleep 300
         assert!(!home.contains("picked"), "{home}");
         let set = notes(state_at(dir.path(), "http://172.17.0.2:7788", false).await).await;
         assert!(!set.contains("picked"), "{set}");
+    }
+
+    /// Library matching (F1): an album is matched by title, artist and song count, a tagged
+    /// release by its id, and each artist by its albums' credits; an artist with nothing but a
+    /// name that several MusicBrainz artists share stays unmatched. Pages carry the id and where
+    /// it came from, and a second pass asks nothing.
+    #[tokio::test]
+    async fn library_artists_and_albums_are_matched_without_trusting_a_name_alone() {
+        const RG_TAXI: &str = "0b5d3e2b-4b0c-4d5f-9d4b-1e9a2b3c4d5e";
+        const TAXI: &str = "2d7f5a4d-6d2e-4f7b-9f6d-3a1c4d5e6f70";
+        const RELEASE: &str = "4f9b7c6f-8f4a-4b9d-9b8f-5c3e6f708192";
+        const RG_SOLO: &str = "5a0c8d7a-9a5b-4c0e-8c9a-6d4f708192a3";
+        const SOLO: &str = "6b1d9e8b-0b6c-4d1f-9d0b-7e5a8192a3b4";
+        const SMITH_1: &str = "7c2e0f9c-1c7d-4e2a-8e1c-8f6b92a3b4c5";
+        const SMITH_2: &str = "8d3f1a0d-2d8e-4f3b-9f2d-9a7ca3b4c5d6";
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let credit = |name: &str, id: &str| serde_json::json!([{"name": name, "joinphrase": "", "artist": {"id": id, "name": name}}]);
+        let (c1, c2, c3) = (calls.clone(), calls.clone(), calls.clone());
+        let search = {
+            let taxi = credit("7 Dollar Taxi", TAXI);
+            let smith = credit("John Smith", SMITH_1);
+            move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let query = q.get("query").cloned().unwrap_or_default();
+                let releases = if query.contains("Zahltag") {
+                    serde_json::json!([
+                        {"title": "Zahltag", "track-count": 5, "release-group": {"id": RG_SOLO}, "artist-credit": taxi},
+                        {"title": "Zahltag", "track-count": 2, "release-group": {"id": RG_TAXI}, "artist-credit": taxi}
+                    ])
+                } else {
+                    // John Smith's "Hits" has more songs than the library's copy
+                    serde_json::json!([{"title": "Hits", "track-count": 9, "release-group": {"id": RG_TAXI}, "artist-credit": smith}])
+                };
+                async move { Json(serde_json::json!({"releases": releases})) }
+            }
+        };
+        let mock = Router::new()
+            .route("/ws/2/release", get(search))
+            .route(
+                &format!("/ws/2/release/{RELEASE}"),
+                get(move || {
+                    c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        Json(serde_json::json!({"id": RELEASE, "release-group": {"id": RG_SOLO},
+                            "artist-credit": [{"name": "Solo", "joinphrase": "", "artist": {"id": SOLO, "name": "Solo"}}]}))
+                    }
+                }),
+            )
+            .route(
+                "/ws/2/recording",
+                get(move || {
+                    c3.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Two artists called John Smith with a song of that title and length
+                    async move {
+                        Json(serde_json::json!({"recordings": [
+                            {"title": "Morning", "length": 180_000, "artist-credit": [{"name": "John Smith", "artist": {"id": SMITH_1, "name": "John Smith"}}]},
+                            {"title": "Morning", "length": 181_000, "artist-credit": [{"name": "John Smith", "artist": {"id": SMITH_2, "name": "John Smith"}}]}
+                        ]}))
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.discovery.write().unwrap() = None;
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        {
+            let mut b = s.info_bases.write().unwrap();
+            b.musicbrainz = "http://127.0.0.1:9".into();
+            b.fanart_key = None;
+            b.audiodb = "http://127.0.0.1:9".into();
+        }
+        let song = |file: &str, title: &str, artist: &str, album: Option<(&str, Option<&str>)>, ms: u64| {
+            let mut t = untagged_track(dir.path().join(file), title, artist);
+            t.duration_ms = Some(ms);
+            t.album = album.map(|(name, release)| pm_model::Album {
+                id: None,
+                title: name.into(),
+                album_artist: Some(artist.into()),
+                release_mbid: release.map(|r| pm_model::Mbid::parse(r).unwrap()),
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            t
+        };
+        {
+            let lib = s.library.lock().unwrap();
+            for t in [
+                song(
+                    "1.flac",
+                    "Taxi",
+                    "7 Dollar Taxi",
+                    Some(("Zahltag (Deluxe)", None)),
+                    200_000,
+                ),
+                song(
+                    "2.flac",
+                    "Zahltag",
+                    "7 Dollar Taxi",
+                    Some(("Zahltag (Deluxe)", None)),
+                    210_000,
+                ),
+                song(
+                    "3.flac",
+                    "Alone",
+                    "Solo",
+                    Some(("Solo Album", Some(RELEASE))),
+                    190_000,
+                ),
+                song("4.flac", "Morning", "John Smith", Some(("Hits", None)), 180_500),
+            ] {
+                lib.upsert_track(&t).unwrap();
+            }
+        }
+        let report = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(report.failed, 0, "{report:?}");
+        // Three albums, then John Smith's song (his album didn't match)
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4, "{report:?}");
+        let app = router(s.clone());
+        let (_, m) = call(&app, "GET", "/v1/library/matches", None).await;
+        assert_eq!(m["albums"]["lookup"], 1, "{m}");
+        assert_eq!(m["albums"]["tags"], 1, "{m}");
+        assert_eq!(m["albums"]["unmatched"], 1, "{m}");
+        assert_eq!(m["artists"]["lookup"], 2, "{m}");
+        assert_eq!(m["artists"]["unmatched"], 1, "{m}");
+        assert_eq!(m["artists"]["pending"], 0, "{m}");
+        let artists = s.library.lock().unwrap().list_artists().unwrap();
+        let id_of = |name: &str| artists.iter().find(|a| a.name == name).unwrap().id;
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("7 Dollar Taxi")),
+            None,
+        )
+        .await;
+        assert_eq!(p["mb_match"]["mbid"], TAXI, "{p}");
+        assert_eq!(p["mb_match"]["source"], "lookup");
+        assert_eq!(p["uri"], format!("https://musicbrainz.org/artist/{TAXI}"));
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("Solo")),
+            None,
+        )
+        .await;
+        assert_eq!(p["mb_match"]["mbid"], SOLO, "{p}");
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{}", id_of("John Smith")),
+            None,
+        )
+        .await;
+        assert!(
+            p["mb_match"].is_null(),
+            "a name and a song two artists share: {p}"
+        );
+        let albums = s.library.lock().unwrap().list_albums(None, 100).unwrap();
+        let album_of = |t: &str| albums.iter().find(|a| a.title == t).unwrap().id.unwrap();
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/album/lib-{}", album_of("Zahltag (Deluxe)")),
+            None,
+        )
+        .await;
+        assert_eq!(
+            p["mb_match"],
+            serde_json::json!({"mbid": RG_TAXI, "source": "lookup"}),
+            "{p}"
+        );
+        let (_, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/album/lib-{}", album_of("Solo Album")),
+            None,
+        )
+        .await;
+        assert_eq!(
+            p["mb_match"],
+            serde_json::json!({"mbid": RG_SOLO, "source": "tags"}),
+            "{p}"
+        );
+        assert_eq!(
+            p["uri"],
+            format!("https://musicbrainz.org/release-group/{RG_SOLO}")
+        );
+        // Answered, sure or not: nothing is asked again
+        let again = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(again, library_match::PassReport::default());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// About from open sources (F2–F5): the artist's "Also on" from MusicBrainz's links, its
+    /// Commons picture with author and licence, Wikidata facts with labels and the Wikipedia
+    /// summary in the reader's language; the album's label, release date and the English article
+    /// when there is none in that language; the song's work and its article. Cached per language.
+    #[tokio::test]
+    async fn library_pages_say_what_open_sources_know_in_the_readers_language() {
+        const ARTIST: &str = "2d7f5a4d-6d2e-4f7b-9f6d-3a1c4d5e6f70";
+        const GROUP: &str = "0b5d3e2b-4b0c-4d5f-9d4b-1e9a2b3c4d5e";
+        const RELEASE: &str = "4f9b7c6f-8f4a-4b9d-9b8f-5c3e6f708192";
+        const RECORDING: &str = "5a0c8d7a-9a5b-4c0e-8c9a-6d4f708192a3";
+        const WORK: &str = "6b1d9e8b-0b6c-4d1f-9d0b-7e5a8192a3b4";
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let rel = |kind: &str, url: &str| serde_json::json!({"type": kind, "url": {"resource": url}});
+        let claim = |v: serde_json::Value| serde_json::json!([{"rank": "normal", "mainsnak": {"datavalue": {"value": v}}}]);
+        let item = |q: &str| claim(serde_json::json!({"id": q}));
+        let mut answers: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        answers.insert(
+            format!("/ws/2/artist/{ARTIST}"),
+            serde_json::json!({"relations": [
+                rel("wikidata", "https://www.wikidata.org/wiki/Q1"),
+                rel("official homepage", "https://7dollartaxi.example/"),
+                rel("free streaming", "https://open.spotify.com/artist/abc"),
+                rel("streaming", "https://tidal.com/browse/artist/42"),
+            ]}),
+        );
+        answers.insert("/wiki/Special:EntityData/Q1.json".into(), serde_json::json!({"entities": {"Q1": {
+            "claims": {
+                "P31": item("Q215380"), "P740": item("Q72"), "P136": item("Q11399"),
+                "P527": [{"mainsnak": {"datavalue": {"value": {"id": "Q100"}}}}, {"mainsnak": {"datavalue": {"value": {"id": "Q101"}}}}],
+                "P571": claim(serde_json::json!({"time": "+1994-00-00T00:00:00Z"})),
+                "P18": claim(serde_json::json!("Taxi Band.jpg"))
+            },
+            "sitelinks": {"dewiki": {"title": "7 Dollar Taxi (Band)"}, "enwiki": {"title": "7 Dollar Taxi"}}
+        }}}));
+        answers.insert(
+            format!("/ws/2/release-group/{GROUP}"),
+            serde_json::json!({
+                "first-release-date": "2001-05-04",
+                "releases": [{"id": RELEASE, "status": "Official", "date": "2001-05-04"}],
+                "relations": [rel("wikidata", "https://www.wikidata.org/wiki/Q2")]
+            }),
+        );
+        answers.insert(
+            format!("/ws/2/release/{RELEASE}"),
+            serde_json::json!({
+                "label-info": [{"label": {"name": "Sound Service"}}],
+                "relations": [rel("purchase for download", "https://7dollartaxi.bandcamp.com/album/zahltag"),
+                              rel("free streaming", "https://www.deezer.com/album/77")]
+            }),
+        );
+        answers.insert(
+            "/wiki/Special:EntityData/Q2.json".into(),
+            serde_json::json!({"entities": {"Q2": {
+            "claims": {}, "sitelinks": {"enwiki": {"title": "Zahltag (album)"}}}}}),
+        );
+        answers.insert(
+            format!("/ws/2/recording/{RECORDING}"),
+            serde_json::json!({"relations": [
+            {"type": "performance", "target-type": "work", "work": {"id": WORK, "title": "Taxi"}}]}),
+        );
+        answers.insert(
+            format!("/ws/2/work/{WORK}"),
+            serde_json::json!({"relations": [
+            rel("wikidata", "https://www.wikidata.org/wiki/Q3")]}),
+        );
+        answers.insert(
+            "/wiki/Special:EntityData/Q3.json".into(),
+            serde_json::json!({"entities": {"Q3": {
+            "claims": {}, "sitelinks": {"dewiki": {"title": "Taxi (Lied)"}}}}}),
+        );
+        let answers = Arc::new(answers);
+        let b2 = base.clone();
+        let c2 = calls.clone();
+        let mock = Router::new()
+            .route("/w/api.php", get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                let b = b2.clone();
+                c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if q.get("action").map(String::as_str) == Some("wbgetentities") {
+                        assert_eq!(q["languages"], "de|en");
+                        let de = |n: &str| serde_json::json!({"labels": {"de": {"value": n}}});
+                        return Json(serde_json::json!({"entities": {
+                            "Q72": de("Zürich"), "Q11399": de("Rockmusik"), "Q100": de("Anna"),
+                            "Q101": {"labels": {"en": {"value": "Ben"}}}}}));
+                    }
+                    assert_eq!(q["titles"], "File:Taxi_Band.jpg");
+                    Json(serde_json::json!({"query": {"pages": {"7": {"imageinfo": [{
+                        "thumburl": format!("{b}/img/taxi.jpg"),
+                        "descriptionurl": "https://commons.wikimedia.org/wiki/File:Taxi_Band.jpg",
+                        "extmetadata": {
+                            "Artist": {"value": "<a href=\"//commons.wikimedia.org/wiki/User:Jane\">Jane Doe</a>"},
+                            "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                            "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0"}
+                        }}]}}}}))
+                }
+            }))
+            .route("/api/rest_v1/page/summary/{title}", get(|Path(title): Path<String>| async move {
+                let text = match title.as_str() {
+                    "7_Dollar_Taxi_(Band)" => "7 Dollar Taxi ist eine Band aus Zürich.",
+                    "Zahltag_(album)" => "Zahltag is the first album by 7 Dollar Taxi.",
+                    "Taxi_(Lied)" => "Taxi ist ein Lied von 7 Dollar Taxi.",
+                    other => panic!("no article {other}"),
+                };
+                Json(serde_json::json!({"title": title.replace('_', " "), "extract": text,
+                    "content_urls": {"desktop": {"page": format!("https://de.wikipedia.org/wiki/{title}")}}}))
+            }))
+            .route("/img/taxi.jpg", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xffu8, 0xd8, 0xff, 1, 2, 3]) }))
+            .fallback({
+                let c = calls.clone();
+                move |uri: axum::http::Uri| {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let a = answers.clone();
+                    async move {
+                        match a.get(uri.path()) {
+                            Some(v) => Json(v.clone()).into_response(),
+                            None => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }
+            });
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        {
+            let mut b = s.info_bases.write().unwrap();
+            b.musicbrainz = base.clone();
+            b.wikidata = base.clone();
+            b.wikipedia = base.clone();
+            b.commons = base.clone();
+            b.fanart_key = None;
+            b.audiodb = "http://127.0.0.1:9".into();
+            b.wikimedia_interval = std::time::Duration::ZERO;
+        }
+        let (artist, album, track) = {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join("taxi.flac"), "Taxi", "7 Dollar Taxi");
+            t.artists[0].mbid = Some(pm_model::Mbid::parse(ARTIST).unwrap());
+            t.recording_mbid = Some(pm_model::Mbid::parse(RECORDING).unwrap());
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: "Zahltag".into(),
+                album_artist: Some("7 Dollar Taxi".into()),
+                release_mbid: Some(pm_model::Mbid::parse(RELEASE).unwrap()),
+                release_group_mbid: Some(pm_model::Mbid::parse(GROUP).unwrap()),
+                year: Some(2001),
+                upc: None,
+                total_discs: None,
+            });
+            let tid = lib.upsert_track(&t).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (t.artists[0].id.unwrap(), t.album.unwrap().id.unwrap(), tid.0)
+        };
+        let app = router(s.clone());
+        let fact = |p: &serde_json::Value, label: &str| {
+            p["about"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["label"] == label)
+                .map(|f| f["value"].clone())
+        };
+        let (st, p) = call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{artist}?lang=de-CH"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        assert_eq!(
+            p["about_text"]["text"], "7 Dollar Taxi ist eine Band aus Zürich.",
+            "{p}"
+        );
+        assert_eq!(p["about_text"]["lang"], "de");
+        assert_eq!(p["about_text"]["licence"], "CC BY-SA 4.0");
+        assert_eq!(p["image"], format!("/v1/library/artists/{artist}/image"));
+        assert_eq!(p["image_credit"]["author"], "Jane Doe", "{p}");
+        assert_eq!(p["image_credit"]["licence"], "CC BY-SA 4.0");
+        assert_eq!(
+            p["image_credit"]["file_page"],
+            "https://commons.wikimedia.org/wiki/File:Taxi_Band.jpg"
+        );
+        assert_eq!(fact(&p, "Origin"), Some("Zürich".into()), "{p}");
+        assert_eq!(fact(&p, "Active"), Some("since 1994".into()));
+        assert_eq!(fact(&p, "Genres"), Some("Rockmusik".into()));
+        assert_eq!(
+            fact(&p, "Members"),
+            Some("Anna, Ben".into()),
+            "English where German has no label"
+        );
+        // In the play-from order, as every page's sources
+        let sources = |p: &serde_json::Value| {
+            let mut v: Vec<String> = p["also_on"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["source"].as_str().unwrap().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(sources(&p), ["homepage", "spotify", "tidal"], "{p}");
+        let tidal = p["also_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["source"] == "tidal")
+            .unwrap();
+        assert_eq!(tidal["id"], "artist:42");
+        // The album: no German article, so the English one; label and date from the release
+        let req = Request::builder()
+            .uri(format!("/v1/item/album/lib-{album}"))
+            .header(header::ACCEPT_LANGUAGE, "de-DE,de;q=0.9")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let p: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(p["about_text"]["lang"], "en", "{p}");
+        assert_eq!(p["blurb"], "Zahltag is the first album by 7 Dollar Taxi.");
+        assert_eq!(fact(&p, "Released"), Some("2001-05-04".into()), "{p}");
+        assert_eq!(fact(&p, "Label"), Some("Sound Service".into()));
+        assert_eq!(sources(&p), ["bandcamp", "deezer"], "{p}");
+        // The song: its work's article
+        let (_, p) = call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
+        assert_eq!(
+            p["about_text"]["text"], "Taxi ist ein Lied von 7 Dollar Taxi.",
+            "{p}"
+        );
+        assert_eq!(fact(&p, "Work"), Some("Taxi".into()));
+        // Cached per language: the same pages again ask nothing
+        let asked = calls.load(std::sync::atomic::Ordering::SeqCst);
+        call(
+            &app,
+            "GET",
+            &format!("/v1/item/artist/lib-{artist}?lang=de"),
+            None,
+        )
+        .await;
+        call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), asked);
     }
 
     #[tokio::test]
