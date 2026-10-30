@@ -598,7 +598,7 @@
     }
     if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
     if (replace) startWait('play', state.zone, qitems[0].title || '', true);
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (replace) startSent(); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
@@ -934,6 +934,7 @@
     if (replace) startWait('play', state.zone, tracks[0].title, true);
     try {
       await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
+      if (replace) startSent();
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
     } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
@@ -964,13 +965,14 @@
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }
     startWait('play', state.zone, st.name, true);
-    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
+    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const playPlaylist = async (id) => {
     try {
       if (isBrowser()) { const d = await api('GET', `/playlists/${id}`); playTracks(d.tracks.filter(Boolean), true); return; }
       startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
       const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
+      startSent();
       toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
@@ -1420,9 +1422,17 @@
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
-    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem }; state.startError = null;
+    // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
+    // (its song ended) isn't taken for the new one starting
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace }; state.startError = null;
     setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
     renderBar();
+  };
+  // The node took the replace: from now on the zone playing another song ends the wait (it may
+  // already be playing it)
+  const startSent = () => {
+    const s = state.starting; if (!s || s.sent) return; s.sent = true;
+    const z = state.zones[s.zone]; if (z && z.transport === 'playing' && z.now_playing && z.now_playing.item.id !== s.oldItem) startDone();
   };
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
   const startFail = (msg, quiet) => {
@@ -5182,7 +5192,7 @@
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
-          if ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped')) startDone(true);
+          if (state.starting.sent !== false && ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped'))) startDone(true);
           // Only an error that is new fails the start: the engine keeps the last error until a track starts
           else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
