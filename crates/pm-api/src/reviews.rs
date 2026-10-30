@@ -69,7 +69,17 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
             reviews: all_reviews(&lib)?.iter().map(|(row, r)| entry(row, r)).collect(),
         }));
     }
-    let url = canonical_for(&lib, &target(&r))?.to_url();
+    // An item with no identity yet has no review yet (writing one still says why it can't)
+    let url = match canonical_for(&lib, &target(&r)) {
+        Ok(u) => u.to_url(),
+        Err(e) if e.status == StatusCode::UNPROCESSABLE_ENTITY => {
+            return Ok(Json(Reviews {
+                uri: None,
+                reviews: Vec::new(),
+            }))
+        }
+        Err(e) => return Err(e),
+    };
     let reviews = review_for(&lib, &url)?
         .map(|(row, r)| entry(&row, &r))
         .into_iter()

@@ -855,7 +855,9 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 12] = [
+const WEB_VIEWS: [&str; 14] = [
+    "add-music",
+    "downloads",
     "favourites",
     "albums",
     "artists",
@@ -12657,5 +12659,32 @@ exec sleep 300
         assert_eq!(z["queue"].as_array().unwrap().len(), 1);
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
+    }
+
+    /// Every view the page navigates to by path (NAV_VIEWS in app.js) is served on a reload or a
+    /// shared link, not a 404.
+    #[tokio::test]
+    async fn every_page_view_is_served_by_its_path() {
+        let js = include_str!("../static/app.js");
+        let start = js.find("const NAV_VIEWS = [").expect("NAV_VIEWS");
+        let end = start + js[start..].find("];").expect("end of NAV_VIEWS");
+        let views: Vec<&str> = js[start..end].split('\'').skip(1).step_by(2).collect();
+        assert!(views.len() > 5, "{views:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        for v in views {
+            // Home is the root path (pathFor in app.js)
+            let v = if v == "home" { "" } else { v };
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/{v}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "/{v}");
+        }
     }
 }
