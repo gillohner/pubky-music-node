@@ -250,6 +250,9 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .quality.q-lossless .qdot { background: var(--q-lossless); }
 .quality.q-lossy .qdot { background: var(--q-lossy); }
 .volume { display: flex; align-items: center; gap: 6px; width: 130px; color: var(--muted); }
+/* The Live switch (share what I'm listening to) next to the device pill */
+.live-btn { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
+.live-btn.on { color: var(--accent-fg, #fff); background: var(--accent); border-color: var(--accent); }
 .zone-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg); border-radius: 999px; padding: 6px 10px 6px 12px; cursor: pointer; max-width: 220px; }
 .zone-btn:hover { border-color: var(--line-strong); }
 .zone-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -446,6 +449,15 @@ button.chip { cursor: pointer; font: inherit; }
 button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; font-size: 13px; }
 .kv dt { color: var(--muted); }
+/* Item pages: comments (social v1 notes on the item) */
+.comments-body { display: grid; gap: 10px; max-width: 72ch; }
+.comments { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.comment { border-left: 2px solid var(--line); padding-left: 12px; }
+.comment-head { font-size: 13px; }
+.comment-text { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment-sub { margin-top: 6px; display: grid; gap: 8px; }
+.comment-form { display: flex; gap: 8px; align-items: flex-end; }
+.comment-form textarea { flex: 1; min-width: 0; resize: vertical; }
 .kv dd { margin: 0; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
 .card h3 { margin-bottom: 10px; }
@@ -713,10 +725,11 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .input.filter { width: 200px; max-width: 100%; }
 .hbody { min-height: 48px; }
 .blurb { max-width: 72ch; line-height: 1.6; color: var(--fg-2); margin: 0 0 12px; }
+/* Where the About text and picture come from, and their licences */
+.credit { max-width: 72ch; line-height: 1.5; margin: -4px 0 12px; }
 /* About under the header (F6): a few lines of the article, then More; the credits small */
 .blurb.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; }
 #iblurbmore { display: inline-block; margin-bottom: 8px; }
-.credit { margin: 4px 0 12px; }
 .credit a { color: inherit; text-decoration: underline; }
 /* "Also on" next to Play/Shuffle: one icon per service */
 .also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
@@ -744,6 +757,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .srcchip.pinned .ic { width: 12px; height: 12px; color: var(--accent-strong); }
 .srcchip.none { color: var(--muted); border-style: dashed; padding-left: 8px; }
 .list-row.unavail .grow, .list-row.unavail .thumb, .list-row.unavail [data-splay] { opacity: 0.45; }
+/* A collection item that doesn't play (a web page, a post): its card in the list (B3) */
+.card-row .card-thumb { display: grid; place-items: center; color: var(--muted); }
+.card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row.filtered { display: none; }
 .plsummary { margin-bottom: 12px; }
 .chip.warnchip { border-color: rgba(232, 178, 74, 0.4); }
@@ -796,6 +812,11 @@ a.btn { text-decoration: none; }
 /* A running files job: a small chip in the player bar (details in #jobpop) */
 .jobchip { display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 5px 10px 7px; font-size: 12px; cursor: pointer; color: var(--fg-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .jobchip[hidden] { display: none; }
+/* Listening along with someone on this node: who, and Leave */
+.along-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 12px; color: var(--fg-2); white-space: nowrap; max-width: 220px; }
+.along-chip[hidden] { display: none; }
+.along-text { overflow: hidden; text-overflow: ellipsis; }
+.along-leave { padding: 2px 8px; cursor: pointer; }
 .jobchip:hover { border-color: var(--line-strong); }
 .jobchip .ic { width: 15px; height: 15px; }
 .jobchip .jc-text { line-height: 1; }

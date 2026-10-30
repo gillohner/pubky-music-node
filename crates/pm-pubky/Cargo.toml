@@ -32,3 +32,6 @@ zeroize = "1"
 pubky-noise = "=0.1.0"
 tempfile = "3"
 tokio = { workspace = true }
+# The spec's v0-to-v1 transforms (what pubky-social-migrator runs), to check the node's own move
+# writes the same paths (v1::tests::the_spec_migrator_writes_where_the_node_does). Tests only.
+pubky-social-specs = { workspace = true, features = ["migrator"] }

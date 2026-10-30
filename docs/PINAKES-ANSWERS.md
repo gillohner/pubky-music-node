@@ -31,7 +31,9 @@
 5. **Joining with Nexus is by URL, never by id.** Send the card's `uri` (and
    `details.aliases`) to Nexus. Pinakes ids are Pinakes's own. For a calendar occurrence, use
    `occurrence.feed_uri`.
-6. **Playlists and listening activity aren't indexed yet.** Nexus reports only tags today. For
+6. *(Superseded 2026-10-26 by ADR 0014: playlists are social v1 `collection` posts, listens music
+   `listen` posts under `/pub|priv/music/v1/posts/`, tags social v1 tags; kept for the record.)*
+   **Playlists and listening activity aren't indexed yet.** Nexus reports only tags today. For
    v1:
    - keep playlists in your `pubky.music` namespace;
    - make discovery work through plain tags on the canonical URIs;

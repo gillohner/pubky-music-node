@@ -9,6 +9,7 @@
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
 //     replaced and shown once; the login dialog says where the token is;
+//   * an item page credits Wikipedia's text and a Commons picture (source, licence, links);
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
 //   * Play to: while something plays or is queued, every other device gets Move here (This zone
@@ -140,6 +141,22 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
 
+    // ---- About credits: Wikipedia's text and a Commons picture carry their source and licence ----
+    c = await ctx(); p = await c.newPage();
+    const credited = { kind: 'artist', id: 'lib-777', uri: null, target: { artist_id: 777 }, title: 'Credit Test', source: 'Your library', source_id: 'library',
+      songs: [], albums: [], versions: [], also_on: [], open_on: [], connect: [], about: [], section: 'artists', reading: false, pending: false, total_ms: 0,
+      blurb: 'Credit Test ist eine Band.',
+      about_text: { text: 'Credit Test ist eine Band.', source: 'Wikipedia', url: 'https://de.wikipedia.org/wiki/Credit_Test', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: '<b>Jane</b> Doe', licence: 'CC BY 2.0', licence_url: 'javascript:alert(1)', file_page: 'https://commons.wikimedia.org/wiki/File:Credit.jpg', source: 'Wikimedia Commons' } };
+    await p.route(/\/v1\/item\/artist\/lib-777(\?.*)?$/, (r) => r.fulfill({ json: credited }));
+    await p.goto(BASE + '/artist/lib-777');
+    check(await visible(p, '#iabout .credit'), 'About shows a credit line');
+    const credit = await p.textContent('#iabout .credit').catch(() => '');
+    const links = await p.$$eval('#iabout .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
+    check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
+    check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
+    check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
+    await c.close();
     // ---- Provider badges on covers ----
     // A mocked TIDAL artist page: a TIDAL album and a library album as tiles, a streamed and a
     // library song as rows; then album pages from TIDAL and from the library.
@@ -190,7 +207,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
     check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
     check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
-    check(/Read more on Wikipedia/.test(ab.credit) && /CC BY-SA 4\.0/.test(ab.credit) && /Photo: Jane Doe, CC BY-SA 3\.0, Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
+    check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
     await p.click('#iblurbmore');
     check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
     check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
@@ -361,6 +378,49 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
         await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});
       }
+      // A refused play from the transport: the wait ends at once with the node's words
+      await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [(await api('GET', '/library/tracks?limit=1')).tracks[0].id], replace: true, play: false });
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');
+      await p.click('#zonebtn'); await p.waitForSelector(`#zonepop:not([hidden]) [data-zone="${nz.id}"]`); await p.click(`#zonepop [data-zone="${nz.id}"]`);
+      await p.waitForTimeout(800);
+      await p.route(/\/v1\/zones\/[^/]+\/transport$/, (r) => r.fulfill({ status: 409, json: { error: 'the zone is busy' } }));
+      await p.click('#toggle'); await p.waitForTimeout(500);
+      const np2 = await p.textContent('#np');
+      check(!/Starting on/.test(np2) && /zone is busy/.test(np2), `a refused play ends the wait at once (${np2.trim().replace(/\s+/g, ' ')})`);
+      await p.unroute(/\/v1\/zones\/[^/]+\/transport$/);
+      // The DSP switches keep what was set: EQ's switched-off band, crossfeed's values
+      await api('PUT', `/zones/${encodeURIComponent(nz.id)}/dsp`, { dither: true, resample: true, dsd_mode: 'auto', loudness: 'off', eq: [{ kind: 'peaking', freq_hz: 100, gain_db: 2, q: 1, enabled: true }, { kind: 'peaking', freq_hz: 1000, gain_db: -2, q: 1, enabled: false }], crossfeed: { level_db: -9, cutoff_hz: 650, delay_us: 280, enabled: true } });
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
+      const flip = async (k) => { await p.locator(`#qpanel [data-dsp="${k}"]`).click({ force: true }); await p.waitForSelector(`#qpanel [data-dsp="${k}"]:not([disabled])`); await p.waitForTimeout(200); };
+      await flip('eq'); await flip('eq');
+      const dsp = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);
+      check(JSON.stringify(dsp.eq.map((b) => b.enabled)) === '[true,false]', `EQ off and on keeps the band that was off (${JSON.stringify(dsp.eq.map((b) => b.enabled))})`);
+      await flip('crossfeed');
+      const cf1 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      await flip('crossfeed');
+      const cf2 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      check(cf1 && cf1.enabled === false && cf1.level_db === -9 && cf2 && cf2.enabled === true && cf2.level_db === -9 && cf2.cutoff_hz === 650, `crossfeed off and on keeps its values (${JSON.stringify(cf1)} → ${JSON.stringify(cf2)})`);
+      check(await p.evaluate(() => document.activeElement && document.activeElement.dataset && document.activeElement.dataset.dsp === 'crossfeed'), 'the switch keeps the keyboard focus');
+      await p.click('#scrim');
+      // Move to… from the Queue page: a song this browser can't play is not moved into it
+      await p.route(/\/v1\/zones\/[^/?]+$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { id: nz.id, name: nz.name, output: nz.output, queue: [{ id: 1, uri: 'spotify:track:abc', title: 'Spot' }], queue_index: 0, now_playing: { index: 0, item: { id: 1, uri: 'spotify:track:abc', title: 'Spot' }, position_ms: 0 }, transport: 'paused' } }) : r.continue()));
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'This browser' }).click();
+      check(await visible(p, '.toast.error', 4000) && /plays on the node’s zones only/.test(await p.textContent('#toast')), 'a song this browser can’t play is not moved into it (the zone keeps it)');
+      await p.unroute(/\/v1\/zones\/[^/?]+$/);
+      // and out of This browser, Move to… says “Moving to …” at once
+      await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-zone="browser"]'); await p.click('#zonepop [data-zone="browser"]');
+      await p.click('.nav-item[data-view="tracks"]'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]'); await p.waitForTimeout(800);
+      await p.evaluate(() => document.querySelector('audio').pause());
+      await p.route(/\/v1\/zones\/[^/]+\/load$/, async (r) => { await new Promise((res) => setTimeout(res, 1500)); return r.fulfill({ status: 409, json: { error: 'not now' } }); });
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: nz.name }).first().click();
+      await p.waitForTimeout(150);
+      check(/Moving to/.test(await p.textContent('#toast')), `Move to… says “Moving to …” at once (${(await p.textContent('#toast')).trim()})`);
+      await p.waitForTimeout(1800);
+      await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
       await c.close();
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
@@ -372,7 +432,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/');
     await p.waitForSelector('#login[open]');
     const hint = await p.textContent('#login details');
-    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && /Umbrel/.test(hint), 'the login dialog says where the token is');
+    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint), 'the login dialog says where the token is');
     check(await p.locator('#login a[href*="troubleshooting.md"]').count() === 1, 'and links the guide');
     await c.close();
   } finally {

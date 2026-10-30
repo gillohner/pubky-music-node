@@ -519,7 +519,7 @@ pub(crate) async fn play_plan(
 }
 
 /// `POST /v1/discover/describe {uris}`: a proper row for each music URL
-/// that is not in the library (favourites, playlist items, history): title,
+/// that is not in the library (bookmarks, playlist items, history): title,
 /// artist, cover and where it plays from. Pinakes answers in one batch; links
 /// it has not seen ask the provider's own API for that id (TIDAL, Deezer,
 /// Spotify). A URL is never used as a name: unknown titles stay empty.
@@ -1443,6 +1443,7 @@ async fn expand_link(
             album,
             duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
+            limit: None,
         }]);
     }
     if l.kind == "artist" {
@@ -1462,6 +1463,7 @@ async fn expand_link(
                     album: None,
                     duration_ms: h.duration_ms,
                     image: h.image,
+                    limit: None,
                 })
             })
             .collect());
@@ -1478,6 +1480,7 @@ async fn expand_link(
             album: Some(album.title.clone()),
             duration_ms: t.duration_ms,
             image: album.image.clone().or_else(|| it.image.clone()),
+            limit: None,
         })
         .collect())
 }
@@ -1658,6 +1661,14 @@ fn bare_item(u: &str) -> DiscoverItem {
         plays_from: None,
         connect: Vec::new(),
     }
+}
+
+/// Items for Pinakes music cards, each with where it plays from here (smart_network.rs).
+pub(crate) fn items_for(s: &NodeState, cards: Vec<pm_pubky::pinakes::Card>) -> Vec<DiscoverItem> {
+    let items = pm_pubky::discovery::items_from_cards(cards);
+    let acc = service_access(s);
+    let lib = s.library.lock().expect("library poisoned");
+    items.iter().map(|d| item(&acc, &lib, d)).collect()
 }
 
 fn page(
@@ -1843,12 +1854,12 @@ pub(crate) async fn also_on_versions(s: &NodeState, key: &str, cache_key: &str) 
 /// view of one object (tags and taggers from Nexus). 412 without a contact.
 pub(crate) async fn on_pubky(
     State(s): State<Arc<NodeState>>,
-    Query(r): Query<FavouriteRef>,
+    Query(r): Query<ItemRef>,
 ) -> ApiResult<OnPubky> {
     let d = discovery(&s)?;
     let uri = {
         let lib = s.library.lock().expect("library poisoned");
-        crate::favourites::canonical_for(&lib, &r)?
+        crate::bookmarks::canonical_for(&lib, &r)?
     };
     let url = uri.to_url();
     match d.nexus().resource_by_uri(&url).await {

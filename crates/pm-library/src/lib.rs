@@ -32,7 +32,7 @@ pub mod tagwrite;
 
 pub use canonical::{assign, Resolver};
 pub use db::{
-    AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, FavouriteRow, Focus, GenreSummary, IdentityCounts,
+    AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentityCounts,
     PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
 pub use db::{Library, LibraryStats};

@@ -6,8 +6,9 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
   write, under `/pub/music/v1/` and `/priv/music/v1/`, plus the shared social objects (`/pub|priv/social/v1/`).
   It knows nothing about this app.
 - **Pubky Music's app data** (`crates/pm-appdata`, this page): what only this app and its node use, under
-  `/priv/pubky.music/`, and `/pub/pubky.music/` where something must be public. Every path is a
-  constant in `pm_appdata::paths`. A test fails if one is missing here.
+  `/priv/pubky.music/`. Every path is a constant in `pm_appdata::paths`. A test fails if one is missing
+  here. (`/pub/pubky.music/tags/` is the one public path, from before tags moved to social v1; the
+  node only reads and empties it.)
 
 ## App paths
 
@@ -23,26 +24,29 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 | `/priv/pubky.music/vault/index.json` | the same clients | the vault's device list, every entry with a grant proof (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.json` | the same clients | one sign-in's envelope (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.lease.json` | the same clients | a refresh lease, only on homeservers without locks (VAULT.md) | — |
-| `/pub/pubky.music/tags/` | the node | music tags: social `PubkyAppTag`s on canonical music URLs (below) | pubky-app-specs tag |
+| `/pub/pubky.music/tags/` | the node, from 2026-10-21 to 2026-10-26; nothing new since | music tags as `PubkyAppTag`s; the sync moves them to `/pub/social/v1/tags/` once and reads them until then (below) | pubky-app-specs tag |
 
 Everything under `/priv/` is readable by the homeserver's operator. The vault is therefore encrypted on the
 device. The rest is the person's own data, as [ADR 0016](adr/0016-many-people-one-node.md) says.
 
-### Why tags sit in the app's public namespace
-A tag is a social object (ADR 0014), and its place is `/pub/social/v1/tags/`. Pubky Music keeps it at
-`/pub/pubky.music/tags/` for one reason: the Nexus behind Pinakes indexes tags on external links (a
-MusicBrainz URL) only as universal tags in an app's own namespace. Under `pubky.app/tags/` they must
-target `pubky://` objects and are dropped, and `social/v1/tags` isn't indexed yet. When it is, the tags
-move there (ADR 0014, "Tags stay at /pub/pubky.music/tags/ until…"). Nothing else social is kept in app
-data.
+### Where tags went
+A tag is a social object (ADR 0014), and since 2026-10-26 the node writes it where social v1 puts it:
+`/pub/social/v1/tags/<id>.json`. Upstream Nexus #1165 indexes a tag there on an external URL (a
+MusicBrainz URL) as a resource tag, and stops indexing `/pub/<app>/tags/`. From 2026-10-21 the node kept
+tags at `/pub/pubky.music/tags/`, because the Nexus of the time indexed tags on external links only in an
+app's own namespace. The sync moves them once (the `pubky.tags_social_v1` setting) and reads both
+folders until then. Nothing else social is kept in app data.
 
 ## What the app writes outside its namespace (the specs' paths)
 
 | Path | Objects | Spec |
 | :-- | :-- | :-- |
-| `/pub|priv/music/v1/posts/` | music `review` and `listen` (later `listening`, `session`) | pubky-music-specs |
-| `/pub|priv/social/v1/posts/` | playlists as `collection` posts, with `ext.music` hints | pubky-social-specs, pubky-music-specs `ext` |
-| `/priv/social/v1/bookmarks/` | favourites | pubky-social-specs |
+| `/pub|priv/music/v1/posts/` | music `review`, `listen` (under the root the listen history setting picks), `listening` and `session` | pubky-music-specs |
+| `/pub|priv/social/v1/posts/` | collections as `collection` posts with `ext.music` hints: always the private draft, and the published copy under `/pub/` while public | pubky-social-specs, pubky-music-specs `ext` |
+| `/priv/social/v1/bookmarks/` | bookmarks of music URLs and of public posts (someone's collection) | pubky-social-specs |
+| `/pub/social/v1/tags/` | tags on music URLs | pubky-social-specs |
+| `/pub/social/v1/follows/` | follows | pubky-social-specs |
+| `/pub/pubky.app/follows/` | follows again, the older form, until Nexus indexes v1 follows | pubky-app-specs |
 | `/priv/pubky.app/`, `/pub/pubky.app/` | older objects from before ADR 0014, read for the one-time move | pubky-app-specs |
 
 ## What the node asks Ring for
@@ -50,7 +54,7 @@ The node's sign-in requests `/priv/pubky.music/vault/:rw` (named on its own: VAU
 grant) and the other parts of the private folder it uses (`node.json`, `settings.json`, `prefs.json`,
 `files/`), never `/priv/pubky.music/` itself: pubky's canonical form drops a capability that a broader one
 covers, so asking for the folder could lose the vault. Sessions approved before with the whole folder
-still cover every part. It also asks for `/pub/pubky.music/:rw` for the tags. It also requests the
+still cover every part. It also asks for `/pub/pubky.music/:rw`, to move the older tags out of it, and for the
 social and music folders (`/pub|priv/social/v1/:rw`, `/pub|priv/music/v1/:rw`), and `/priv/pubky.app/:rw`
 and `/pub/pubky.app/:rw` for the move from older objects (`pm_pubky::homeserver::LOGIN_CAPABILITIES`). The
 desktop app asks Ring only for `/priv/pubky.music/:r`, to read the node record and find the person's node.

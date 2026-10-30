@@ -2,7 +2,7 @@
 //!
 //! The node looks in the known places, read-only, says what it found (the app, the user, the
 //! expiry; never a token) and uses one on a click. The same parsers take a pasted token file or a
-//! bare token, for nodes that do not share a home directory with the other app (Docker, Umbrel).
+//! bare token, for nodes that do not share a home directory with the other app (Docker).
 //! What is imported is kept exactly like the node's own sign-in (the same setting, sealed in
 //! backups, gone with Sign out) and renewed by the node where the issuing client is ours.
 //!

@@ -324,7 +324,7 @@ fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiEr
     }
     let mut albums: BTreeSet<i64> = keep.albums.iter().copied().collect();
     if keep.favourites {
-        let f = crate::favourites::collect(&lib)?;
+        let f = crate::bookmarks::collect(&lib)?;
         for t in f.tracks {
             push(t, &mut seen, &mut out);
         }

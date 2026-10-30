@@ -2,7 +2,7 @@
 //! (docs/ux/08-item-page.md): the library, a streaming service, or a link
 //! only Pubky knows. Whatever the source, the answer has the same sections:
 //! hero, songs (and albums for artists), versions, On Pubky, About, plus the
-//! playback answer and the target that tags, ratings and favourites attach to.
+//! playback answer and the target that tags, ratings and bookmarks attach to.
 
 use crate::discover::{load_external, page_id, url_of_page};
 use crate::state::NodeState;
@@ -842,9 +842,9 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         Some((MusicUri::Recording { mbid }, _)) => Some(*mbid),
         _ => None,
     });
-    let more = match recording {
-        Some(r) => crate::about::song(s, n, r, lang).await,
-        None => None,
+    let (more, about_pending) = match recording {
+        Some(r) => crate::about::song(s, r, lang),
+        None => (None, false),
     };
     let about_text = more.as_ref().and_then(|m| m.text.clone());
     if let Some(m) = more {
@@ -908,6 +908,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         blurb: about_text.as_ref().map(|t| t.text.clone()),
         about_text,
         image_credit: None,
+        about_pending,
         section: "tracks".into(),
         mb_match: None,
         related: Vec::new(),
@@ -947,12 +948,16 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
             .map(|j| j.0)
             .unwrap_or_default(),
     );
-    let canonical = mb_match
-        .map(|m| format!("https://musicbrainz.org/release-group/{}", m.mbid))
+    // The tags' ids first, as hearts and tags were saved on them; the lookup's group only when
+    // the tags have neither
+    let canonical = a
+        .release_group_mbid
+        .map(|m| format!("https://musicbrainz.org/release-group/{m}"))
         .or_else(|| {
             a.release_mbid
                 .map(|m| format!("https://musicbrainz.org/release/{m}"))
-        });
+        })
+        .or_else(|| mb_match.map(|m| format!("https://musicbrainz.org/release-group/{}", m.mbid)));
     let on_pubky = match &canonical {
         Some(u) => crate::discover::on_pubky_for(s, u).await,
         None => None,
@@ -979,9 +984,9 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         about.push(fact("UPC", u.to_string()));
     }
     // Label, release date, the Wikipedia article and "Also on" by the release group
-    let more = match mb_match {
-        Some(m) => crate::about::album(s, n, m.mbid, a.release_mbid, lang).await,
-        None => None,
+    let (more, about_pending) = match mb_match {
+        Some(m) => crate::about::album(s, m.mbid, a.release_mbid, lang),
+        None => (None, false),
     };
     let about_text = more.as_ref().and_then(|m| m.text.clone());
     // Its links become sources like the rest: "Also on" and "Open on"
@@ -1036,6 +1041,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         blurb: about_text.as_ref().map(|t| t.text.clone()),
         about_text,
         image_credit: None,
+        about_pending,
         section: "albums".into(),
         mb_match,
         related: Vec::new(),
@@ -1074,10 +1080,11 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
     if mb_match.is_none() && !unknown {
         crate::library_match::want_artist(&a.name);
     }
-    let info = if unknown {
-        None
+    // What is cached; a fetch runs in the background and the page asks again (about_pending)
+    let (info, about_pending) = if unknown {
+        (None, false)
     } else {
-        crate::artist_info::artist_info(s, n, lang).await.ok()
+        crate::artist_info::artist_info_now(s, n, lang).unwrap_or((None, false))
     };
     let canonical = mb_match.map(|m| format!("https://musicbrainz.org/artist/{}", m.mbid));
     let on_pubky = match &canonical {
@@ -1178,6 +1185,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
         about,
         about_text: info.as_ref().and_then(|i| i.text.clone()),
         image_credit: info.as_ref().and_then(|i| i.image_credit.clone()),
+        about_pending,
         blurb: info.and_then(|i| i.bio),
         section: "artists".into(),
         mb_match,
@@ -1363,6 +1371,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         mb_match: None,
         about_text: None,
         image_credit: None,
+        about_pending: false,
         related: Vec::new(),
         concerts: Vec::new(),
     }
@@ -1395,6 +1404,7 @@ mod instance_tests {
             mb_match: None,
             about_text: None,
             image_credit: None,
+            about_pending: false,
             target: serde_json::json!({}),
             versions: vec![
                 v("library", "Your library · FLAC", "", Some("track:7")),
