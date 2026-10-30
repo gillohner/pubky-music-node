@@ -825,6 +825,8 @@ a.btn { text-decoration: none; }
 .along-chip[hidden] { display: none; }
 .along-text { overflow: hidden; text-overflow: ellipsis; }
 .along-leave { padding: 2px 8px; cursor: pointer; }
+.along-chat { padding: 2px 8px; cursor: pointer; }
+.along-chat[hidden] { display: none; }
 .jobchip:hover { border-color: var(--line-strong); }
 .jobchip .ic { width: 15px; height: 15px; }
 .jobchip .jc-text { line-height: 1; }

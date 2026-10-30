@@ -299,3 +299,128 @@ async fn the_owners_listening_is_one_post_versioned_per_change() {
     let (_, v) = call(&app, "GET", "/v1/me/listening", None).await;
     assert!(v["post"].is_null(), "the session ended: {v}");
 }
+
+/// Listening along with someone's listening post (L4): the node finds their newest listening
+/// post among their posts (a listen written after it is skipped), plays the same song from its
+/// own library at their position, and follows each new version: a pause pauses, the end ends
+/// following. Nothing is read from their node but their homeserver.
+#[tokio::test]
+async fn listening_along_follows_a_listening_post() {
+    if std::env::var("PM_TESTNET").as_deref() != Ok("1") {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup(&PublicKey::try_from(TESTNET_HOMESERVER).unwrap(), None)
+        .await
+        .unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("pm-api-listening-along").unwrap())
+        .await
+        .unwrap();
+    let z32 = session.public_key().to_string();
+    let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
+    let owner = pubky_music_specs::PubkyId::try_from(key.as_str()).unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let song = format!("https://musicbrainz.org/recording/{SONG}");
+    // They have been listening for 5 s
+    let now = pm_pubky::ids::now_micros();
+    let started = now - 5_000_000;
+    let content = pubky_music_specs::MusicListeningContent {
+        started_at: started,
+        expires_at: Some(now + 600_000_000),
+        duration_ms: Some(20_000),
+        ..Default::default()
+    };
+    let post = pubky_music_specs::listening_post(&content, song.clone());
+    let v = pubky_music_specs::create_version(&post, pubky_music_specs::Root::Pub, &owner).unwrap();
+    homeserver.write_object(&session, &v.path, &post).await.unwrap();
+    // A listen of an earlier song, written after the session started
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let listen = pubky_music_specs::listen(now - 60_000_000, None, None, song.clone());
+    let l = pubky_music_specs::create_version(&listen, pubky_music_specs::Root::Pub, &owner).unwrap();
+    homeserver.write_object(&session, &l.path, &listen).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (s, app, track) = node(dir.path()).await;
+    let (st, live) = call(&app, "GET", &format!("/v1/profiles/{key}/listening"), None).await;
+    assert_eq!(st, StatusCode::OK, "{live}");
+    assert_eq!(live["live"], true, "{live}");
+    assert_eq!(live["song"], song);
+    assert_eq!(live["post"], format!("pubky://{key}/pub/music/v1/posts/{}", v.id));
+    assert!(live["position_ms"].as_i64().unwrap() >= 5_000, "{live}");
+
+    let (st, f) = call(
+        &app,
+        "POST",
+        "/v1/presence/post",
+        Some(serde_json::json!({"key": key, "zone": "null-output"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{f}");
+    assert_eq!(f["status"], "playing", "{f}");
+    assert_eq!(f["mine"], true);
+    let zone = |s: Arc<NodeState>| {
+        s.zones
+            .get(&pm_zones::ZoneId::new("null-output"))
+            .unwrap()
+            .state()
+    };
+    let st = zone(s.clone());
+    let np = st.now_playing.expect("plays");
+    assert_eq!(np.item.uri, format!("track:{track}"), "from the library");
+    assert!(np.position_ms >= 4_000, "at their position: {}", np.position_ms);
+
+    // They pause: so does the zone here
+    let paused = pubky_music_specs::MusicListeningContent {
+        paused_at: Some(pm_pubky::ids::now_micros()),
+        ..content.clone()
+    };
+    let post = pubky_music_specs::listening_post(&paused, song.clone());
+    let v2 = pubky_music_specs::edit_version(&post, &v.id, &v.edit_id, pubky_music_specs::Root::Pub, &owner)
+        .unwrap();
+    homeserver.write_object(&session, &v2.path, &post).await.unwrap();
+    let wait_for = |want: &'static str| {
+        let app = app.clone();
+        async move {
+            for _ in 0..80 {
+                let (_, all) = call(&app, "GET", "/v1/presence/post", None).await;
+                if all[0]["status"] == want {
+                    return all;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            panic!("never {want}");
+        }
+    };
+    wait_for("paused").await;
+    for _ in 0..40 {
+        if zone(s.clone()).transport == pm_zones::Transport::Paused {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(zone(s.clone()).transport, pm_zones::Transport::Paused);
+
+    // They stop: following ends, and the zone stays paused
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let ended = pubky_music_specs::MusicListeningContent {
+        ended_at: Some(pm_pubky::ids::now_micros()),
+        ..paused
+    };
+    let post = pubky_music_specs::listening_post(&ended, song.clone());
+    let v3 = pubky_music_specs::edit_version(&post, &v.id, &v2.edit_id, pubky_music_specs::Root::Pub, &owner)
+        .unwrap();
+    homeserver.write_object(&session, &v3.path, &post).await.unwrap();
+    wait_for("ended").await;
+    assert_ne!(zone(s.clone()).transport, pm_zones::Transport::Playing);
+    let (_, live) = call(&app, "GET", &format!("/v1/profiles/{key}/listening"), None).await;
+    assert_eq!(live["live"], false, "{live}");
+    // Leaving forgets it
+    let (st, _) = call(&app, "DELETE", "/v1/presence/post?zone=null-output", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, all) = call(&app, "GET", "/v1/presence/post", None).await;
+    assert_eq!(all, serde_json::json!([]));
+}

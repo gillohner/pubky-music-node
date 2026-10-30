@@ -39,6 +39,9 @@ pub struct Comment {
     pub mine: bool,
     /// What it comments on.
     pub parent: String,
+    /// A song it suggests (its link: the note's `embed`). Read for a thread asked `embeds=1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +62,10 @@ pub struct ThreadQuery {
     #[serde(default)]
     pub skip: u32,
     pub limit: Option<u32>,
+    /// Read each comment's `embed` from its author's homeserver (Nexus doesn't give it): a
+    /// listening post's thread, where a comment may suggest a song.
+    #[serde(default)]
+    pub embeds: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +74,10 @@ pub struct NewComment {
     /// A comment's `post`, to reply to it.
     pub reply_to: Option<String>,
     pub content: String,
+    /// A song the comment suggests (its link), attached as the note's `embed`: "Suggest a song"
+    /// on a listening post.
+    #[serde(default)]
+    pub embed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +183,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(q): Query<Thread
                             at: p.details.indexed_at,
                             replies: p.counts.replies,
                             parent: parent.clone(),
+                            embed: None,
                         })
                         .collect();
                     (list, true)
@@ -197,11 +209,60 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(q): Query<Thread
         }
     }
     comments.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.id.cmp(&a.id)));
+    if q.embeds {
+        read_embeds(&s, &mut comments).await;
+    }
     Ok(Json(Thread {
         parent,
         comments,
         indexed,
     }))
+}
+
+/// Fill each comment's `embed` from its newest version on its author's homeserver (8 at a time,
+/// each cut short: a slow homeserver leaves it out).
+async fn read_embeds(s: &NodeState, comments: &mut [Comment]) {
+    use futures_util::StreamExt;
+    let Ok(h) = s.homeserver() else { return };
+    let wanted: Vec<(String, String, Option<String>)> = comments
+        .iter()
+        .map(|c| (c.author.clone(), c.id.clone(), c.embed.clone()))
+        .collect();
+    let reads = wanted.into_iter().map(|(author, id, known)| {
+        let h = h.clone();
+        async move {
+            if known.is_some() {
+                return known;
+            }
+            let dir = format!("/pub/social/v1/posts/{id}/");
+            let read = async {
+                let path = h
+                    .newest_public_paths(&author, &dir, 1, true)
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .next()?;
+                let path = if path.starts_with('/') {
+                    path
+                } else {
+                    format!("{dir}{}", path.trim_end_matches('/').rsplit('/').next()?)
+                };
+                let bytes = h
+                    .get_bytes(&author, &path, pm_pubky::Visibility::Public, None)
+                    .await
+                    .ok()?;
+                serde_json::from_slice::<PubkySocialPost>(&bytes).ok()?.embed
+            };
+            tokio::time::timeout(Duration::from_secs(3), read)
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+    let found: Vec<Option<String>> = futures_util::stream::iter(reads).buffered(8).collect().await;
+    for (c, e) in comments.iter_mut().zip(found) {
+        c.embed = e;
+    }
 }
 
 /// Writes a public social v1 note with `parent` or `embed` to the signed-in person's homeserver.
@@ -255,8 +316,24 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(c): Json<NewCom
             ))
         }
     };
-    let (key, id, micros, content) =
-        write_note(&sync, &c.content, Some(parent.clone()), None, "A comment").await?;
+    // A suggestion: a song's link
+    let embed = match c.embed.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => {
+            let e = canonical(e)?;
+            pm_model::MusicUri::parse(&e)
+                .map_err(|_| ApiError::bad_request(format!("{e}: not a song's link")))?;
+            Some(e)
+        }
+        None => None,
+    };
+    let (key, id, micros, content) = write_note(
+        &sync,
+        &c.content,
+        Some(parent.clone()),
+        embed.clone(),
+        "A comment",
+    )
+    .await?;
     let comment = Comment {
         post: post_uri(&key, &id),
         id,
@@ -267,6 +344,7 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(c): Json<NewCom
         replies: 0,
         mine: true,
         parent,
+        embed,
     };
     {
         let mut r = recent().lock().expect("recent comments");
