@@ -2314,4 +2314,32 @@ async fn a_comment_is_a_note_with_the_song_as_parent() {
         .is_empty());
     let (_, t) = call(&app, "GET", &q, None).await;
     assert!(t["comments"].as_array().unwrap().is_empty(), "{t}");
+
+    // "Post about this" (B2): a note with the song as its embed and no parent
+    let (st, p) = call(
+        &app,
+        "POST",
+        "/v1/posts",
+        Some(serde_json::json!({"uri": song, "content": "Listen to this"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["embed"], song);
+    let pid = p["id"].as_str().unwrap().to_string();
+    assert_eq!(p["post"], format!("pubky://{raw}/pub/social/v1/posts/{pid}"));
+    let shared = read(format!("/pub/social/v1/posts/{pid}/{pid}.json")).await;
+    assert_eq!(
+        (
+            &shared["kind"],
+            &shared["embed"],
+            &shared["parent"],
+            &shared["content"]
+        ),
+        (
+            &"note".into(),
+            &song.into(),
+            &serde_json::Value::Null,
+            &"Listen to this".into()
+        )
+    );
 }

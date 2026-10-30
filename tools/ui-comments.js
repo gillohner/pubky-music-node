@@ -1,6 +1,7 @@
 // Comments on item pages (TASK-pinakes-social-ux.md B1): a song with a link shows Comments
 // between Tags and About; posting sends the song's link, a reply sends the comment's post, only
-// your own comments have Delete (after a question); a song without a link has no Comments. The
+// your own comments have Delete (after a question); "Post about this" in the ⋯ menu sends the song as
+// the post's embed; a song without a link has neither. The
 // node's /v1/comments is mocked here (pm-api's tests cover it against Nexus and a testnet).
 //   node tools/ui-comments.js <api token> <node URL>
 const assert = require('node:assert/strict');
@@ -38,6 +39,7 @@ const post = (k, id) => `pubky://${k}/pub/social/v1/posts/${id}`;
         if (req.method() === 'DELETE') { sent.push({ delete: u.searchParams.get('post') }); thread = thread.filter((c) => c.post !== u.searchParams.get('post')); return r.fulfill({ json: { deleted: 1 } }); }
         return r.fallback();
       });
+      await page.route(/\/v1\/posts$/, (r) => { const b = r.request().postDataJSON(); sent.push({ share: b }); return r.fulfill({ json: { post: post(ME, '0034P'), id: '0034P', embed: b.uri } }); });
       await page.goto(BASE + '/song/lib-1');
       const sec = page.locator('#icomments');
       await sec.locator('li.comment').first().waitFor();
@@ -70,6 +72,13 @@ const post = (k, id) => `pubky://${k}/pub/social/v1/posts/${id}`;
       await page.locator('.toast', { hasText: 'Comment deleted' }).waitFor();
       assert.deepEqual(sent[2], { delete: post(ME, '0034A') });
       assert.equal(await sec.locator('li.comment', { hasText: 'Mine' }).count(), 0);
+      // "Post about this" (B2), from the ⋯ menu: the song goes as the embed
+      await page.locator('#imore').click();
+      await page.locator('.pop-item', { hasText: 'Post about this' }).click();
+      await page.locator('dialog [data-field]').fill('Listen to this');
+      await page.locator('dialog .choice', { hasText: 'Post' }).click();
+      await page.locator('.toast', { hasText: 'Posted' }).waitFor();
+      assert.deepEqual(sent[3], { share: { uri: SONG, content: 'Listen to this' } });
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       assert.ok(overflow <= 0, `no sideways scroll at ${width} px (${overflow})`);
       // A song without a link has no Comments

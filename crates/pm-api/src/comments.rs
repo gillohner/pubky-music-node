@@ -204,6 +204,40 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(q): Query<Thread
     }))
 }
 
+/// Writes a public social v1 note with `parent` or `embed` to the signed-in person's homeserver.
+/// Answers `(key, id, micros, content)`. `what` names it in the refusals ("A comment").
+async fn write_note(
+    sync: &crate::sync::PubkySync,
+    content: &str,
+    parent: Option<String>,
+    embed: Option<String>,
+    what: &str,
+) -> Result<(String, String, i64, String), ApiError> {
+    let content = pubky_social_specs::frozen_trim(content).to_string();
+    let max = pubky_social_specs::VALIDATION_LIMITS.post_note_content_max_length;
+    if content.is_empty() {
+        return Err(ApiError::bad_request(format!("{what} needs some words")));
+    }
+    if content.chars().count() > max {
+        return Err(ApiError::bad_request(format!(
+            "{what} is at most {max} characters"
+        )));
+    }
+    let key = bare(sync.z32()).to_string();
+    let owner = PubkyId::try_from(key.as_str())
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("your key: {e}")))?;
+    let post = PubkySocialPost::new(content, PubkySocialPostKind::Note, parent, embed, Vec::new());
+    let micros = pm_pubky::ids::now_micros();
+    let id = pm_pubky::v1::id_of(micros);
+    pm_pubky::v1::validate_social(&post, &id, Root::Pub, &owner).map_err(ApiError::bad_request)?;
+    let path = PubkySocialPost::create_path_in(Root::Pub, &id, &id, None);
+    sync.homeserver()
+        .write_object(sync.session(), &path, &post)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("your homeserver: {e}")))?;
+    Ok((key, id, micros, post.content))
+}
+
 /// `POST /v1/comments {uri | reply_to, content}`: a comment on an item, or a reply to a comment,
 /// written as a public social v1 note.
 pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(c): Json<NewComment>) -> ApiResult<Comment> {
@@ -221,40 +255,14 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(c): Json<NewCom
             ))
         }
     };
-    let content = pubky_social_specs::frozen_trim(&c.content).to_string();
-    let max = pubky_social_specs::VALIDATION_LIMITS.post_note_content_max_length;
-    if content.is_empty() {
-        return Err(ApiError::bad_request("A comment needs some words"));
-    }
-    if content.chars().count() > max {
-        return Err(ApiError::bad_request(format!(
-            "A comment is at most {max} characters"
-        )));
-    }
-    let key = bare(sync.z32()).to_string();
-    let owner = PubkyId::try_from(key.as_str())
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("your key: {e}")))?;
-    let post = PubkySocialPost::new(
-        content,
-        PubkySocialPostKind::Note,
-        Some(parent.clone()),
-        None,
-        Vec::new(),
-    );
-    let micros = pm_pubky::ids::now_micros();
-    let id = pm_pubky::v1::id_of(micros);
-    pm_pubky::v1::validate_social(&post, &id, Root::Pub, &owner).map_err(ApiError::bad_request)?;
-    let path = PubkySocialPost::create_path_in(Root::Pub, &id, &id, None);
-    sync.homeserver()
-        .write_object(sync.session(), &path, &post)
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("your homeserver: {e}")))?;
+    let (key, id, micros, content) =
+        write_note(&sync, &c.content, Some(parent.clone()), None, "A comment").await?;
     let comment = Comment {
         post: post_uri(&key, &id),
         id,
         author: key,
         name: None,
-        content: post.content,
+        content,
         at: micros / 1000,
         replies: 0,
         mine: true,
@@ -266,6 +274,36 @@ pub(crate) async fn create(State(s): State<Arc<NodeState>>, Json(c): Json<NewCom
         r.push((Instant::now(), comment.clone()));
     }
     Ok(Json(comment))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewPost {
+    /// The song, album or artist the post is about (its link), attached as the post's `embed`.
+    pub uri: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Posted {
+    /// The post's `pubky://…/pub/social/v1/posts/<id>`.
+    pub post: String,
+    pub id: String,
+    /// What it embeds (the item's canonical link).
+    pub embed: String,
+}
+
+/// `POST /v1/posts {uri, content}` ("Post about this", TASK-pinakes-social-ux.md B2): a public
+/// social v1 note with the item as its `embed`, so any Pubky app shows it with the item's card.
+/// Nothing in it names an app.
+pub(crate) async fn share(State(s): State<Arc<NodeState>>, Json(p): Json<NewPost>) -> ApiResult<Posted> {
+    let sync = signed_in(&s)?;
+    let embed = canonical(&p.uri)?;
+    let (key, id, _, _) = write_note(&sync, &p.content, None, Some(embed.clone()), "A post").await?;
+    Ok(Json(Posted {
+        post: post_uri(&key, &id),
+        id,
+        embed,
+    }))
 }
 
 #[derive(Debug, Serialize)]

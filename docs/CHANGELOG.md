@@ -5,6 +5,8 @@ Newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 - **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
+- **Post about this** (B2): the ⋯ menu on song, album and artist pages writes a public social v1 note with the item as its `embed`, so pubky.app and other Pubky apps show it with the item's card (`POST /v1/posts`).
+- **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
 
 ### 2026-10-30
 

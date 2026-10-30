@@ -333,6 +333,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .post(comments::create)
                 .delete(comments::delete),
         )
+        .route("/posts", post(comments::share))
         // The name before social v1 bookmarks, for one release (docs/api.md, Deprecated)
         .route(
             "/favourites",
@@ -12296,6 +12297,15 @@ exec sleep 300
             "POST",
             "/v1/comments",
             Some(serde_json::json!({"uri": song, "content": "Hi"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        // "Post about this" too (B2)
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/posts",
+            Some(serde_json::json!({"uri": song, "content": "Listen"})),
         )
         .await;
         assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
