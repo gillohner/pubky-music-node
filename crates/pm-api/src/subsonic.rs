@@ -648,7 +648,7 @@ async fn dispatch(
                             loop {
                                 match events.recv().await {
                                     Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
-                                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                                    Ok(pm_zones::ZoneEvent::Error { .. }) | Err(_) => break false,
                                     Ok(_) => {}
                                 }
                             }

@@ -85,6 +85,14 @@ pub(crate) fn local_ids(lib: &Library) -> Vec<i64> {
     local_of(lib, LOCAL_KEY)
 }
 
+/// How many hearts are kept on this node only (songs, albums and artists without an identity).
+pub(crate) fn local_count(lib: &Library) -> u64 {
+    [LOCAL_KEY, LOCAL_ALBUMS, LOCAL_ARTISTS]
+        .iter()
+        .map(|k| local_of(lib, k).len() as u64)
+        .sum()
+}
+
 fn store_of(lib: &Library, key: &str, ids: &[i64]) -> Result<(), ApiError> {
     if ids.is_empty() {
         lib.delete_setting(key)?;

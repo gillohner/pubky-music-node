@@ -321,7 +321,8 @@ Open Sources › TIDAL › Connect TIDAL.
   here are scrobbled; artist pages show similar artists.
 - **Your own apps:** `[tidal]`, `[jamendo]` and `[acoustid]` in `node.toml` always win over the built-in ones
   (Spotify has none: `[spotify]` is your own app). The node also reads `PM_JAMENDO_CLIENT_ID` / `_SECRET` and
-  `PM_ACOUSTID_KEY` itself, and these override node.toml. `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
+  `PM_ACOUSTID_KEY` itself, and these override node.toml; so does `PM_MUSICBRAINZ_URL` (a MusicBrainz mirror, the
+  top-level `musicbrainz_base_url` key in node.toml). `PM_TIDAL_CLIENT_*` and `PM_SPOTIFY_CLIENT_*` work only
   in the Docker image, which writes them into node.toml on first start (or with `PM_REWRITE_CONFIG=1`, which
   rewrites the whole file); setting them on a running install changes nothing. See [STREAMING-PROVIDERS.md](STREAMING-PROVIDERS.md).
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
@@ -420,6 +421,15 @@ folders it cannot find. Type each folder's new place and the tracks keep their m
 and history (`POST /v1/library/folders/move`). Covers taken from the files are read again. The old
 config file is kept as `<data_dir>/node.restored.toml`; from the next start its service keys fill
 whatever this node's own config leaves empty.
+
+**The bundle (node and homeserver):** `deploy/bundle/backup.sh` backs up everything while it runs:
+the backup file above with the sign-ins locked, a snapshot of the library database, the rest of the
+node's data folder, the tunnel settings, the homeserver's PostgreSQL dump and data volume (its key,
+config and users' files), `.env`, the compose files and the definitions of the network-share
+volumes the node mounts (`config/recreate-volumes.sh`). Each run is a folder readable by its owner
+only, the newest `KEEP` (7) kept. `deploy/bundle/restore.sh <folder>` puts it back into an empty
+install and refuses to touch one that has containers or data. Details:
+[guides/backup-and-update.md](guides/backup-and-update.md).
 
 From the command line: `pm-node -c node.toml backup <file>` writes a database snapshot (without
 sign-ins) while the node runs. `pm-node -c node.toml restore <file>`, with the node stopped, takes

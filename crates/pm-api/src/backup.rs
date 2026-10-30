@@ -235,6 +235,14 @@ fn remove_db(path: &Path) {
     }
 }
 
+/// What a backup holds: the library's counts, with the favourites kept on this node only (songs,
+/// albums and artists without an identity live in settings, not in the favourites table).
+fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
+    let mut c = lib.backup_counts()?;
+    c.favourites += crate::favourites::local_count(lib);
+    Ok(c)
+}
+
 /// The backup file's bytes. `passphrase`: lock the sign-ins in; `None` leaves them out.
 pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifest), BackupError> {
     let snap = scratch("backup.db");
@@ -252,7 +260,7 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             .into_iter()
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        (lib.backup_counts()?, folders, secrets)
+        (counts_of(&lib)?, folders, secrets)
     };
     // The snapshot without sign-ins and without what belongs to this node only
     let db = (|| -> Result<Vec<u8>, BackupError> {
@@ -518,7 +526,7 @@ async fn restore_locked(
             }
         }
         lib.drop_missing_art()?;
-        report.restored = lib.backup_counts()?;
+        report.restored = counts_of(&lib)?;
         report.missing_folders = lib
             .list_folders()?
             .into_iter()

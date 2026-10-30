@@ -155,7 +155,7 @@ impl SlimOutput {
             link: Arc::new(Link::default()),
             server_port,
             stream_path,
-            pull: Arc::new(PullOutput::new(&name)),
+            pull: Arc::new(PullOutput::unpaced(&name)),
             caps,
         }
     }
@@ -604,9 +604,8 @@ mod tests {
             .take_stream(std::time::Duration::from_secs(2))
             .await
             .unwrap();
-        let header = live.rx.recv().await.unwrap();
-        assert_eq!(&header[0..4], b"RIFF");
-        let pcm = live.rx.recv().await.unwrap();
+        // PCM only (`stream.pcm` serves it as is)
+        let pcm = live.next_chunk().await.unwrap();
         assert_eq!(pcm, vec![1, 0, 0, 0xff, 0xff, 0xff]);
         writer.join().unwrap();
         let (op, data) = next_frame(&mut player).unwrap();
