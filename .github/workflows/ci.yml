@@ -186,7 +186,7 @@ jobs:
       - run: cargo build -p pm-node
       - run: python3 -I tools/slim-squeezelite.py target/debug/pm-node /tmp/slim
       - if: failure()
-        run: tail -50 /tmp/slim/node.log /tmp/slim/squeezelite.log
+        run: tail -n 50 /tmp/slim/node.log /tmp/slim/squeezelite.log
   plex:
     # The Plex source against a real Plex Media Server: Plex's official Linux build, pinned by
     # version and checksum, unpacked and run without Docker (tools/plex-source.py).
@@ -208,7 +208,7 @@ jobs:
       - run: cargo build -p pm-node
       - run: python3 -I tools/plex-source.py target/debug/pm-node /tmp/pms-root /tmp/plex
       - if: failure()
-        run: tail -50 /tmp/plex/node.log /tmp/plex/pms.log
+        run: tail -n 50 /tmp/plex/node.log /tmp/plex/pms.log
   audiobookshelf:
     # The Audiobookshelf source against a real Audiobookshelf: its server built from a pinned
     # release (tag and commit), run without Docker (tools/abs-source.py).
@@ -236,7 +236,7 @@ jobs:
       # Downloads with the real ffmpeg (the other download tests use a stand-in)
       - run: PM_REAL_FFMPEG=1 cargo test -p pm-api --test downloads real_ffmpeg
       - if: failure()
-        run: tail -50 /tmp/abs/node.log /tmp/abs/abs.log
+        run: tail -n 50 /tmp/abs/node.log /tmp/abs/abs.log
   bundle:
     # deploy/bundle: the node with its own Pubky homeserver (pinned pubky-homeserver image,
     # PostgreSQL, the config wrapper), up with docker compose; tools/bundle-check.py checks the
@@ -311,7 +311,7 @@ jobs:
       - run: cargo build -p pm-node
       - run: python3 -I tools/webdav-source.py target/debug/pm-node /tmp/dav/bin/wsgidav /tmp/webdav
       - if: failure()
-        run: tail -50 /tmp/webdav/node.log /tmp/webdav/dav.log
+        run: tail -n 50 /tmp/webdav/node.log /tmp/webdav/dav.log
   connection:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04
@@ -415,7 +415,7 @@ jobs:
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:7791/v1/info >/dev/null && break; sleep 1; done
           node $GITHUB_WORKSPACE/tools/ui-tidal-login.js http://127.0.0.1:7791 7811
       - if: failure()
-        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true; tail -30 /tmp/tl/node.log || true
+        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true
 
   speed:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
@@ -466,7 +466,7 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-perf.js ci-token http://127.0.0.1:7788 --budget $GITHUB_WORKSPACE/tools/perf-budget.json
       - if: failure()
-        run: tail -50 /tmp/big/node.log
+        run: tail -n 50 /tmp/big/node.log
 
   ui-controls:
     # The controls audit on its own runner: it takes most of half an hour as the app grows.
@@ -509,7 +509,7 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-controls.js ci-token http://127.0.0.1:7788
       - if: failure()
-        run: tail -50 /tmp/pm/node.log
+        run: tail -n 50 /tmp/pm/node.log
   ui-screens:
     # The other browser checks (accessibility, playback, YouTube, overlap, first run), split from
     # ui-controls so neither runs into its time limit.
@@ -584,4 +584,4 @@ jobs:
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:7790/v1/info && break; sleep 1; done
           cd /tmp/pw && PM_MUSIC_DIR=/tmp/fresh/home/Music node $GITHUB_WORKSPACE/tools/ui-first-run.js http://127.0.0.1:7790
       - if: failure()
-        run: tail -50 /tmp/pm/node.log; tail -30 /tmp/fresh/node.log || true
+        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true

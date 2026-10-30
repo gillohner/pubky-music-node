@@ -49,6 +49,14 @@ const post = (k, id) => `pubky://${k}/pub/social/v1/posts/${id}`;
       assert.equal(await sec.locator('li.comment').nth(0).locator('[data-cdel]').count(), 0, 'no Delete on someone else\'s comment');
       assert.equal(await sec.locator('li.comment').nth(1).locator('[data-cdel]').count(), 1, 'Delete on your own');
       assert.match(await sec.locator('li.comment').nth(0).textContent(), /Ann/);
+      // What you type survives the page's renders (review of #152): away and back, it is still there
+      await sec.locator('textarea[aria-label="Add a comment"]').fill('Half a thought');
+      await page.evaluate(() => document.querySelector('[data-view="home"]').click());
+      await page.waitForTimeout(500);
+      await page.goBack();
+      await sec.locator('li.comment').first().waitFor();
+      assert.equal(await sec.locator('textarea[aria-label="Add a comment"]').inputValue(), 'Half a thought', 'the draft is back');
+      assert.equal(await sec.locator('form.comment-form button').first().isDisabled(), false, 'and Post is ready');
       // Post
       await sec.locator('textarea[aria-label="Add a comment"]').fill('Great song');
       await sec.locator('form.comment-form button').first().click();

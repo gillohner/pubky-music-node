@@ -21,11 +21,16 @@ The `session` kind of the earlier drafts is retired: an old one reads as an unkn
 One `listening` post per listening session; each song change, pause or resume is a new version of
 the same post, never a post per song. `embed` is the song playing now.
 
-- `started_at` is when this song started: the position is now − `started_at`, or
+- `started_at` is when the song would have started for the position it is at: the time the
+  version is written minus the position then. The position is now − `started_at`, or
   `paused_at` − `started_at` while paused (`position_ms(now)`).
+- **Pause:** a version with `paused_at` = now; `started_at` stays. **Resume or seek:** a version
+  with `started_at` = now − the position, and no `paused_at`. So everyone listening along stays
+  where the person is, not where the clock would put them.
 - `ended_at` is set when the person stops. `expires_at`, optional, is when a reader stops showing
   it without a newer version, at most 24 hours after `started_at`; a writer keeps it a little past the
-  song's end. Without it a reader stops a day after the newest version (`is_live(now)`).
+  song's end, and past the pause while paused (a paused post is renewed, or written without one).
+  Without it a reader stops 24 hours after `started_at` (`is_live(now)`), which every version moves.
 - **Listen along:** play the same song from your own source at `position_ms(now)` and follow each
   new version. Comments are social posts with `parent` = the listening post; reactions are social
   tags on it. Suggesting a song is a comment that embeds it.
@@ -64,6 +69,7 @@ the social v1 feed. It is not a post: it embeds no music.
 | `feed.content` | `songs`, `albums`, `artists`, `playlists`, `sessions` |
 | `feed.layout` | the social feed's layouts |
 | `feed.rules` | up to 50 `{field, op, value, to?}`: `genre`, `artist`, `album`, `year`, `format`, `tag`, `plays`, `last_played`, `bookmarked`; `is`, `contains`, `between`, `at_least`, `at_most`, `within_days`, `not_within_days` |
+| `feed.rules_match` | `any` when an item meets any of the rules; left out (the default) when it meets all of them |
 | `feed.leave_out` | `artists`, `genres`, `uris` (canonical), `played_within_days` |
 | `feed.limit` | `songs` (1–1000) and/or `minutes` (1–1440) |
 | `feed.seeds` | up to 500 canonical URIs to start from |

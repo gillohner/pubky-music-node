@@ -200,7 +200,9 @@ pub(crate) async fn get(
     let p = read_one(&s, &key, &owner, &id).await?;
     let (order, own_order, items) = crate::play_from::resolve_playlist(&s, &p).await;
     let acc = crate::discover::service_access(&s);
+    let entries = crate::playlists::entries(&s.library.lock().expect("library poisoned"), &p);
     Ok(Json(SharedPlaylist {
+        entries,
         summary: summary(&key, &id, &p),
         play_from: PlaylistPlayFrom {
             order: crate::play_from::play_order_of(order, &acc),
