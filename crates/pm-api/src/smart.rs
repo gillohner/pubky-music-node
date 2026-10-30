@@ -249,10 +249,9 @@ fn check(r: &Rules) -> Result<(), ApiError> {
 }
 
 /// The songs these rules pick right now.
-pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    let marked = crate::bookmarks::collect(&lib)?;
-    let facts = Facts {
+fn facts(lib: &pm_library::Library) -> Result<Facts, ApiError> {
+    let marked = crate::bookmarks::collect(lib)?;
+    Ok(Facts {
         bookmarks: marked.tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect(),
         plays: lib.play_stats()?,
         tags: {
@@ -263,16 +262,36 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
             m
         },
         now: pm_library::db::now_unix(),
-    };
-    let any = r.matches == "any";
+    })
+}
+
+/// Whether `t` meets the rules (`any` or `all` of them) and isn't left out.
+fn keeps(r: &Rules, t: &Track, facts: &Facts) -> bool {
+    let rules_ok = r.rules.is_empty()
+        || if r.matches == "any" {
+            r.rules.iter().any(|rule| matches(rule, t, facts))
+        } else {
+            r.rules.iter().all(|rule| matches(rule, t, facts))
+        };
+    rules_ok && !excluded(&r.exclude, t, facts)
+}
+
+pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
+    evaluate_within(s, r, None)
+}
+
+/// [`evaluate`], keeping only the songs whose canonical URL is in `only` (the ones a network
+/// reach tagged) when it is given.
+fn evaluate_within(
+    s: &NodeState,
+    r: &Rules,
+    only: Option<&HashSet<String>>,
+) -> Result<SmartResult, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let facts = facts(&lib)?;
     let keep = |t: &Track| -> bool {
-        let rules_ok = r.rules.is_empty()
-            || if any {
-                r.rules.iter().any(|rule| matches(rule, t, &facts))
-            } else {
-                r.rules.iter().all(|rule| matches(rule, t, &facts))
-            };
-        rules_ok && !excluded(&r.exclude, t, &facts)
+        only.is_none_or(|o| t.publishable_uri().is_some_and(|u| o.contains(&u.to_url())))
+            && keeps(r, t, &facts)
     };
     let mut picked: Vec<Track> = Vec::new();
     if r.seeds.is_empty() {
@@ -537,9 +556,19 @@ pub(crate) async fn preview(State(s): State<Arc<NodeState>>, Json(r): Json<Rules
     Ok(Json(with_network(&s, &r).await?))
 }
 
-/// The library's songs, and with a network reach what people in it tagged.
+/// The library's songs, and with a network reach what people in it tagged: one query, as the
+/// feed the playlist writes says (tagged by the reach **and** meeting the rules). With tags, the
+/// library's songs are the ones the reach tagged; what the network found meets the rules too:
+/// a song in the library on everything the library knows, another on what it says itself (its
+/// artist), so a rule nothing can check for it leaves it out.
 async fn with_network(s: &Arc<NodeState>, r: &Rules) -> Result<SmartResult, ApiError> {
-    let mut out = if r.rules.is_empty() && r.seeds.is_empty() {
+    let (network, network_note) = match crate::smart_network::network(s, r).await {
+        Ok(items) => (items, None),
+        Err(note) => (Vec::new(), Some(note)),
+    };
+    let tagged: Option<HashSet<String>> =
+        (!r.tags.is_empty()).then(|| network.iter().map(|i| i.uri.clone()).collect());
+    let mut out = if r.rules.is_empty() && r.seeds.is_empty() && tagged.is_none() {
         SmartResult {
             matched: 0,
             tracks: Vec::new(),
@@ -547,13 +576,54 @@ async fn with_network(s: &Arc<NodeState>, r: &Rules) -> Result<SmartResult, ApiE
             network_note: None,
         }
     } else {
-        evaluate(s, r)?
+        evaluate_within(s, r, tagged.as_ref())?
     };
-    match crate::smart_network::network(s, r).await {
-        Ok(items) => out.network = items,
-        Err(note) => out.network_note = Some(note),
+    out.network = network;
+    out.network_note = network_note;
+    if !r.rules.is_empty() || !r.exclude.is_empty() {
+        let lib = s.library.lock().expect("library poisoned");
+        let facts = facts(&lib)?;
+        out.network.retain(|it| {
+            let in_library = pm_model::MusicUri::parse(&it.uri)
+                .ok()
+                .and_then(|u| lib.tracks_by_canonical(&u).ok())
+                .and_then(|ts| ts.into_iter().next());
+            match in_library {
+                Some(t) => keeps(r, &t, &facts),
+                None => network_keeps(r, it),
+            }
+        });
     }
     Ok(out)
+}
+
+/// The rules on a network item the library hasn't got: only what it says itself (its artist)
+/// can be checked; any other rule fails, so it is left out rather than guessed in.
+fn network_keeps(r: &Rules, it: &crate::smart_network::NetworkItem) -> bool {
+    let one = |rule: &Rule| match rule.field.as_str() {
+        "artist" => {
+            let want = text(&rule.value);
+            !want.is_empty()
+                && it
+                    .artist
+                    .as_deref()
+                    .is_some_and(|a| a.to_lowercase().contains(&want))
+        }
+        _ => false,
+    };
+    let rules_ok = r.rules.is_empty()
+        || if r.matches == "any" {
+            r.rules.iter().any(one)
+        } else {
+            r.rules.iter().all(one)
+        };
+    let artist_out = it.artist.as_deref().is_some_and(|a| {
+        r.exclude
+            .artists
+            .iter()
+            .any(|x| a.to_lowercase() == x.trim().to_lowercase())
+    });
+    rules_ok && !artist_out
 }
 
 #[cfg(test)]

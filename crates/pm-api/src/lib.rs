@@ -58,6 +58,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod lastfm;
+pub mod library_edit;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
@@ -252,7 +253,20 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
-        .route("/library/tracks/{id}", get(track))
+        .route(
+            "/library/tracks/{id}",
+            get(track).delete(library_edit::hide_track),
+        )
+        .route(
+            "/library/tracks/{id}/edit",
+            get(library_edit::get_edit)
+                .put(library_edit::edit_track)
+                .delete(library_edit::undo_edit),
+        )
+        .route("/library/albums/{id}/edit", put(library_edit::edit_album))
+        .route("/library/hidden", get(library_edit::hidden))
+        .route("/library/hidden/restore", post(library_edit::restore))
+        .route("/me/music", get(library_edit::my_music))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
         .route("/lyrics", get(lrclib::get))
         .route("/library/tracks/{id}/versions", get(track_versions))
@@ -768,6 +782,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/source/{id}", get(web_ui))
         .route("/sources/{id}", get(web_ui))
         .route("/settings/{tab}", get(web_ui))
+        .route("/library/{tab}", get(web_ui))
         .route("/home/{section}", get(web_ui))
         .route("/tag/{labels}", get(web_ui))
         .route("/discover", get(web_ui))
@@ -944,7 +959,8 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 14] = [
+const WEB_VIEWS: [&str; 15] = [
+    "library",
     "add-music",
     "downloads",
     "favourites",
@@ -1647,6 +1663,10 @@ async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // A listen-along group ends as when its host ends it: the music goes back, not lost
+    if presence::delete_group(&s, &id).await? {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let zone = zone_of(&s, &id)?;
     zone.stop();
     s.remove_zone(zone.id());
@@ -7353,7 +7373,12 @@ mod tests {
         assert_eq!(pubky["hits"][0]["tagged"], "#chill");
         let ans = lines(app.clone(), "/v1/search?q=%23chill%20%2390s".into()).await;
         let srcs: Vec<&str> = ans.iter().filter_map(|a| a["source"].as_str()).collect();
-        assert!(srcs.iter().all(|x| *x == "library" || *x == "pubky"), "{srcs:?}");
+        // tags only: the library, Pubky's cards and posts carrying the tag
+        assert!(
+            srcs.iter()
+                .all(|x| *x == "library" || *x == "pubky" || *x == "posts"),
+            "{srcs:?}"
+        );
         let pubky = ans.iter().find(|a| a["source"] == "pubky").unwrap();
         assert_eq!(pubky["hits"][0]["title"], "Both Tags", "{pubky}");
         let ans = lines(app.clone(), "/v1/search?q=%23chill".into()).await;
@@ -7791,7 +7816,13 @@ mod tests {
         };
         let lines = ask(app.clone()).await;
         let order: Vec<&str> = lines.iter().map(|a| a.source.as_str()).collect();
-        assert_eq!(order.len(), 3, "{order:?}");
+        // people and posts (Nexus) answer too; the three this test watches are the rest
+        let core: Vec<&str> = order
+            .iter()
+            .copied()
+            .filter(|s| *s != "people" && *s != "posts")
+            .collect();
+        assert_eq!(core.len(), 3, "{order:?}");
         assert_eq!(order[0], "library", "the library answers first: {order:?}");
         let lib = &lines[0];
         assert_eq!(lib.status, "ok");
@@ -12708,7 +12739,7 @@ exec sleep 300
 
     /// Smart playlists with tags from the network (TASK-pinakes-social-ux.md E2): `reach` other than
     /// `me` asks Pinakes' generic search for music tagged with the tags in that reach, and Nexus by
-    /// URI for who tagged it (five named, the rest counted, labels in the request's order). Items
+    /// URI for who tagged it (five named, the rest counted, labels in canonical (sorted) order). Items
     /// that play here come first; the answer is cached; a personal reach needs a Pubky sign-in; a
     /// plain smart playlist is unchanged.
     #[tokio::test]
@@ -12742,7 +12773,8 @@ exec sleep 300
                         let taggers: Vec<String> = (0..7).map(|i| if i == 0 { a.to_string() } else { format!("tagger{i}") }).collect();
                         Json(serde_json::json!({"resource": {"id": "r", "uri": q["uri"]}, "tags": [
                             {"label": "house", "taggers": [a], "taggers_count": 1, "relationship": false},
-                            {"label": "techno", "taggers": taggers, "taggers_count": 7, "relationship": false},
+                            // Nexus lists some of the taggers; the label says how many there are
+                            {"label": "techno", "taggers": taggers, "taggers_count": 9, "relationship": false},
                             {"label": "other", "taggers": ["x"], "taggers_count": 1, "relationship": false}
                         ]}))
                     }),
@@ -12780,7 +12812,10 @@ exec sleep 300
         assert_eq!(tidal["site"], "tidal.com");
         let by = &tidal["tagged_by"];
         assert_eq!(by.as_array().unwrap().len(), 5);
-        assert_eq!(tidal["taggers_count"], 7);
+        assert_eq!(
+            tidal["taggers_count"], 9,
+            "the label's count, not the listed taggers"
+        );
         assert_eq!(
             by[0],
             serde_json::json!({"key": a, "name": "Ann", "labels": ["house", "techno"]})
@@ -12790,6 +12825,20 @@ exec sleep 300
         // The same answer again comes from the cache
         call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
         assert_eq!(searches.lock().unwrap().len(), 1);
+        // One query, as the feed says (review of #159): with a rule, what the network found meets
+        // it too; a card nothing can check it on (no genre known) is left out
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(
+                serde_json::json!({"reach": "all", "tags": ["Techno", "house"], "network_limit": 5,
+                                    "rules": [{"field": "genre", "value": "techno"}]}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r.get("network").is_none(), "{r}");
         // People you follow need a Pubky sign-in: said in plain words, not an error
         let (st, r) = call(
             &app,
@@ -13617,6 +13666,166 @@ exec sleep 300
         assert_eq!(z["queue"].as_array().unwrap().len(), 1);
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
+    }
+
+    /// Search groups (TASK-pinakes-social-ux A1/A2): own playlists, people and posts from Nexus,
+    /// `tag:` as `#`, the `tags` parameter, and a library file's format and quality on its row.
+    #[tokio::test]
+    async fn search_lists_playlists_people_posts_and_formats() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let key = "k".repeat(52);
+        let who = key.clone();
+        let mock = Router::new()
+            .route("/v1/search", get(|| async { Json(serde_json::json!({"items": []})) }))
+            .route(
+                "/nexus/v0/stream/users/username",
+                get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let who = who.clone();
+                    async move {
+                        let items = if q.get("username").map(String::as_str) == Some("sat") {
+                            serde_json::json!([{"details": {"id": who, "name": "Sat", "bio": "plays bass"}}])
+                        } else {
+                            serde_json::json!([])
+                        };
+                        Json(items)
+                    }
+                }),
+            )
+            .route(
+                "/nexus/v0/search/posts/by_content",
+                get(|| async { Json(serde_json::json!([{"post_key": "author1:0033", "score": 1.0}])) }),
+            )
+            .route(
+                "/nexus/v0/search/posts/by_tag/{t}",
+                get(|| async { Json(serde_json::json!([{"post_key": "author1:0033", "score": 1}])) }),
+            )
+            .route(
+                "/nexus/v0/stream/posts/by_ids",
+                post(|| async {
+                    Json(serde_json::json!([{"details": {"id": "0033", "author": "author1", "content": "Great music tonight\nand more", "uri": "pubky://author1/pub/pubky.app/posts/0033", "kind": "short"}}]))
+                }),
+            )
+            .route(
+                "/nexus/v0/stream/users/by_ids",
+                post(|| async { Json(serde_json::json!([{"details": {"id": "author1", "name": "Author One"}}])) }),
+            )
+            .route(
+                "/nexus/v0/search/tags/by_prefix/{p}",
+                get(|| async { Json(serde_json::json!([])) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let tr = untagged_track(dir.path().join("s.flac"), "Saturday Song", "Someone");
+            lib.upsert_track(&tr).unwrap().0
+        };
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "Saturday chill", "track_ids": [tid]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let lines = |app: Router, uri: String| async move {
+            let resp = app
+                .oneshot(
+                    axum::http::Request::get(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let sources = resp
+                .headers()
+                .get("x-pm-sources")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let answers = String::from_utf8_lossy(&body)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v.get("source").is_some())
+                .collect::<Vec<_>>();
+            (sources, answers)
+        };
+        let (sources, ans) = lines(app.clone(), "/v1/search?q=sat".into()).await;
+        assert!(
+            sources.contains("people") && sources.contains("posts"),
+            "{sources}"
+        );
+        let lib = ans
+            .iter()
+            .find(|a| a["source"] == "library")
+            .expect("library answered");
+        let hits = lib["hits"].as_array().unwrap();
+        let pl = hits
+            .iter()
+            .find(|h| h["kind"] == "playlist")
+            .expect("the playlist is a result");
+        assert_eq!(pl["title"], "Saturday chill", "{pl}");
+        let song = hits
+            .iter()
+            .find(|h| h["kind"] == "song")
+            .expect("the song is a result");
+        assert!(song["format"].as_str().is_some_and(|f| !f.is_empty()), "{song}");
+        assert!(
+            ["hi_res", "lossless", "lossy"].contains(&song["quality"].as_str().unwrap_or("")),
+            "{song}"
+        );
+        let people = ans
+            .iter()
+            .find(|a| a["source"] == "people")
+            .expect("people answered");
+        assert_eq!(people["status"], "ok", "{people}");
+        assert_eq!(people["hits"][0]["kind"], "person");
+        assert_eq!(people["hits"][0]["title"], "Sat");
+        assert_eq!(people["hits"][0]["id"], key);
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(posts["status"], "ok", "{posts}");
+        assert_eq!(posts["hits"][0]["kind"], "post");
+        assert_eq!(posts["hits"][0]["title"], "Great music tonight");
+        assert_eq!(posts["hits"][0]["subtitle"], "Author One");
+        assert_eq!(posts["hits"][0]["page"], "https://pubky.app/post/author1/0033");
+        // `tag:` is `#`: tags only, posts carrying the tag included (a tag no other test searches:
+        // answers are cached per process)
+        let (sources, _) = lines(app.clone(), "/v1/search?q=tag%3Alofi".into()).await;
+        assert_eq!(sources, "library,pubky,posts");
+        let (sources2, ans) = lines(app.clone(), "/v1/search?tags=lofi".into()).await;
+        assert_eq!(sources2, sources);
+        // the tag reaches the posts search (Nexus's by_tag answers the post)
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(posts["status"], "ok", "{posts}");
+        assert_eq!(posts["hits"][0]["title"], "Great music tonight");
+        // One letter is no search for Nexus: people and posts answer with nothing, not an error
+        let (_, ans) = lines(app.clone(), "/v1/search?q=a".into()).await;
+        for src in ["people", "posts"] {
+            let a = ans.iter().find(|a| a["source"] == src).expect("answered");
+            assert_eq!(a["status"], "ok", "{a}");
+            assert_eq!(a["hits"].as_array().map(Vec::len), Some(0), "{a}");
+        }
+        assert_eq!(search::hash_tags("rock tag:chill #90s"), vec!["chill", "90s"]);
+        assert_eq!(search::text_words("rock tag:chill #90s"), "rock");
+        let (sources, _) = lines(app.clone(), "/v1/search?q=sat&in=library".into()).await;
+        assert_eq!(sources, "library");
     }
 
     /// Every view the page navigates to by path (NAV_VIEWS in app.js) is served on a reload or a

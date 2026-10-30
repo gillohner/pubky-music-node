@@ -131,6 +131,32 @@ impl Library {
         Ok(())
     }
 
+    /// Record a successful push of `pushed` (as it was read for the push), only if the post is
+    /// still that: a change made while the push ran (a move to the other folder, an edit, a
+    /// delete) stays unsynced for the next pass. A pushed tombstone is purged. `true` when marked.
+    pub fn mark_music_post_synced_if_unchanged(&self, pushed: &MusicPostRow, at_micros: i64) -> Result<bool> {
+        let conn = self.lock();
+        let n = if pushed.deleted {
+            conn.execute(
+                "DELETE FROM music_posts WHERE id = ?1 AND deleted = 1 AND updated_at = ?2",
+                params![pushed.id, pushed.updated_at],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE music_posts SET synced_at = ?2
+                 WHERE id = ?1 AND deleted = 0 AND updated_at = ?3 AND visibility = ?4 AND json = ?5",
+                params![
+                    pushed.id,
+                    at_micros,
+                    pushed.updated_at,
+                    pushed.visibility,
+                    pushed.json
+                ],
+            )?
+        };
+        Ok(n > 0)
+    }
+
     /// Record a successful push; a tombstone is purged.
     pub fn mark_music_post_synced(&self, id: &str, at_micros: i64) -> Result<()> {
         let conn = self.lock();
@@ -193,6 +219,21 @@ impl Library {
             "UPDATE music_posts SET visibility = ?2, synced_at = NULL
              WHERE kind = ?1 AND deleted = 0 AND visibility != ?2",
             params![kind, visibility],
+        )?)
+    }
+
+    /// Tombstone the live posts of one kind **written** at or before `max_id` (a timestamp id:
+    /// those sort by time), e.g. the listens a history delete on another node covers. Returns
+    /// how many.
+    pub fn delete_music_posts_of_kind_up_to(
+        &self,
+        kind: &str,
+        max_id: &str,
+        now_micros: i64,
+    ) -> Result<usize> {
+        Ok(self.lock().execute(
+            "UPDATE music_posts SET deleted = 1, updated_at = ?3 WHERE kind = ?1 AND deleted = 0 AND id <= ?2",
+            params![kind, max_id, now_micros],
         )?)
     }
 
@@ -291,7 +332,24 @@ mod tests {
         assert_eq!(lib.set_music_posts_visibility(kind, "public").unwrap(), 0);
         assert_eq!(lib.music_post_counts(kind).unwrap(), (0, 4));
         assert_eq!(lib.unsynced_music_posts().unwrap().len(), 4, "queued to move");
-        assert_eq!(lib.delete_music_posts_of_kind(kind, 99).unwrap(), 4);
+        // A push that read "c" before the move doesn't mark the moved one synced
+        let before_move = MusicPostRow {
+            visibility: "private".into(),
+            ..lib.get_music_post("c").unwrap().unwrap()
+        };
+        assert!(!lib.mark_music_post_synced_if_unchanged(&before_move, 50).unwrap());
+        assert_eq!(
+            lib.get_music_post("c").unwrap().unwrap().synced_at,
+            None,
+            "still to push"
+        );
+        let now = lib.get_music_post("c").unwrap().unwrap();
+        assert!(lib.mark_music_post_synced_if_unchanged(&now, 50).unwrap());
+        assert_eq!(lib.unsynced_music_posts().unwrap().len(), 3);
+        // A delete on another node: the posts written up to then go
+        assert_eq!(lib.delete_music_posts_of_kind_up_to(kind, "b", 60).unwrap(), 2);
+        assert_eq!(ids(lib.music_posts_page(kind, None, 10).unwrap()), ["d", "c"]);
+        assert_eq!(lib.delete_music_posts_of_kind(kind, 99).unwrap(), 2);
         assert!(lib.music_posts_page(kind, None, 10).unwrap().is_empty());
         assert!(lib.get_music_post("r").unwrap().is_some(), "other kinds stay");
     }
