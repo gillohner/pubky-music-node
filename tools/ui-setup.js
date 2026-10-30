@@ -149,7 +149,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await c.close();
 
     // ---- Every sidebar place on tablets and phones (TASK-tablet-nav) ----
-    // Desktop's sidebar destinations, each reached within two taps (the rail or tabs, else the
+    // Desktop's sidebar destinations online (Downloads is the offline app's), each reached within two taps (the rail or tabs, else the
     // Library chips; Queue through Now playing and Settings through the account button on phones),
     // plus search and volume
     {
@@ -164,7 +164,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         if (await shown('[data-bnav="library"]')) { await p.click('[data-bnav="library"]'); if (await visible(p, `[data-libnav="${d}"]`, 5000)) { await p.click(`[data-libnav="${d}"]`); return 2; } }
         return 0;
       };
-      for (const [w, h, layout] of [[768, 1024], [1024, 768], [834, 1194], [1194, 834], [1024, 1366], [1366, 1024], [820, 1180], [1180, 820], [1345, 900, 'comfortable'], [390, 844]]) {
+      for (const [w, h, layout] of [[768, 1024], [1024, 768], [834, 1194], [1194, 834], [1024, 1366], [1366, 1024], [820, 1180], [1180, 820], [1080, 800], [1345, 900, 'comfortable'], [390, 844]]) {
         c = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1100 });
         await c.addInitScript(([t, l]) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); if (l) localStorage.setItem('pm.layout', l); }, [TOKEN, layout || '']);
         p = await c.newPage();
@@ -183,7 +183,17 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         if (!vol && await shown('#volbtn')) { await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         check(vol, `${w}×${h}: volume (${(await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel'})`);
-        if (shell === 'tablet') check(await p.evaluate(() => { const r = document.querySelector('#bottomnav'); return r.scrollHeight <= r.clientHeight + 1 || getComputedStyle(r).overflowY === 'auto'; }), `${w}×${h}: the rail fits or scrolls`);
+        if (shell === 'tablet') {
+          const foot = p.locator('[data-bnav="settings"]'); await foot.scrollIntoViewIfNeeded().catch(() => {});
+          const box = await foot.boundingBox();
+          check(!!box && box.y >= 0 && box.y + box.height <= h, `${w}×${h}: the rail's foot (Settings) is on screen, scrolled to if need be`);
+        }
+        if (w === 834) {
+          await p.goto(BASE + '/'); await p.waitForSelector('[data-bnav="sources"]');
+          await p.click('[data-bnav="sources"]'); await p.waitForTimeout(500); await p.click('[data-bnav="home"]'); await p.waitForTimeout(500); await p.click('[data-bnav="library"]'); await p.waitForTimeout(800);
+          check(new URL(p.url()).pathname !== '/sources' && await p.$eval('[data-bnav="library"]', (b) => b.classList.contains('on')) && !(await p.$eval('[data-bnav="sources"]', (b) => b.classList.contains('on'))), `${w}×${h}: after Sources, Library opens the library, marked`);
+        }
+        if (w === 1080) check(await shown('#volbtn') && !(await shown('#vol')), `${w}×${h}: a narrow desktop has the volume button`);
         if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-rail-${w}x${h}.png` }); }
         await c.close();
       }

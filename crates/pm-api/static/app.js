@@ -1528,9 +1528,18 @@
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
+  // The tabs (phone) and the rail (tablet) mark the current place; again when the shell changes
+  const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
+  const markTabs = (v = state.view) => {
+    // The tablet rail has Sources of its own; on phones it is a Library section
+    const srcView = v === 'sources' || v === 'source-item'; const railSources = shellMode() === 'tablet';
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) && !(srcView && railSources) : k === 'sources' ? srcView && railSources : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  };
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
+    const changed = document.documentElement.dataset.shell !== now;
     document.documentElement.dataset.shell = now;
+    if (changed && state.view) markTabs();
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
@@ -1812,7 +1821,8 @@
   // Zone and device, the source, the signal path, this zone's DSP with quick switches, volume.
   const qPanel = $('#qpanel');
   let qPanelKey = null;
-  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $('#quality').focus(); if (fromBack !== true) popTransient(); };
+  let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
   const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
@@ -1897,7 +1907,11 @@
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
   };
   // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
-  $('#volbtn').onclick = () => { if (qPanel.hidden) $('#quality').click(); const v = $('#qpvol', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); } };
+  $('#volbtn').onclick = () => {
+    if (!qPanel.hidden) { closeQPanel(); return; }
+    $('#quality').click(); qOpener = '#volbtn'; $('#volbtn').setAttribute('aria-expanded', 'true');
+    const v = $('#qpvol', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
+  };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -2456,12 +2470,9 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Sources, Queue, Zones, Downloads, Settings
-    const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
-    if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
-    // The tablet rail has Sources of its own; on phones it is a Library section
-    const srcView = v === 'sources' || v === 'source-item'; const railSources = shellMode() === 'tablet';
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) && !(srcView && railSources) : k === 'sources' ? srcView : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // Sources has a rail button of its own on tablets: the Library button doesn't open it there
+    if (LIB_TOP.some(([k]) => k === v) && !(v === 'sources' && shellMode() === 'tablet')) state.lastLib = v;
+    markTabs(v);
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
@@ -3549,9 +3560,9 @@
   // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
   const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
-    if (!LIB_TOP.some(([k]) => k === state.view) && state.view !== 'downloads') return '';
+    if (!LIB_TOP.some(([k]) => k === state.view)) return '';
     const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
-    const items = [...LIB_TOP, ...(isOffline() ? [['downloads', 'Downloads']] : [])].filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
+    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
     return `<nav class="libnav chips" aria-label="Library">${items.map(([k, l]) => `<button class="chip ${k === state.view ? 'on' : ''}" data-libnav="${k}" ${k === state.view ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
   };
   const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;

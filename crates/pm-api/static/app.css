@@ -1198,7 +1198,7 @@ html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inse
 /* A listener (#46) plays the shared library; the owner's favourites, playlists, tags and settings aren't theirs */
 body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
-body.listener .bnav[data-bnav="home"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
+body.listener .bnav[data-bnav="home"], body.listener .bnav[data-bnav="sources"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
 body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
 body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
@@ -1275,7 +1275,7 @@ body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
 .dl-note { margin-top: 4px; }
-body.offline [data-bnav="home"] { display: none; }
+body.offline [data-bnav="home"], body.offline [data-bnav="sources"] { display: none; }
 body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 /* The source line on item pages (STEWARD-UX-PLAYER-SOURCES §1): small, one line, no pills */
 .srcline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
