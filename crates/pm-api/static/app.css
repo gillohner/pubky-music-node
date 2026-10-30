@@ -713,6 +713,15 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .input.filter { width: 200px; max-width: 100%; }
 .hbody { min-height: 48px; }
 .blurb { max-width: 72ch; line-height: 1.6; color: var(--fg-2); margin: 0 0 12px; }
+/* About under the header (F6): a few lines of the article, then More; the credits small */
+.blurb.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; }
+#iblurbmore { display: inline-block; margin-bottom: 8px; }
+.credit { margin: 4px 0 12px; }
+.credit a { color: inherit; text-decoration: underline; }
+/* "Also on" next to Play/Shuffle: one icon per service */
+.also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
+.also-icons .also-ico { width: 36px; height: 36px; }
+.also-icons .src-badge.ico { width: 24px; height: 24px; margin: 0; box-shadow: none; }
 .btn.icon-only { padding-left: 10px; padding-right: 10px; }
 .idfile { min-width: 0; }
 .eq-row .eq-kind { text-transform: capitalize; }
