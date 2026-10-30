@@ -35,7 +35,7 @@ pub use db::{
     AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentityCounts,
     PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
-pub use db::{Library, LibraryStats};
+pub use db::{AlbumEdit, Library, LibraryStats, TrackOverride};
 pub use error::{LibraryError, Result};
 pub use import::{ImportFormat, ImportedList, ImportedTrack};
 pub use lyrics::LyricLine;
