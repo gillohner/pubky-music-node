@@ -870,7 +870,7 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 14] = [
+const WEB_VIEWS: [&str; 15] = [
     "library",
     "add-music",
     "downloads",
