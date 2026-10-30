@@ -123,6 +123,36 @@
           "x": 1
         }
       }
+    },
+    {
+      "about": "rules of which any will do",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "random",
+          "content": "songs",
+          "layout": "list",
+          "rules": [
+            {
+              "field": "genre",
+              "op": "contains",
+              "value": "techno"
+            },
+            {
+              "field": "tag",
+              "op": "is",
+              "value": "chill"
+            }
+          ],
+          "rules_match": "any",
+          "tags": [
+            "night"
+          ],
+          "match": "any"
+        },
+        "name": "Techno or chill",
+        "created_at": 1792540800000000
+      }
     }
   ],
   "reader_only": [
@@ -185,6 +215,31 @@
           "layout": "list"
         },
         "name": "Late techno",
+        "created_at": 1792540800000000
+      }
+    },
+    {
+      "about": "rules matched in a way this version doesn't know",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "random",
+          "content": "songs",
+          "layout": "list",
+          "rules": [
+            {
+              "field": "genre",
+              "op": "contains",
+              "value": "techno"
+            }
+          ],
+          "rules_match": "most",
+          "tags": [
+            "night"
+          ],
+          "match": "any"
+        },
+        "name": "Odd",
         "created_at": 1792540800000000
       }
     }
@@ -378,6 +433,42 @@
         "icon": "Disc"
       },
       "error": "icon"
+    },
+    {
+      "about": "a seed is a private path (a feed may be published as the same bytes)",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "seeds": [
+            "pubky://o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy/priv/music/v1/posts/0034ABCDEFGHJ"
+          ]
+        },
+        "name": "Seeds",
+        "created_at": 1792540800000000
+      },
+      "error": "seeds"
+    },
+    {
+      "about": "a left-out URI is someone's private path",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "leave_out": {
+            "uris": [
+              "pubky://pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy/priv/social/v1/posts/0034ABCDEFGHJ"
+            ]
+          }
+        },
+        "name": "Seeds",
+        "created_at": 1792540800000000
+      },
+      "error": "left-out URIs"
     }
   ],
   "canonical": [

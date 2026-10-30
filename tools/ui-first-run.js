@@ -68,7 +68,9 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
   await waitFor(p, () => location.pathname.startsWith('/settings') && document.querySelector('#pkurl') && document.querySelector('#pkurl').textContent.trim().length > 0, null, 20000).catch(() => null);
   check(new URL(p.url()).pathname.startsWith('/settings'), 'sign-in goes to Settings');
   check(!!(await p.evaluate(() => { const u = document.querySelector('#pkurl'); return u && /Pubky Ring/.test(u.textContent); })), 'the Pubky Ring sign-in (QR and link) is open');
-  check(new URL(p.url()).pathname === '/settings/accounts' && /Music folders/.test(await p.textContent('#set-library')), 'sign-in opens the Accounts tab; the Library tab has the music folders');
+  check(new URL(p.url()).pathname === '/settings/accounts', 'sign-in opens the Accounts tab');
+  await p.goto(BASE + '/library/node'); await p.waitForSelector('#folderadd', { timeout: 15000 }).catch(() => null);
+  check(/Music folders/.test(await p.textContent('#main')), 'Your library › Node library has the music folders');
 
   // Contact: saved from the card; Pubky's sections come back, and with that the card is done
   await p.goto(BASE + '/');

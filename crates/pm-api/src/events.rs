@@ -177,6 +177,8 @@ fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
             may_use_zone(s, c, &zone.0).then(|| ev.clone())
         }
         ApiEvent::LibraryChanged => Some(ev.clone()),
+        // The owner's post on the owner's homeserver
+        ApiEvent::ListeningStopped { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
     }
 }
 

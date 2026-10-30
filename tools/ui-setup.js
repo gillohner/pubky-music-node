@@ -2,7 +2,11 @@
 //   * Home's Get started shows the steps the node names (no music step: the config has a folder),
 //     goes when hidden, stays hidden in a new browser (kept on the node), comes back from
 //     Settings › Home for everyone, and goes by itself when only optional steps are left;
-//   * Library folders marks the config's folder and offers no Remove for it;
+//   * Your library › Node library marks the config's folder and offers no Remove for it;
+//   * Your library: My music lists homeserver files as songs (names, not hashes) with the save
+//     status and Save now, edits a song's tags on the node, deletes a file; Add music offers
+//     upload, a folder or share, and playlists; Node library takes a song out and brings it back;
+//     a listener gets My music only, with no edit controls; Settings has no library or import tab;
 //   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite, the
 //     app's players on a DAC), by
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
@@ -22,6 +26,8 @@
 //     (and a link to all of it) and volume;
 //   * pressing play answers at once: the pressed button spins and the bar says "Starting on
 //     <device>…" until it plays, or shows the zone's error; Move to says "Moving to …" too.
+//   * search: results grouped (songs, albums, playlists, people, posts…), facet chips that narrow
+//     them, `tag:` like `#`, and the keyboard: ↑/↓ walk the results, Enter opens.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -83,10 +89,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.unroute(/\/v1\/me\/first-steps$/);
     await c.close();
 
-    // ---- Library folders ----
+    // ---- Your library › Node library: folders ----
     c = await ctx(); p = await c.newPage();
     const ns = await api('GET', '/node/settings');
-    await p.goto(BASE + '/settings/library');
+    await p.goto(BASE + '/library/node');
     await p.waitForSelector('#folderadd');
     const rows = await p.$$eval('#main code.path', (els) => els.map((e) => { const r = e.closest('.set-row'); return { path: e.textContent, text: r.textContent, remove: !!r.querySelector('[data-folder-del]') }; }));
     for (const f of ns.config_folders) {
@@ -363,6 +369,151 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
+    // ---- Your library ----
+    c = await ctx(); p = await c.newPage();
+    const choose = async (label) => { await p.waitForSelector('dialog[open] .choice'); await p.locator('dialog[open] .choice', { hasText: label }).first().click(); };
+    // The owner: three tabs; without a Pubky session (CI's node) My music says to sign in
+    await p.goto(BASE + '/library'); await p.waitForSelector('#libadd');
+    const libTabs = await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(libTabs) === '["My music","Node library","Import"]', `the owner's tabs (${libTabs.join(', ')})`);
+    check(/Sign in with Pubky/.test(await p.textContent('#main')), 'without a Pubky session My music asks to sign in');
+    check(await p.locator('.nav-item[data-view="library"]').count() === 1, 'Your library is in the main navigation');
+    await p.goto(BASE + '/settings'); await p.waitForSelector('#main .set-group', { state: 'attached' });
+    const setNav = await p.textContent('#main');
+    check(!/Library folders/.test(setNav) && !/Move from Roon/.test(setNav), 'Settings keeps settings: no library folders, no import');
+    // My music with a session (mocked): songs by name, the save status, Save now, the ⋯ menu
+    const libTracks = (await api('GET', '/library/tracks?limit=5')).tracks;
+    const lt0 = libTracks[0];
+    await p.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'k'.repeat(52), sync: null, needs_resign: false } }));
+    await p.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'bundled', quota_mb: 1000, used_bytes: 8300000 }, saving: { state: 'saved', pending: 0, last_saved_at: Math.floor(Date.now() / 1000) - 120 } } }));
+    const HASHED = '0123456789abcdef-one.flac';
+    await p.route(/\/v1\/me\/music$/, (r) => r.fulfill({ json: { count: 2, bytes: 8300100, files: [
+      { path: `/priv/pubky.music/files/${HASHED}`, name: 'one.flac', size: 8300000, song: { id: lt0.id, title: lt0.title, artist: 'The Band', duration_ms: 5000, edited: false } },
+      { path: '/priv/pubky.music/files/fedcba9876543210-new.flac', name: 'new.flac', size: 100 },
+    ] } }));
+    let deleted = null;
+    await p.route(/\/v1\/pubky\/files$/, (r) => { if (r.request().method() !== 'DELETE') return r.continue(); deleted = r.request().postDataJSON(); return r.fulfill({ json: [] }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main .mrow');
+    const mineText = await p.textContent('#main');
+    check(mineText.includes(lt0.title) && !mineText.includes(HASHED), 'a homeserver file shows as its song, not its hashed name');
+    check(/Being added/.test(mineText) && mineText.includes('new.flac'), 'a file the library hasn’t read yet shows by its own name');
+    check(/Saved · 2 min ago/.test(await p.textContent('#libsaved')) && (await p.textContent('#sync')).trim() === 'Save now', 'the save status in a few words, with Save now');
+    await p.click('#main [data-mmore]');
+    const mItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(['Edit tags…', 'Download', 'Delete from my homeserver'].every((x) => mItems.includes(x)), `a song’s ⋯: edit, download, delete (${mItems.join(', ')})`);
+    // Edit tags: on the node, the file untouched; then back to the file's tags
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Edit tags…' }).click();
+    await p.waitForSelector('dialog[open] [data-k="title"]');
+    check(await p.inputValue('dialog[open] [data-k="title"]') === '' && await p.getAttribute('dialog[open] [data-k="title"]', 'placeholder') === lt0.title, 'the edit dialog shows what the file says (an empty field keeps it)');
+    await p.fill('dialog[open] [data-k="title"]', 'Edited by ui-setup'); await p.click('dialog[open] [data-save]');
+    await p.waitForTimeout(600);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === 'Edited by ui-setup', 'Save edits the song on the node');
+    const ed = await api('GET', `/library/tracks/${lt0.id}/edit`);
+    check(ed.edit && ed.edit.title === 'Edited by ui-setup' && !ed.edit.artist && !ed.edit.album, `only the changed field is pinned (${JSON.stringify(ed.edit)})`);
+    await api('DELETE', `/library/tracks/${lt0.id}/edit`);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === lt0.title, 'and it goes back to the file’s tags');
+    // Delete a file from the homeserver, after asking
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-mdel]');
+    await p.click('#main [data-mdel]'); await choose('Delete'); await p.waitForTimeout(400);
+    check(deleted && JSON.stringify(deleted.paths) === JSON.stringify(['/priv/pubky.music/files/fedcba9876543210-new.flac']), `Delete removes that file from the homeserver (${JSON.stringify(deleted)})`);
+    // Add music: three ways in; Upload opens the drop zone, Import its tab, a folder is checked
+    await p.click('#libadd');
+    await p.waitForSelector('dialog[open] .choice');
+    const ways = await p.$$eval('dialog[open] .choice .choice-label', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(ways) === '["Upload files","Add a folder or network share","Import playlists"]', `Add music: ${ways.join(', ')}`);
+    await choose('Upload files');
+    check(await visible(p, '#libupload #updrop'), 'Upload files opens the drop zone');
+    await p.click('#libadd'); await choose('Add a folder or network share'); await choose('A folder on the node');
+    await p.waitForSelector('dialog[open] [data-field]'); await p.fill('dialog[open] [data-field]', '/no/such/folder/ui-setup'); await choose('Add folder');
+    check(await visible(p, '.toast.error'), 'a folder that isn’t there is refused before it is saved');
+    await p.click('#libadd'); await choose('Import playlists');
+    check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import playlists opens Your library › Import (playlist files, Move from Roon)');
+    await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music$/); await p.unroute(/\/v1\/pubky\/files$/);
+    // Node library: a song taken out from its ⋯ menu, then brought back
+    const before = (await api('GET', '/library/tracks?limit=50')).tracks.length;
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
+    await choose('Remove'); await p.waitForTimeout(600);
+    check((await api('GET', '/library/tracks?limit=50')).tracks.length === before - 1, 'Remove from library takes the song out');
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#main [data-unhide]');
+    check(/Taken out of the library/.test(await p.textContent('#main')), 'Node library lists it as taken out');
+    await p.click('#main [data-unhide]');
+    const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
+    check(backN === before, `Bring back returns it (${backN} of ${before})`);
+    await c.close();
+    // A listener: My music only, no edit controls
+    c = await ctx(); p = await c.newPage();
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
+    check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    const lItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(lItems.includes('Play next') && !lItems.includes('Edit tags…') && !lItems.includes('Remove from library'), `no edit controls for a listener (${lItems.join(', ')})`);
+    await c.close();
+    // ---- Search: groups, facets, tag:, keyboard ----
+    // A mocked /v1/search stream (the real sources are pm-api's tests): the page groups, narrows
+    // by facets, sends tag: as the node expects, and walks the results from the keyboard.
+    c = await ctx(); p = await c.newPage();
+    const KEY = 'k'.repeat(52);
+    const ndjson = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+    const seen = [];
+    await p.route(/\/v1\/search\?/, (r) => {
+      const u = new URL(r.request().url()); seen.push(u.searchParams.get('q'));
+      const body = ndjson([
+        { source: 'library', status: 'ok', ms: 3, hits: [
+          { kind: 'song', title: 'Old Song', subtitle: 'Band', id: 'lib-5', track_id: 5, year: 1999, format: 'FLAC 16/44.1', quality: 'lossless', keys: [] },
+          { kind: 'song', title: 'New Song', subtitle: 'Band', id: 'lib-6', track_id: 6, year: 2015, format: 'MP3', quality: 'lossy', keys: [] },
+          { kind: 'album', title: 'Old Album', subtitle: 'Band', id: 'lib-1', year: 1999, keys: [] },
+          { kind: 'playlist', title: 'Saturday chill', subtitle: '3 songs · your playlist', id: 'pl1', keys: [] }] },
+        { source: 'pubky', status: 'ok', ms: 40, hits: [{ kind: 'song', title: 'Shared Song', subtitle: 'Someone', id: 'tidal-9', uri: 'tidal:track:9', page: 'https://tidal.com/track/9', site: 'tidal.com', year: 2015, keys: [] }] },
+        { source: 'people', status: 'ok', ms: 50, hits: [{ kind: 'person', title: 'Sat', subtitle: 'plays bass', id: KEY, page: `https://pubky.app/profile/${KEY}`, keys: [] }] },
+        { source: 'posts', status: 'ok', ms: 60, hits: [{ kind: 'post', title: 'Great music tonight', subtitle: 'Author One', id: 'post-a:1', page: 'https://pubky.app/post/a/1', keys: [] }] },
+      ]);
+      return r.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson', 'x-pm-sources': 'library,pubky,people,posts' }, body });
+    });
+    await p.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [], others: [] } }));
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'sat'); await p.press('#search', 'Enter');
+    await p.waitForSelector('#sresults [data-skind="post"]');
+    const heads = await p.$$eval('#sresults .section h3', (els) => els.map((e) => e.textContent.trim()));
+    check(['Albums', 'Songs', 'Playlists', 'People', 'Posts'].every((h) => heads.includes(h)), `results come grouped (${heads.join(', ')})`);
+    check((await p.locator('#sresults [data-skind="person"] .list-row').count()) === 1 && (await p.locator('#sresults [data-skind="playlist"] .list-row').count()) === 1, 'a person and your playlist are rows of their own');
+    const facetText = await p.textContent('#sresults .facets');
+    check(/Quality/.test(facetText) && /Lossless/.test(facetText) && /Years/.test(facetText) && /1990s/.test(facetText) && /2010s/.test(facetText), `facets are counted from the results (${facetText.replace(/\s+/g, ' ').trim().slice(0, 120)})`);
+    check((await p.locator('#sresults .facets [data-facet^="service:pubky"]').count()) === 1 && (await p.locator('#sresults .facets [data-facet="service:people"], #sresults .facets [data-facet="service:posts"]').count()) === 0, 'people and posts count as Pubky: one Source chip for the three');
+    await p.click('#sresults [data-facet="decade:2010s"]'); await p.waitForTimeout(200);
+    const songsNow = await p.$$eval('#sresults [data-skind="song"] .srow .name', (els) => els.map((e) => e.textContent.trim()));
+    check(songsNow.includes('New Song') && songsNow.includes('Shared Song') && !songsNow.includes('Old Song') && (await p.locator('#sresults [data-skind="album"]').count()) === 0, `a facet narrows every group (${songsNow.join(', ')})`);
+    await p.click('#sresults [data-facet=""]'); await p.waitForTimeout(200);
+    check((await p.$$eval('#sresults [data-skind="song"] .srow', (els) => els.length)) === 3, 'Clear brings them all back');
+    check(await p.evaluate(() => !!document.activeElement && document.activeElement.matches('#sresults [data-facet]')), 'a facet chip keeps the keyboard focus across the re-render');
+    check(await p.evaluate(() => { const s = document.querySelector('#search'); return s.getAttribute('role') === 'combobox' && s.getAttribute('aria-controls') === 'sresults' && s.getAttribute('aria-expanded') === 'true'; }), 'the search box is a combobox over the results');
+    // the keyboard: ↓ ↓ walk the results, the box says where it is, Enter opens the person's page
+    await p.focus('#search');
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
+    const k = await p.evaluate(() => { const el = document.querySelector('#sresults .kfocus'); return { has: !!el, id: el && el.id, active: document.querySelector('#search').getAttribute('aria-activedescendant'), focusStays: document.activeElement && document.activeElement.id === 'search' }; });
+    check(k.has && k.id && k.active === k.id && k.focusStays, `↓ walks the results while the box keeps focus (${k.id})`);
+    check(/\(2 of \d+\)/.test(await p.textContent('#sresults-said')), 'the active row is said politely');
+    // typing drops the position: Enter then searches the new words, not the old row
+    await p.keyboard.type('u');
+    check(await p.evaluate(() => !document.querySelector('#search').hasAttribute('aria-activedescendant') && !document.querySelector('#sresults .kfocus')), 'typing drops the highlighted row');
+    await p.keyboard.press('Backspace'); await p.waitForTimeout(400);
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
+    const n = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => e.classList.contains('kfocus')));
+    const total = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.length);
+    const personAt = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => (e.dataset.sother || '').startsWith('person:')));
+    for (let i = n; i < personAt; i++) await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('Enter');
+    const path = await (async () => { const end = Date.now() + 5000; for (;;) { const v = await p.evaluate(() => location.pathname); if (v.startsWith('/person/')) return v; if (Date.now() > end) return v; await p.waitForTimeout(100); } })();
+    check(path === `/person/${KEY}`, `Enter opens the row in focus (${path}; ${total} results)`);
+    // tag: goes to the node as it is (the node reads it like #)
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'tag:chill'); await p.press('#search', 'Enter'); await p.waitForSelector('#sresults [data-skind="song"]');
+    check(seen.includes('tag:chill'), `tag:chill is sent as typed (${seen.join(' | ')})`);
+    await p.unroute(/\/v1\/search\?/); await p.unroute(/\/v1\/search\/tags\?/);
+    await c.close();
 
     // ---- Home: Listening now (L3) ----
     if (nz) {
