@@ -152,11 +152,11 @@ pub struct NodeState {
     pub contact: std::sync::RwLock<String>,
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
-    /// Controller sign-ins in progress: id → (flow, started).
     /// Bulk uploads to the homeserver's private storage, by job id (files.rs).
     pub upload_jobs: std::sync::Mutex<std::collections::HashMap<String, crate::types::UploadProgress>>,
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant)>,
+        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
     >,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
@@ -218,6 +218,8 @@ pub struct NodeState {
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
+    /// Who on this node listens where, and the listen-along groups (presence.rs).
+    pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
@@ -439,6 +441,7 @@ impl NodeState {
             nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),
             identify: Mutex::new(Default::default()),
             pinakes_reader: Default::default(),
+            presence: Default::default(),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
@@ -853,12 +856,13 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
-    /// Create (or reuse) a pull output under `name`, registered for the HTTP route.
+    /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
+    /// renderer the node tells when to fetch ([`pm_zones::outputs::PullOutput::controlled`]).
     pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
         let mut pulls = self.pulls.lock().expect("pulls lock");
         pulls
             .entry(name.to_string())
-            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::new(name)))
+            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
             .clone()
     }
 

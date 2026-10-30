@@ -158,6 +158,27 @@ pub struct PullOutput {
     shared: Arc<Shared>,
     /// Sinks keep to real time ([`PACE_AHEAD`]); off for players paced by their own buffer.
     paced: bool,
+    /// The node tells the fetcher when to fetch ([`PullOutput::controlled`]).
+    controlled: bool,
+}
+
+/// Where a pull output's stream generations start: milliseconds of the clock, so they don't
+/// repeat across restarts of the node.
+fn first_generation() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Why [`PullOutput::take_stream_for`] gave no stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missed {
+    /// Nothing played into it within the wait.
+    Timeout,
+    /// A newer stream opened while this request was waiting: the request is from before (a
+    /// stopped renderer polling its old URI); the fetch the node asks for next gets it.
+    Superseded,
 }
 
 impl PullOutput {
@@ -173,10 +194,27 @@ impl PullOutput {
             name: name.to_string(),
             caps,
             shared: Arc::new(Shared {
-                slot: Mutex::new(Slot::default()),
+                // Generations start from the clock, so a URL naming one from before a restart
+                // never names one after it
+                slot: Mutex::new(Slot {
+                    generation: first_generation(),
+                    ..Slot::default()
+                }),
                 notify: tokio::sync::Notify::new(),
             }),
             paced: true,
+            controlled: false,
+        }
+    }
+
+    /// A pull output whose fetcher the node tells when to fetch (a UPnP renderer after
+    /// SetAVTransportURI; Cast, MPD and BluOS likewise). A stopped Linn keeps polling its old URI
+    /// every 15 s, and such a request, waiting when the next stream opens, took that stream and
+    /// dropped it (NUC, 2026-10-30): here it is answered instead ([`Missed::Superseded`]).
+    pub fn controlled(name: &str) -> Self {
+        Self {
+            controlled: true,
+            ..Self::new(name)
         }
     }
 
@@ -210,7 +248,24 @@ impl PullOutput {
     /// Take the live stream for an HTTP listener, waiting until a sink opens one (or a listener
     /// that left gives it back).
     pub async fn take_stream(&self, wait: Duration) -> Option<LiveStream> {
+        self.take_stream_for(wait, None).await.ok()
+    }
+
+    /// [`Self::take_stream`], saying why there is none. `generation`: the stream the request is
+    /// for (the node puts it in the URL it gives a renderer, [`Self::generation`]); no other is
+    /// for it, whenever the request comes (a renderer polling its old URI, also from before a
+    /// restart). Without one,
+    /// on a [`Self::controlled`] output, a stream opened after the request began waiting is not
+    /// for it.
+    pub async fn take_stream_for(
+        &self,
+        wait: Duration,
+        generation: Option<u64>,
+    ) -> Result<LiveStream, Missed> {
         let deadline = tokio::time::Instant::now() + wait;
+        let start = self.shared.slot.lock().expect("pull lock").generation;
+        let since = generation.unwrap_or(start);
+        let checked = self.controlled || generation.is_some();
         loop {
             // Registered before the check, so a stream parked in between wakes us
             let notified = self.shared.notify.notified();
@@ -218,11 +273,37 @@ impl PullOutput {
             notified.as_mut().enable();
             {
                 let mut slot = self.shared.slot.lock().expect("pull lock");
-                if let Some(p) = slot.pending.take() {
+                // A request naming its stream gets that one only (older, newer, or from before a
+                // restart); one that doesn't, none opened after it began
+                let other = match generation {
+                    Some(g) => slot.generation != g,
+                    None => slot.generation > since,
+                };
+                // A stream whose sink closed with nothing left to hear is no stream
+                if slot
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.rx.is_closed() && p.rx.is_empty() && p.replay.is_empty())
+                {
+                    slot.pending = None;
+                }
+                if checked && other {
+                    // Answered at once when a newer stream waits to be fetched, or one opened
+                    // while it waited: the renderer's fetch of its new URL gets it. An old URL
+                    // with nothing new (after a restart, a refused SetAVTransportURI) is held
+                    // like any request for a stream that isn't playing: answered at once, a
+                    // stopped Linn would ask again in a tight loop
+                    // Only a stream whose sink is still open: a refused start's leftover audio
+                    // (the sink closed) is no stream the renderer will fetch
+                    let newer_waiting = slot.pending.as_ref().is_some_and(|p| !p.rx.is_closed());
+                    if generation.is_none() || newer_waiting || slot.generation != start {
+                        return Err(Missed::Superseded);
+                    }
+                } else if let Some(p) = slot.pending.take() {
                     if slot.left.is_some_and(|(g, _)| g == p.generation) {
                         slot.left = None;
                     }
-                    return Some(LiveStream {
+                    return Ok(LiveStream {
                         format: p.format,
                         rx: Some(p.rx),
                         replay: p.replay,
@@ -238,7 +319,7 @@ impl PullOutput {
             }
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
-                return None;
+                return Err(Missed::Timeout);
             }
             let _ = tokio::time::timeout(left, notified).await;
         }
@@ -599,6 +680,143 @@ mod tests {
             "goes on, no repeat"
         );
         drop(writer.join().unwrap());
+    }
+
+    /// A stopped renderer polls its old URI: a request waiting when the next stream opens is
+    /// answered (superseded) and the fresh fetch gets the stream from its first byte; a listener
+    /// that reconnects to the same stream still gets it. An uncontrolled output (the Stream
+    /// zone) lets a waiting player have the stream it waited for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_from_before_the_stream_does_not_take_it() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = Arc::new(PullOutput::controlled("rend"));
+        // The last session: played and stopped
+        let mut sink = out.open_now(fmt).unwrap();
+        let w = std::thread::spawn(move || {
+            sink.write(&block(fmt, 0)).unwrap();
+            sink
+        });
+        let mut live = out.take_stream(Duration::from_secs(2)).await.unwrap();
+        assert!(live.next_chunk().await.is_some());
+        drop(w.join().unwrap());
+        assert_eq!(live.next_chunk().await, None);
+        drop(live);
+        // The renderer polls while stopped; then the node opens the next stream
+        let o = out.clone();
+        let stale =
+            tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5), None).await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut sink = out.open_now(fmt).unwrap();
+        let w = std::thread::spawn(move || {
+            sink.write(&block(fmt, 40)).unwrap();
+            sink
+        });
+        let missed = tokio::time::timeout(Duration::from_secs(1), stale)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(missed.err(), Some(Missed::Superseded));
+        let mut fresh = out.take_stream_for(Duration::from_secs(2), None).await.unwrap();
+        assert_eq!(fresh.next_chunk().await.unwrap(), pack_pcm(&block(fmt, 40)));
+        drop(w.join().unwrap());
+        // The Stream zone: a player that waited gets the stream it waited for
+        let open = Arc::new(PullOutput::new("open"));
+        let o = open.clone();
+        let waiting =
+            tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5), None).await.is_ok() });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let sink = open.open_now(fmt).unwrap();
+        assert!(waiting.await.unwrap(), "the waiting player gets it");
+        drop(sink);
+    }
+
+    /// A renderer's URL names its stream: a request for another one, older or from before a
+    /// restart (a higher number than any now), is answered and never takes the stream; the
+    /// one it names, it gets (review of #181).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_naming_another_stream_never_takes_this_one() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = PullOutput::controlled("named");
+        let sink = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        for other in [g - 1, g + 1_000_000, 5] {
+            assert_eq!(
+                out.take_stream_for(Duration::from_secs(1), Some(other))
+                    .await
+                    .err(),
+                Some(Missed::Superseded),
+                "g={other}"
+            );
+        }
+        assert!(out.take_stream_for(Duration::from_secs(1), Some(g)).await.is_ok());
+        drop(sink);
+        // A new node (a restart) does not start where the old one did
+        assert_ne!(PullOutput::controlled("named").generation(), 0);
+    }
+
+    /// An old URL while nothing new waits (after a restart, a refused SetAVTransportURI) is
+    /// held like a request for a stream that isn't playing, not answered at once: a stopped Linn
+    /// would ask again in a tight loop (review of #181). A stream opening meanwhile answers it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_old_url_with_nothing_new_is_held_not_answered_at_once() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = Arc::new(PullOutput::controlled("held-old"));
+        // The current stream is playing to its listener: nothing waits to be fetched
+        let mut sink = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        let w = std::thread::spawn(move || {
+            sink.write(&block(fmt, 0)).unwrap();
+            sink
+        });
+        let mut live = out.take_stream(Duration::from_secs(2)).await.unwrap();
+        assert!(live.next_chunk().await.is_some());
+        let t = Instant::now();
+        let r = out.take_stream_for(Duration::from_millis(600), Some(g - 1)).await;
+        assert_eq!(r.err(), Some(Missed::Timeout));
+        assert!(
+            t.elapsed() >= Duration::from_millis(550),
+            "answered after {:?}",
+            t.elapsed()
+        );
+        // Held, then a new stream opens: answered then, and the new one is not taken
+        let o = out.clone();
+        let held = tokio::spawn(async move {
+            let t = Instant::now();
+            (
+                o.take_stream_for(Duration::from_secs(5), Some(g - 1)).await.err(),
+                t.elapsed(),
+            )
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(live);
+        drop(w.join().unwrap());
+        let next = out.open_now(fmt).unwrap();
+        let (missed, took) = held.await.unwrap();
+        assert_eq!(missed, Some(Missed::Superseded));
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(out
+            .take_stream_for(Duration::from_secs(1), Some(out.generation()))
+            .await
+            .is_ok());
+        drop(next);
+        // A refused start: the sink wrote a little and closed, its audio left unfetched. That is
+        // no newer stream waiting: an old URL is still held, not answered at once
+        let mut refused = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        std::thread::spawn(move || {
+            refused.write(&block(fmt, 0)).unwrap();
+            refused
+        })
+        .join()
+        .unwrap();
+        let t = Instant::now();
+        let r = out.take_stream_for(Duration::from_millis(600), Some(g - 1)).await;
+        assert_eq!(r.err(), Some(Missed::Timeout));
+        assert!(
+            t.elapsed() >= Duration::from_millis(550),
+            "answered after {:?}",
+            t.elapsed()
+        );
     }
 
     /// Nobody comes back: the sink fails soon after the listener left, not after the full

@@ -1506,6 +1506,10 @@ pub struct ItemPage {
     /// The picture's credit when it is from Wikimedia Commons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_credit: Option<ImageCredit>,
+    /// What open sources say (About, its links, the picture) is being fetched: ask for the page
+    /// again in a few seconds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub about_pending: bool,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
     /// A library artist's or album's MusicBrainz id (an album's release group) and where it came

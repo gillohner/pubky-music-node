@@ -53,6 +53,18 @@ Newest first. Dates are when the change landed on `main`.
   - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
   - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.
   - The homeserver format does not change (`/priv/social/v1/bookmarks/`).
+- **Who's listening on this node, and listening along.** `GET /v1/presence` shows who on the node listens to what, as each person chooses (`PUT /v1/me/presence`: everyone, the people they follow on Pubky, or hidden, the default). Listening along (`POST /v1/presence/along`) joins your zone's speakers to theirs as one synced group, so you hear their music at the same moment, quality and DSP; leaving moves it back to their zone. Nothing is published.
+- **A Linn DS that was stopped no longer loses the new stream to its old requests.** While stopped, a Linn keeps asking for its last stream every 15 s, and the node held each request until a stream came: when play started, that old request could take the new stream and drop it ("listener went away", 1 start in 5 on the owner's Klimax). The URL the node gives a UPnP renderer now names its stream (`g=`): a request for an older one, and any request that was already waiting when a new stream opened, is answered at once (410), and the Linn's fetch of the new URL gets the stream from its first byte. An ended stream with nothing left is no longer handed out either.
+- **Security fixes (review of 2026-10-30).**
+  - A listener queues (and announces) only library songs, the services' tracks and links to public web addresses: never a file path, a `file:` URL or an address on the node's machine or network.
+  - Such a link, and a URI a UPnP controller sets, is fetched only where its sender could reach: every redirect, a playlist's stream and every address a name resolves to are checked when the node connects. The limit is kept with the queued item, so moving it or restarting the node keeps it too (no redirect or DNS rebinding to `localhost` or the cloud metadata address).
+  - A backup's working copy of the library (with the sign-ins, before they are taken out) is made in a private folder of its own and removed afterwards, and scheduled backup files are readable by their owner only (0600).
+  - "Bring files here" makes each homeserver file name one plain file name, so a name with `..\` or `C:\` can't leave the folder on Windows.
+  - Pubky Ring sign-ins waiting at once are capped (6 from one address, 64 in all; 429 beyond). So are a renderer zone's UPnP event subscriptions (32 per controller, 256 in all, 4 callbacks each; 503 beyond).
+  - Listeners no longer see where the owner keeps files in queue items, zone errors or the event socket.
+  - A listener who signs out or loses access loses the event socket too.
+  - The MusicBrainz proxy stops reading an answer past 4 MiB and keeps its cache under 64 MiB.
+- **Library pages: credits shown, no waiting, better matches (review of the two entries below).** The About block shows Wikipedia's text and a Commons picture with their source, licence and links. Library pages no longer wait for open sources: they show what is cached and ask again a few seconds later. An album's search leaves out "(Deluxe Edition)" and " - 2011 Remaster", a Wikipedia link from MusicBrainz with non-Latin letters is read right, and the next article is tried when one has no summary. An album keeps the page address its tags give (so its heart stays). The portrait is the same in every language, cached answers follow a changed match, and other languages than Wikipedia's read English.
 
 ## 0.2.1
 

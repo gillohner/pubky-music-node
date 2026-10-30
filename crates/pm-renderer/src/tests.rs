@@ -22,7 +22,7 @@ impl Host for FakeHost {
     async fn act(&self, _zone: &str, act: Act) -> Result<(), String> {
         let mut v = self.view.lock().unwrap();
         match &act {
-            Act::SetUri { uri, meta } => {
+            Act::SetUri { uri, meta, .. } => {
                 v.uri = uri.clone();
                 v.meta = meta.clone();
                 v.state = Transport::Stopped;
@@ -203,7 +203,7 @@ async fn describes_and_plays_a_uri() {
     let acts = host.acts.lock().unwrap().clone();
     assert_eq!(acts.len(), 4, "{acts:?}");
     assert!(
-        matches!(&acts[0], Act::SetUri { uri, meta } if uri == "http://192.168.1.20:8097/flow/1.flac" && meta.title.as_deref() == Some("Get Lucky"))
+        matches!(&acts[0], Act::SetUri { uri, meta, .. } if uri == "http://192.168.1.20:8097/flow/1.flac" && meta.title.as_deref() == Some("Get Lucky"))
     );
     assert_eq!(acts[1], Act::Play);
     assert_eq!(acts[2], Act::Seek(65_000));
@@ -379,4 +379,41 @@ async fn uris_and_callbacks_only_reach_what_the_controller_could() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+}
+
+/// A LAN client can't pile up subscriptions: 32 from one controller, then 503; others still get
+/// theirs; renewing one is always fine (security review 2026-10-30, #5).
+#[tokio::test]
+async fn subscriptions_are_capped_per_controller() {
+    let (r, _host) = renderer();
+    let app = r.router();
+    let sub = |from: &'static str| {
+        Request::builder()
+            .method("SUBSCRIBE")
+            .uri("/upnp/zone/kitchen/evt/avt")
+            .header("CALLBACK", format!("<http://{from}:9/cb><http://{from}:9/a><http://{from}:9/b><http://{from}:9/c><http://{from}:9/d><http://{from}:9/e>"))
+            .header("NT", "upnp:event")
+            .extension(Peer(from.parse().unwrap()))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let mut sids = Vec::new();
+    for _ in 0..32 {
+        let resp = app.clone().oneshot(sub("192.168.1.30")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        sids.push(resp.headers()["SID"].to_str().unwrap().to_string());
+    }
+    let resp = app.clone().oneshot(sub("192.168.1.30")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let resp = app.clone().oneshot(sub("192.168.1.31")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "another controller");
+    assert!(r.subs.lock().unwrap().values().all(|s| s.callbacks.len() <= 4));
+    let renew = Request::builder()
+        .method("SUBSCRIBE")
+        .uri("/upnp/zone/kitchen/evt/avt")
+        .header("SID", &sids[0])
+        .header("TIMEOUT", "Second-300")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(renew).await.unwrap().status(), StatusCode::OK);
 }

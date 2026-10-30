@@ -31,6 +31,10 @@ const INTERVAL: Duration = Duration::from_secs(2);
 const MAX_FAILURES: u32 = 3;
 /// Songs asked for an artist without a matched album.
 const SONGS: usize = 3;
+/// Opened pages asked first, the newest.
+const WANTED: usize = 20;
+/// An opened page wakes the matcher at most this often.
+const WAKE_EVERY: Duration = Duration::from_secs(60);
 
 /// Artists (plain names) and albums (ids) someone opened: asked first.
 fn wanted() -> &'static Mutex<(Vec<String>, Vec<i64>)> {
@@ -38,25 +42,39 @@ fn wanted() -> &'static Mutex<(Vec<String>, Vec<i64>)> {
     W.get_or_init(Default::default)
 }
 
+/// Keep the newest [`WANTED`] of a list: `x` at the end, the oldest dropped.
+fn remember<T: PartialEq>(list: &mut Vec<T>, x: T) {
+    list.retain(|y| *y != x);
+    list.push(x);
+    if list.len() > WANTED {
+        list.remove(0);
+    }
+}
+
+/// Wake the matcher for an opened page, at most once a minute: each pass plans over the whole
+/// library, and a page without an id may well be one already answered "not sure".
+fn wake() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().expect("last wake");
+    if last.is_none_or(|t| t.elapsed() >= WAKE_EVERY) {
+        *last = Some(std::time::Instant::now());
+        WAKE.notify_one();
+    }
+}
+
 /// An artist page was opened before the artist has an answer: ask for it (and its albums) next.
 pub(crate) fn want_artist(name: &str) {
-    let mut w = wanted().lock().expect("wanted");
-    let k = matching::plain_name(name);
-    if !w.0.contains(&k) {
-        w.0.push(k);
-        w.0.truncate(20);
-    }
-    WAKE.notify_one();
+    remember(
+        &mut wanted().lock().expect("wanted").0,
+        matching::plain_name(name),
+    );
+    wake();
 }
 
 /// An album page was opened before the album has an answer.
 pub(crate) fn want_album(id: i64) {
-    let mut w = wanted().lock().expect("wanted");
-    if !w.1.contains(&id) {
-        w.1.push(id);
-        w.1.truncate(20);
-    }
-    WAKE.notify_one();
+    remember(&mut wanted().lock().expect("wanted").1, id);
+    wake();
 }
 
 /// The background matcher.
@@ -175,6 +193,7 @@ pub(crate) async fn pass(s: &NodeState, interval: Duration) -> PassReport {
         {
             tracing::warn!("saving an album match: {e}");
         }
+        wanted().lock().expect("wanted").1.retain(|id| *id != t.album.id);
     }
     // Artists once their albums are answered
     let plan = s
@@ -203,6 +222,8 @@ pub(crate) async fn pass(s: &NodeState, interval: Duration) -> PassReport {
             .flatten()
             .any(|(_, n)| matching::plain_name(n) == t.key);
         let mut songs: Vec<Vec<pm_model::Mbid>> = Vec::new();
+        // This artist's own requests: a failure here leaves it for the next pass
+        let mut failed = false;
         if !named {
             let mut seen: Vec<String> = Vec::new();
             for tr in &tracks {
@@ -240,6 +261,7 @@ pub(crate) async fn pass(s: &NodeState, interval: Duration) -> PassReport {
                         tracing::debug!(artist = t.id, "musicbrainz: {e}");
                         failures += 1;
                         report.failed += 1;
+                        failed = true;
                         break;
                     }
                 }
@@ -247,7 +269,7 @@ pub(crate) async fn pass(s: &NodeState, interval: Duration) -> PassReport {
                     break;
                 }
             }
-            if failures > 0 {
+            if failed {
                 continue;
             }
         }
@@ -269,6 +291,7 @@ pub(crate) async fn pass(s: &NodeState, interval: Duration) -> PassReport {
         {
             tracing::warn!("saving an artist match: {e}");
         }
+        wanted().lock().expect("wanted").0.retain(|k| *k != t.key);
     }
     RUNNING.store(false, Ordering::SeqCst);
     if report.asked > 0 {

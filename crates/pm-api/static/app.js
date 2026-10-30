@@ -84,6 +84,14 @@
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-copykey]'); if (!b) return; e.preventDefault(); e.stopPropagation(); const k = b.dataset.copykey; (navigator.clipboard ? navigator.clipboard.writeText(k) : Promise.reject()).then(() => toast('Key copied')).catch(() => toast(k)); }, true);
   const artists = (t) => (t.artists || []).map((a) => a.name).join(', ');
   const hue = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+  // The credit Wikipedia's text (CC BY-SA) and a Commons picture need: source, licence and a link to each
+  const creditLink = (href, text) => (webUrl(href) ? `<a href="${esc(webUrl(href))}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text));
+  const aboutCredit = (pg) => {
+    const t = pg.about_text; const c = pg.image_credit; const lines = [];
+    if (t && t.source) lines.push(`Text: ${t.url ? creditLink(t.url, t.source === 'Wikipedia' ? 'Read more on Wikipedia' : t.source) : esc(t.source)}${t.licence ? ` · ${creditLink(t.licence_url, t.licence)}` : ''}`);
+    if (c) lines.push(`Picture: ${c.author ? `${esc(c.author)} · ` : ''}${c.licence ? `${creditLink(c.licence_url, c.licence)} · ` : ''}${creditLink(c.file_page, c.source || 'Wikimedia Commons')}`);
+    return lines.length ? `<p class="muted small credit">${lines.join('<br>')}</p>` : '';
+  };
   // Two letters for an artwork placeholder: the first word and the next real word ("I'm in Love…"
   // gives "IL", not "II", which reads as a pause button)
   const initials = (s) => {
@@ -1200,6 +1208,37 @@
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
     } finally { moving = false; }
   };
+  // Listening together on this node (presence.rs): who you listen along with, with Leave, and who
+  // sees what you play. The node keeps it; the page asks every 20 s and when zones come or go.
+  const personName = (l) => l.name || (l.key === 'owner' ? 'the owner' : shortKey(l.key));
+  const VISIBLE = [['hidden', 'Nobody', 'what you play stays yours'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
+  const renderAlong = () => {
+    const a = state.along; $('#along').hidden = !a;
+    if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
+  };
+  const refreshAlong = async () => {
+    if (!state.me || isOffline() || document.hidden) return;
+    try {
+      const ls = await api('GET', '/presence'); state.along = ls.find((l) => l.mine) || null;
+      if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
+    } catch { return; }
+    renderAlong();
+  };
+  const leaveAlong = async () => {
+    const a = state.along; const b = $('#alongleave'); if (!a) return;
+    b.disabled = true;
+    try {
+      const zs = await api('DELETE', '/presence/along'); state.zones[zs.id] = zs;
+      if (a.your_zone && state.zones[a.your_zone]) { state.zone = a.your_zone; try { localStorage.setItem('pm.zone', state.zone); } catch { /* storage unavailable */ } }
+      state.along = null; renderAlong(); renderZoneName(); renderBar(); refreshQueue();
+      toast(`You left ${personName(a)}'s music`);
+    } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+  };
+  $('#alongleave').onclick = leaveAlong;
+  setInterval(refreshAlong, 20000);
+  const setVisible = async (v) => {
+    try { state.presenceVisible = (await api('PUT', '/me/presence', { visible: v })).visible; toast(v === 'hidden' ? 'Nobody sees what you play' : `${VISIBLE.find((x) => x[0] === v)[1]} can see what you play`); } catch (e) { toast(e.message, 'error'); }
+  };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
     const movingTo = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
@@ -1212,8 +1251,10 @@
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
       + `<div class="pop-title">This zone</div>`
       + (movable && otherZones().length ? `<button class="pop-item" id="zpmove">${icon('zone')}<span><span class="name">Move to…</span><span class="sub">the song where it is, the queue, repeat and radio</span></span></button>` : '')
-      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
+      + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
+    const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
     const zm = $('#zpmove', zonePop); if (zm) zm.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Move to' }, ...otherZones().map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
@@ -4357,7 +4398,7 @@
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
-            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
+            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${aboutCredit(pg)}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
@@ -4409,8 +4450,9 @@
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          // Not while someone types a comment: the render would take the box away under them
-          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.pending ? 3000 : 4000); }
+          // About from open sources comes in the background too: ask again until it is there. Not
+          // while someone types a comment: the render would take the box away under them
+          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           break;
         }
         case 'queue': {
@@ -5295,7 +5337,7 @@
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
-      ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);
+      ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
       { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
       link.loaded = true;
       openEvents();
@@ -5336,7 +5378,7 @@
         // A start that failed says so until the zone starts playing (from stopped or paused) something
         // other than the song it was already playing: that song going on, or the next one of its queue, is not that start
         if (ev.state.transport === 'playing' && (!old || old.transport !== 'playing') && state.startError && state.startError.zone === ev.state.id && !(ev.state.now_playing && ev.state.now_playing.item.id === state.startError.still)) state.startError = null;
-        if (!old) renderZoneName();
+        if (!old) { renderZoneName(); refreshAlong(); }
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
         if (state.view === 'zones' && (!old || old.transport !== ev.state.transport || old.error !== ev.state.error || (old.now_playing && old.now_playing.item.id) !== (ev.state.now_playing && ev.state.now_playing.item.id))) render();
@@ -5345,7 +5387,11 @@
       else if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && ev.zone === state.zone) {
         const zn = state.zones[ev.zone]; toast(`${zn ? zn.name : 'This zone'}: ${ev.event.message || 'something went wrong'}`, 'error');
       }
-      else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
+      else if (ev.type === 'zone_removed') {
+        // The group you listened along in is gone (they ended it): back to your own zone
+        const a = state.along; if (a && a.zone && a.zone.id === ev.zone && ev.zone === state.zone && state.zones[a.your_zone]) state.zone = a.your_zone;
+        delete state.zones[ev.zone]; ensureZone(); renderZoneName(); refreshAlong();
+      }
       else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
