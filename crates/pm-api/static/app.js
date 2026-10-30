@@ -1394,13 +1394,27 @@
     const a = state.along; $('#along').hidden = !a;
     if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
   };
+  // Follow your music: into the group it plays on (you host it or listen along) from your own
+  // zone, and back to your own zone once that group is gone. A zone you picked yourself stays.
+  const followAlong = () => {
+    const g = state.along || state.hosting; const target = g && g.zone ? g.zone.id : null;
+    if (g && g.your_zone) state.alongHome = g.your_zone;
+    let to = null;
+    if (target && state.zones[target] && state.zone !== target && (state.zone === g.your_zone || !state.zones[state.zone])) to = target;
+    else if (!g && !state.zones[state.zone] && state.alongHome && state.zones[state.alongHome]) to = state.alongHome;
+    if (!g) state.alongHome = null;
+    if (!to) return;
+    state.zone = to; try { localStorage.setItem('pm.zone', to); } catch { /* storage unavailable */ }
+    renderZoneName(); renderBar(); refreshQueue();
+  };
   const refreshAlong = async () => {
     if (!state.me || isOffline() || document.hidden) return;
     try {
-      const ls = await api('GET', '/presence'); state.along = ls.find((l) => l.mine) || null;
+      const ls = await api('GET', '/presence');
+      state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null;
       if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
     } catch { return; }
-    renderAlong();
+    renderAlong(); followAlong();
   };
   const leaveAlong = async () => {
     const a = state.along; const b = $('#alongleave'); if (!a) return;
@@ -5614,9 +5628,12 @@
         const zn = state.zones[ev.zone]; toast(`${zn ? zn.name : 'This zone'}: ${ev.event.message || 'something went wrong'}`, 'error');
       }
       else if (ev.type === 'zone_removed') {
-        // The group you listened along in is gone (they ended it): back to your own zone
-        const a = state.along; if (a && a.zone && a.zone.id === ev.zone && ev.zone === state.zone && state.zones[a.your_zone]) state.zone = a.your_zone;
-        delete state.zones[ev.zone]; ensureZone(); renderZoneName(); refreshAlong();
+        // A group of yours went: rebuilt (follow it) or ended (back to your own zone). Ask first,
+        // then fall back as for any zone that goes
+        const yours = ev.zone === state.zone && (state.along || state.hosting || state.alongHome);
+        delete state.zones[ev.zone];
+        if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
+        else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
       else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }

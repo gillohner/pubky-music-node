@@ -1663,6 +1663,10 @@ async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // A listen-along group ends as when its host ends it: the music goes back, not lost
+    if presence::delete_group(&s, &id).await? {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let zone = zone_of(&s, &id)?;
     zone.stop();
     s.remove_zone(zone.id());
