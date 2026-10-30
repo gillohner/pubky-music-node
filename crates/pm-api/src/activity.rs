@@ -241,7 +241,8 @@ fn bridge(lib: &pm_library::Library, d: &DescribedTrack) -> Result<Bridged, ApiE
         uri: music.as_ref().map(MusicUri::to_url),
         ..d.clone()
     };
-    if let Some(u) = resolve_described(lib, &lookup)?.and_then(|t| t.publishable_uri().cloned()) {
+    let found = resolve_described(lib, &lookup)?;
+    if let Some(u) = found.as_ref().and_then(|t| t.publishable_uri()) {
         return Ok(Bridged::Identified(u.to_url()));
     }
     let named = d
@@ -259,13 +260,19 @@ fn bridge(lib: &pm_library::Library, d: &DescribedTrack) -> Result<Bridged, ApiE
     if let Some(u) = named {
         return Ok(Bridged::Identified(u.to_url()));
     }
+    // A song of the library not identified yet: unresolved, so importing again after
+    // identification finds it (a search link would stand in for it for good)
+    if found.is_some() {
+        return Ok(Bridged::Empty);
+    }
     if let Some(link) = addresses.iter().find_map(|a| kept_link(a)) {
         return Ok(Bridged::Kept(link));
     }
-    let stem = d.path.as_deref().map(|p| {
-        let file = p.rsplit(['/', '\\']).next().unwrap_or(p);
-        file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_string()
-    });
+    let stem = d
+        .path
+        .as_deref()
+        .map(pm_library::import::title_from_path)
+        .filter(|t| !t.is_empty());
     let title = Some(d.title.trim())
         .filter(|t| !t.is_empty())
         .map(str::to_string)
@@ -312,13 +319,14 @@ fn kept_link(raw: &str) -> Option<String> {
 }
 
 /// A MusicBrainz recording search for an unmatched song's words, kept as a collection link so
-/// the line isn't lost; `None` without any words. Long words are cut so the link stays within a
-/// v1 reference.
+/// the line isn't lost; `None` without any words. An address among the words loses its sign-in
+/// first (`without_secrets`), and long words are cut so the link stays within a v1 reference.
 pub(crate) fn search_link(artist: Option<&str>, title: Option<&str>) -> Option<String> {
     const SEARCH: &str = "https://musicbrainz.org/search?type=recording&query=";
-    let words = [artist.map(str::trim), title.map(str::trim)]
+    let words = [artist, title]
         .into_iter()
         .flatten()
+        .map(|w| pm_library::import::without_secrets(w).trim().to_string())
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
@@ -348,6 +356,17 @@ mod tests {
             Some("https://musicbrainz.org/search?type=recording&query=Only+a+title")
         );
         assert_eq!(super::search_link(Some("  "), None), None);
+        // Words that are an address lose its sign-in
+        assert_eq!(
+            super::search_link(
+                None,
+                Some("https://a:SECRET@radio.example.com/live?token=SECRET#SECRET")
+            )
+            .as_deref(),
+            Some(
+                "https://musicbrainz.org/search?type=recording&query=https%3A%2F%2Fradio.example.com%2Flive"
+            )
+        );
         // Percent-encoding takes 9 bytes a CJK character: cut to fit a v1 reference
         let long = super::search_link(Some("Artist"), Some(&"曲".repeat(500))).unwrap();
         assert!(long.len() <= super::LINK_MAX, "{}", long.len());

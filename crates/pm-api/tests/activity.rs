@@ -148,7 +148,8 @@ async fn record_and_import_resolve_through_the_library() {
         .any(|e| e["source"]["kind"] == "service" && e["source"]["name"] == "spotify"));
 
     // Import (TASK-pinakes-social-ux.md B4): one resolves in the library, one has a URL, one an
-    // ISRC, one a MusicBrainz id, one a service link; the lost one stays, as a MusicBrainz search.
+    // ISRC, one a MusicBrainz id, one a service link; a library song not identified yet stays
+    // unresolved (review of #156), so importing again after identification finds it.
     let (st, imp) = call(
         &app,
         "POST",
@@ -169,7 +170,7 @@ async fn record_and_import_resolve_through_the_library() {
     assert_eq!(st, StatusCode::OK, "{imp}");
     assert_eq!(
         (imp["imported"].as_u64(), imp["kept"].as_u64()),
-        (Some(6), Some(1)),
+        (Some(5), Some(0)),
         "{imp}"
     );
     assert_eq!(imp["unresolved"].as_array().unwrap().len(), 1);
@@ -191,16 +192,11 @@ async fn record_and_import_resolve_through_the_library() {
         &uris[1..],
         [
             "https://musicbrainz.org/isrc/USQX91300108",
-            "https://musicbrainz.org/search?type=recording&query=Nobody+Mystery+Song",
             "https://musicbrainz.org/isrc/GBAYE9701376",
             "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862",
             "https://tidal.com/track/50850120",
         ],
         "{mixed}"
-    );
-    assert_eq!(
-        mixed["entries"][2]["kind"], "link",
-        "the lost line is a link, in its place"
     );
     let id = imp["id"].as_str().unwrap();
     let (st, pl) = call(&app, "GET", &format!("/v1/playlists/{id}"), None).await;
@@ -300,9 +296,10 @@ async fn record_and_import_resolve_through_the_library() {
     );
     // A media server's playlist (review of #156): streams with their sign-in in them, on the
     // LAN, or longer than a v1 reference are never kept; the lines fall back to their words,
-    // and the import still works
+    // and the import still works. Lines without `#EXTINF` take their words from the address's
+    // path only, never its sign-in; one with no path is unresolved.
     let m3u = format!(
-        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\n",
+        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\nhttp://jf.example.com/Audio/x/universal?UserId=u&api_key=hunter2\nhttp://admin:hunter2@radio.example.com:8000\n",
         "a".repeat(3000)
     );
     let req = Request::builder()
@@ -315,7 +312,15 @@ async fn record_and_import_resolve_through_the_library() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(st, StatusCode::OK, "{imp}");
-    assert_eq!(imp["kept"], 4, "{imp}");
+    assert_eq!(imp["kept"], 5, "{imp}");
+    assert_eq!(
+        (
+            imp["imported"].as_u64(),
+            imp["unresolved"].as_array().map(Vec::len)
+        ),
+        (Some(5), Some(6)),
+        "the radio line has no words: unresolved, not kept: {imp}"
+    );
     let (_, server) = call(
         &app,
         "GET",
@@ -323,6 +328,10 @@ async fn record_and_import_resolve_through_the_library() {
         None,
     )
     .await;
+    assert!(
+        !server.to_string().contains("hunter2"),
+        "no sign-in in the collection: {server}"
+    );
     let uris: Vec<&str> = server["entries"]
         .as_array()
         .unwrap()
@@ -336,6 +345,7 @@ async fn record_and_import_resolve_through_the_library() {
             "https://musicbrainz.org/search?type=recording&query=Nobody+Password+Song",
             "https://musicbrainz.org/search?type=recording&query=Nobody+Nas+Song",
             "https://musicbrainz.org/search?type=recording&query=Nobody+Long+Song",
+            "https://musicbrainz.org/search?type=recording&query=universal",
         ],
         "{server}"
     );
