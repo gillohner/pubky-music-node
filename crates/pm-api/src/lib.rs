@@ -3075,11 +3075,16 @@ async fn controller_login_start(
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The node's own session lacks folders: this log in asks for them too, so the owner's
+    // approval renews it (no separate "sign in again")
+    let renews = s.sync_handle().is_some_and(|h| h.needs_resign());
+    let caps = if renews {
+        pm_pubky::homeserver::LOGIN_CAPABILITIES
+    } else {
+        pm_pubky::homeserver::CONTROLLER_CAPABILITIES
+    };
     let flow = hs
-        .start_login_with(
-            "pubky-music-controller",
-            pm_pubky::homeserver::CONTROLLER_CAPABILITIES,
-        )
+        .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
@@ -3098,16 +3103,21 @@ async fn controller_login_start(
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     drop(logins);
     let qr_svg = qr_svg(&url);
+    let owner_face = profiles::login_face(&s, &owner).await;
     Ok(Json(ControllerLoginStarted {
         id,
         url,
         owner,
+        owner_face,
+        node_name: s.name.clone(),
+        renews,
         qr_svg,
     }))
 }
 
-/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with
-/// the API token when the approver is the owner; `denied` otherwise.
+/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
+/// of its own when the approver is the owner (renewing the node's session when this log in asked
+/// for its folders); `denied` otherwise, with who approved and whose node it is.
 async fn controller_login_poll(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<std::collections::HashMap<String, String>>,
@@ -3115,31 +3125,17 @@ async fn controller_login_poll(
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
     let Some((flow, at, _)) = logins.get(&id) else {
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     };
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     }
     match flow.poll().await {
-        Ok(None) => Ok(Json(ControllerLoginStatus {
-            status: "pending".into(),
-            token: None,
-            user: None,
-            role: None,
-        })),
+        Ok(None) => Ok(Json(ControllerLoginStatus::of("pending"))),
         Ok(Some(session)) => {
             logins.remove(&id);
+            drop(logins);
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
@@ -3148,26 +3144,44 @@ async fn controller_login_poll(
                     let token = accounts::mint(&s, &who)?;
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
-                        status: "ok".into(),
                         token: Some(token),
                         user: Some(who),
                         role: Some("listener".into()),
+                        ..ControllerLoginStatus::of("ok")
                     }));
                 }
-                tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
+                let key = who.trim_start_matches("pubky");
+                let known = people::load(&s).people.iter().any(|p| p.key == key);
+                tracing::warn!(%who, %owner, known, "controller sign-in by a different identity refused");
+                let (approver, owner_face) =
+                    tokio::join!(profiles::login_face(&s, &who), profiles::login_face(&s, &owner));
                 return Ok(Json(ControllerLoginStatus {
-                    status: "denied".into(),
-                    token: None,
                     user: Some(who),
-                    role: None,
+                    reason: Some(if known { "no_access" } else { "not_owner" }.into()),
+                    approver: Some(approver),
+                    owner_face: Some(owner_face),
+                    ..ControllerLoginStatus::of("denied")
                 }));
             }
-            tracing::info!(%who, "controller signed in with Pubky Ring");
+            // A log in that asked for the node's folders, approved by the owner: the node's
+            // session is renewed with it
+            let granted = pm_pubky::homeserver::session_capabilities(&session);
+            let renew = s.sync_handle().is_some_and(|h| h.needs_resign())
+                && pm_pubky::homeserver::missing_capabilities(
+                    &granted,
+                    pm_pubky::homeserver::LOGIN_CAPABILITIES,
+                )
+                .is_empty();
+            if renew {
+                adopt_session(&s, session).await?;
+            }
+            let token = accounts::mint_owner(&s, &who)?;
+            tracing::info!(%who, renew, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
-                status: "ok".into(),
-                token: s.token(),
+                token: Some(token),
                 user: Some(who),
                 role: Some("owner".into()),
+                ..ControllerLoginStatus::of("ok")
             }))
         }
         Err(e) => {
@@ -3175,6 +3189,33 @@ async fn controller_login_poll(
             Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))
         }
     }
+}
+
+/// The node signs in to Pubky with `session`: its secret goes to the configured file, sync
+/// starts with it, and the node record, settings and the first sync follow in the background.
+/// Returns the user's z32 key.
+async fn adopt_session(s: &Arc<NodeState>, session: pubky::PubkySession) -> Result<String, ApiError> {
+    let secret = pm_pubky::homeserver::export_session_secret(&session).await;
+    if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Created 0600, never written first and made private after
+        if let Err(e) = imports::write_private(path, secret.as_bytes()) {
+            tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
+        }
+    }
+    let hs = s
+        .homeserver()
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let sync = Arc::new(sync::PubkySync::from_session(hs, session));
+    let user = sync.z32().to_string();
+    s.set_sync(Some(sync.clone()));
+    tracing::info!(user = %user, "pubky sign-in: session ready");
+    // "Signed in" now; the node record, settings and the first sync follow in the background
+    // (they took minutes, one request at a time, before the answer)
+    sync::first_sync_in_background(s, sync.clone());
+    Ok(user)
 }
 
 /// Poll the sign-in. When approved: the session is kept, its secret written
@@ -3207,26 +3248,7 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
         Ok(Some(session)) => {
             *guard = None;
             drop(guard);
-            let secret = pm_pubky::homeserver::export_session_secret(&session).await;
-            if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                // Created 0600, never written first and made private after
-                if let Err(e) = imports::write_private(path, secret.as_bytes()) {
-                    tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
-                }
-            }
-            let hs = s
-                .homeserver()
-                .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
-            let sync = Arc::new(sync::PubkySync::from_session(hs, session));
-            let user = sync.z32().to_string();
-            s.set_sync(Some(sync.clone()));
-            tracing::info!(user = %user, "pubky sign-in: session ready");
-            // "Signed in" now; the node record, settings and the first sync follow in the
-            // background (they took minutes, one request at a time, before the answer)
-            sync::first_sync_in_background(&s, sync.clone());
+            let user = adopt_session(&s, session).await?;
             Ok(Json(LoginStatus {
                 status: "signed_in".into(),
                 user: Some(user),
@@ -5279,6 +5301,20 @@ mod tests {
         // The owner's token is the owner
         let (_, me) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(me["role"], "owner");
+        // Log out with the API token ends nothing (apps keep it; the page forgets it)
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "s3cret".into(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK);
+        // An owner's browser session is for the node's own Pubky identity: a node without one
+        // lets none in (the Ring log in itself is in tests/bundled_homeserver.rs)
+        let session =
+            accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+        assert!(session.starts_with(accounts::OWNER_PREFIX));
+        let (st, _) = send("GET", "/v1/me".into(), session, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = send("GET", "/v1/me".into(), "pmo_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

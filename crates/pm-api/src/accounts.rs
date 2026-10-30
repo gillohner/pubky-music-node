@@ -1,7 +1,8 @@
 //! Accounts on the node, per person (STEWARD-BUNDLED-HOMESERVER.md, step 3): the owner and
 //! listeners. Everyone signs in with Pubky Ring (`/v1/auth/pubky/start|poll`):
-//! - the **owner** (the node's own Pubky identity) gets the node's API token, as before; apps
-//!   and integrations keep using that token;
+//! - the **owner** (the node's own Pubky identity) gets a browser session of their own (`pmo_…`,
+//!   kept only as its hash, ended by Log out); apps and integrations keep using the node's API
+//!   token, which a browser may still be given by hand;
 //! - a **listener** (someone in People with music access, `people::may_use_music`) gets a
 //!   personal token, kept only as its hash. It opens the shared library, search, sources and the
 //!   zones the owner allows; settings, People, the homeserver, sources' sign-ins and the
@@ -22,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const TOKENS: &str = "accounts.tokens";
+const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+/// The start of an owner's browser session token.
+pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,23 +64,31 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
+fn load(s: &NodeState, setting: &str) -> Vec<PersonToken> {
     s.library
         .lock()
         .expect("library poisoned")
-        .get_setting(TOKENS)
+        .get_setting(setting)
         .ok()
         .flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default()
 }
 
-fn store_tokens(s: &NodeState, t: &[PersonToken]) -> Result<(), ApiError> {
+fn store(s: &NodeState, setting: &str, t: &[PersonToken]) -> Result<(), ApiError> {
     s.library
         .lock()
         .expect("library poisoned")
-        .set_setting(TOKENS, &serde_json::to_string(t).expect("serializes"))?;
+        .set_setting(setting, &serde_json::to_string(t).expect("serializes"))?;
     Ok(())
+}
+
+fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
+    load(s, TOKENS)
+}
+
+fn store_tokens(s: &NodeState, t: &[PersonToken]) -> Result<(), ApiError> {
+    store(s, TOKENS, t)
 }
 
 /// A new personal token for `key` (returned once; the node keeps its hash).
@@ -101,6 +113,33 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
     });
     store_tokens(s, &all)?;
     Ok(token)
+}
+
+/// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
+/// the node keeps its hash. At most 20; the oldest goes first.
+pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
+    let mut all = load(s, OWNER_SESSIONS);
+    if all.len() >= 20 {
+        all.remove(0);
+    }
+    all.push(PersonToken {
+        hash: hash(&token),
+        key: key.trim_start_matches("pubky").to_string(),
+        created_at: now(),
+    });
+    store(s, OWNER_SESSIONS, &all)?;
+    Ok(token)
+}
+
+/// An owner's browser session that is still open, for the identity the node is signed in as now
+/// (a node signed in as someone else no longer lets the old owner's browsers in).
+fn owner_session(s: &NodeState, token: &str, owner: Option<&str>) -> bool {
+    let Some(owner) = owner else { return false };
+    let h = hash(token);
+    load(s, OWNER_SESSIONS)
+        .iter()
+        .any(|t| t.hash == h && t.key == owner)
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
@@ -256,8 +295,8 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")
 }
 
-/// The request's caller, from its token: the API token is the owner; a listener's personal
-/// token is a listener. `None` = not signed in.
+/// The request's caller, from its token: the API token or an owner's browser session is the
+/// owner; a listener's personal token is a listener. `None` = not signed in.
 pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
     let owner_key = || {
         s.sync_handle()
@@ -274,6 +313,13 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         return Some(Caller {
             role: Role::Owner,
             key: owner_key(),
+        });
+    }
+    if t.starts_with(OWNER_PREFIX) {
+        let key = owner_key();
+        return owner_session(s, t, key.as_deref()).then_some(Caller {
+            role: Role::Owner,
+            key,
         });
     }
     if t.starts_with(crate::party::GUEST_PREFIX) {
@@ -308,25 +354,27 @@ pub(crate) async fn me(
     }))
 }
 
-/// `DELETE /v1/me/token`: a listener signs this device out (the token stops working).
+/// `DELETE /v1/me/token`: Log out of this browser. A listener's token or an owner's browser
+/// session stops working; the node's API token (given to this browser by hand) stays as it is,
+/// for the apps that use it: the page forgets it. `ended` says whether a session was ended.
 pub(crate) async fn sign_out(
     State(s): State<Arc<NodeState>>,
     axum::Extension(c): axum::Extension<Caller>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<serde_json::Value> {
-    if c.role != Role::Listener {
-        return Err(ApiError::bad_request(
-            "the owner's API token is set in the node's config, not signed out",
-        ));
-    }
     // The token the request was let in with, from the header or `?token=` (as the middleware read it)
     let token = crate::bearer(&headers, &query).unwrap_or_default();
+    let setting = match c.role {
+        Role::Listener => TOKENS,
+        Role::Owner if token.starts_with(OWNER_PREFIX) => OWNER_SESSIONS,
+        _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
+    };
     let h = hash(&token);
-    let mut all = load_tokens(&s);
+    let mut all = load(&s, setting);
     all.retain(|t| t.hash != h);
-    store_tokens(&s, &all)?;
-    Ok(Json(serde_json::json!({"signed_out": true})))
+    store(&s, setting, &all)?;
+    Ok(Json(serde_json::json!({"signed_out": true, "ended": true})))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

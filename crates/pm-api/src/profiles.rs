@@ -345,16 +345,10 @@ async fn profile_from_homeserver(s: &NodeState, id: &str) -> Option<UserView> {
     })
 }
 
-/// `GET /v1/profiles/<id>/avatar`: their picture, kept on the node a day (browsers never ask Nexus).
-pub(crate) async fn avatar(
-    State(s): State<Arc<NodeState>>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    if !valid_id(&id) {
-        return Err(ApiError::bad_request("that isn't a Pubky key"));
-    }
+/// Their picture's bytes and type, kept on the node a day (browsers never ask Nexus).
+async fn avatar_bytes(s: &NodeState, id: &str) -> Option<(Vec<u8>, &'static str)> {
     let dir = s.art_dir.join("people");
-    let path = dir.join(&id);
+    let path = dir.join(id);
     let fresh = tokio::fs::metadata(&path)
         .await
         .ok()
@@ -362,21 +356,19 @@ pub(crate) async fn avatar(
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age < AVATAR_TTL);
     if !fresh {
-        let d = s.discovery().ok_or_else(|| ApiError::not_found("no picture"))?;
-        match tokio::time::timeout(Duration::from_secs(5), d.nexus().avatar(&id)).await {
+        let d = s.discovery()?;
+        match tokio::time::timeout(Duration::from_secs(5), d.nexus().avatar(id)).await {
             Ok(Ok((bytes, _))) if !bytes.is_empty() => {
                 let _ = tokio::fs::create_dir_all(&dir).await;
                 let _ = tokio::fs::write(&path, &bytes).await;
             }
-            Ok(Err(NexusError::NotFound)) => return Err(ApiError::not_found("no picture")),
+            Ok(Err(NexusError::NotFound)) => return None,
             // Keep serving the old one when Nexus doesn't answer
             _ if path.is_file() => {}
-            _ => return Err(ApiError::not_found("no picture")),
+            _ => return None,
         }
     }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|_| ApiError::not_found("no picture"))?;
+    let bytes = tokio::fs::read(&path).await.ok()?;
     let mime = match bytes.get(..4) {
         Some([0x89, b'P', b'N', b'G']) => "image/png",
         Some([b'R', b'I', b'F', b'F']) => "image/webp",
@@ -384,6 +376,20 @@ pub(crate) async fn avatar(
         Some([b'<', ..]) => "image/svg+xml",
         _ => "image/jpeg",
     };
+    Some((bytes, mime))
+}
+
+/// `GET /v1/profiles/<id>/avatar`: their picture.
+pub(crate) async fn avatar(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if !valid_id(&id) {
+        return Err(ApiError::bad_request("that isn't a Pubky key"));
+    }
+    let (bytes, mime) = avatar_bytes(&s, &id)
+        .await
+        .ok_or_else(|| ApiError::not_found("no picture"))?;
     Ok((
         [
             (header::CONTENT_TYPE, mime.to_string()),
@@ -392,6 +398,60 @@ pub(crate) async fn avatar(
         bytes,
     )
         .into_response())
+}
+
+/// Pictures bigger than this stay off the Log in screen (it shows initials instead).
+const FACE_MAX: usize = 256 * 1024;
+
+/// A person on the Log in screen, which has no token to load `/v1/profiles` with: their name
+/// and picture (a `data:` URL) in the answer itself.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct LoginFace {
+    /// Raw z32 key.
+    pub id: String,
+    /// Their name, or a short form of the key.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+/// [`LoginFace`] of `key` (with or without `pubky`): from the cache, else Nexus or their
+/// homeserver, a few seconds at most.
+pub(crate) async fn login_face(s: &NodeState, key: &str) -> LoginFace {
+    use base64::Engine as _;
+    let id = key.trim_start_matches("pubky").to_string();
+    if !valid_id(&id) {
+        return LoginFace {
+            name: short(&id),
+            id,
+            avatar: None,
+        };
+    }
+    let found = tokio::time::timeout(Duration::from_secs(6), async {
+        let v = views(s, std::slice::from_ref(&id)).await.remove(&id).flatten();
+        let name = v
+            .as_ref()
+            .map(|u| u.details.name.trim().to_string())
+            .filter(|n| !n.is_empty());
+        let pic = if v.as_ref().is_some_and(|u| u.details.image.is_some()) {
+            avatar_bytes(s, &id).await
+        } else {
+            None
+        };
+        (name, pic)
+    })
+    .await
+    .unwrap_or_default();
+    LoginFace {
+        name: found.0.unwrap_or_else(|| short(&id)),
+        avatar: found.1.filter(|(b, _)| b.len() <= FACE_MAX).map(|(b, mime)| {
+            format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(b)
+            )
+        }),
+        id,
+    }
 }
 
 #[derive(Debug, Serialize)]

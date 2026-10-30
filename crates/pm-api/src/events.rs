@@ -197,14 +197,18 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
     // (and pm-client) never send anything.
     let mut pings = false;
     let mut last_heard = tokio::time::Instant::now();
+    // An owner's browser session (Log out ends it) is checked like a listener's token
+    let session = token
+        .as_deref()
+        .is_some_and(|t| t.starts_with(crate::accounts::OWNER_PREFIX));
     // The owner came in with the API token: when it is replaced, this socket ends with it
-    let with_token = c.role == crate::accounts::Role::Owner && s.token().is_some();
+    let with_token = c.role == crate::accounts::Role::Owner && !session && s.token().is_some();
     let mut token_changed = s.token_changed.subscribe();
-    // A listener signed out or lost music access: the socket goes with the token (checked on
-    // each server ping, and before an event at most every few seconds)
+    // A listener signed out or lost music access, or an owner logged out: the socket goes with
+    // the token (checked on each server ping, and before an event at most every few seconds)
     let mut checked = tokio::time::Instant::now();
     let still_valid = |at: &mut tokio::time::Instant, now: bool| {
-        if c.role == crate::accounts::Role::Owner || !(now || at.elapsed() >= RECHECK) {
+        if (c.role == crate::accounts::Role::Owner && !session) || !(now || at.elapsed() >= RECHECK) {
             return true;
         }
         *at = tokio::time::Instant::now();

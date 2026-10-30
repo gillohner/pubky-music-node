@@ -192,7 +192,7 @@
     } catch { linkHint(); throw new Error("Can't reach the node."); }
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
-    if (r.status === 401) { login(); throw new Error('The node wants an API token.'); }
+    if (r.status === 401) { sessionEnded(); throw new Error('Log in to use the node.'); }
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
@@ -662,7 +662,7 @@
     const bad = parts.filter((p) => p.state !== 'ok');
     el.hidden = !bad.length; if (!bad.length) return;
     const first = bad[0];
-    $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? `${first.name}: sign in again` : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
+    $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? (first.id === 'homeserver' ? `${first.name}: log out and in to approve new folders` : `${first.name}: sign in again`) : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
     el.title = bad.map((p) => `${p.name}: ${p.detail || p.state}`).join('\n') + '\nYour library keeps playing.';
     el.onclick = () => showMenu(el, [{ title: 'Outside parts' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in', run: () => { state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
   };
@@ -673,31 +673,128 @@
     const tag = () => { queued = false; document.querySelectorAll('.clickable:not(button):not(a):not([tabindex])').forEach((el) => { el.tabIndex = 0; if (!el.getAttribute('role')) el.setAttribute('role', 'button'); }); };
     new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
   }
-  const login = () => { const d = $('#login'); if (!d.open) { $('#tok').value = state.token; d.showModal(); } };
-  // Pubky Ring sign-in: the node starts a flow, we show the link (and a QR when the device has a camera elsewhere), poll until the owner approves, and keep the token it hands out.
-  let ringPoll = null;
-  $('#ringstart').onclick = async () => {
-    const out = $('#ringout'); $('#ringstart').disabled = true; out.innerHTML = 'Starting…';
+  // ---- Log in / Log out (TASK-login-ux) -------------------------------------
+  // Signed out, the page is one Log in screen instead of the app: Pubky Ring for the owner and
+  // listeners alike (the node tells them apart), the node's API token as the small alternative.
+  // Phones and tablets get "Open in Pubky Ring" first, desktops the QR code. The node's answer
+  // names who approved when it refuses, so a wrong identity is said plainly.
+  const LOGIN_WHY = { ended: 'Your session ended. Log in again.', out: 'You logged out.' };
+  // This browser's own state that belongs to the account, not the device (theme and layout stay)
+  const ACCOUNT_KEYS = ['pm.token', 'pm.zone', 'pm.browserQueue', 'pm.browserAt', 'pm.setupHidden'];
+  const forgetAccount = () => {
+    state.token = '';
     try {
-      const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json(); if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      out.innerHTML = `<div class="qrbox">${j.qr_svg ? `<div class="qr">${j.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or <a href="${esc(ringUrl(j.url))}">open it in Ring on this device</a>.</p><p>Waiting for approval from <code>${esc(j.owner.slice(0, 12))}…</code></p></div></div>`;
-      clearInterval(ringPoll);
-      ringPoll = setInterval(async () => {
-        try {
-          const p = await (await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(j.id)}`)).json();
-          if (p.status === 'pending') return;
-          clearInterval(ringPoll); $('#ringstart').disabled = false;
-          if (p.status === 'ok') { state.token = p.token || ''; localStorage.setItem('pm.token', state.token); $('#login').close(); toast('Connected with Pubky Ring'); connect(); }
-          else if (p.status === 'denied') out.innerHTML = `<p class="warn">That was a different Pubky identity (${esc((p.user || '').slice(0, 12))}…). Only the node's owner can connect.</p>`;
-          else out.innerHTML = '<p class="warn">The sign-in expired. Try again.</p>';
-        } catch (e) { clearInterval(ringPoll); $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
-      }, 2000);
-    } catch (e) { $('#ringstart').disabled = false; out.innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+      ACCOUNT_KEYS.forEach((k) => localStorage.removeItem(k));
+      Object.keys(localStorage).filter((k) => k.startsWith('pm.up.')).forEach((k) => localStorage.removeItem(k));
+    } catch { /* no storage */ }
   };
-  $('#login form').addEventListener('submit', () => {
-    state.token = $('#tok').value.trim();
-    localStorage.setItem('pm.token', state.token);
-    connect();
+  const ringFirst = () => matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  const loginFace = (f, cls = '') => (f && f.avatar && /^data:image\//.test(f.avatar)
+    ? `<img class="face ${cls}" src="${esc(f.avatar)}" alt="">`
+    : `<span class="face mono ${cls}" style="background:hsl(${hue(f && f.id)} 35% 34%)">${esc(initials((f && f.name) || '?'))}</span>`);
+  const lg = { flow: null, timer: null, showQr: false, gen: 0 };
+  const loginStop = () => { clearTimeout(lg.timer); lg.timer = null; lg.gen += 1; };
+  const drawLoginFlow = () => {
+    const f = lg.flow; if (!f) return;
+    const owner = f.owner_face || { id: f.owner, name: '' };
+    $('#loginface').innerHTML = loginFace(owner);
+    $('#loginh').textContent = f.node_name ? `Log in to ${f.node_name}` : 'Log in';
+    const qr = f.qr_svg ? `<div class="loginqr" role="img" aria-label="QR code to scan with Pubky Ring">${f.qr_svg}</div>` : '';
+    const open = (cls) => `<a class="btn ${cls}" id="loginring" href="${esc(ringUrl(f.url))}">Open in Pubky Ring</a>`;
+    const wait = '<p class="loginwait" id="loginwait"><span class="spin" aria-hidden="true"></span>Waiting for Pubky Ring… this page continues by itself.</p>';
+    const renew = f.renews ? `<p class="muted small">If this is your node, Pubky Ring also asks you to approve new folders for it.</p>` : '';
+    $('#loginbody').innerHTML = ringFirst()
+      ? `${open('primary loginmain')}${lg.showQr ? qr : ''}<button class="btn ghost sm" type="button" id="loginqrbtn" aria-expanded="${lg.showQr}">${lg.showQr ? 'Hide QR code' : 'Show QR code'}</button>${wait}${renew}`
+      : `${qr}<p class="muted">Scan with Pubky Ring on your phone.</p>${open('ghost sm')}${wait}${renew}`;
+    const qb = $('#loginqrbtn'); if (qb) qb.onclick = () => { lg.showQr = !lg.showQr; drawLoginFlow(); };
+  };
+  const drawRefused = (p) => {
+    const owner = p.owner_face || (lg.flow && lg.flow.owner_face) || { name: 'its owner' };
+    const them = p.approver || { id: p.user, name: (p.user || '').slice(0, 12) + '…' };
+    const msg = p.reason === 'no_access'
+      ? `${esc(them.name)} doesn’t have access to the music here. Ask ${esc(owner.name)} to give you access.`
+      : `This node belongs to ${esc(owner.name)}. You approved as ${esc(them.name)}. Pick ${esc(owner.name)} in Pubky Ring and try again.`;
+    $('#loginbody').innerHTML = `<div class="loginwho"><figure>${loginFace(owner)}<figcaption>${esc(owner.name)}<br><span class="muted small">this node’s owner</span></figcaption></figure><figure>${loginFace(them, 'wrong')}<figcaption>${esc(them.name)}<br><span class="muted small">you approved as</span></figcaption></figure></div>`
+      + `<p class="loginmsg" id="loginrefused" role="alert">${msg}</p>`
+      + (p.reason === 'no_access' ? '' : `<p class="muted small">To listen here as ${esc(them.name)}, ask ${esc(owner.name)} to give you access.</p>`)
+      + '<button class="btn primary loginmain" type="button" id="loginagain">Try again</button>';
+    $('#loginagain').onclick = () => { $('#loginwhy').hidden = true; loginStart(); };
+    $('#loginagain').focus();
+  };
+  const loginPoll = (gen) => {
+    lg.timer = setTimeout(async () => {
+      if (gen !== lg.gen) return;
+      let p;
+      try { const r = await fetch(`/v1/auth/pubky/poll?id=${encodeURIComponent(lg.flow.id)}`); p = await r.json(); if (!r.ok) throw new Error(p.error || `HTTP ${r.status}`); } catch { if (gen === lg.gen) loginPoll(gen); return; }
+      if (gen !== lg.gen) return;
+      if (p.status === 'pending') return loginPoll(gen);
+      if (p.status === 'ok' && p.token) {
+        loginStop(); state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
+        hideLogin(); connect(); return;
+      }
+      if (p.status === 'denied') { loginStop(); drawRefused(p); return; }
+      loginStart(); // the sign-in expired (ten minutes): a fresh one, quietly
+    }, 2000);
+  };
+  const loginStart = async () => {
+    loginStop(); const gen = lg.gen;
+    $('#loginbody').innerHTML = '<p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p>';
+    try {
+      const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json();
+      if (gen !== lg.gen) return;
+      if (r.status === 412) {
+        $('#loginbody').innerHTML = '<p class="muted">This node isn’t linked to a Pubky identity yet, so Pubky Ring can’t log you in. Use its API token below.</p>';
+        $('#logintoken').open = true; return;
+      }
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      lg.flow = j; drawLoginFlow(); loginPoll(gen);
+    } catch (e) {
+      if (gen !== lg.gen) return;
+      $('#loginbody').innerHTML = `<p class="muted">Can’t start a log in: ${esc(e.message)}</p><button class="btn primary" type="button" id="loginretry">Try again</button>`;
+      $('#loginretry').onclick = () => loginStart();
+    }
+  };
+  // Back from Pubky Ring: ask at once instead of waiting for the next tick (phones pause timers)
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && lg.flow && lg.timer) { clearTimeout(lg.timer); loginPoll(lg.gen); } });
+  const showLogin = (why) => {
+    if (signedOut()) return;
+    dropSocket(); clearTimeout(link.retry); link.retry = null;
+    document.body.classList.add('signedout');
+    for (const d of document.querySelectorAll('dialog[open]')) d.close();
+    $('#loginpage').hidden = false;
+    const w = $('#loginwhy'); w.hidden = !LOGIN_WHY[why]; w.textContent = LOGIN_WHY[why] || '';
+    $('#tok').value = ''; $('#logintoken').open = false;
+    loginStart();
+  };
+  const hideLogin = () => { loginStop(); document.body.classList.remove('signedout'); $('#loginpage').hidden = true; };
+  // The node refused this browser's token (401): the session ended (or there was none). Start
+  // over from a fresh page, so nothing of the old session lingers; it says why.
+  const signedOut = () => document.body.classList.contains('signedout');
+  const sessionEnded = () => {
+    if (!state.token) { let why; try { why = sessionStorage.getItem('pm.loginWhy'); sessionStorage.removeItem('pm.loginWhy'); } catch { /* no reason */ } showLogin(why); return; }
+    forgetAccount();
+    try { sessionStorage.setItem('pm.loginWhy', 'ended'); } catch { /* the screen just doesn't say why */ }
+    location.reload();
+  };
+  // Log out: the node ends this browser's session (an owner's or a listener's; a pasted API
+  // token stays the node's), and the page forgets everything of the account, back to Log in.
+  const logOut = async () => {
+    try { if (state.token) await fetch('/v1/me/token', { method: 'DELETE', headers: { authorization: 'Bearer ' + state.token } }); } catch { /* logged out here either way */ }
+    forgetAccount();
+    try { sessionStorage.setItem('pm.loginWhy', 'out'); } catch { /* no reason shown */ }
+    // From a menu: its history entry goes first, or popping it later would cancel this navigation
+    popTransient(); if (popPending) await popPending;
+    location.replace('/');
+  };
+  // A pasted token is tried first: a wrong one is said here, not taken for an ended session
+  $('#tokform').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const t = $('#tok').value.trim(); if (!t) return;
+    const out = $('#tokerr'); out.textContent = '';
+    let r; try { r = await fetch('/v1/me', { headers: { authorization: 'Bearer ' + t } }); } catch { out.textContent = 'Can’t reach the node. Try again.'; return; }
+    if (r.status === 401) { out.textContent = 'The node doesn’t take that token.'; $('#tok').select(); return; }
+    state.token = t; try { localStorage.setItem('pm.token', t); } catch { /* this tab keeps it */ }
+    hideLogin(); connect();
   });
 
   // ---- zones & playback ----------------------------------------------------
@@ -1518,7 +1615,20 @@
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
-  $('#me').onclick = () => setView('settings');
+  // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
+  // no token has nothing to log out of.
+  $('#me').onclick = async () => {
+    const me = state.me || {}; const [who] = me.key ? await loadProfiles([me.key]) : [];
+    const name = (who && who.name) || (isListener() ? 'Listener' : 'Owner');
+    showMenu($('#me'), [{ title: `${name} · ${isListener() ? 'listening here' : 'this node’s owner'}` }, { label: 'Settings', icon: 'settings', run: () => setView('settings') }, ...(state.token ? [{ label: 'Log out', icon: 'logout', run: logOut }] : [])], { all: true });
+  };
+  // The account button shows your picture once the node knows who you are
+  const drawMe = async () => {
+    const b = $('#me'); const me = state.me || {}; if (!me.key) return;
+    const [who] = await loadProfiles([me.key]); if (!who) return;
+    b.innerHTML = face(who, 'md'); b.classList.add('has-face');
+    b.setAttribute('aria-label', `${who.name}: settings and Log out`); b.title = `${who.name}: settings and Log out`;
+  };
   $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
@@ -3586,9 +3696,11 @@
   };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
-  const RESIGN_TEXT = 'This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.';
-  const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span><button class="btn sm primary" data-resign>Sign in again</button></div>` : '';
-  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = () => { state.autoResign = true; setView('settings', 'accounts'); });
+  // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
+  // them (one approval, no separate sign-in), so the way there is Log out
+  const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.';
+  const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : ''}</div>` : '';
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = logOut);
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
@@ -3784,7 +3896,7 @@
           const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`;
           const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (k === 'listening') return '<div id="h-listenwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
-          main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + resignNotice() + '<div id="h-setup"></div>'
+          main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + '<div id="h-setup"></div>'
             + ordered.filter(showRow).map(rowHtml).join('');
           // Saves go one at a time and the newest layout is the one that ends up saved: while one is
           // on its way, a later change waits and is sent when it lands (each save takes seconds)
@@ -4803,7 +4915,7 @@
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? '' : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -5203,11 +5315,11 @@
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
             const zonesText = me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
             main.innerHTML = pageHead('Settings', null)
-              + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), '<button class="btn" id="lsignout">Sign out of this device</button>')
+              + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
                 + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
-            $('#lsignout').onclick = async () => { try { await api('DELETE', '/me/token'); } catch { /* signed out either way */ } state.token = ''; try { localStorage.removeItem('pm.token'); } catch { /* no storage */ } location.reload(); };
+            $('#lsignout').onclick = logOut;
             break;
           }
           const info = await api('GET', '/info'); state.info = info;
@@ -5250,8 +5362,8 @@
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           const accounts = group('Pubky', pk ? (
               (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
-              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
-              + (pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : '')
+              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? '' : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
+              + (pk.needs_resign ? resignNotice(pk).replace('<div class="notice warn resign"', '<div id="pkresign" class="notice warn resign"') : '')
               + '<div id="pkurl"></div>'
               + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
             ) : row('Pubky', 'Pubky is not set up on this node.', ''))
@@ -5265,9 +5377,9 @@
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
-            + group('Access', row('This browser', 'Changes only the token this browser uses to reach the node; the node’s token stays as it is.', '<button class="btn ghost" id="logout">Use a different token in this browser</button>')
+            + group('Access', (state.token ? row('This browser', 'Log out ends this browser’s session and brings back the Log in screen. The node’s token for apps stays as it is.', `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
               + (ns.token_replaceable
-                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app, browser and Subsonic app needs the new one. People you invited keep their own sign-ins.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
+                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and so does a browser given the token by hand. Browsers logged in with Pubky Ring and people you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
                 : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
@@ -5366,15 +5478,16 @@
             } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }
             sc.disabled = false;
           };
-          $('#logout').onclick = () => login();
+          const lo = $('#logout'); if (lo) lo.onclick = logOut;
           const tn = $('#tokennew'); if (tn) tn.onclick = async () => {
-            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app, browser and Subsonic app then needs the new one; this browser switches to it now.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
+            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app and Subsonic app then needs the new one; browsers logged in with Pubky Ring stay logged in.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
             if (!go) return;
             tn.disabled = true;
             try {
               const r = await api('POST', '/node/token');
               // Every later call (and a reconnect of the event socket) uses it
-              state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
+              // A browser given the old token by hand moves to the new one; a Pubky Ring session stays
+              if (!/^pm[ol]_/.test(state.token)) { state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ } }
               $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
               $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
             } catch (e) { toast(e.message, 'error'); tn.disabled = false; }
@@ -5638,6 +5751,7 @@
     link.retry = setTimeout(() => { link.retry = null; clearRetryAt(); reconnect(); }, wait);
   };
   const goneDown = () => {
+    if (signedOut()) return; // the Log in screen, not a dropped link
     link.up = false; clearInterval(link.ping); link.awaiting = false;
     if (!link.downSince) link.downSince = Date.now();
     scheduleRetry(); showDown();
@@ -5750,6 +5864,7 @@
       watchScan(state.info);
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
       document.body.classList.toggle('listener', isListener());
+      drawMe().catch(() => {});
       if (isOwner()) {
         wireLive();
         loadFavourites().catch(() => {});
@@ -5762,6 +5877,7 @@
       link.loaded = true;
       openEvents();
     } catch (e) {
+      if (signedOut()) return;
       main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)} It retries by itself.</div>`;
       if (!link.downSince) link.downSince = Date.now();
       scheduleRetry(); showDown();
