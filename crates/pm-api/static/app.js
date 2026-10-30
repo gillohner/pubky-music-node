@@ -1205,7 +1205,9 @@
   };
   // Home's "Listening now" (TASK-pinakes-social-ux L3): who else on this node is listening, what and
   // where, with Listen along when their zone is open to you. A zone you can't see: just who.
-  const ALONG_ERRORS = { 404: 'They’ve stopped listening (or keep it to themselves).', 409: 'You’re listening along with someone already. Leave first.', 403: 'That zone isn’t open to you.', 400: 'These speakers can’t join a group.' };
+  // The node's own words name the reason (along already, someone else's zone, a maker's group,
+  // a zone that is gone); a 403 gets a plain sentence
+  const ALONG_ERRORS = { 403: 'That zone isn’t open to you.' };
   const renderListening = () => {
     const wrap = $('#h-listenwrap'); if (!wrap || state.view !== 'home') return;
     const others = (state.presence || []).filter((l) => !l.you);
@@ -1214,28 +1216,34 @@
       const name = personName(l);
       const face = l.avatar ? `<img class="thumb round" src="${esc(imgSrc(l.avatar))}" alt="" loading="lazy" data-err="hide">` : `<div class="avatar" aria-hidden="true">${esc(initials(name))}</div>`;
       const what = l.title ? ` to <b>${esc(l.title)}</b>${l.artist ? ` <span class="muted">· ${esc(l.artist)}</span>` : ''}` : '';
-      const act = l.mine ? '<span class="pill ok">Listening along</span>' : l.zone && l.can_join ? `<button class="btn sm" data-alongjoin="${k}" aria-label="Listen along with ${esc(name)}">${icon('zone')} Listen along</button>` : '';
+      const joining = state.joiningAlong === l.key;
+      const act = l.mine ? '<span class="pill ok">Listening along</span>' : l.zone && l.can_join ? `<button class="btn sm" data-alongjoin="${k}" ${joining ? 'disabled aria-label="Joining…"' : `aria-label="Listen along with ${esc(name)}"`}>${joining ? '<span class="spin"></span> Joining…' : `${icon('zone')} Listen along`}</button>` : '';
       return `<div class="list-row listening">${face}${l.image ? `<img class="thumb" src="${esc(imgSrc(l.image))}" alt="" loading="lazy" data-err="hide">` : ''}<div class="grow"><div class="name">${esc(name)} is listening${what}</div>${l.zone ? `<div class="sub">on ${esc(l.zone.name)}${l.playing === false ? ' · paused' : ''}</div>` : ''}</div>${act}</div>`;
     }).join('')}</div></section>`;
     $$('[data-alongjoin]', wrap).forEach((b) => b.onclick = () => joinAlong(others[Number(b.dataset.alongjoin)], b));
   };
-  // Listen along from your zone: a node zone of yours (This browser can't join a group), asked
-  // when the zone in use isn't one
+  // Listen along from a zone that is free to join: a node zone (This browser can't join a group),
+  // not one someone else is listening on (joining stops what plays there) and not a listen-along
+  // group. The zone in use when it is one, else a menu of them.
   const joinAlong = (l, b) => {
-    const mine = zoneList().filter((z) => z.id !== BROWSER && (!l.zone || z.id !== l.zone.id));
-    if (state.zone !== BROWSER && state.zones[state.zone] && (!l.zone || state.zone !== l.zone.id)) return doJoinAlong(l, state.zone, b);
-    if (!mine.length) { toast('Listening along needs speakers of yours on this node: This browser can’t join.', 'error'); return; }
-    showMenu(b, [{ title: 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b) }))]);
+    const busy = new Set((state.presence || []).filter((p) => !p.you && p.zone).map((p) => p.zone.id));
+    const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && (!l.zone || id !== l.zone.id);
+    if (free(state.zone)) return doJoinAlong(l, state.zone, b);
+    const mine = zoneList().filter((z) => free(z.id));
+    if (!mine.length) { toast('Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
+    showMenu(b, [{ title: 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b) }))], { all: true });
   };
   const doJoinAlong = async (l, zone, b) => {
-    const label = b.innerHTML; b.disabled = true; b.innerHTML = '<span class="spin"></span> Joining…';
+    // The row may be drawn again while this runs (a zone came, the 20 s poll): it stays "Joining…"
+    state.joiningAlong = l.key; renderListening();
     try {
       const zs = await api('POST', '/presence/along', { key: l.key, zone });
       state.zones[zs.id] = zs; state.zone = zs.id; try { localStorage.setItem('pm.zone', state.zone); } catch { /* storage unavailable */ }
       renderZoneName(); renderBar(); refreshQueue();
+      state.joiningAlong = null;
       toast(`Listening along with ${personName(l)}`);
       await refreshAlong();
-    } catch (e) { toast(ALONG_ERRORS[e.status] || e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = label; } }
+    } catch (e) { state.joiningAlong = null; renderListening(); toast(ALONG_ERRORS[e.status] || e.message, 'error'); }
   };
   const leaveAlong = async () => {
     const a = state.along; const b = $('#alongleave'); if (!a) return;
@@ -2563,8 +2571,9 @@
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
-  const showMenu = (anchor, items) => {
-    if (isListener()) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+  // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
+  const showMenu = (anchor, items, opts = {}) => {
+    if (isListener() && !opts.all) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
     if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
     else if (menuPick) {
       const want = menuPick; menuPick = null; closeMenu();

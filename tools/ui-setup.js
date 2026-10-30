@@ -378,7 +378,9 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.route(/\/v1\/presence$/, (r) => r.fulfill({ json: PRES }));
       await p.route(/\/v1\/me\/presence$/, (r) => r.fulfill({ json: { visible: 'hidden' } }));
       let alongBody = null; let alongStatus = 409;
-      await p.route(/\/v1\/presence\/along$/, (r) => { alongBody = JSON.parse(r.request().postData() || '{}'); return alongStatus === 200 ? r.fulfill({ json: { ...nz, id: nz.id } }) : r.fulfill({ status: alongStatus, json: { error: 'already listening along' } }); });
+      // the node answers with the new group zone: their music, your speakers with theirs
+      const GROUP = { ...nz, id: `group:${nz.output}+alice`, name: 'Kitchen + Null output', output: `group:${nz.output}+alice` };
+      await p.route(/\/v1\/presence\/along$/, (r) => { alongBody = JSON.parse(r.request().postData() || '{}'); if (alongStatus !== 200) return r.fulfill({ status: alongStatus, json: { error: 'someone else is listening on that zone: listen along from yours' } }); PRES[1] = { ...PRES[1], mine: true, your_zone: nz.id }; return r.fulfill({ json: GROUP }); });
       await p.goto(BASE + '/'); await p.waitForSelector('#h-listening .list-row', { timeout: 15000 }).catch(() => {});
       const rows = await p.$$eval('#h-listening .list-row', (els) => els.map((e) => ({ name: e.querySelector('.name').textContent.replace(/\s+/g, ' ').trim(), sub: (e.querySelector('.sub') || {}).textContent || '', join: !!e.querySelector('[data-alongjoin]'), pill: (e.querySelector('.pill') || {}).textContent || '' })));
       check(rows.length === 3 && !rows.some((r) => /My own song/.test(r.name)), `Listening now lists the others, not you (${rows.length})`);
@@ -390,9 +392,16 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const menuText = await p.evaluate(() => (document.querySelector('.popover.menu:not([hidden])') || {}).textContent || '');
       check(/Listen from/.test(menuText) && menuText.includes(nz.name), `from This browser it asks which speakers listen along (${menuText.replace(/\s+/g, ' ').slice(0, 80)})`);
       await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
-      const refusal = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Leave first/.test(v || '')) return v; if (Date.now() > end) return v; await p.waitForTimeout(150); } })();
-      check(/You’re listening along with someone already\. Leave first\./.test(refusal || ''), `a refusal in words (409: ${refusal})`);
+      const refusal = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/listen along from yours/i.test(v || '')) return v; if (Date.now() > end) return v; await p.waitForTimeout(150); } })();
+      check(/someone else is listening on that zone/i.test(refusal || ''), `a refusal in the node's words (409: ${refusal})`);
       check(alongBody && alongBody.key === K('a') && alongBody.zone === nz.id, `the request names them and your zone (${JSON.stringify(alongBody && { zone: alongBody.zone })})`);
+      check(await p.evaluate(() => { const b = document.querySelector('[data-alongjoin="0"]'); return !!b && !b.disabled && /Listen along with Alice/.test(b.getAttribute('aria-label')); }), 'after a refusal the button is back, named again');
+      // and now it works: the page switches to the group and the row says you listen along
+      alongStatus = 200;
+      await p.click('[data-alongjoin="0"]'); await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const ok = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Listening along with Alice/.test(v || '')) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } })();
+      check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);
+      check(await waitText(p, '#h-listening .list-row:first-child .pill', 'Listening along'), 'the row says you listen along now');
       await p.unroute(/\/v1\/presence$/); await p.unroute(/\/v1\/me\/presence$/); await p.unroute(/\/v1\/presence\/along$/);
       await c.close();
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
