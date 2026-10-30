@@ -66,6 +66,13 @@ pub fn plain_name(s: &str) -> String {
 /// A title as people compare them: [`plain_name`] without "(Deluxe Edition)", "\[Remastered\]"
 /// or " - 2011 Remaster". A title that is nothing but brackets keeps them.
 pub fn plain_title(s: &str) -> String {
+    plain_name(&bare_title(s))
+}
+
+/// A title without its edition: no "(Deluxe Edition)", "\[Remastered\]" or " - 2011 Remaster",
+/// as typed otherwise. What a search asks for: MusicBrainz's titles carry no such suffix. A title
+/// that is nothing but brackets is kept.
+pub fn bare_title(s: &str) -> String {
     let mut out = String::new();
     let mut depth = 0u32;
     let head = s.split(" - ").next().unwrap_or(s);
@@ -77,11 +84,11 @@ pub fn plain_title(s: &str) -> String {
             _ => {}
         }
     }
-    let plain = plain_name(&out);
-    if plain.is_empty() {
-        plain_name(s)
+    let bare = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if plain_name(&bare).is_empty() {
+        s.trim().to_string()
     } else {
-        plain
+        bare
     }
 }
 
@@ -89,7 +96,7 @@ pub fn plain_title(s: &str) -> String {
 pub fn album_query(a: &AlbumEvidence) -> String {
     format!(
         "release:\"{}\" AND artist:\"{}\"",
-        lucene_escape(&a.title),
+        lucene_escape(&bare_title(&a.title)),
         lucene_escape(&a.artist)
     )
 }
@@ -98,7 +105,7 @@ pub fn album_query(a: &AlbumEvidence) -> String {
 pub fn recording_query(artist: &str, s: &SongEvidence) -> String {
     format!(
         "recording:\"{}\" AND artist:\"{}\" AND dur:[{} TO {}]",
-        lucene_escape(&s.title),
+        lucene_escape(&bare_title(&s.title)),
         lucene_escape(artist),
         s.duration_ms.saturating_sub(LENGTH_SLACK_MS),
         s.duration_ms + LENGTH_SLACK_MS
@@ -800,6 +807,10 @@ mod tests {
         assert_eq!(plain_title("Abbey Road - 2019 Remix"), "abbey road");
         assert_eq!(plain_title("[Untitled]"), "untitled");
         assert_eq!(plain_title("Björk Live"), "björk live");
+        assert_eq!(bare_title("Zahltag (Deluxe Edition)"), "Zahltag");
+        assert_eq!(bare_title("Abbey Road - 2019 Remix"), "Abbey Road");
+        assert_eq!(bare_title("Who  Made Who [Remastered]"), "Who Made Who");
+        assert_eq!(bare_title("[Untitled]"), "[Untitled]");
     }
 
     #[test]
@@ -927,8 +938,9 @@ mod tests {
             "recording:\"T.N.T.\" AND artist:\"AC\\/DC\" AND dur:[0 TO 4000]"
         );
         assert_eq!(
-            album_query(&album("Who Made Who?", "AC/DC", 9)),
-            "release:\"Who Made Who\\?\" AND artist:\"AC\\/DC\""
+            album_query(&album("Who Made Who? (Deluxe)", "AC/DC", 9)),
+            "release:\"Who Made Who\\?\" AND artist:\"AC\\/DC\"",
+            "the search asks for the title without its edition"
         );
     }
 

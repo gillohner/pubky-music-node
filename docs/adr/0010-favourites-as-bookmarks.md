@@ -26,3 +26,11 @@ reason, consistent with constraint 4.
   when the primitives land, without a schema change.
 * Pinakes can index public music bookmarks as bookmarks of URLs; no new type to teach it.
 * Albums are hearted by release MBID, so an album with no MusicBrainz match waits for the resolver.
+
+## Amendment (2026-10-26): called bookmarks
+
+The owner's decision: "use bookmark terming with social specs v1". The API, the code and the
+library say bookmark: `/v1/bookmarks`, the `bookmarks` table (library migration 15) and
+`pm_pubky::Bookmark`. `/v1/favourites` answers for one release, marked deprecated
+(`docs/api.md`, Deprecated). The homeserver format does not change: social v1 bookmarks in
+`/priv/social/v1/bookmarks/` (ADR 0014).

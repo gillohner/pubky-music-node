@@ -78,18 +78,27 @@ pub fn element_text(xml: &str, name: &str) -> Option<String> {
     use quick_xml::Reader;
     let mut reader = Reader::from_str(xml);
     let mut inside = false;
+    // The text comes in pieces around each entity (`&amp;` in a URL's query is its own event)
+    let mut text: Option<String> = None;
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 inside = e.local_name().as_ref() == name;
             }
-            Ok(Event::Text(t)) if inside => {
-                return Some(
-                    t.xml_content(quick_xml::XmlVersion::Implicit1_0)
-                        .trim()
-                        .to_string(),
-                );
+            Ok(Event::Text(t)) if inside => text
+                .get_or_insert_with(String::new)
+                .push_str(&t.xml_content(quick_xml::XmlVersion::Implicit1_0)),
+            Ok(Event::GeneralRef(r)) if inside => {
+                let name = r.xml10_content().to_string();
+                let piece = match r.resolve_char_ref() {
+                    Ok(Some(c)) => c.to_string(),
+                    _ => quick_xml::escape::resolve_xml_entity(&name)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("&{name};")),
+                };
+                text.get_or_insert_with(String::new).push_str(&piece);
             }
+            Ok(Event::End(_)) if inside => return text.map(|t| t.trim().to_string()),
             Ok(Event::End(_)) => inside = false,
             Ok(Event::Eof) | Err(_) => return None,
             _ => {}
@@ -142,6 +151,15 @@ mod tests {
                 || e.contains("<u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">")
         );
         assert!(e.contains("<CurrentURI>http://h/s.wav?a=1&amp;b=&lt;2&gt;</CurrentURI>"));
+        // Read back whole: the text around each entity, and the entities
+        assert_eq!(
+            element_text(&e, "CurrentURI").as_deref(),
+            Some("http://h/s.wav?a=1&b=<2>")
+        );
+        assert_eq!(
+            element_text("<a><b>x&#38;y &#x26; z</b></a>", "b").as_deref(),
+            Some("x&y & z")
+        );
         let resp = "<s:Envelope xmlns:s=\"x\"><s:Body><u:GetVolumeResponse><CurrentVolume>37</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>";
         assert_eq!(element_text(resp, "CurrentVolume").as_deref(), Some("37"));
         assert!(element_text(resp, "Nope").is_none());

@@ -145,6 +145,67 @@ impl Library {
     }
 }
 
+impl Library {
+    /// Live posts of one kind whose `updated_at` is before `before` (all when `None`), newest
+    /// first, at most `limit`: a page of a history (a listen's `updated_at` is its play time).
+    pub fn music_posts_page(&self, kind: &str, before: Option<i64>, limit: u32) -> Result<Vec<MusicPostRow>> {
+        let conn = self.lock();
+        let mut st = conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM music_posts WHERE kind = ?1 AND deleted = 0 AND updated_at < ?2
+             ORDER BY updated_at DESC, id DESC LIMIT ?3"
+        ))?;
+        let rows = st
+            .query_map(params![kind, before.unwrap_or(i64::MAX), limit as i64], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Live posts of one kind with `updated_at` in `from..=to`.
+    pub fn music_posts_between(&self, kind: &str, from: i64, to: i64) -> Result<Vec<MusicPostRow>> {
+        let conn = self.lock();
+        let mut st = conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM music_posts WHERE kind = ?1 AND deleted = 0 AND updated_at BETWEEN ?2 AND ?3
+             ORDER BY updated_at DESC"
+        ))?;
+        let rows = st
+            .query_map(params![kind, from, to], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// How many live posts of one kind each visibility has: `(private, public)`.
+    pub fn music_post_counts(&self, kind: &str) -> Result<(u64, u64)> {
+        let conn = self.lock();
+        let n = |vis: &str| -> Result<u64> {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM music_posts WHERE kind = ?1 AND deleted = 0 AND visibility = ?2",
+                params![kind, vis],
+                |r| r.get::<_, i64>(0),
+            )? as u64)
+        };
+        Ok((n("private")?, n("public")?))
+    }
+
+    /// Give every live post of one kind this visibility; the ones that change are queued for the
+    /// next push (which moves them). Returns how many changed.
+    pub fn set_music_posts_visibility(&self, kind: &str, visibility: &str) -> Result<usize> {
+        Ok(self.lock().execute(
+            "UPDATE music_posts SET visibility = ?2, synced_at = NULL
+             WHERE kind = ?1 AND deleted = 0 AND visibility != ?2",
+            params![kind, visibility],
+        )?)
+    }
+
+    /// Tombstone every live post of one kind (each stays until the remote delete is confirmed).
+    /// Returns how many.
+    pub fn delete_music_posts_of_kind(&self, kind: &str, now_micros: i64) -> Result<usize> {
+        Ok(self.lock().execute(
+            "UPDATE music_posts SET deleted = 1, updated_at = ?2 WHERE kind = ?1 AND deleted = 0",
+            params![kind, now_micros],
+        )?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +258,41 @@ mod tests {
         lib.mark_music_post_unsynced("r").unwrap();
         assert_eq!(lib.unsynced_music_posts().unwrap()[0].id, "r");
         assert!(!lib.unsynced_music_posts().unwrap().iter().any(|r| r.id == "b"));
+    }
+
+    #[test]
+    fn a_history_pages_moves_and_goes() {
+        let lib = Library::open_in_memory().unwrap();
+        let listen = |id: &str, at: i64| MusicPostRow {
+            id: id.into(),
+            kind: "pubky.music/activity".into(),
+            visibility: "private".into(),
+            json: "{}".into(),
+            created_at: at,
+            updated_at: at,
+            synced_at: Some(at + 1),
+            deleted: false,
+        };
+        for (id, at) in [("a", 10), ("b", 20), ("c", 30), ("d", 40)] {
+            lib.upsert_music_post(&listen(id, at)).unwrap();
+        }
+        lib.upsert_music_post(&MusicPostRow {
+            kind: "pubky.music/review".into(),
+            ..listen("r", 35)
+        })
+        .unwrap();
+        let ids = |rows: Vec<MusicPostRow>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        let kind = "pubky.music/activity";
+        assert_eq!(ids(lib.music_posts_page(kind, None, 2).unwrap()), ["d", "c"]);
+        assert_eq!(ids(lib.music_posts_page(kind, Some(30), 2).unwrap()), ["b", "a"]);
+        assert_eq!(ids(lib.music_posts_between(kind, 15, 30).unwrap()), ["c", "b"]);
+        assert!(lib.unsynced_music_posts().unwrap().is_empty());
+        assert_eq!(lib.set_music_posts_visibility(kind, "public").unwrap(), 4);
+        assert_eq!(lib.set_music_posts_visibility(kind, "public").unwrap(), 0);
+        assert_eq!(lib.music_post_counts(kind).unwrap(), (0, 4));
+        assert_eq!(lib.unsynced_music_posts().unwrap().len(), 4, "queued to move");
+        assert_eq!(lib.delete_music_posts_of_kind(kind, 99).unwrap(), 4);
+        assert!(lib.music_posts_page(kind, None, 10).unwrap().is_empty());
+        assert!(lib.get_music_post("r").unwrap().is_some(), "other kinds stay");
     }
 }

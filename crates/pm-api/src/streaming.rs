@@ -66,7 +66,7 @@ pub const DOWNLOADABLE: &[&str] = &[
 /// - `play`: its tracks play on zones or in the browser;
 /// - `connect`: plays on the service's own devices, not through the node (Spotify Connect);
 /// - `artists`: artist pages;
-/// - `library`: the signed-in user's collection or likes, with an import as favourites;
+/// - `library`: the signed-in user's collection or likes, with an import as bookmarks;
 /// - `playlists`: the user's playlists, with an import as Pubky playlists;
 /// - `downloads`: files the user owns can be downloaded into the library;
 /// - `lyrics`: lyrics for its tracks;

@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "pm-appdata"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -4893,7 +4893,7 @@ dependencies = [
 
 [[package]]
 name = "pm-discovery"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "if-addrs",
  "mdns-sd",
@@ -4904,7 +4904,7 @@ dependencies = [
 
 [[package]]
 name = "pm-endpoint"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4920,7 +4920,7 @@ dependencies = [
 
 [[package]]
 name = "pm-model"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4931,7 +4931,7 @@ dependencies = [
 
 [[package]]
 name = "pm-offline"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -4946,7 +4946,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-local"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alsa",
  "alsa-sys",
@@ -4960,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "pm-pubky"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base32",
  "blake3",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "pm-remote"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "iroh",
@@ -4994,7 +4994,7 @@ dependencies = [
 
 [[package]]
 name = "pm-stream"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "pm-model",
  "pm-zones",
@@ -5006,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "pm-zones"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "hound",
@@ -5404,8 +5404,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-social-specs"
-version = "1.0.0-alpha.5"
-source = "git+https://github.com/pubky/pubky-social-specs?rev=acde362939dabb79a3b08de250bcbc70da4e827d#acde362939dabb79a3b08de250bcbc70da4e827d"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6dded6a08c919ae4de45a0461360aed0aad9ff46a5e150d7099b4a19f8b04bb"
 dependencies = [
  "base32",
  "base64 0.22.1",

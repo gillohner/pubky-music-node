@@ -167,3 +167,58 @@ pub fn resolve_later(s: &std::sync::Arc<NodeState>, uris: Vec<String>) {
         }
     });
 }
+
+/// A link's card as `GET /v1/cards` answers it: what a collection shows for an item it doesn't
+/// play (a web page, a post, an album the library hasn't got), TASK-pinakes-social-ux.md B3.
+#[derive(Debug, serde::Serialize, PartialEq)]
+pub struct CardView {
+    pub uri: String,
+    /// `found`, `reading` (Pinakes is reading the page: ask again shortly) or `unknown`.
+    pub status: &'static str,
+    /// The schema.org type Pinakes gives it (`Article`, `VideoObject`, `MusicAlbum`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Only ever an http(s) address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CardQuery {
+    pub uri: String,
+}
+
+/// `GET /v1/cards?uri=`: the Pinakes card for any link (cached, read on demand, never an error).
+pub(crate) async fn get_card(
+    axum::extract::State(s): axum::extract::State<std::sync::Arc<NodeState>>,
+    axum::extract::Query(q): axum::extract::Query<CardQuery>,
+) -> crate::ApiResult<CardView> {
+    let uri = q.uri.trim().to_string();
+    if uri.is_empty() {
+        return Err(crate::ApiError::bad_request("uri is required"));
+    }
+    let web = |u: Option<String>| u.filter(|u| u.starts_with("https://") || u.starts_with("http://"));
+    let view = |status, r: Option<Box<ResourceDetail>>| {
+        let c = r.map(|r| r.card);
+        CardView {
+            uri: uri.clone(),
+            status,
+            kind: c.as_ref().and_then(|c| c.type_.clone()),
+            name: c.as_ref().and_then(|c| c.name.clone()),
+            description: c.as_ref().and_then(|c| c.description.clone()),
+            image: web(c.as_ref().and_then(|c| c.image.clone())),
+            site: c.and_then(|c| c.site),
+        }
+    };
+    Ok(axum::Json(match card(&s, &uri).await {
+        Card::Found(r) => view("found", Some(r)),
+        Card::Reading(r) => view("reading", r),
+        Card::Unknown => view("unknown", None),
+    }))
+}

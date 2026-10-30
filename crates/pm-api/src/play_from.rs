@@ -138,6 +138,7 @@ fn link_candidate(l: ServiceLink, a: Access, it: &DiscoverItem) -> Candidate {
             album: None,
             duration_ms: None,
             image: it.image.clone(),
+            limit: None,
         });
     Candidate {
         service: l.service.to_string(),

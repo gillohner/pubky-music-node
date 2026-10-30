@@ -1,10 +1,14 @@
 //! The `ext.music` hints on a playlist, which is a social `collection` post.
 //!
 //! - On an item: `ext.music.source = {service, uri}`, where the curator played it from, and
-//!   `ext.music.added_at` (Unix milliseconds). The item's
+//!   `ext.music.added_at` (Unix microseconds; older millisecond values still read). The item's
 //!   own `uri` stays the canonical music URL.
 //! - On the collection: `ext.music.source_order = ["tidal", "library", …]`, the services to try
-//!   first when playing it.
+//!   first when playing it, and `ext.music.original = "pubky://…/posts/<id>"` on a duplicate:
+//!   the public collection it was copied from.
+//!
+//! `music` is the spec's namespace (`/{pub,priv}/music/v1/`), and the same name keys its member
+//! of `ext`.
 //!
 //! Everything under `ext` is third-party data the social spec never validates, so it is hostile
 //! input (RFC Part C2, rules 10 and 11). The readers here return only what passes the music rules
@@ -134,14 +138,51 @@ pub fn set_source_order(collection: &mut PubkySocialCollectionContent, order: &[
     tidy(&mut collection.extra);
 }
 
-/// The item's `ext.music.added_at`, Unix milliseconds, when it is a JSON-safe integer from 2000 on.
-pub fn item_added_at(item: &PubkySocialCollectionItem) -> Option<i64> {
-    let ms = music(&item.extra)?.get("added_at")?.as_i64()?;
-    (pubky_social_specs::validate_safe_json_int(ms).is_ok() && ms >= crate::LISTEN_PLAYED_AT_MIN_MS)
-        .then_some(ms)
+/// The collection's `ext.music.original`: the public collection this one duplicates, a versionless
+/// `pubky://` post reference that passes the reference gate under `ctx`. Anything else reads as
+/// absent.
+pub fn original(collection: &PubkySocialCollectionContent, ctx: &ValidationCtx) -> Option<String> {
+    let uri = music(&collection.extra)?.get("original")?.as_str()?;
+    let uri = validate_reference(
+        uri,
+        AllowedSchemes::PubkyOnly,
+        VALIDATION_LIMITS.reference_uri_max_length,
+        ctx,
+        None,
+    )
+    .ok()?;
+    let parsed = pubky_social_specs::ParsedUri::try_from(uri.as_str()).ok()?;
+    matches!(
+        parsed.resource,
+        pubky_social_specs::Resource::Post { version: None, .. }
+    )
+    .then_some(uri)
 }
 
-/// Sets the item's `ext.music.added_at` (Unix milliseconds).
-pub fn set_item_added_at(item: &mut PubkySocialCollectionItem, ms: i64) {
-    music_mut(&mut item.extra).insert("added_at".into(), Value::from(ms));
+/// Sets or clears the collection's `ext.music.original`.
+pub fn set_original(collection: &mut PubkySocialCollectionContent, uri: Option<&str>) {
+    match uri {
+        Some(uri) => {
+            music_mut(&mut collection.extra).insert("original".into(), Value::String(uri.to_string()));
+        }
+        None => {
+            if let Some(Value::Object(ext)) = collection.extra.get_mut(EXT) {
+                if let Some(Value::Object(m)) = ext.get_mut(MUSIC) {
+                    m.remove("original");
+                }
+            }
+        }
+    }
+    tidy(&mut collection.extra);
+}
+
+/// The item's `ext.music.added_at` in Unix microseconds (an older millisecond value converted,
+/// [`crate::micros_of`]), when it is a JSON-safe time from 2000 on.
+pub fn item_added_at(item: &PubkySocialCollectionItem) -> Option<i64> {
+    crate::micros_of(music(&item.extra)?.get("added_at")?.as_i64()?)
+}
+
+/// Sets the item's `ext.music.added_at` (Unix microseconds).
+pub fn set_item_added_at(item: &mut PubkySocialCollectionItem, micros: i64) {
+    music_mut(&mut item.extra).insert("added_at".into(), Value::from(micros));
 }

@@ -79,6 +79,40 @@ struct Cached {
     info: ArtistInfo,
 }
 
+/// The artist's cache key (its MusicBrainz id in it: a new match or retag is a new entry),
+/// that id and its name; `None` for an artist the library doesn't have.
+fn key_of(
+    lib: &pm_library::Library,
+    artist_id: i64,
+    lang: &str,
+) -> Result<Option<(String, Option<Mbid>, String)>, pm_library::LibraryError> {
+    let Some(a) = lib.get_artist(artist_id)? else {
+        return Ok(None);
+    };
+    // The tags' id, else the node's lookup (`library_match`)
+    let mbid = lib.artist_match(artist_id)?.map(|m| m.mbid);
+    let key = format!(
+        "artist.info.{artist_id}.{}.{lang}",
+        mbid.map(|m| m.to_string()).unwrap_or_default()
+    );
+    Ok(Some((key, mbid, a.name)))
+}
+
+/// The cached info and whether it is still fresh.
+fn cached(lib: &pm_library::Library, key: &str) -> Option<(ArtistInfo, bool)> {
+    let c = lib
+        .get_setting(key)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Cached>(&j).ok())?;
+    let ttl = if c.info.bio.is_some() || c.info.image || !c.info.links.is_empty() {
+        HIT_TTL_SECS
+    } else {
+        MISS_TTL_SECS
+    };
+    Some((c.info, pm_library::db::now_unix() - c.at < ttl))
+}
+
 /// The artist's info in `lang` (a bare language code, see `about::language`), from cache or
 /// freshly fetched. Never fails on network trouble: it answers what it has and remembers a
 /// miss.
@@ -87,28 +121,15 @@ pub(crate) async fn artist_info(
     artist_id: i64,
     lang: &str,
 ) -> Result<ArtistInfo, pm_library::LibraryError> {
-    let key = format!("artist.info.{artist_id}.{lang}");
-    let (mbid, name) = {
+    let (key, mbid, name) = {
         let lib = s.library.lock().expect("library poisoned");
-        let Some(a) = lib.get_artist(artist_id)? else {
+        let Some((key, mbid, name)) = key_of(&lib, artist_id, lang)? else {
             return Ok(ArtistInfo::default());
         };
-        if let Some(c) = lib
-            .get_setting(&key)?
-            .and_then(|j| serde_json::from_str::<Cached>(&j).ok())
-        {
-            let age = pm_library::db::now_unix() - c.at;
-            let ttl = if c.info.bio.is_some() || c.info.image || !c.info.links.is_empty() {
-                HIT_TTL_SECS
-            } else {
-                MISS_TTL_SECS
-            };
-            if age < ttl {
-                return Ok(c.info);
-            }
+        if let Some((info, true)) = cached(&lib, &key) {
+            return Ok(info);
         }
-        // The tags' id, else the node's lookup (`library_match`)
-        (lib.artist_match(artist_id)?.map(|m| m.mbid), a.name)
+        (key, mbid, name)
     };
     let Some(mbid) = mbid else {
         return Ok(ArtistInfo {
@@ -134,6 +155,33 @@ pub(crate) async fn artist_info(
     Ok(info)
 }
 
+/// For a page, which never waits: the cached info (an expired one while it is fetched again)
+/// and whether a fetch is running in the background.
+pub(crate) fn artist_info_now(
+    s: &std::sync::Arc<NodeState>,
+    artist_id: i64,
+    lang: &str,
+) -> Result<(Option<ArtistInfo>, bool), pm_library::LibraryError> {
+    let old = {
+        let lib = s.library.lock().expect("library poisoned");
+        let Some((key, mbid, _)) = key_of(&lib, artist_id, lang)? else {
+            return Ok((None, false));
+        };
+        if mbid.is_none() {
+            return Ok((None, false));
+        }
+        match cached(&lib, &key) {
+            Some((info, true)) => return Ok((Some(info), false)),
+            other => other.map(|(info, _)| info),
+        }
+    };
+    let (st, lang) = (s.clone(), lang.to_string());
+    tokio::spawn(async move {
+        let _ = artist_info(&st, artist_id, &lang).await;
+    });
+    Ok((old, true))
+}
+
 pub(crate) fn image_path(s: &NodeState, artist_id: i64) -> std::path::PathBuf {
     s.art_dir.join(format!("artist-{artist_id}.jpg"))
 }
@@ -153,12 +201,8 @@ fn commons_name(url: &str) -> Option<String> {
     } else {
         rest.get(2)?
     };
-    Some(
-        url::form_urlencoded::parse(format!("n={name}").as_bytes())
-            .next()?
-            .1
-            .into_owned(),
-    )
+    // A path, not a form: `+` stays `+`
+    Some(about::percent_decode(name))
 }
 
 async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str, lang: &str) -> ArtistInfo {
@@ -196,21 +240,31 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str, lang: &str
     if let Some(e) = &ent {
         info.facts = about::artist_facts(s, e, lang).await;
     }
-    // 3. Wikipedia summary.
-    if let Some((l, title)) = about::article(lang, &rels, ent.as_ref()) {
-        if let Some((text, picture)) = about::summary(s, &l, &title).await {
-            info.bio = Some(text.text.clone());
-            info.wikipedia = text.url.clone();
-            info.text = Some(text);
-            // No P18: the article's picture, credited from Commons when it is there
-            if commons_file.is_none() {
-                commons_file = picture.as_deref().and_then(commons_name);
-                if let (None, Some(src)) = (&commons_file, &picture) {
-                    info.image = download(&http, src, &image_path(s, artist_id)).await;
-                    if info.image {
-                        info.image_from = Some("Wikipedia".into());
-                    }
-                }
+    // 3. Wikipedia summary: the reader's language, else English; the next article when one
+    // has none.
+    let english = about::articles("en", &rels, ent.as_ref());
+    let mut english_picture = None;
+    if let Some((text, picture)) = about::first_summary(s, &about::articles(lang, &rels, ent.as_ref())).await
+    {
+        if text.lang.as_deref() == Some("en") {
+            english_picture = Some(picture);
+        }
+        info.bio = Some(text.text.clone());
+        info.wikipedia = text.url.clone();
+        info.text = Some(text);
+    }
+    // No P18: the English article's picture, the same whatever the reader's language (one
+    // portrait file per artist), credited from Commons when it is there
+    if commons_file.is_none() {
+        let picture = match english_picture {
+            Some(p) => p,
+            None => about::first_summary(s, &english).await.and_then(|(_, p)| p),
+        };
+        commons_file = picture.as_deref().and_then(commons_name);
+        if let (None, Some(src)) = (&commons_file, &picture) {
+            info.image = download(&http, src, &image_path(s, artist_id)).await;
+            if info.image {
+                info.image_from = Some("Wikipedia".into());
             }
         }
     }
@@ -368,4 +422,19 @@ async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bo
         return false;
     }
     tokio::fs::write(to, &bytes).await.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn commons_names_keep_their_plus() {
+        let up = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Simon_%2B_Garfunkel%C3%A9.jpg/320px-x.jpg";
+        assert_eq!(super::commons_name(up).as_deref(), Some("Simon_+_Garfunkelé.jpg"));
+        let plain = "https://upload.wikimedia.org/wikipedia/commons/a/ab/A+B.jpg";
+        assert_eq!(super::commons_name(plain).as_deref(), Some("A+B.jpg"));
+        assert_eq!(
+            super::commons_name("https://example.org/commons/a/ab/X.jpg"),
+            None
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! The user's own reviews: a rating (1–10, half stars) and/or notes on an album, track or
 //! artist, kept by the node and synced as music `review` posts (ADR 0014). One review per target; editing keeps the post id.
 
-use crate::favourites::canonical_for;
+use crate::bookmarks::canonical_for;
 use crate::playlists::{now_micros, store};
 use crate::state::NodeState;
 use crate::types::*;
@@ -14,8 +14,8 @@ use pm_pubky::schemas::post::TYPE_REVIEW;
 use pm_pubky::{MusicContent, MusicPost, Review, Visibility};
 use std::sync::Arc;
 
-fn target(r: &ReviewRef) -> FavouriteRef {
-    FavouriteRef {
+fn target(r: &ReviewRef) -> ItemRef {
+    ItemRef {
         uri: r.uri.clone(),
         track_id: r.track_id,
         album_id: r.album_id,
@@ -67,9 +67,21 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
         return Ok(Json(Reviews {
             uri: None,
             reviews: all_reviews(&lib)?.iter().map(|(row, r)| entry(row, r)).collect(),
+            ..Default::default()
         }));
     }
-    let url = canonical_for(&lib, &target(&r))?.to_url();
+    // An item with no identity yet has no review yet (writing one still says why it can't)
+    let url = match canonical_for(&lib, &target(&r)) {
+        Ok(u) => u.to_url(),
+        Err(e) if e.status == StatusCode::UNPROCESSABLE_ENTITY => {
+            return Ok(Json(Reviews {
+                uri: None,
+                reviews: Vec::new(),
+                needs_match: true,
+            }))
+        }
+        Err(e) => return Err(e),
+    };
     let reviews = review_for(&lib, &url)?
         .map(|(row, r)| entry(&row, &r))
         .into_iter()
@@ -77,6 +89,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
     Ok(Json(Reviews {
         uri: Some(url),
         reviews,
+        ..Default::default()
     }))
 }
 
@@ -123,6 +136,7 @@ pub(crate) async fn delete(
         Reviews {
             uri: Some(url),
             reviews: Vec::new(),
+            ..Default::default()
         }
     };
     s.notify_library();
