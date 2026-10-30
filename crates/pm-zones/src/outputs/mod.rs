@@ -9,7 +9,7 @@ mod wav;
 pub use group::{intersect_caps, GroupOutput, GroupSink};
 pub use null::NullOutput;
 pub use pull::{
-    pack_pcm, wav_header, wav_header_continuous, LiveStream, PullOutput, LISTENER_TIMEOUT, PROBE_TIME,
+    pack_pcm, wav_header, wav_header_continuous, LiveStream, PullOutput, LISTENER_TIMEOUT, PROBE_KEEP_BYTES,
     REATTACH_GRACE,
 };
 pub use wav::{read_wav, WavFileOutput, WavSink};

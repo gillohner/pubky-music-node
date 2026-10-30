@@ -13,9 +13,10 @@
 //! A listener may come back. Renderers built on Linn's OpenHome pipeline read the first few KB
 //! of a live stream to recognise it, close the connection and open it again once their pipeline
 //! is ready; some TVs probe the same way. So a listener that leaves gives the stream back: the
-//! next one gets it, with a fresh header, and first the bytes a listener that left within
-//! [`PROBE_TIME`] already had (it heard nothing yet). Nobody back within [`REATTACH_GRACE`]: the
-//! sink fails with "listener went away".
+//! next one gets it, with a fresh header, and first the bytes a listener that took less than
+//! [`PROBE_KEEP_BYTES`] already had (it was probing, however long it held on: a Linn holds a
+//! stream 5 s waiting for its first bytes). Nobody back within [`REATTACH_GRACE`]: the sink fails
+//! with "listener went away".
 
 use crate::sink::{check_block, AudioSink, BufferLevel, Output, OutputId, SinkError};
 use async_trait::async_trait;
@@ -27,14 +28,12 @@ use tokio::sync::mpsc;
 
 /// How long a sink waits for a listener before giving up.
 pub const LISTENER_TIMEOUT: Duration = Duration::from_secs(15);
-/// A listener that leaves within this time of taking the stream was probing it: the next
-/// listener gets what it had again.
-pub const PROBE_TIME: Duration = Duration::from_secs(3);
 /// How long a stream waits for its listener to come back before the sink fails.
 pub const REATTACH_GRACE: Duration = Duration::from_secs(5);
 /// A listener that took more than this was playing, not probing (a Linn reads about 72 KB):
-/// what it had is not sent again.
-const PROBE_KEEP_BYTES: usize = 1024 * 1024;
+/// what it had is not sent again. Less, and the next listener gets it all again, from the first
+/// byte, however long the one before held the stream.
+pub const PROBE_KEEP_BYTES: usize = 1024 * 1024;
 /// Chunks a listener may lag before the zone blocks (~ a few seconds).
 const CHANNEL_CHUNKS: usize = 64;
 /// How far ahead of real time a sink may write. A renderer that buffers fast (a BluOS player
@@ -80,7 +79,6 @@ pub struct LiveStream {
     kept: Vec<Vec<u8>>,
     kept_bytes: usize,
     keeping: bool,
-    taken: Instant,
     /// The sink closed and this listener read everything: nothing to give back.
     finished: bool,
     generation: u64,
@@ -101,7 +99,7 @@ impl LiveStream {
             },
         };
         if self.keeping {
-            if self.taken.elapsed() < PROBE_TIME && self.kept_bytes + chunk.len() <= PROBE_KEEP_BYTES {
+            if self.kept_bytes + chunk.len() <= PROBE_KEEP_BYTES {
                 self.kept_bytes += chunk.len();
                 self.kept.push(chunk.clone());
             } else {
@@ -125,7 +123,7 @@ impl Drop for LiveStream {
             return;
         };
         let mut replay = VecDeque::new();
-        if self.keeping && self.taken.elapsed() < PROBE_TIME {
+        if self.keeping {
             replay.extend(std::mem::take(&mut self.kept));
         }
         replay.extend(std::mem::take(&mut self.replay));
@@ -225,7 +223,6 @@ impl PullOutput {
                         kept: Vec::new(),
                         kept_bytes: 0,
                         keeping: true,
-                        taken: Instant::now(),
                         finished: false,
                         generation: p.generation,
                         home: Arc::downgrade(&self.shared),
@@ -534,6 +531,41 @@ mod tests {
         drop(second);
         // Everything was read: nothing is given back to a third listener
         assert!(out.take_stream(Duration::from_millis(50)).await.is_none());
+    }
+
+    /// A Linn holds a stream ~5 s waiting for its first bytes, gives up and asks again: the
+    /// next listener still gets the stream from the first byte (it took less than
+    /// [`PROBE_KEEP_BYTES`]), not after a gap the pacing would leave (NUC, 2026-10-30: ~10 s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listener_that_held_the_stream_long_but_took_little_gives_it_all_back() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = PullOutput::new("held");
+        let mut sink = out.open_now(fmt).unwrap();
+        let writer = std::thread::spawn(move || {
+            for i in 0..8 {
+                sink.write(&block(fmt, i * 4)).unwrap();
+            }
+            sink
+        });
+        let mut first = out.take_stream(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(first.next_chunk().await.unwrap(), pack_pcm(&block(fmt, 0)));
+        assert_eq!(first.next_chunk().await.unwrap(), pack_pcm(&block(fmt, 4)));
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        drop(first);
+        let mut second = out.take_stream(Duration::from_secs(2)).await.expect("given back");
+        assert_eq!(
+            second.next_chunk().await.unwrap(),
+            pack_pcm(&block(fmt, 0)),
+            "from the first byte"
+        );
+        for i in 1..8 {
+            assert_eq!(
+                second.next_chunk().await.unwrap(),
+                pack_pcm(&block(fmt, i * 4)),
+                "chunk {i}"
+            );
+        }
+        drop(writer.join().unwrap());
     }
 
     /// Nobody comes back: the sink fails soon after the listener left, not after the full

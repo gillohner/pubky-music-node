@@ -4,6 +4,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **A Linn DS over UPnP starts at once (it took ~10 s).** A Linn fetches the stream while it answers SetAVTransportURI and answers only once it has read its start, but the node waited for that answer before it wrote any audio, so the Linn gave up after 5 s and asked again. Then the stream's first seconds went to the connection the Linn had left, and the pacing held back the next one for another 5 s. Stop, SetAVTransportURI and Play now go out in order on their own thread while the zone writes (a refused URI or Play is still the zone's error at once), and a listener that took less than 1 MB gives the next one the stream from its first byte, however long it held on.
 ## 0.2.1
 
 ### 2026-10-29
