@@ -1660,6 +1660,14 @@ fn bare_item(u: &str) -> DiscoverItem {
     }
 }
 
+/// Items for Pinakes music cards, each with where it plays from here (smart_network.rs).
+pub(crate) fn items_for(s: &NodeState, cards: Vec<pm_pubky::pinakes::Card>) -> Vec<DiscoverItem> {
+    let items = pm_pubky::discovery::items_from_cards(cards);
+    let acc = service_access(s);
+    let lib = s.library.lock().expect("library poisoned");
+    items.iter().map(|d| item(&acc, &lib, d)).collect()
+}
+
 fn page(
     acc: &ServiceAccess,
     lib: &Library,
