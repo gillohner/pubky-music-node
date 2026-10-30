@@ -55,10 +55,24 @@ fn remember<T: PartialEq>(list: &mut Vec<T>, x: T) {
 /// library, and a page without an id may well be one already answered "not sure".
 fn wake() {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    static LATER: AtomicBool = AtomicBool::new(false);
     let mut last = LAST.lock().expect("last wake");
     if last.is_none_or(|t| t.elapsed() >= WAKE_EVERY) {
         *last = Some(std::time::Instant::now());
         WAKE.notify_one();
+        return;
+    }
+    // Within the minute: the wake is put off to its end, not dropped (one at a time)
+    let left = WAKE_EVERY.saturating_sub(last.map_or(Duration::ZERO, |t| t.elapsed()));
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if !LATER.swap(true, Ordering::SeqCst) {
+        rt.spawn(async move {
+            tokio::time::sleep(left).await;
+            LATER.store(false, Ordering::SeqCst);
+            wake();
+        });
     }
 }
 

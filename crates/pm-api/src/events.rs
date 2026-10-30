@@ -186,7 +186,8 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
     // A listener sees file names, not where the owner keeps files (as in every JSON answer)
-    let hide = c.role != crate::accounts::Role::Owner;
+    let roots = (c.role != crate::accounts::Role::Owner).then(|| crate::accounts::library_roots(&s));
+    let hide = roots.as_deref();
     if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
         return;
     }
@@ -289,15 +290,16 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
 /// [`send_json`], with the owner's file paths hidden when `hide` (a listener).
 async fn send_for<T: Serialize>(
     tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    hide: bool,
+    hide: Option<&[String]>,
     v: &T,
 ) -> Result<(), axum::Error> {
-    if !hide {
+    let Some(roots) = hide else {
         return send_json(tx, v).await;
-    }
+    };
     match serde_json::to_value(v) {
         Ok(mut j) => {
             crate::accounts::hide_file_paths(&mut j);
+            crate::accounts::hide_paths_under(&mut j, roots);
             send_json(tx, &j).await
         }
         Err(_) => send_json(tx, v).await,

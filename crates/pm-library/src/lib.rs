@@ -13,6 +13,7 @@
 //! Everything in [`db`] and [`scan`] is synchronous; the node wraps calls in
 //! `spawn_blocking`.
 
+pub mod album_fit;
 pub mod canonical;
 pub mod credits;
 pub mod db;
@@ -32,8 +33,8 @@ pub mod tagwrite;
 
 pub use canonical::{assign, Resolver};
 pub use db::{
-    AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentityCounts,
-    PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
+    AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentifiedBy,
+    IdentityCounts, PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
 pub use db::{AlbumEdit, Library, LibraryStats, TrackOverride};
 pub use error::{LibraryError, Result};

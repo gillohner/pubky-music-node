@@ -102,6 +102,11 @@ fn allowed(ip: IpAddr, peer: Option<IpAddr>) -> bool {
 /// service), unspecified, multicast or broadcast; loopback only for a peer on this machine;
 /// private and shared (CGNAT) addresses only with `lan`.
 pub fn ip_allowed(ip: IpAddr, peer: Option<IpAddr>, lan: bool) -> bool {
+    // Local-use NAT64 (64:ff9b:1::/48, RFC 8215) carries an IPv4 address where its network
+    // chose: which one can't be told, so it is never a place to fetch from
+    if matches!(ip, IpAddr::V6(v6) if v6.segments()[..3] == [0x64, 0xff9b, 1]) {
+        return false;
+    }
     let ip = embedded_v4(ip);
     let link_local = match ip {
         IpAddr::V4(v4) => v4.is_link_local() || v4.is_broadcast(),
