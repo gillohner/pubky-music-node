@@ -218,6 +218,8 @@ pub struct NodeState {
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
+    /// `/v1/search`'s answers, cached a few minutes per query and source (search.rs).
+    pub(crate) search_answers: crate::search::AnswerCache,
     /// Who on this node listens where, and the listen-along groups (presence.rs).
     pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -442,6 +444,7 @@ impl NodeState {
             identify: Mutex::new(Default::default()),
             pinakes_reader: Default::default(),
             presence: Default::default(),
+            search_answers: Default::default(),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),

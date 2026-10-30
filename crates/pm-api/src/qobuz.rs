@@ -681,7 +681,7 @@ pub(crate) async fn put(
             st.quality = q;
         }
     });
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(view(&s)))
 }
 
@@ -710,7 +710,7 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
         st.session = Some(sess);
         st.health = None;
     });
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     tracing::info!("Qobuz sign-in stored");
     Ok(Json(view(&s)))
 }
@@ -930,7 +930,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
 
     fn sign_out_of(&self, s: &NodeState, _way: &str) -> Result<(), ApiError> {
         update(s, |st| st.session = None);
-        crate::search::forget_answers();
+        crate::search::forget_answers(s);
         Ok(())
     }
 
@@ -992,7 +992,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
             st.health = None;
             st.enabled = true;
         });
-        crate::search::forget_answers();
+        crate::search::forget_answers(s);
         Ok(way)
     }
 }
@@ -1000,7 +1000,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
 /// `DELETE /v1/sources/qobuz/unofficial/login`: forget the session (the mode stays as set).
 pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<QobuzStatus> {
     update(&s, |st| st.session = None);
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(view(&s)))
 }
 

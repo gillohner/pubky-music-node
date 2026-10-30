@@ -334,7 +334,7 @@ pub(crate) async fn put_key(
             .lock()
             .expect("library poisoned")
             .delete_setting(KEY_SETTING)?;
-        crate::search::forget_answers();
+        crate::search::forget_answers(&s);
         return Ok(Json(KeyStatus { set: false }));
     }
     if key.len() < 30
@@ -373,7 +373,7 @@ pub(crate) async fn put_key(
         .lock()
         .expect("library poisoned")
         .set_setting(KEY_SETTING, key)?;
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(KeyStatus { set: true }))
 }
 
@@ -479,7 +479,7 @@ impl crate::signin::SignInSource for YouTubeSignIn {
                 .expect("library poisoned")
                 .delete_setting(KEY_SETTING)?;
         }
-        crate::search::forget_answers();
+        crate::search::forget_answers(s);
         Ok(())
     }
 
