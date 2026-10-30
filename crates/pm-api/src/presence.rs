@@ -586,8 +586,28 @@ pub async fn join(
     if s.presence.sources(&body.zone).is_some() {
         return Err(ApiError::bad_request("that zone is a listen-along group already"));
     }
+    // Your zone stops to join: never one where someone else's music plays (whether or not they
+    // let you see them)
+    let busy = {
+        let st = mine.state();
+        st.transport != Transport::Stopped && st.now_playing.is_some()
+    };
+    let someone_else = s
+        .presence
+        .players
+        .lock()
+        .expect("presence lock")
+        .get(&body.zone)
+        .is_some_and(|p| p.key != me);
+    if busy && someone_else {
+        return Err(conflict(
+            "someone else is listening on that zone: listen along from yours",
+        ));
+    }
     let outputs = outputs_of(&s, &mine).ok_or_else(|| {
-        ApiError::bad_request("your speakers are grouped by their own system; pick one of them")
+        ApiError::bad_request(
+            "the zone you picked is a speaker group its maker keeps (Sonos, BluOS, HEOS): pick the zone of one of its speakers",
+        )
     })?;
     // A speaker plays in one group at a time (theirs, or anyone else's)
     if outputs.iter().any(|o| s.presence.in_a_group(o)) {
@@ -605,7 +625,7 @@ pub async fn join(
             home_version: 0,
             host_outputs: outputs_of(&s, &host_zone).ok_or_else(|| {
                 ApiError::bad_request(
-                    "their speakers are grouped by their own system; listening along can't join them",
+                    "they listen on a speaker group its maker keeps (Sonos, BluOS, HEOS): listening along can't join it",
                 )
             })?,
             joiners: Vec::new(),

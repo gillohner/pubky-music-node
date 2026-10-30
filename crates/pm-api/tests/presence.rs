@@ -518,3 +518,28 @@ async fn a_speaker_plays_in_one_group_and_ending_one_keeps_the_hosts_music() {
     let (st, _) = call(&app, &l1, "DELETE", "/v1/presence/along", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "not along any more");
 }
+
+/// Joining stops your zone: never one where someone else's music plays (mn-app's review of
+/// #193), whether or not they let you see them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_never_stops_someone_elses_music() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app, track, l1, l2) = rooms(dir.path(), &["Kitchen", "Den", "Hall"]).await;
+    call(
+        &app,
+        &l2,
+        "PUT",
+        "/v1/me/presence",
+        Some(serde_json::json!({"visible": "hidden"})),
+    )
+    .await;
+    play(&app, OWNER, "kitchen", track).await;
+    play(&app, &l2, "den", track).await;
+    let along = |zone: &str| serde_json::json!({"key": "owner", "zone": zone});
+    let (st, e) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("den"))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    let (_, den) = call(&app, OWNER, "GET", "/v1/zones/den", None).await;
+    assert_eq!(den["transport"], "playing", "l2's music plays on: {den}");
+    let (st, g) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("hall"))).await;
+    assert_eq!(st, StatusCode::OK, "a zone nobody plays on: {g}");
+}
