@@ -18,7 +18,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long one source may take before it is reported as not answering.
@@ -152,16 +152,13 @@ pub fn sources_for(s: &NodeState, scope: &str) -> Vec<String> {
 }
 
 /// Answers by (query, source), with when they were fetched.
-type AnswerCache = Mutex<HashMap<(String, String), (Instant, SourceAnswer)>>;
+/// Each node's answers, by query and source (on `NodeState`: one node's change never empties
+/// another's, as two nodes in one process, or tests running side by side, would otherwise).
+pub(crate) type AnswerCache = Mutex<HashMap<(String, String), (Instant, SourceAnswer)>>;
 
-/// Drop cached answers (a source was switched on or off).
-pub(crate) fn forget_answers() {
-    cache().lock().expect("search cache").clear();
-}
-
-fn cache() -> &'static AnswerCache {
-    static C: OnceLock<AnswerCache> = OnceLock::new();
-    C.get_or_init(Default::default)
+/// Drop this node's cached answers (a source was switched on or off).
+pub(crate) fn forget_answers(s: &NodeState) {
+    s.search_answers.lock().expect("search cache").clear();
 }
 
 /// `GET /v1/search?q=&in=`: NDJSON, one line per source as it answers.
@@ -201,7 +198,8 @@ pub(crate) async fn search(
                     format!("{src}|listener")
                 },
             );
-            let hit = cache()
+            let hit = s
+                .search_answers
                 .lock()
                 .expect("search cache")
                 .get(&key)
@@ -242,7 +240,7 @@ pub(crate) async fn search(
                         },
                     };
                     if a.status == "ok" {
-                        cache()
+                        s.search_answers
                             .lock()
                             .expect("search cache")
                             .insert(key, (Instant::now(), a.clone()));

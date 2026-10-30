@@ -236,7 +236,7 @@ fn mark_down(s: &NodeState, why: &str) {
             at: now(),
         });
     });
-    crate::search::forget_answers();
+    crate::search::forget_answers(s);
 }
 
 // ---- API ---------------------------------------------------------------------------------------
@@ -967,7 +967,7 @@ pub(crate) async fn put(
             st.user = None;
         }
     });
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     if check_token {
         // Does SoundCloud know this token? (The mode must be on for the call.)
         let c = {

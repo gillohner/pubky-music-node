@@ -193,7 +193,7 @@ pub(crate) async fn set_enabled(
     let svc = find(&source)?;
     s.set_source_enabled(svc.id(), b.enabled)
         .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(SourceRow::of(svc.as_ref(), &s, b.enabled)))
 }
 
