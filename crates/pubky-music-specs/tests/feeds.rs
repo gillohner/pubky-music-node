@@ -50,7 +50,7 @@ fn feed_vectors() {
     }
     for case in v["invalid"].as_array().unwrap() {
         let f = read(case);
-        let err = f.validate(Some(id), false).unwrap_err();
+        let err = f.validate(Some(id), false).expect_err(case["about"].as_str().unwrap());
         let want = case["error"].as_str().unwrap();
         assert!(err.contains(want), "{}: {err} (wanted {want})", case["about"]);
     }

@@ -378,6 +378,42 @@
         "icon": "Disc"
       },
       "error": "icon"
+    },
+    {
+      "about": "a seed is a private path (a feed may be published as the same bytes)",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "seeds": [
+            "pubky://o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy/priv/music/v1/posts/0034ABCDEFGHJ"
+          ]
+        },
+        "name": "Seeds",
+        "created_at": 1792540800000000
+      },
+      "error": "seeds"
+    },
+    {
+      "about": "a left-out URI is someone's private path",
+      "feed": {
+        "feed": {
+          "reach": "following",
+          "sort": "popularity",
+          "content": "songs",
+          "layout": "list",
+          "leave_out": {
+            "uris": [
+              "pubky://pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy/priv/social/v1/posts/0034ABCDEFGHJ"
+            ]
+          }
+        },
+        "name": "Seeds",
+        "created_at": 1792540800000000
+      },
+      "error": "left-out URIs"
     }
   ],
   "canonical": [
