@@ -196,6 +196,35 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('.hero .art');
     const h1 = await badge('.hero .art');
     check(h1 && h1.label === 'From your library', `a library album’s cover too (${h1 && h1.label})`);
+    // ---- Library artist pages: About under the header, Also on next to Play (F6) ----
+    const LONG = 'Mock Artist is a band from Zürich. '.repeat(30);
+    await p.route(/\/v1\/item\/artist\/lib-900$/, (r) => r.fulfill({ json: pageJson('artist', 'lib-900', {
+      source: 'Your library', source_id: 'library', image: IMG, songs: [SONGS[1]], albums: [ALBUMS[1]],
+      blurb: LONG, about_text: { text: LONG, source: 'Wikipedia', title: 'Mock Artist', url: 'https://de.wikipedia.org/wiki/Mock_Artist', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: 'Jane Doe', licence: 'CC BY-SA 3.0', licence_url: 'https://creativecommons.org/licenses/by-sa/3.0/', file_page: 'https://commons.wikimedia.org/wiki/File:Mock.jpg', source: 'Wikimedia Commons' },
+      about: [{ label: 'Origin', value: 'Zürich' }, { label: 'Active', value: '1998–' }],
+      also_on: [{ source: 'tidal', id: 'artist:77', label: 'TIDAL', url: 'https://tidal.com/artist/77', page: 'tidal-77' }, { source: 'spotify', id: 'artist:abc', label: 'Spotify', url: 'https://open.spotify.com/artist/abc', page: 'spotify-abc' }],
+    }) }));
+    // TIDAL on and working here, Spotify not: the TIDAL icon opens its page here, Spotify's its site
+    // (the node gives every link a page, so the fixture does too)
+    await p.route(/\/v1\/sources$/, (r) => r.fulfill({ json: [{ id: 'tidal', name: 'TIDAL', enabled: true, healthy: true }, { id: 'spotify', name: 'Spotify', enabled: true, healthy: false }] }));
+    await p.route(/\/v1\/play-order$/, (r) => r.fulfill({ json: { order: ['library', 'tidal', 'spotify'], services: [{ id: 'tidal', connected: true }, { id: 'spotify', connected: false }] } }));
+    await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
+    const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
+    check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
+    check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
+    check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
+    await p.click('#iblurbmore');
+    check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
+    check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
+    await p.click('.also-icons [data-also]'); await p.waitForTimeout(300);
+    check(/\/artist\/tidal-77$/.test(await p.evaluate(() => location.pathname)), 'a service the node plays from opens its page here');
+    await p.unroute(/\/v1\/item\/artist\/lib-900$/);
+    await p.unroute(/\/v1\/sources$/);
+    await p.unroute(/\/v1\/play-order$/);
+    // without an article, About stays at the end
+    await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('#iabout');
+    check(await p.evaluate(() => { const s = [...document.querySelectorAll('#main > section')]; return s[s.length - 1].id === 'iabout'; }), 'without an article, About stays at the end of the page');
     await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
     // Now playing: the first library track plays in This browser; the bar's art and the big cover
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
