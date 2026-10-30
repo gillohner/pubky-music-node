@@ -230,6 +230,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/crossfade", axum::routing::put(crossfade))
         .route("/zones/{id}/shuffle", post(shuffle_queue))
         .route("/zones/{id}/transfer", post(transfer))
+        .route("/zones/{id}/load", post(load))
         .route("/zones/{id}/sleep", get(sleep_get).put(sleep_set))
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
@@ -339,11 +340,6 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/smart/{id}/tracks", get(smart::tracks))
         .route("/home/{section}", get(home::section))
-        .route("/item/candidates", get(item::candidates))
-        .route(
-            "/item/matches",
-            post(item::confirm_match).delete(item::unlink_match),
-        )
         .route("/item/{kind}/{id}", get(item::page))
         .route("/item/{kind}/{id}/extras", get(item::page_extras))
         .route(
@@ -1800,24 +1796,46 @@ async fn transfer(
     if st.queue.is_empty() {
         return Err(ApiError::bad_request("nothing to transfer: the queue is empty"));
     }
-    let index = st
-        .now_playing
-        .as_ref()
-        .map(|n| n.index)
-        .or(st.queue_index)
-        .filter(|i| *i < st.queue.len());
+    let index = st.now_playing.as_ref().map(|n| n.index).or(st.queue_index);
     let position_ms = st.now_playing.as_ref().map(|n| n.position_ms).unwrap_or(0);
     from.stop();
     from.clear();
+    let moved = load_zone(
+        &to,
+        st.queue,
+        index,
+        position_ms,
+        st.transport,
+        st.repeat,
+        st.radio,
+    )
+    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), from.wait_acked()).await;
+    Ok(Json(moved))
+}
+
+/// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat` and `radio`;
+/// `index` plays from `position_ms` (paused when the source was paused; nothing starts when it
+/// was stopped). Seeking needs the track open, so it waits for that (bounded) first.
+async fn load_zone(
+    to: &Zone,
+    queue: Vec<QueueItem>,
+    index: Option<usize>,
+    position_ms: u64,
+    transport: pm_zones::Transport,
+    repeat: pm_zones::Repeat,
+    radio: bool,
+) -> ZoneState {
     to.stop();
     to.clear();
-    to.set_repeat(st.repeat);
-    to.set_radio(st.radio);
+    to.set_repeat(repeat);
+    to.set_radio(radio);
     let mut events = to.subscribe();
-    to.enqueue(st.queue, Insert::End);
-    if let (Some(i), true) = (index, st.transport != pm_zones::Transport::Stopped) {
+    let len = queue.len();
+    to.enqueue(queue, Insert::End);
+    let index = index.filter(|i| *i < len);
+    if let (Some(i), true) = (index, transport != pm_zones::Transport::Stopped) {
         to.play_index(i);
-        // Seeking needs the track open; wait for it (bounded) before resuming where it was.
         let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 match events.recv().await {
@@ -1833,17 +1851,43 @@ async fn transfer(
             if position_ms > 1_000 {
                 to.seek_ms(position_ms);
             }
-            if st.transport == pm_zones::Transport::Paused {
+            if transport == pm_zones::Transport::Paused {
                 to.pause();
             }
         }
     }
-    let settle = std::time::Duration::from_secs(5);
-    let _ = tokio::time::timeout(settle, from.wait_acked()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), to.wait_acked())
+        .await
+        .unwrap_or_else(|_| to.state())
+}
+
+/// `POST /v1/zones/{id}/load`: a player the node does not run (This browser) moves its queue
+/// here. The zone stops and empties, takes the items, repeat and radio, and plays `index` from
+/// `position_ms`; paused stays paused. A listener needs the zone open to listeners (the
+/// middleware checks the path).
+async fn load(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<LoadRequest>,
+) -> ApiResult<ZoneState> {
+    if body.items.is_empty() {
+        return Err(ApiError::bad_request("nothing to move: the queue is empty"));
+    }
+    if body.items.iter().any(|it| it.uri.trim().is_empty()) {
+        return Err(ApiError::bad_request("item uri is empty"));
+    }
+    let to = zone_of(&s, &id)?;
     Ok(Json(
-        tokio::time::timeout(settle, to.wait_acked())
-            .await
-            .unwrap_or_else(|_| to.state()),
+        load_zone(
+            &to,
+            body.items,
+            body.index,
+            body.position_ms,
+            body.transport,
+            body.repeat,
+            body.radio,
+        )
+        .await,
     ))
 }
 
@@ -6865,70 +6909,17 @@ mod tests {
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
-    /// "Same artist" on a library artist, album and song (no canonical URL): the match is kept
-    /// by kind and id and shows on the page as "also on"; a body that doesn't fit answers in
-    /// plain words (STEWARD-FIX-same-artist.md).
+    /// A body that doesn't fit answers in plain words, with the detail apart.
     #[tokio::test]
-    async fn library_items_take_matches_and_bad_bodies_answer_plainly() {
+    async fn bad_bodies_answer_plainly() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (tid, artist, album) = {
-            let lib = s.library.lock().unwrap();
-            let mut tr = untagged_track(dir.path().join("01.flac"), "Trip to Serbia", "Sefa");
-            tr.album = Some(pm_model::Album {
-                id: None,
-                title: "Trip To Bangladesh".into(),
-                album_artist: Some("Sefa".into()),
-                release_mbid: None,
-                release_group_mbid: None,
-                year: Some(2024),
-                upc: None,
-                total_discs: None,
-            });
-            let tid = lib.upsert_track(&tr).unwrap();
-            let t = lib.get_track(tid).unwrap().unwrap();
-            (tid.0, t.artists[0].id.unwrap(), t.album.unwrap().id.unwrap())
-        };
         let app = router(s.clone());
-        for (kind, id, url) in [
-            ("artist", artist, "https://www.deezer.com/artist/123"),
-            ("album", album, "https://www.deezer.com/album/456"),
-            ("song", tid, "https://www.deezer.com/track/789"),
-        ] {
-            let (st, v) = call(
-                &app,
-                "POST",
-                "/v1/item/matches",
-                Some(serde_json::json!({"kind": kind, "id": format!("lib-{id}"), "image": "https://cdn.example/p.jpg",
-                    "version": {"source": "deezer", "id": "x", "label": "Deezer · Sefa", "url": url}})),
-            )
-            .await;
-            assert_eq!(st, StatusCode::OK, "{kind}: {v}");
-            let (st, pg) = call(&app, "GET", &format!("/v1/item/{kind}/lib-{id}"), None).await;
-            assert_eq!(st, StatusCode::OK, "{pg}");
-            assert!(
-                pg["also_on"].as_array().unwrap().iter().any(|v| v["url"] == url),
-                "{kind}: {pg}"
-            );
-        }
-        // The artist page now has a picture (the match's)
-        let (_, pg) = call(&app, "GET", &format!("/v1/item/artist/lib-{artist}"), None).await;
-        assert_eq!(pg["image"], format!("/v1/library/artists/{artist}/image"));
-        // The owner's case: no uri, no kind; and a body that is not a match at all
         let (st, e) = call(
             &app,
             "POST",
-            "/v1/item/matches",
-            Some(serde_json::json!({"version": {"source": "deezer", "id": "x", "label": "x", "url": "u"}})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
-        assert!(!e["error"].as_str().unwrap().contains("deserialize"), "{e}");
-        let (st, e) = call(
-            &app,
-            "POST",
-            "/v1/item/matches",
-            Some(serde_json::json!({"uri": "x"})),
+            "/v1/playlists",
+            Some(serde_json::json!({"uris": "not a list"})),
         )
         .await;
         assert!(st.is_client_error(), "{st}");
@@ -6936,7 +6927,7 @@ mod tests {
             e["error"], "The node didn't understand that request. Reload the page and try again.",
             "{e}"
         );
-        assert!(e["detail"].as_str().unwrap().contains("version"), "{e}");
+        assert!(e["detail"].as_str().unwrap().contains("uris"), "{e}");
     }
 
     /// Library tags are Pubky tags (STEWARD-UX-INSTANCES item 6): an unmatched file takes a tag
@@ -12606,5 +12597,64 @@ exec sleep 300
         .await;
         call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), asked);
+    }
+
+    #[tokio::test]
+    async fn load_fills_a_zone_at_a_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("long.wav");
+        write_wav(&wav, 44_100 * 30);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..3)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        // Nothing to move
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": []})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": [{"uri": " "}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // A paused browser queue: the second song at 5 s, repeat all
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": items, "index": 1, "position_ms": 5000, "transport": "paused", "repeat": "all"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["queue"].as_array().unwrap().len(), 3);
+        assert_eq!(z["queue"][1]["title"], "t1");
+        assert_eq!(z["repeat"], "all");
+        assert_eq!(z["now_playing"]["index"], 1);
+        assert_eq!(z["transport"], "paused");
+        assert!(z["now_playing"]["position_ms"].as_u64().unwrap() >= 4_000, "{z}");
+        // Stopped: loaded, nothing plays
+        let one = vec![serde_json::json!({"uri": wav.to_string_lossy(), "title": "only"})];
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": one})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["queue"].as_array().unwrap().len(), 1);
+        assert_eq!(z["transport"], "stopped");
+        assert_eq!(z["repeat"], "off");
     }
 }

@@ -118,6 +118,26 @@ pub struct TransferRequest {
     pub to: String,
 }
 
+/// `POST /v1/zones/{id}/load`: the queue of a player the node does not run (This browser) moves
+/// into the zone, which stops and empties first; `index` plays from `position_ms`, paused when
+/// the player was paused (`transport`), and nothing starts when it was stopped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadRequest {
+    pub items: Vec<QueueItem>,
+    /// The item that was playing or paused, if any.
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub position_ms: u64,
+    /// `playing`, `paused` or `stopped` (the default).
+    #[serde(default)]
+    pub transport: pm_zones::Transport,
+    #[serde(default)]
+    pub repeat: pm_zones::Repeat,
+    #[serde(default)]
+    pub radio: bool,
+}
+
 /// Sleep timer: pause the zone after `seconds`; `null` cancels.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SetSleep {
@@ -201,25 +221,6 @@ pub struct SourceArtist {
     pub albums: Vec<SourceHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_artist_id: Option<i64>,
-}
-
-/// "Find on other services": one possible match, with what tells it apart from others of the
-/// same name and the evidence that it is this item (STEWARD-FIX-same-artist.md).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MatchCandidate {
-    #[serde(flatten)]
-    pub version: Version,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// What tells it apart: "12,345 fans", "2015 · Sefa".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// Why it may be the same: "has your album Trip To Bangladesh", "same ISRC".
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    /// The only candidate with evidence: the page pre-selects it.
-    #[serde(default)]
-    pub likely: bool,
 }
 
 /// Where else a library album or track can be streamed from (Roon's "Versions").
