@@ -492,7 +492,7 @@ pub(crate) async fn put(
             OWN.join(", ")
         )));
     };
-    let mut own = own_apps(&s.library.lock().expect("library poisoned"));
+    let own = own_apps(&s.library.lock().expect("library poisoned"));
     if origin(&s, &own, id) == Some("config") {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -528,7 +528,9 @@ pub(crate) async fn put(
     let back = next.clone().or_else(|| builtin(id));
     let changed = current(&s, id) != back.clone().unwrap_or_default();
     {
+        // Read again under the lock: another service's save meanwhile stays
         let lib = s.library.lock().expect("library poisoned");
+        let mut own = own_apps(&lib);
         match &next {
             Some(a) => {
                 own.insert(id.to_string(), a.clone());
@@ -549,7 +551,11 @@ pub(crate) async fn put(
         match id {
             "tidal" => crate::tidal::app_changed(&s)?,
             "jamendo" => crate::jamendo::app_changed(&s)?,
-            _ => {}
+            other => {
+                if let Some(p) = drive(other) {
+                    crate::drives::app_changed(&s, p)?;
+                }
+            }
         }
     }
     let base = crate::tidal::external_base(&s, &headers);
