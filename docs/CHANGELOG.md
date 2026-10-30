@@ -8,6 +8,8 @@ Newest first. Dates are when the change landed on `main`.
 - **Post about this** (B2): the ⋯ menu on song, album and artist pages writes a public social v1 note with the item as its `embed`, so pubky.app and other Pubky apps show it with the item's card (`POST /v1/posts`).
 - **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
 
+- **A collection may hold web links**. Besides songs, albums, artists and Pubky posts, any web page goes in as a `link` item (stored canonical, as social v1 allows). Playing skips it and says so; `GET /v1/cards?uri=` gives its Pinakes card (title, image, site). The playlist page shows a web page or a post as its card, in its place among the songs, with Open instead of Play, and counts songs and links apart. A web-page bookmark from another app is still not read as a music bookmark.
+
 ### 2026-10-30
 
 - **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.

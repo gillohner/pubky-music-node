@@ -18,7 +18,8 @@
 
 use crate::ids;
 use crate::schemas::{
-    item_uri, Activity, ActivitySource, ItemSource, MusicContent, Playlist, PlaylistItem, Review, LAYOUTS,
+    item_uri, Activity, ActivitySource, ItemKind, ItemSource, MusicContent, Playlist, PlaylistItem, Review,
+    LAYOUTS,
 };
 use pm_model::MusicUri;
 use pubky_music_specs::ext;
@@ -498,7 +499,11 @@ pub fn music_bookmark(path: &str, body: &[u8]) -> Option<(String, i64)> {
     let filename = path.rsplit('/').next()?.strip_suffix(".json")?;
     let content: PubkySocialBookmark = serde_json::from_slice(body).ok()?;
     let target = bookmark_target(filename, &content).ok()?;
-    Some((item_uri(&target).ok()?, content.created_at))
+    // Music and public posts only: a bookmarked web page is another app's, not a music bookmark
+    let uri = item_uri(&target)
+        .ok()
+        .filter(|u| ItemKind::of(u) != Some(ItemKind::Link))?;
+    Some((uri, content.created_at))
 }
 
 /// `/pub/social/v1/tags/`: where tags live (pubky-social-specs v1). Nexus indexes a tag there on
@@ -859,7 +864,7 @@ mod tests {
             back.items.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>(),
             pl.items.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>()
         );
-        // A newer writer's layout reads as a list; a link the node cannot show is left out
+        // A newer writer's layout reads as a list; a web link is kept as a link (B3)
         let mut c: PubkySocialCollectionContent = serde_json::from_str(&post_v1.content).unwrap();
         c.layout = Some(PubkySocialCollectionLayout::from("carousel".to_string()));
         c.items.push(PubkySocialCollectionItem::new(
@@ -871,7 +876,8 @@ mod tests {
         let Some(MusicContent::Playlist(back)) = from_social(&other, &id, &id) else {
             panic!("still music")
         };
-        assert_eq!((back.layout, back.items.len()), (None, 3));
+        assert_eq!((back.layout, back.items.len()), (None, 4));
+        assert_eq!(back.items[3].kind(), Some(ItemKind::Link));
         // Posts only, no ext.music: someone's reading list, not music
         let posts = PubkySocialPost::new_collection(
             "Reading".into(),

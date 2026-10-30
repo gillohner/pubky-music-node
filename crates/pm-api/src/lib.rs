@@ -383,6 +383,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/discover/charts", get(discover::charts))
         .route("/discover/search", get(discover::search))
         .route("/discover/item", get(discover::item_detail))
+        .route("/cards", get(pinakes_reader::get_card))
         .route("/discover/play", get(discover::play_plan))
         .route("/discover/describe", post(discover::describe))
         .route("/discover/contents", get(discover::contents))
@@ -12329,6 +12330,94 @@ exec sleep 300
             .await
             .0,
             StatusCode::PRECONDITION_FAILED
+        );
+    }
+
+    /// `GET /v1/cards` (TASK-pinakes-social-ux.md B3): the Pinakes card for a collection item the
+    /// node doesn't play (a web page), with only an http(s) image; a link Pinakes can't read is
+    /// `unknown`, never an error.
+    #[tokio::test]
+    async fn a_web_link_has_its_pinakes_card() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/resources/by-uri",
+                get(
+                    |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        match q["uri"].as_str() {
+                            "https://example.com/liner-notes" => Json(serde_json::json!({
+                                "id": "c1", "uri": q["uri"], "status": "ok", "type": "Article",
+                                "name": "Liner notes", "description": "How it was made",
+                                "image": "https://example.com/cover.jpg", "site": "example.com"
+                            }))
+                            .into_response(),
+                            "https://example.com/odd" => Json(serde_json::json!({
+                                "id": "c2", "uri": q["uri"], "status": "ok", "name": "Odd",
+                                "image": "javascript:alert(1)"
+                            }))
+                            .into_response(),
+                            _ => (
+                                StatusCode::NOT_FOUND,
+                                Json(serde_json::json!({"error": "not found"})),
+                            )
+                                .into_response(),
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/resolve",
+                post(|| async {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({"error": "cannot read"})),
+                    )
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let (st, c) = call(
+            &app,
+            "GET",
+            "/v1/cards?uri=https%3A%2F%2Fexample.com%2Fliner-notes",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        assert_eq!(
+            c,
+            serde_json::json!({"uri": "https://example.com/liner-notes", "status": "found", "kind": "Article",
+                "name": "Liner notes", "description": "How it was made",
+                "image": "https://example.com/cover.jpg", "site": "example.com"})
+        );
+        let (_, odd) = call(&app, "GET", "/v1/cards?uri=https%3A%2F%2Fexample.com%2Fodd", None).await;
+        assert_eq!(odd["name"], "Odd");
+        assert!(odd["image"].is_null(), "only an http(s) image: {odd}");
+        let (st, none) = call(
+            &app,
+            "GET",
+            "/v1/cards?uri=https%3A%2F%2Fexample.com%2Fnothing",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{none}");
+        assert!(
+            matches!(none["status"].as_str(), Some("unknown" | "reading")),
+            "{none}"
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/cards?uri=", None).await.0,
+            StatusCode::BAD_REQUEST
         );
     }
 
