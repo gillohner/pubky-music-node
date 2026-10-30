@@ -320,7 +320,7 @@ fn listening_is_live() {
     let src = MusicSource::new("tidal", "https://tidal.com/track/50850120");
     let post = listening(
         PLAYED,
-        PLAYED + 213_000_000,
+        Some(PLAYED + 213_000_000),
         None,
         Some(213_000),
         Some(src),
@@ -329,104 +329,127 @@ fn listening_is_live() {
     let back = written(&post, Root::Pub).unwrap();
     assert_eq!(back.kind, MusicPostKind::Listening);
     let c = read_listening(&back).unwrap();
-    assert_eq!((c.started_at, c.expires_at), (PLAYED, PLAYED + 213_000_000));
+    assert_eq!((c.started_at, c.expires_at), (PLAYED, Some(PLAYED + 213_000_000)));
     assert_eq!(serde_json::to_value(&back).unwrap()["embed"], SONG);
-    // Expires after it starts, within a day; embed names the music
+    // Expires after its song starts, within a day; embed names the music
     assert!(written(
-        &listening(PLAYED, PLAYED, None, None, None, SONG.into()),
+        &listening(PLAYED, Some(PLAYED), None, None, None, SONG.into()),
         Root::Pub
     )
     .is_err());
     let day = pubky_music_specs::LIVE_WINDOW_MAX_MICROS;
     assert!(written(
-        &listening(PLAYED, PLAYED + day + 1, None, None, None, SONG.into()),
+        &listening(PLAYED, Some(PLAYED + day + 1), None, None, None, SONG.into()),
         Root::Pub
     )
     .is_err());
-    let mut no_embed = listening(PLAYED, PLAYED + 1, None, None, None, SONG.into());
+    let mut no_embed = listening(PLAYED, Some(PLAYED + 1), None, None, None, SONG.into());
     no_embed.embed = None;
     assert!(written(&no_embed, Root::Pub).is_err());
+    // No expiry at all is fine: readers stop a day after the newest version
+    written(&listening(PLAYED, None, None, None, None, SONG.into()), Root::Pub).unwrap();
 }
 
+/// Listening together (2026-10-29): `started_at` is when this song started; a pause and the end
+/// are versions with `paused_at` or `ended_at`; a reader listens along at `position_ms`.
 #[test]
-fn a_session_has_a_pubky_host() {
-    use pubky_music_specs::{read_session, session};
-    let host = format!("pubky://{OWNER}");
-    let post = session(
-        PLAYED,
-        Some(PLAYED + 3_600_000_000),
-        host.clone(),
-        None,
-        None,
-        SONG.into(),
+fn listening_along_follows_the_position() {
+    use pubky_music_specs::{listening_post, read_listening, MusicListeningContent};
+    let base = MusicListeningContent {
+        started_at: PLAYED,
+        expires_at: Some(PLAYED + 3_600_000_000),
+        duration_ms: Some(200_000),
+        ..Default::default()
+    };
+    let playing = read_listening(&written(&listening_post(&base, SONG.into()), Root::Pub).unwrap()).unwrap();
+    assert_eq!(playing.position_ms(PLAYED + 30_000_000), Some(30_000));
+    assert_eq!(
+        playing.position_ms(PLAYED + 900_000_000),
+        Some(200_000),
+        "never past the song"
     );
-    let back = written(&post, Root::Pub).unwrap();
-    assert_eq!(read_session(&back).unwrap().host, host);
+    assert_eq!(playing.position_ms(PLAYED + 3_600_000_000), None, "expired");
+    let paused = MusicListeningContent {
+        paused_at: Some(PLAYED + 42_000_000),
+        ..base.clone()
+    };
+    let paused = read_listening(&written(&listening_post(&paused, SONG.into()), Root::Pub).unwrap()).unwrap();
+    assert_eq!(
+        paused.position_ms(PLAYED + 100_000_000),
+        Some(42_000),
+        "paused stays put"
+    );
+    let ended = MusicListeningContent {
+        ended_at: Some(PLAYED + 60_000_000),
+        ..base.clone()
+    };
+    let ended = read_listening(&written(&listening_post(&ended, SONG.into()), Root::Pub).unwrap()).unwrap();
+    assert!(ended.is_live(PLAYED + 59_000_000) && !ended.is_live(PLAYED + 60_000_000));
+    assert_eq!(ended.position_ms(PLAYED + 61_000_000), None);
+    // Never before the song started
     for bad in [
-        "https://example.com/me".to_string(),
-        format!("pubky://{OWNER}/pub/social/v1/profile.json"),
-        "pubky://not-a-key".to_string(),
+        MusicListeningContent {
+            paused_at: Some(PLAYED - 1),
+            ..base.clone()
+        },
+        MusicListeningContent {
+            ended_at: Some(PLAYED - 1),
+            ..base.clone()
+        },
     ] {
-        let post = session(PLAYED, None, bad.clone(), None, None, SONG.into());
-        assert!(written(&post, Root::Pub).is_err(), "{bad}");
+        let err = written(&listening_post(&bad, SONG.into()), Root::Pub).unwrap_err();
+        assert!(err.contains("before started_at"), "{err}");
     }
 }
 
+/// `session` of the earlier drafts is retired: a listening covers it. An old one reads as an
+/// unknown kind and fails validation.
 #[test]
-fn a_session_or_a_listening_may_have_a_name() {
-    use pubky_music_specs::{
-        generic_listening_name, generic_session_name, listening, read_listening, read_session, session,
-        LIVE_NAME_MAX_LENGTH,
-    };
-    let host = format!("pubky://{OWNER}");
-    let named = session(
+fn a_session_is_retired() {
+    let kind = MusicPostKind::from("session".to_string());
+    assert!(matches!(kind, MusicPostKind::Unknown(ref k) if k == "session"));
+    let old = MusicPost::new(
+        json!({"started_at": PLAYED, "host": format!("pubky://{OWNER}")}).to_string(),
+        kind,
+        None,
+        Some(SONG.into()),
+        Vec::new(),
+    );
+    assert!(written(&old, Root::Pub).is_err());
+}
+
+#[test]
+fn a_listening_may_have_a_name() {
+    use pubky_music_specs::{generic_listening_name, listening, read_listening, LIVE_NAME_MAX_LENGTH};
+    let named = listening(
         PLAYED,
         None,
-        host.clone(),
-        Some("  Friday night  ".into()),
+        Some("  Friday vinyl night  ".into()),
+        None,
         None,
         SONG.into(),
     );
-    let back = read_session(&written(&named, Root::Pub).unwrap()).unwrap();
-    assert_eq!(back.name.as_deref(), Some("Friday night"));
-    assert_eq!(back.name_or_generic("Alice"), "Friday night");
+    let back = read_listening(&written(&named, Root::Pub).unwrap()).unwrap();
+    assert_eq!(back.name.as_deref(), Some("Friday vinyl night"));
+    assert_eq!(back.name_or_generic("Alice"), "Friday vinyl night");
 
     // Absent: the constructor drops a blank one, and a reader shows the generic name
-    let unnamed = session(PLAYED, None, host.clone(), Some(" ".into()), None, SONG.into());
-    let back = read_session(&written(&unnamed, Root::Pub).unwrap()).unwrap();
+    let unnamed = listening(PLAYED, None, Some(" ".into()), None, None, SONG.into());
+    let back = read_listening(&written(&unnamed, Root::Pub).unwrap()).unwrap();
     assert_eq!(back.name, None);
     assert!(!unnamed.content.contains("name"), "{}", unnamed.content);
-    assert_eq!(back.name_or_generic("Alice"), "Alice's listening session");
-    assert_eq!(back.name_or_generic("Alice"), generic_session_name("Alice"));
-
-    // A client with no name from the person writes the generic one, which is a valid name
-    let generic = session(
-        PLAYED,
-        None,
-        host.clone(),
-        Some(generic_session_name("Alice")),
-        None,
-        SONG.into(),
-    );
-    written(&generic, Root::Pub).unwrap();
-    let live = listening(
-        PLAYED,
-        PLAYED + 1,
-        Some(generic_listening_name("Alice")),
-        None,
-        None,
-        SONG.into(),
-    );
-    let back = read_listening(&written(&live, Root::Pub).unwrap()).unwrap();
-    assert_eq!(back.name.as_deref(), Some("Alice is listening"));
+    assert_eq!(back.name_or_generic("Alice"), "Alice is listening");
+    assert_eq!(back.name_or_generic("Alice"), generic_listening_name("Alice"));
 
     // The generic name is always a valid one: a blank display name, a long one
-    assert_eq!(generic_session_name("  "), "Someone's listening session");
-    let long = generic_session_name(&"é".repeat(300));
+    assert_eq!(generic_listening_name("  "), "Someone is listening");
+    let long = generic_listening_name(&"é".repeat(300));
     assert_eq!(long.chars().count(), LIVE_NAME_MAX_LENGTH);
-    assert!(long.ends_with("'s listening session"));
-    let fits = session(PLAYED, None, host.clone(), Some(long), None, SONG.into());
-    written(&fits, Root::Pub).unwrap();
+    written(
+        &listening(PLAYED, None, Some(long), None, None, SONG.into()),
+        Root::Pub,
+    )
+    .unwrap();
 
     // Written by hand: untrimmed, blank or too long is refused
     for bad in [
@@ -436,29 +459,20 @@ fn a_session_or_a_listening_may_have_a_name() {
         "  ".into(),
         "a".repeat(101),
     ] {
-        let mut post = session(PLAYED, None, host.clone(), None, None, SONG.into());
+        let mut post = listening(PLAYED, None, None, None, None, SONG.into());
         let mut content: serde_json::Value = serde_json::from_str(&post.content).unwrap();
         content["name"] = json!(bad);
         post.content = content.to_string();
         let err = written(&post, Root::Pub).unwrap_err();
         assert!(err.contains("name"), "{bad:?}: {err}");
     }
-    let max = session(
-        PLAYED,
-        None,
-        host,
-        Some("a".repeat(LIVE_NAME_MAX_LENGTH)),
-        None,
-        SONG.into(),
-    );
-    written(&max, Root::Pub).unwrap();
 }
 
-/// `tests/vectors/live-v1.json`: `listening` and `session` contents with what each is shown as,
-/// the ones refused, and the generic names, for other implementations to check against.
+/// `tests/vectors/live-v1.json`: `listening` contents with what each is shown as and its position at
+/// `now`, the ones refused, and the generic names, for other implementations to check against.
 #[test]
 fn live_vectors() {
-    use pubky_music_specs::{generic_listening_name, generic_session_name, read_listening, read_session};
+    use pubky_music_specs::{generic_listening_name, read_listening};
     let raw =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/live-v1.json")).unwrap();
     let vectors: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -471,12 +485,15 @@ fn live_vectors() {
     assert!(!valid.is_empty());
     for case in valid {
         let back = written(&post(case), Root::Pub).unwrap_or_else(|e| panic!("{case}: {e}"));
-        let who = case["display_name"].as_str().unwrap();
-        let shown = match back.kind {
-            MusicPostKind::Listening => read_listening(&back).unwrap().name_or_generic(who),
-            _ => read_session(&back).unwrap().name_or_generic(who),
-        };
-        assert_eq!(shown, case["shown_as"].as_str().unwrap(), "{case}");
+        let l = read_listening(&back).unwrap();
+        assert_eq!(
+            l.name_or_generic(case["display_name"].as_str().unwrap()),
+            case["shown_as"].as_str().unwrap(),
+            "{case}"
+        );
+        if let Some(now) = case["now"].as_i64() {
+            assert_eq!(l.position_ms(now), case["position_ms"].as_i64(), "{case}");
+        }
     }
     let invalid = vectors["invalid"].as_array().unwrap();
     assert!(!invalid.is_empty());
@@ -486,11 +503,6 @@ fn live_vectors() {
     }
     for case in vectors["generic_names"].as_array().unwrap() {
         let who = case["display_name"].as_str().unwrap();
-        assert_eq!(
-            generic_session_name(who),
-            case["session"].as_str().unwrap(),
-            "{case}"
-        );
         assert_eq!(
             generic_listening_name(who),
             case["listening"].as_str().unwrap(),

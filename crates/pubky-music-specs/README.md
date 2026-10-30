@@ -12,36 +12,42 @@ microseconds; durations (`*_ms`) are milliseconds. Unknown members are kept on a
 | --- | --- |
 | `review` | `{rating: 1–10, text?}` |
 | `listen` | one play: `{played_at, duration_ms?, source?}` |
-| `listening` | now playing: `{started_at, expires_at, name?, duration_ms?, source?}` |
-| `session` | a listening session others join: `{started_at, expires_at?, host: "pubky://<key>", name?, source?}` |
+| `listening` | someone listening now: `{started_at, expires_at?, paused_at?, ended_at?, name?, duration_ms?, source?}` |
 
-`listening` and `session` are ordinary kinds: a reader stops showing one once its `expires_at` has
-passed, at most 24 hours after `started_at`.
+The `session` kind of the earlier drafts is retired: an old one reads as an unknown kind.
+
+## Listening together
+
+One `listening` post per listening session; each song change, pause or resume is a new version of
+the same post, never a post per song. `embed` is the song playing now.
+
+- `started_at` is when this song started: the position is now − `started_at`, or
+  `paused_at` − `started_at` while paused (`position_ms(now)`).
+- `ended_at` is set when the person stops. `expires_at`, optional, is when a reader stops showing
+  it without a newer version, at most 24 hours after `started_at`; a writer keeps it a little past the
+  song's end. Without it a reader stops a day after the newest version (`is_live(now)`).
+- **Listen along:** play the same song from your own source at `position_ms(now)` and follow each
+  new version. Comments are social posts with `parent` = the listening post; reactions are social
+  tags on it. Suggesting a song is a comment that embeds it.
 
 ## Names
 
-A `listening` or a `session` may have a `name`: trimmed, 1 to 100 code points (`LIVE_NAME_MAX_LENGTH`).
-Absent is the one spelling of no name; a blank one is refused.
+A `listening` may have a `name`: trimmed, 1 to 100 code points (`LIVE_NAME_MAX_LENGTH`). Absent is
+the one spelling of no name; a blank one is refused.
 
-- A client that publishes one without a name from the person writes the generic name:
-  `generic_session_name(display name)` is `"<display name>'s listening session"`,
-  `generic_listening_name(display name)` is `"<display name> is listening"`.
-- A reader shows the same generic name when `name` is absent (`name_or_generic`), so a post reads
-  the same whichever client wrote it.
+- A reader shows `generic_listening_name(display name)`, `"<display name> is listening"`, when
+  `name` is absent (`name_or_generic`); a client may write the same.
 - The generic name is always a valid name: a blank display name reads as `Someone`, and a long one
   is shortened to fit.
 
 ```rust
-use pubky_music_specs::{generic_session_name, session};
+use pubky_music_specs::{listening, listening_post, MusicListeningContent};
 
-let post = session(
-    started_at,
-    None,
-    format!("pubky://{host}"),
-    Some(generic_session_name("Alice")), // "Alice's listening session"
-    None,
-    song_url,
-);
+// The song that just started; renewed a little past its end
+let post = listening(started_at, Some(started_at + 3_600_000_000), None, Some(duration_ms), None, song_url);
+// Paused: a new version of the same post
+let paused = MusicListeningContent { paused_at: Some(now), ..content };
+let post = listening_post(&paused, song_url);
 ```
 
 ## Feeds
@@ -69,9 +75,10 @@ and leaves that part out; `MusicFeed::validate(id, strict: true)` is what a writ
 
 ## Test vectors
 
-`tests/vectors/live-v1.json` holds `listening` and `session` contents: the valid ones with what a
-reader shows, the ones refused, and the generic names. `tests/vectors/feed-v1.json` holds music feeds: valid ones, ones only a reader keeps, refused ones,
-and the canonical tag form. `cargo test -p pubky-music-specs` checks
+`tests/vectors/live-v1.json` holds `listening` contents: the valid ones with what a reader shows
+and the position at a given time, the ones refused (a retired `session` among them), and the
+generic names. `tests/vectors/feed-v1.json` holds music feeds: valid ones, ones only a reader keeps,
+refused ones, and the canonical tag form. `cargo test -p pubky-music-specs` checks
 this crate against them; another implementation can check itself the same way.
 
 [pubky-social-specs]: https://github.com/pubky/pubky-social-specs
