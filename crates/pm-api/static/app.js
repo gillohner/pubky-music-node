@@ -1207,7 +1207,10 @@
     }
     if (!state.zones[state.zone]) return;
     const zt = state.zones[state.zone];
-    if ((action.action === 'play' || (action.action === 'toggle' && zt.transport !== 'playing')) && zt.queue && zt.queue.length) startWait('play', state.zone, zt.now_playing ? zt.now_playing.item.title || '' : '');
+    // The button says what it does: pause while it shows pause. A toggle pressed twice, or
+    // pressed while the shown state was behind, played again instead of pausing
+    if (action.action === 'toggle') action = { action: zt.transport === 'playing' ? 'pause' : 'play' };
+    if (action.action === 'play' && zt.queue && zt.queue.length) startWait('play', state.zone, zt.now_playing ? zt.now_playing.item.title || '' : '');
     try {
       const st = await api('POST', `/zones/${state.zone}/transport`, action);
       state.zones[st.id] = st;
@@ -5008,6 +5011,7 @@
           }).join('')}</div>`;
           const zoneTransport = async (zid, action) => {
             if (zid === BROWSER) { const keep = state.zone; state.zone = BROWSER; try { await transport({ action }); } finally { state.zone = keep; } return; }
+            if (action === 'toggle') action = (state.zones[zid] || {}).transport === 'playing' ? 'pause' : 'play';
             try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
           };
           $$('[data-zcard]', main).forEach((card) => {
