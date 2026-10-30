@@ -206,68 +206,32 @@ impl Output for UpnpOutput {
             &protocol_info,
         );
         let renderer = self.renderer.clone();
-        let target = offload(move || -> Result<String, UpnpError> {
-            // A Sonos player in a Sonos group plays through its coordinator.
-            let av = if crate::sonos::is_sonos(&renderer) {
-                crate::sonos::transport_target(&renderer)
-            } else {
-                renderer.av_transport.clone()
-            };
-            // Some TVs refuse a new URI while they hold one; a renderer with nothing loaded may
-            // answer Stop with an error, which is fine.
-            let _ = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]);
-            soap::call(
-                &av,
-                AV_TRANSPORT,
-                "SetAVTransportURI",
-                &[
-                    ("InstanceID", "0"),
-                    ("CurrentURI", &url),
-                    ("CurrentURIMetaData", &meta),
-                ],
-            )?;
-            Ok(av)
-        })
-        .await
-        .map_err(soap_err)?;
-        // Play goes out on its own thread, and the sink is writable at once: a Linn answers Play
-        // only once it has read the start of the stream, and the stream has no bytes until the
-        // zone writes into the sink (waiting for Play here stalled both for 5 s, then the Linn
-        // gave up). A refused Play shows up on the next write.
+        // Stop, SetAVTransportURI and Play go out in order on their own thread, and the sink is
+        // writable at once: a Linn fetches the URI during SetAVTransportURI (and again during
+        // Play) and answers only once it has read the start of the stream, which has no bytes
+        // until the zone writes into the sink. Waiting for either answer here stalled both for
+        // the Linn's 5 s, twice (NUC, 2026-10-30). A refused URI or Play shows up on the next
+        // write.
         let (played_tx, played) = std::sync::mpsc::channel();
-        let av = target.clone();
+        let target = Arc::new(Mutex::new(None::<String>));
+        let target_set = target.clone();
         let (pull, generation) = (self.pull.clone(), self.pull.generation());
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_retrying = cancelled.clone();
         std::thread::Builder::new()
             .name("upnp-play".into())
             .spawn(move || {
-                // TVs answer 701 while they still open the URI: try again for a moment.
-                let mut tries = 0;
-                let result = loop {
-                    match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
-                        Ok(_) => break Ok(()),
-                        // The sink closed meanwhile: no Play after its Stop
-                        Err(e) if stop_retrying.load(std::sync::atomic::Ordering::SeqCst) => {
-                            break Err(e.to_string())
-                        }
-                        Err(e) if tries < 4 => {
-                            tries += 1;
-                            tracing::debug!(tries, "renderer Play refused, retrying: {e}");
-                            std::thread::sleep(std::time::Duration::from_millis(400));
-                        }
-                        Err(e) => break Err(e.to_string()),
-                    }
-                };
+                let result = start(&renderer, &url, &meta, &target_set, &stop_retrying);
                 if let Err(e) = &result {
                     // Nobody will fetch the stream: the zone hears why now, not after 15 s
-                    pull.abort(generation, format!("the renderer refused Play: {e}"));
+                    pull.abort(generation, e.clone());
                 }
                 let _ = played_tx.send(result);
             })
             .map_err(|e| SinkError::Device(format!("cannot start the Play call: {e}")))?;
         Ok(Box::new(UpnpSink {
             inner,
+            renderer: self.renderer.av_transport.clone(),
             av_transport: target,
             played: Some(played),
             cancelled,
@@ -281,6 +245,61 @@ impl Output for UpnpOutput {
         offload(move || set_volume_blocking(&rc, v))
             .await
             .map_err(soap_err)
+    }
+}
+
+/// Point the renderer at the stream and play it: Stop, SetAVTransportURI, Play, in that order
+/// (on the sink's own thread, see [`UpnpOutput::open`]). The AVTransport it used goes into
+/// `target`, for the sink's Stop. Err is the reason, in the zone's words.
+fn start(
+    renderer: &Renderer,
+    url: &str,
+    meta: &str,
+    target: &Mutex<Option<String>>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    // A Sonos player in a Sonos group plays through its coordinator.
+    let av = if crate::sonos::is_sonos(renderer) {
+        crate::sonos::transport_target(renderer)
+    } else {
+        renderer.av_transport.clone()
+    };
+    *target.lock().expect("target") = Some(av.clone());
+    // Some TVs refuse a new URI while they hold one; a renderer with nothing loaded may answer
+    // Stop with an error, which is fine.
+    let _ = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]);
+    // The sink closed meanwhile (a slow start): nothing more, so nothing plays after its Stop
+    let closed = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
+    if closed() {
+        return Ok(());
+    }
+    soap::call(
+        &av,
+        AV_TRANSPORT,
+        "SetAVTransportURI",
+        &[
+            ("InstanceID", "0"),
+            ("CurrentURI", url),
+            ("CurrentURIMetaData", meta),
+        ],
+    )
+    .map_err(|e| format!("the renderer refused the stream: {e}"))?;
+    if closed() {
+        return Ok(());
+    }
+    // TVs answer 701 while they still open the URI: try again for a moment.
+    let mut tries = 0;
+    loop {
+        match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
+            Ok(_) => return Ok(()),
+            // The sink closed meanwhile: no Play after its Stop
+            Err(e) if tries < 4 && !closed() => {
+                tries += 1;
+                tracing::debug!(tries, "renderer Play refused, retrying: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            Err(e) => return Err(format!("the renderer refused Play: {e}")),
+        }
     }
 }
 
@@ -330,8 +349,11 @@ fn set_volume_blocking(rc: &str, v: Volume) -> Result<(), UpnpError> {
 
 struct UpnpSink {
     inner: Box<dyn AudioSink>,
-    av_transport: String,
-    /// The answer to Play, until it came.
+    /// The renderer's own AVTransport, for Stop before [`start`] chose one.
+    renderer: String,
+    /// The AVTransport [`start`] used (a Sonos group's coordinator), once it chose it.
+    av_transport: Arc<Mutex<Option<String>>>,
+    /// The answer to SetAVTransportURI and Play, until it came.
     played: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Set on close: the Play thread stops retrying.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -348,7 +370,7 @@ impl UpnpSink {
             }
             Ok(Err(e)) => {
                 self.played = None;
-                Some(SinkError::Device(format!("the renderer refused Play: {e}")))
+                Some(SinkError::Device(e))
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
         }
@@ -384,12 +406,18 @@ impl AudioSink for UpnpSink {
 
 impl Drop for UpnpSink {
     fn drop(&mut self) {
-        // Stop after Play's answer (briefly), so the renderer does not start after it
+        // Stop after the start's answers (briefly), so the renderer does not start after it
         self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(rx) = self.played.take() {
             let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
         }
-        if let Err(e) = soap::call(&self.av_transport, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]) {
+        let av = self
+            .av_transport
+            .lock()
+            .expect("target")
+            .clone()
+            .unwrap_or_else(|| self.renderer.clone());
+        if let Err(e) = soap::call(&av, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]) {
             tracing::debug!("renderer Stop: {e}");
         }
     }
@@ -405,6 +433,11 @@ mod tests {
     /// A fake renderer: answers SOAP posts, records the actions, and on Play
     /// fetches nothing (the test takes the pull stream itself).
     fn fake_renderer() -> (String, Arc<Mutex<Vec<String>>>) {
+        fake_renderer_slow(std::time::Duration::ZERO)
+    }
+
+    /// [`fake_renderer`] that takes `stop` to answer Stop.
+    fn fake_renderer_slow(stop: std::time::Duration) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -450,6 +483,9 @@ mod tests {
                 } else {
                     format!("{action} {uri}")
                 });
+                if action == "Stop" {
+                    std::thread::sleep(stop);
+                }
                 let body = if action == "GetVolume" {
                     "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume>40</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>"
                 } else {
@@ -545,6 +581,33 @@ mod tests {
         );
     }
 
+    /// A sink closed while the start is still on its first Stop sends neither the URI nor Play
+    /// after it: the renderer stays stopped (nothing plays after the sink's own Stop).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sink_closed_during_a_slow_start_never_plays() {
+        let (base, log) = fake_renderer_slow(std::time::Duration::from_millis(300));
+        let renderer = Renderer {
+            udn: "uuid:slow".into(),
+            friendly_name: "Slow TV".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let out = UpnpOutput::new(
+            renderer,
+            Arc::new(PullOutput::new("slow")),
+            "http://node/v1/outputs/pull/slow/stream.wav".into(),
+        );
+        let sink = out.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        std::thread::spawn(move || drop(sink)).join().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(*log.lock().unwrap(), vec!["Stop".to_string(), "Stop".into()]);
+    }
+
     /// A renderer like a Linn DS: it answers Play only once it has read the start of the stream.
     /// The sink must be writable before Play's answer (it waited for it, and both waited 5 s).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -631,6 +694,163 @@ mod tests {
             started.elapsed()
         );
         heard.store(true, Ordering::SeqCst);
+        drop(writer.join().unwrap());
+    }
+
+    /// A Linn DS fetches the URI during SetAVTransportURI and answers only once it has read the
+    /// start of the stream (~64 KB); without bytes it gives up after 5 s and asks again. Then it
+    /// closes that connection and opens a new one to play (NUC, 2026-10-30: the zone started
+    /// ~10 s late, open() waited for SetAVTransportURI). Audio must flow at once, and the second
+    /// fetch must get the stream from its first byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linn_that_reads_the_stream_during_set_uri_starts_at_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        const PROBE: usize = 64 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let pull = Arc::new(PullOutput::new("linn-set"));
+        let rt = tokio::runtime::Handle::current();
+        // When the Linn had the first PROBE bytes, and what the playing fetch got first
+        let probed: Arc<Mutex<Option<Instant>>> = Arc::default();
+        // When the playing fetch had the first PROBE bytes, and those bytes
+        type Heard = Arc<Mutex<Option<(Instant, Vec<u8>)>>>;
+        let played: Heard = Arc::default();
+        let first: Arc<Mutex<Vec<u8>>> = Arc::default();
+        let (pull2, probed2, played2, first2) = (pull.clone(), probed.clone(), played.clone(), first.clone());
+        std::thread::spawn(move || {
+            let _runtime = rt.enter();
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = s.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(idx) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_string)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= idx + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if text.contains("#SetAVTransportURI\"") {
+                    // Fetch and read the start; no bytes in 5 s: give up and fetch again
+                    'fetch: loop {
+                        let Some(mut live) = rt.block_on(pull2.take_stream(Duration::from_secs(5))) else {
+                            continue;
+                        };
+                        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+                        let mut got = Vec::new();
+                        while got.len() < PROBE {
+                            match rt.block_on(tokio::time::timeout_at(until, live.next_chunk())) {
+                                Ok(Some(c)) => got.extend(c),
+                                _ => continue 'fetch,
+                            }
+                        }
+                        *first2.lock().unwrap() = got[..PROBE].to_vec();
+                        *probed2.lock().unwrap() = Some(Instant::now());
+                        break; // closes this connection: the Linn opens a new one to play
+                    }
+                }
+                if text.contains("#Play\"") {
+                    let pull = pull2.clone();
+                    let played = played2.clone();
+                    let rt = rt.clone();
+                    std::thread::spawn(move || {
+                        let mut live = rt.block_on(pull.take_stream(Duration::from_secs(5))).unwrap();
+                        let mut got = Vec::new();
+                        while got.len() < PROBE {
+                            got.extend(rt.block_on(live.next_chunk()).unwrap());
+                        }
+                        *played.lock().unwrap() = Some((Instant::now(), got[..PROBE].to_vec()));
+                        // Keeps playing until the test ends
+                        while rt.block_on(live.next_chunk()).is_some() {}
+                    });
+                }
+                let body = "<s:Envelope><s:Body><u:Response/></s:Body></s:Envelope>";
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        let renderer = Renderer {
+            udn: "uuid:4c494e4e-2".into(),
+            friendly_name: "Klimax DS".into(),
+            manufacturer: Some("Linn".into()),
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let out = UpnpOutput::new(
+            renderer,
+            pull.clone(),
+            "http://node/v1/outputs/pull/linn-set/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let started = Instant::now();
+        let mut sink = tokio::time::timeout(Duration::from_secs(3), out.open(fmt))
+            .await
+            .expect("open waited for the renderer")
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "open took {:?}",
+            started.elapsed()
+        );
+        // The zone writes as it does: blocks of 4096 frames, kept to real time
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let writer = std::thread::spawn(move || {
+            let mut n = 0i32;
+            while !stop2.load(Ordering::SeqCst) {
+                let samples: Vec<i32> = (0..8192).map(|i| (n * 8192 + i) % 30_000).collect();
+                if sink.write(&AudioBlock::pcm_i32(fmt, samples)).is_err() {
+                    break;
+                }
+                n += 1;
+            }
+            sink
+        });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while played.lock().unwrap().is_none() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let probe_at = probed
+            .lock()
+            .unwrap()
+            .expect("the Linn read the start during SetAVTransportURI");
+        let (play_at, play_first) = played.lock().unwrap().clone().expect("the Linn played");
+        assert!(
+            probe_at - started < Duration::from_secs(1),
+            "first audio after {:?}",
+            probe_at - started
+        );
+        assert!(
+            play_at - started < Duration::from_secs(2),
+            "playing after {:?}",
+            play_at - started
+        );
+        assert_eq!(
+            play_first,
+            *first.lock().unwrap(),
+            "the playing fetch starts from the first byte"
+        );
+        stop.store(true, Ordering::SeqCst);
         drop(writer.join().unwrap());
     }
 
