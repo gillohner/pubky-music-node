@@ -124,13 +124,24 @@ pub(crate) fn zone_event(s: &Arc<NodeState>, zone: &str, event: &pm_zones::ZoneE
         return;
     }
     if !crate::listens::plays_are_the_owners(s, zone) {
+        // A listener or a party took over the shared zone: what plays there isn't the owner's,
+        // so the owner's post ends now (not when it expires)
+        if let Some(w) = written(s).filter(|w| w.zone == zone) {
+            let s = s.clone();
+            tokio::spawn(async move {
+                let _turn = writer().lock().await;
+                if let Err(e) = end(&s, &w, pm_pubky::ids::now_micros()).await {
+                    tracing::info!(error = %e, "ending the listening post; tried again at the next change");
+                }
+            });
+        }
         return;
     }
     let s = s.clone();
     let zone = zone.to_string();
     tokio::spawn(async move {
         if let Err(e) = reconcile(&s, &zone).await {
-            stop_sharing(&s, &e);
+            failed(&s, &e);
         }
     });
 }
@@ -182,7 +193,13 @@ pub(crate) async fn reconcile(s: &Arc<NodeState>, zone: &str) -> Result<(), Stri
     let keep =
         last.filter(|w| now < w.expires_at && now < w.session_at + LIVE_WINDOW_MAX_MICROS - 60 * MINUTE);
     let session_at = keep.as_ref().map_or(started_at.min(now), |w| w.session_at);
-    let song_end = duration_ms.map_or(now + 60 * MINUTE, |d| started_at + d * 1000 + 15 * MINUTE);
+    // Playing: a little past the song's end; paused: past the pause (up to the day), so a paused
+    // post doesn't expire mid-pause
+    let song_end = match (paused_at, duration_ms) {
+        (Some(_), _) => started_at + LIVE_WINDOW_MAX_MICROS,
+        (None, Some(d)) => started_at + d * 1000 + 15 * MINUTE,
+        (None, None) => now + 60 * MINUTE,
+    };
     let expires_at = song_end
         .max(now + 5 * MINUTE)
         .min(started_at + LIVE_WINDOW_MAX_MICROS)
@@ -266,19 +283,62 @@ async fn end(s: &NodeState, w: &Written, now: i64) -> Result<(), String> {
         .map_err(|e| format!("your homeserver: {e}"))
 }
 
-/// A write the homeserver refused: sharing turns off, once, instead of retrying.
-fn stop_sharing(s: &NodeState, why: &str) {
-    tracing::warn!(error = %why, "the listening post could not be written; sharing turns off");
-    let mut set = setting(s);
-    set.share = false;
-    if let Err(e) = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(SETTING, &serde_json::to_string(&set).expect("serializes"))
-    {
-        tracing::warn!(error = %e, "turning sharing off");
+/// Whether the homeserver refused the write (a 4xx other than a timeout or too many requests,
+/// or a full homeserver), as opposed to not answering: only a refusal turns sharing off.
+fn refused(why: &str) -> bool {
+    let lower = why.to_ascii_lowercase();
+    [
+        "forbidden",
+        "unauthorized",
+        "quota",
+        "insufficient storage",
+        "too large",
+        "payload",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+        || why
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse::<u16>().ok())
+            .any(|code| (code == 507 || (400..500).contains(&code)) && code != 408 && code != 429)
+}
+
+/// A reconcile that failed: a refusal turns sharing off (once, and the page is told); anything
+/// else (a timeout, a homeserver briefly down, a sign-in being restored) waits for the next
+/// change, which tries again.
+fn failed(s: &NodeState, why: &str) {
+    if refused(why) {
+        stop_sharing(s, why);
+    } else {
+        tracing::info!(error = %why, "the listening post could not be written; tried again at the next change");
     }
+}
+
+/// A write the homeserver refused: sharing turns off, once, instead of retrying, and the page's
+/// Live switch goes off with the reason. The setting is read and written under one lock, so a
+/// late failure can't undo the owner turning it back on meanwhile (or a name change).
+fn stop_sharing(s: &NodeState, why: &str) {
+    tracing::warn!(error = %why, "the listening post was refused; sharing turns off");
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut set: ShareSetting = lib
+            .get_setting(SETTING)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+        if !set.share {
+            return;
+        }
+        set.share = false;
+        if let Err(e) = lib.set_setting(SETTING, &serde_json::to_string(&set).expect("serializes")) {
+            tracing::warn!(error = %e, "turning sharing off");
+            return;
+        }
+    }
+    let _ = s.events.send(crate::types::ApiEvent::ListeningStopped {
+        error: why.to_string(),
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -375,9 +435,36 @@ pub(crate) async fn put(
             return Ok(Json(view(&s)));
         }
         if let Err(e) = reconcile(&s, &zone).await {
-            stop_sharing(&s, &e);
+            failed(&s, &e);
             return Err(ApiError::new(StatusCode::BAD_GATEWAY, e));
         }
     }
     Ok(Json(view(&s)))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review of #163: only a homeserver that refuses the post turns sharing off; one that
+    /// doesn't answer (or a sign-in being restored) is tried again at the next change.
+    #[test]
+    fn only_a_refusal_turns_sharing_off() {
+        for no in [
+            "your homeserver: HTTP status client error (403 Forbidden) for url (https://hs/pub/…)",
+            "your homeserver: 507 Insufficient Storage",
+            "your homeserver: quota exceeded",
+            "your homeserver: status 413",
+        ] {
+            assert!(super::refused(no), "{no}");
+        }
+        for again in [
+            "your homeserver: operation timed out",
+            "your homeserver: error sending request: connection refused",
+            "your homeserver: 503 Service Unavailable",
+            "your homeserver: 429 Too Many Requests",
+            "your homeserver: 408 Request Timeout",
+            "not signed in with Pubky",
+        ] {
+            assert!(!super::refused(again), "{again}");
+        }
+    }
 }

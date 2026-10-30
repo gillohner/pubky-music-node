@@ -50,7 +50,9 @@ fn feed_vectors() {
     }
     for case in v["invalid"].as_array().unwrap() {
         let f = read(case);
-        let err = f.validate(Some(id), false).unwrap_err();
+        let err = f
+            .validate(Some(id), false)
+            .expect_err(case["about"].as_str().unwrap());
         let want = case["error"].as_str().unwrap();
         assert!(err.contains(want), "{}: {err} (wanted {want})", case["about"]);
     }
@@ -71,6 +73,7 @@ fn a_new_feed_is_canonical_and_lives_in_the_music_namespace() {
         content: MusicFeedContent::Songs,
         layout: PubkySocialFeedLayout::List,
         rules: Vec::new(),
+        rules_match: None,
         leave_out: None,
         limit: None,
         seeds: vec![" https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56 ".into()],

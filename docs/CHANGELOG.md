@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Fixes to listens, comments, collections, smart playlists and Live sharing:**
+  - Listens moved to private while a sync ran no longer keep their public copies. A history deleted on one node is deleted on your other nodes too. The listen stats no longer hold up the node with a long history.
+  - What you type in a comment survives the song page refreshing.
+  - Play and Shuffle skip web links and posts in a collection instead of playing nothing. On phones a link or post row has a ⋯ menu (Open, Copy link, Move). Many links no longer slow down playback clicks. Someone else's shared collection shows its links as links, not as broken songs.
+  - Smart playlists with tags from the network save every rule, keep "any of the rules", and list what the saved feed says (tagged by the people you chose and matching the rules). "Tagged by" names only those people.
+  - Listening posts: a resume or a seek tells listeners where you are, a paused post doesn't expire mid-pause, and a session without an expiry ends after a day. A short homeserver hiccup no longer turns Live sharing off; when the homeserver does refuse, the Live switch goes off and says why.
+
 ### 2026-10-30
 
 - **Your library: one place for the music.** A new page in the main navigation with **My music** (your homeserver's files shown as songs, not hashed file names, with the save status in a few words and Save now, storage used, Tag my library, edit, download and delete) and, for the node's owner, **Node library** (the folders, WebDAV shares and cloud drives the node plays in place, the scan status, Fix my files' tags and Identify, moved from Settings) and **Import** (playlist files and Move from Roon, moved from Settings). One **Add music** button: upload files, add a folder or network share (checked before it is saved), or import playlists. Settings keeps settings only; `/settings/library` and `/settings/import` open the new tabs.

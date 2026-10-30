@@ -2019,6 +2019,17 @@ impl Library {
             .collect()
     }
 
+    /// Every play since `since` (unix seconds; all when `None`), as `(track id, played_at)`: no
+    /// track is read, so counting a long history stays cheap (the stats).
+    pub fn play_times_since(&self, since: Option<i64>) -> Result<Vec<(i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached("SELECT track_id, played_at FROM plays WHERE played_at >= ?1")?;
+        let rows = stmt
+            .query_map([since.unwrap_or(i64::MIN)], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Forget every play (the node's own history; nothing of it is published). Returns how many.
     pub fn clear_plays(&self) -> Result<usize> {
         Ok(self.lock().execute("DELETE FROM plays", [])?)

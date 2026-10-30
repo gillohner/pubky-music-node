@@ -478,32 +478,53 @@
     if (!r.text) { toast('Write something to post', 'error'); return; }
     try { await api('POST', '/posts', { uri, content: r.text }); toast('Posted'); } catch (e) { toast(e.message, 'error'); }
   };
+  // What someone is typing survives the page's re-renders (an item still being read renders
+  // again every few seconds): kept per item, and per comment for a reply
+  const commentDrafts = new Map();
+  const commentTyping = () => $$('.comment-form textarea').some((t) => t.value.trim() || t === document.activeElement);
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
+    const draftKey = (f) => `${uri}|${(f && f.dataset.replyTo) || ''}`;
+    const fill = (f, text) => { if (!f || !text) return; f.elements.content.value = text; f.querySelector('button').disabled = false; };
+    const openReply = (li, post) => {
+      const sub = $('.comment-sub', li); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); $(':scope > form', sub).dataset.replyTo = post; }
+      return $(':scope > form', sub);
+    };
     const show = async () => {
       let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
       if (!sec.isConnected) return;
       body.innerHTML = `${commentForm('Add a comment')}${t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : `<p class="muted small">No comments yet.</p>`}<p class="muted small">A comment is a public post on your homeserver, so every Pubky app shows it.</p>`;
+      fill($('form.comment-form', body), commentDrafts.get(`${uri}|`));
+      for (const [k, text] of commentDrafts) {
+        const [u, post] = [k.slice(0, k.lastIndexOf('|')), k.slice(k.lastIndexOf('|') + 1)];
+        const li = u === uri && post ? $$('li.comment', body).find((x) => x.dataset.cpost === post) : null;
+        if (li) fill(openReply(li, post), text);
+      }
     };
     const replies = async (li, post) => {
       let t; try { t = await api('GET', `/comments?post=${encodeURIComponent(post)}`); } catch (e) { toast(e.message, 'error'); return; }
       $('.comment-sub', li).innerHTML = t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : '<p class="muted small">No replies yet.</p>';
     };
     // Post wakes up once there is something to post
-    sec.addEventListener('input', (e) => { const f = e.target.closest('form.comment-form'); if (f) f.querySelector('button').disabled = !f.elements.content.value.trim(); });
+    sec.addEventListener('input', (e) => {
+      const f = e.target.closest('form.comment-form'); if (!f) return;
+      const text = f.elements.content.value; f.querySelector('button').disabled = !text.trim();
+      if (text.trim()) commentDrafts.set(draftKey(f), text); else commentDrafts.delete(draftKey(f));
+    });
     sec.addEventListener('submit', async (e) => {
       const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
       const content = f.elements.content.value.trim(); if (!content) return;
       const b = f.querySelector('button'); b.disabled = true;
       try {
         await api('POST', '/comments', f.dataset.replyTo ? { reply_to: f.dataset.replyTo, content } : { uri, content });
+        commentDrafts.delete(draftKey(f));
         toast(f.dataset.replyTo ? 'Reply posted' : 'Comment posted');
         if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
       } catch (err) { b.disabled = false; toast(err.message, 'error'); }
     });
     sec.addEventListener('click', async (e) => {
       const r = e.target.closest('[data-creply]');
-      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); const f = $(':scope > form', sub); f.dataset.replyTo = r.dataset.creply; f.elements.content.focus(); } return; }
+      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) openReply(r.closest('li.comment'), r.dataset.creply).elements.content.focus(); return; }
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
@@ -3067,20 +3088,29 @@
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
   // A collection item that doesn't play (a web page, a post): its Pinakes card in the list, with
   // Open instead of Play; filled in by fillCards (GET /v1/cards).
-  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}</div>`;
-  const fillCards = (box) => $$('[data-card]', box).forEach(async (row) => {
-    for (let tries = 0; tries < 3; tries++) {
-      let c; try { c = await api('GET', `/cards?uri=${encodeURIComponent(row.dataset.card)}`); } catch { return; }
-      if (!row.isConnected) return;
-      if (c.status === 'found' || (c.status === 'reading' && c.name)) {
-        if (c.name) $('.name', row).textContent = c.name;
-        $('.card-sub', row).textContent = [c.site, c.description].filter(Boolean).join(' · ');
-        const img = webUrl(c.image); if (img) $('.card-thumb', row).outerHTML = `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" data-err="hide">`;
+  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="More: ${esc(t.title)}">${icon('more')}</button></div>`;
+  // At most two at a time: the node's other calls (play, the zone) must not wait behind them
+  const fillCards = (box) => {
+    const rows = $$('[data-card]', box); let next = 0;
+    const one = async (row) => {
+      const sub = $('.card-sub', row);
+      for (let tries = 0; tries < 3; tries++) {
+        let c; try { c = await api('GET', `/cards?uri=${encodeURIComponent(row.dataset.card)}`); } catch { break; }
+        if (!row.isConnected) return;
+        if (c.status === 'found' || (c.status === 'reading' && c.name)) {
+          if (c.name) $('.name', row).textContent = c.name;
+          sub.textContent = [c.site, c.description].filter(Boolean).join(' · ');
+          const img = webUrl(c.image); if (img) $('.card-thumb', row).outerHTML = `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" data-err="hide">`;
+        }
+        if (c.status !== 'reading') { if (c.status === 'unknown') sub.textContent = 'A link'; return; }
+        await new Promise((r) => setTimeout(r, 3000));
       }
-      if (c.status !== 'reading') { if (c.status === 'unknown') $('.card-sub', row).textContent = 'A link'; return; }
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-  });
+      // Never read (or the node didn't answer): say what it is, not "Reading" for good
+      if (row.isConnected && sub.textContent === 'Reading the page…') sub.textContent = 'A link';
+    };
+    const worker = async () => { while (next < rows.length) { const row = rows[next++]; if (row.isConnected) await one(row); } };
+    worker(); worker();
+  };
   const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
@@ -3099,8 +3129,11 @@
         const what = b.dataset.sel;
         if (what === 'cancel') return endSelect();
         if (what === 'all') { if (sel.size === songs.length) sel.clear(); else songs.forEach((_, k) => sel.add(k)); $$('.selbox input', section).forEach((c) => { c.checked = sel.has(Number(c.dataset.k)); }); return draw(); }
-        if (what === 'play') { await playSongs(picked, 0, 'replace', opts.plays_from, b, opts.fallback); return endSelect(); }
-        if (what === 'queue') { await playSongs(picked, 0, 'end', opts.plays_from, b, opts.fallback); return endSelect(); }
+        // Picked cards (web pages, posts) don't play: the songs among the picked ones do
+        const songsPicked = picked.filter((t) => !t.card);
+        if ((what === 'play' || what === 'queue') && !songsPicked.length) { toast('Nothing to play: links and posts open, they don’t play'); return; }
+        if (what === 'play') { await playSongs(songsPicked, 0, 'replace', opts.plays_from, b, opts.fallback); return endSelect(); }
+        if (what === 'queue') { await playSongs(songsPicked, 0, 'end', opts.plays_from, b, opts.fallback); return endSelect(); }
         if (what === 'playlist') {
           if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
           const ids = picked.filter((t) => t.track_id != null).map((t) => t.track_id); const uris = picked.filter((t) => t.track_id == null).map((t) => t.page || (t.id && uriOf('song', t.id))).filter(Boolean);
@@ -3139,6 +3172,13 @@
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
     $$('[data-srow]:not([data-card])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
     fillCards(box);
+    // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
+    $$('[data-cmore]', box).forEach((b) => b.onclick = (e) => {
+      e.stopPropagation(); const k = Number(b.dataset.cmore); const t = all[k]; const web = webUrl(t.page);
+      showMenu(b, [{ title: t.title }, ...(web ? [{ label: 'Open', icon: 'external', run: () => window.open(web, '_blank', 'noopener') }] : []),
+        { label: 'Copy link', icon: 'copy', run: async () => { try { await navigator.clipboard.writeText(t.page); toast('Link copied'); } catch { toast(t.page); } } },
+        ...(ctx.rowExtra ? ctx.rowExtra(k, b.closest('.srow')) : [])]);
+    });
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: all[Number(a.dataset.sartist)].artist_id }); });
     $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = all[Number(a.dataset.sartistq)].artist; runSearch(); });
@@ -3409,11 +3449,13 @@
     const b = $('#livebtn'); if (!b) return;
     if (!(await pubkyUser())) { b.hidden = true; return; }
     const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
+    state.liveShow = show;
     try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
     b.onclick = async () => {
       const on = b.getAttribute('aria-pressed') !== 'true';
       b.disabled = true;
-      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+      // On an error the switch shows what the node has now, not what was asked
+      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); try { show(await api('GET', '/me/listening')); } catch { /* keep it */ } } finally { b.disabled = false; }
     };
   };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
@@ -4032,10 +4074,13 @@
           let sp; try { sp = await api('GET', `/shared/${a.user}/playlists/${a.id}`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'shared') return;
           state.itemTitle = sp.summary.name;
-          const songs = sp.play_from.items.map((r, k) => { const lib = r.plays_from && r.plays_from.service === 'library'; return { no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || r.uri, id: idOf(r.uri), plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services') }; });
-          const playable = songs.filter((t) => !t.unavailable);
+          // A web page or a post plays nowhere: its card, in its place (review of #155, M4)
+          const cardOf = (k) => { const e = sp.entries && sp.entries[k]; if (!e || (e.kind !== 'link' && e.kind !== 'post')) return null; return { no: k + 1, card: true, title: (() => { try { return new URL(e.uri).hostname.replace(/^www\./, ''); } catch { return e.uri; } })(), page: e.uri }; };
+          const songs = sp.play_from.items.map((r, k) => { const card = cardOf(k); if (card) return card; const lib = r.plays_from && r.plays_from.service === 'library'; return { no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || r.uri, id: idOf(r.uri), plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services') }; });
+          const playable = songs.filter((t) => !t.unavailable && !t.card);
+          const songCount = songs.filter((t) => !t.card).length; const linkCount = songs.length - songCount;
           const chip = (t) => t.unavailable ? `<span class="chip srcchip none" title="${esc(t.unavailable)}">${icon('close')}<span>Unavailable</span></span>` : t.plays ? `<span class="chip srcchip${t.pinned ? ' pinned' : ''}" title="${esc(t.plays.label)}${t.pinned ? ' · the author’s pick' : ''}">${svcBadge(t.plays.service)}<span>${esc(srcName(t.plays.service))}</span>${t.pinned ? icon('pin') : ''}</span>` : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${songs.length} song${songs.length === 1 ? '' : 's'} · ${playable.length} play here</p>
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${countOf(songCount, 'songs')}${linkCount ? ` · ${countOf(linkCount, 'links')}` : ''} · ${playable.length} play here</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('external')} Copy link</button></div></div></div>`
             + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This playlist is empty', '')}</section>`
             + (sp.summary.description ? `<section class="section"><div class="section-head"><h3>About</h3></div><p>${esc(sp.summary.description)}</p></section>` : '');
@@ -4104,7 +4149,8 @@
           enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
           $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
-          const playable = (list) => list.filter((t) => !t.unavailable);
+          // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
+          const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
           const playAll = (shuffle, anchorEl) => { const list = [...playable(songs), ...localSongs]; return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl); };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           stickyHead(d.summary.name, (el) => (isBrowser() ? playAll(false, el) : playPlaylist(d.summary.id)));
@@ -4662,8 +4708,9 @@
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          // About from open sources comes in the background too: ask again until it is there
-          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.reading ? 4000 : 3000); }
+          // About from open sources comes in the background too: ask again until it is there. Not
+          // while someone types a comment: the render would take the box away under them
+          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           break;
         }
         case 'queue': {
@@ -5571,6 +5618,7 @@
         const a = state.along; if (a && a.zone && a.zone.id === ev.zone && ev.zone === state.zone && state.zones[a.your_zone]) state.zone = a.your_zone;
         delete state.zones[ev.zone]; ensureZone(); renderZoneName(); refreshAlong();
       }
+      else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };

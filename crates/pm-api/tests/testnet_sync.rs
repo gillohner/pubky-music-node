@@ -765,6 +765,9 @@ async fn another_node_opens_and_copies_a_shared_playlist() {
     assert_eq!(st, StatusCode::OK, "{one}");
     assert_eq!(one["play_from"]["items"].as_array().unwrap().len(), 2);
     assert_eq!(one["play_from"]["items"][0]["pin"]["service"], "tidal");
+    // Every item's kind, in the same order (review of #155, M4: a web page shows as its card)
+    assert_eq!(one["entries"].as_array().map(Vec::len), Some(2), "{one}");
+    assert_eq!(one["entries"][0]["kind"], "track", "{one}");
     assert_eq!(one["play_from"]["own_order"], true);
     let (st, copy) = call(
         &app_b,
