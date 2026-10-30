@@ -42,9 +42,10 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
       check(await p.isVisible('#pkresign'), `${width}: Settings shows the notice`);
       check((await p.textContent('#pklogin')).trim() === 'Sign in again', `${width}: the button says "Sign in again"`);
       check(await p.$eval('#pklogin', (b) => b.classList.contains('primary')), `${width}: it is the primary button`);
-      check(await p.$eval('#sync', (b) => b.disabled && b.title.startsWith('This node needs permission')), `${width}: Sync is disabled with the notice as tooltip`);
       await p.$eval('#pkresign', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200);
       await shot(p, `resign-settings-${width}-dark`);
+      await p.goto(BASE + '/library'); await p.waitForSelector('#sync', { timeout: 20000 });
+      check(await p.$eval('#sync', (b) => b.disabled && b.title.startsWith('This node needs permission')), `${width}: Save now (Your library) is disabled with the notice as tooltip`);
       await p.goto(BASE + '/'); await p.waitForSelector('#main .notice.resign', { timeout: 20000 }).catch(() => {});
       check(await p.isVisible('#main .notice.resign [data-resign]'), `${width}: Home shows the notice with the button`);
       await shot(p, `resign-home-${width}-dark`);
@@ -67,10 +68,11 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
     const { ctx, p } = await open(width, true);
     await p.goto(BASE + '/settings'); await p.waitForSelector('#pklogin', { timeout: 20000 });
     check(!(await p.$('#pkresign')), `${width}: after re-approval there is no notice`);
-    check(await p.$eval('#sync', (b) => !b.disabled), `${width}: Sync is enabled`);
     check(await p.$eval('#pklogin', (b) => b.textContent.trim() === 'Sign in again' && !b.classList.contains('primary')), `${width}: "Sign in again" stays, as a plain button`);
     await p.$eval('#pklogin', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200);
     await shot(p, `resign-cleared-settings-${width}-dark`);
+    await p.goto(BASE + '/library'); await p.waitForSelector('#sync', { timeout: 20000 });
+    check(await p.$eval('#sync', (b) => !b.disabled), `${width}: Save now (Your library) is enabled`);
     await p.goto(BASE + '/'); await sleep(1500);
     check(!(await p.$('#main .notice.resign')), `${width}: Home has no notice`);
     await ctx.close();

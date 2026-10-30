@@ -58,6 +58,7 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod lastfm;
+pub mod library_edit;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
@@ -252,7 +253,20 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
-        .route("/library/tracks/{id}", get(track))
+        .route(
+            "/library/tracks/{id}",
+            get(track).delete(library_edit::hide_track),
+        )
+        .route(
+            "/library/tracks/{id}/edit",
+            get(library_edit::get_edit)
+                .put(library_edit::edit_track)
+                .delete(library_edit::undo_edit),
+        )
+        .route("/library/albums/{id}/edit", put(library_edit::edit_album))
+        .route("/library/hidden", get(library_edit::hidden))
+        .route("/library/hidden/restore", post(library_edit::restore))
+        .route("/me/music", get(library_edit::my_music))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
         .route("/lyrics", get(lrclib::get))
         .route("/library/tracks/{id}/versions", get(track_versions))
@@ -768,6 +782,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/source/{id}", get(web_ui))
         .route("/sources/{id}", get(web_ui))
         .route("/settings/{tab}", get(web_ui))
+        .route("/library/{tab}", get(web_ui))
         .route("/home/{section}", get(web_ui))
         .route("/tag/{labels}", get(web_ui))
         .route("/discover", get(web_ui))
@@ -944,7 +959,8 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 14] = [
+const WEB_VIEWS: [&str; 15] = [
+    "library",
     "add-music",
     "downloads",
     "favourites",
