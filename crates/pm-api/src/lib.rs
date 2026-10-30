@@ -12920,12 +12920,16 @@ exec sleep 300
         assert!(!set.contains("picked"), "{set}");
     }
 
+    /// One matching pass at a time runs in the node, so tests that run one take turns.
+    static MATCH_PASSES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Library matching (F1): an album is matched by title, artist and song count, a tagged
     /// release by its id, and each artist by its albums' credits; an artist with nothing but a
     /// name that several MusicBrainz artists share stays unmatched. Pages carry the id and where
     /// it came from, and a second pass asks nothing.
     #[tokio::test]
     async fn library_artists_and_albums_are_matched_without_trusting_a_name_alone() {
+        let _one = MATCH_PASSES.lock().await;
         const RG_TAXI: &str = "0b5d3e2b-4b0c-4d5f-9d4b-1e9a2b3c4d5e";
         const TAXI: &str = "2d7f5a4d-6d2e-4f7b-9f6d-3a1c4d5e6f70";
         const RELEASE: &str = "4f9b7c6f-8f4a-4b9d-9b8f-5c3e6f708192";
@@ -12944,7 +12948,8 @@ exec sleep 300
             move |Query(q): Query<std::collections::HashMap<String, String>>| {
                 c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let query = q.get("query").cloned().unwrap_or_default();
-                let releases = if query.contains("Zahltag") {
+                // Only the title without its edition finds it, as on MusicBrainz
+                let releases = if query.starts_with("release:\"Zahltag\" AND") {
                     serde_json::json!([
                         {"title": "Zahltag", "track-count": 5, "release-group": {"id": RG_SOLO}, "artist-credit": taxi},
                         {"title": "Zahltag", "track-count": 2, "release-group": {"id": RG_TAXI}, "artist-credit": taxi}
@@ -13094,6 +13099,10 @@ exec sleep 300
             serde_json::json!({"mbid": RG_TAXI, "source": "lookup"}),
             "{p}"
         );
+        assert_eq!(
+            p["uri"],
+            format!("https://musicbrainz.org/release-group/{RG_TAXI}")
+        );
         let (_, p) = call(
             &app,
             "GET",
@@ -13106,10 +13115,8 @@ exec sleep 300
             serde_json::json!({"mbid": RG_SOLO, "source": "tags"}),
             "{p}"
         );
-        assert_eq!(
-            p["uri"],
-            format!("https://musicbrainz.org/release-group/{RG_SOLO}")
-        );
+        // The page stays on the tagged release, which its heart and tags were saved on
+        assert_eq!(p["uri"], format!("https://musicbrainz.org/release/{RELEASE}"));
         // Answered, sure or not: nothing is asked again
         let again = library_match::pass(&s, std::time::Duration::ZERO).await;
         assert_eq!(again, library_match::PassReport::default());
@@ -13139,6 +13146,8 @@ exec sleep 300
             format!("/ws/2/artist/{ARTIST}"),
             serde_json::json!({"relations": [
                 rel("wikidata", "https://www.wikidata.org/wiki/Q1"),
+                // A direct article with no summary (encoded in the link): the next one is used
+                rel("wikipedia", "https://de.wikipedia.org/wiki/Sieben_%C3%84rzte"),
                 rel("official homepage", "https://7dollartaxi.example/"),
                 rel("free streaming", "https://open.spotify.com/artist/abc"),
                 rel("streaming", "https://tidal.com/browse/artist/42"),
@@ -13190,6 +13199,7 @@ exec sleep 300
             "claims": {}, "sitelinks": {"dewiki": {"title": "Taxi (Lied)"}}}}}),
         );
         let answers = Arc::new(answers);
+        let asked_titles: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let b2 = base.clone();
         let c2 = calls.clone();
         let mock = Router::new()
@@ -13215,15 +13225,22 @@ exec sleep 300
                         }}]}}}}))
                 }
             }))
-            .route("/api/rest_v1/page/summary/{title}", get(|Path(title): Path<String>| async move {
-                let text = match title.as_str() {
-                    "7_Dollar_Taxi_(Band)" => "7 Dollar Taxi ist eine Band aus Zürich.",
-                    "Zahltag_(album)" => "Zahltag is the first album by 7 Dollar Taxi.",
-                    "Taxi_(Lied)" => "Taxi ist ein Lied von 7 Dollar Taxi.",
-                    other => panic!("no article {other}"),
-                };
-                Json(serde_json::json!({"title": title.replace('_', " "), "extract": text,
-                    "content_urls": {"desktop": {"page": format!("https://de.wikipedia.org/wiki/{title}")}}}))
+            .route("/api/rest_v1/page/summary/{title}", get({
+                let asked = asked_titles.clone();
+                move |Path(title): Path<String>| {
+                    asked.lock().unwrap().push(title.clone());
+                    async move {
+                        let text = match title.as_str() {
+                            "7_Dollar_Taxi_(Band)" => "7 Dollar Taxi ist eine Band aus Zürich.",
+                            "Zahltag_(album)" => "Zahltag is the first album by 7 Dollar Taxi.",
+                            "Taxi_(Lied)" => "Taxi ist ein Lied von 7 Dollar Taxi.",
+                            _ => return StatusCode::NOT_FOUND.into_response(),
+                        };
+                        Json(serde_json::json!({"title": title.replace('_', " "), "extract": text,
+                            "content_urls": {"desktop": {"page": format!("https://de.wikipedia.org/wiki/{title}")}}}))
+                        .into_response()
+                    }
+                }
             }))
             .route("/img/taxi.jpg", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xffu8, 0xd8, 0xff, 1, 2, 3]) }))
             .fallback({
@@ -13280,14 +13297,48 @@ exec sleep 300
                 .find(|f| f["label"] == label)
                 .map(|f| f["value"].clone())
         };
-        let (st, p) = call(
-            &app,
-            "GET",
-            &format!("/v1/item/artist/lib-{artist}?lang=de-CH"),
-            None,
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{p}");
+        // A page never waits for open sources: it says they are coming, and has them when asked again
+        let settled = |path: String, lang: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let t = std::time::Instant::now();
+                let mut first = None;
+                for _ in 0..100 {
+                    let mut req = Request::builder().uri(path.as_str());
+                    if let Some(l) = lang {
+                        req = req.header(header::ACCEPT_LANGUAGE, l);
+                    }
+                    let resp = app
+                        .clone()
+                        .oneshot(req.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(resp.status(), StatusCode::OK);
+                    let p: serde_json::Value =
+                        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes())
+                            .unwrap();
+                    first.get_or_insert((p["about_pending"] == true, t.elapsed()));
+                    if p["about_pending"] != true {
+                        return (p, first.unwrap());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                panic!("{path} never settled");
+            }
+        };
+        let (p, (pending, took)) = settled(format!("/v1/item/artist/lib-{artist}?lang=de-CH"), None).await;
+        assert!(pending, "the first answer says About is coming");
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "and doesn't wait for it: {took:?}"
+        );
+        // The direct link was asked once, decoded (not "%C3%84" twice over), then the sitelink
+        let asked = asked_titles.lock().unwrap().clone();
+        assert_eq!(
+            asked[..2],
+            ["Sieben_Ärzte".to_string(), "7_Dollar_Taxi_(Band)".to_string()],
+            "{asked:?}"
+        );
         assert_eq!(
             p["about_text"]["text"], "7 Dollar Taxi ist eine Band aus Zürich.",
             "{p}"
@@ -13329,21 +13380,14 @@ exec sleep 300
             .unwrap();
         assert_eq!(tidal["id"], "artist:42");
         // The album: no German article, so the English one; label and date from the release
-        let req = Request::builder()
-            .uri(format!("/v1/item/album/lib-{album}"))
-            .header(header::ACCEPT_LANGUAGE, "de-DE,de;q=0.9")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let p: serde_json::Value =
-            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let (p, _) = settled(format!("/v1/item/album/lib-{album}"), Some("de-DE,de;q=0.9")).await;
         assert_eq!(p["about_text"]["lang"], "en", "{p}");
         assert_eq!(p["blurb"], "Zahltag is the first album by 7 Dollar Taxi.");
         assert_eq!(fact(&p, "Released"), Some("2001-05-04".into()), "{p}");
         assert_eq!(fact(&p, "Label"), Some("Sound Service".into()));
         assert_eq!(sources(&p), ["bandcamp", "deezer"], "{p}");
         // The song: its work's article
-        let (_, p) = call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
+        let (p, _) = settled(format!("/v1/item/song/lib-{track}?lang=de"), None).await;
         assert_eq!(
             p["about_text"]["text"], "Taxi ist ein Lied von 7 Dollar Taxi.",
             "{p}"
@@ -13351,15 +13395,59 @@ exec sleep 300
         assert_eq!(fact(&p, "Work"), Some("Taxi".into()));
         // Cached per language: the same pages again ask nothing
         let asked = calls.load(std::sync::atomic::Ordering::SeqCst);
-        call(
+        let (_, p) = call(
             &app,
             "GET",
             &format!("/v1/item/artist/lib-{artist}?lang=de"),
             None,
         )
         .await;
+        assert!(p["about_pending"].is_null(), "cached: {p}");
         call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), asked);
+    }
+
+    /// A failed album lookup doesn't hold back another artist in the same pass: an artist with
+    /// nothing to ask (no album, no song length) is still answered "not sure".
+    #[tokio::test]
+    async fn a_failed_album_lookup_does_not_skip_other_artists() {
+        let _one = MATCH_PASSES.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/ws/2/release",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.discovery.write().unwrap() = None;
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        {
+            let lib = s.library.lock().unwrap();
+            let mut on_album = untagged_track(dir.path().join("1.flac"), "One", "Band");
+            on_album.album = Some(pm_model::Album {
+                id: None,
+                title: "Album".into(),
+                album_artist: Some("Band".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            lib.upsert_track(&on_album).unwrap();
+            let mut loose = untagged_track(dir.path().join("2.flac"), "Two", "Loner");
+            loose.duration_ms = None;
+            loose.file.duration_ms = None;
+            lib.upsert_track(&loose).unwrap();
+        }
+        let report = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(report.failed, 1, "{report:?}");
+        let c = s.library.lock().unwrap().match_counts().unwrap();
+        assert_eq!(c.artists.unmatched, 1, "Loner is answered: {c:?}");
+        assert_eq!(c.albums.pending, 1, "the album is asked again next pass: {c:?}");
     }
 
     #[tokio::test]
