@@ -30,6 +30,10 @@ Newest first. Dates are when the change landed on `main`.
 - **Move playback to another device from the Play to menu.** When something plays or is queued, every other device in the menu gets **Move here** (and This zone gets **Move to…**): the song at its position, the queue, repeat and radio move there, paused stays paused, and the menu follows. Moves out of and into This browser work too (`POST /v1/zones/{id}/load` takes a browser queue; the browser takes a zone's queue and the zone empties). Errors from the node (a zone not open to listeners, an empty queue) show in the menu. The device line under each zone says the protocol and the device in words (`AirPlay · HomePod`, `UPnP · Linn Klimax DSM`; `GET /v1/outputs` gains `model`), with the id as a tooltip. The Queue page's Transfer is the same Move to.
 - **The app's players on a DAC group in sync.** An app player on a Linux computer's `hw:` DAC (`net:…/alsa:hw:…`) now reports `caps.groupable`, and Settings › Group outputs offers them as their own kind ("The app's players on a DAC"): the node keeps them in time sample by sample, as it does squeezelite players. A player through the system's sound output (macOS, Windows, a phone) is not offered. Each player's position is now read as of its last `Ack` plus what has played since, so one on a slower network is not taken for one running ahead.
 
+### Removed
+
+- **"Link another source…" and "Wrong match…"** (the item page's hand-made source links: the dialog, the menu entries, `GET /v1/item/candidates`, `POST`/`DELETE /v1/item/matches`), per the owner's decision of 2026-10-29: the node matches by the identifiers in files and services, with no hand tooling. Links made before stay in the database unused; an artist picture taken from one still shows.
+
 ## 0.2.0
 
 ### 2026-10-28

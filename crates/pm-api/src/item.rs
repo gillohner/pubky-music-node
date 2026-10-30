@@ -11,7 +11,6 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path, State};
 use axum::Json;
 use pm_model::{MusicUri, Track, TrackId};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// `GET /v1/item/{kind}/{id}`. A page is one instance (the library file, the TIDAL track…);
@@ -320,53 +319,6 @@ async fn decide_play(s: &Arc<NodeState>, pg: &mut ItemPage) {
             }
         }
     }
-}
-
-/// A library artist without a picture: when exactly one service artist of that name has your
-/// albums (the "likely" match), its picture is used, found in the background at most once a
-/// day (STEWARD-FIX-same-artist.md item 4). The page shows it from the next visit on.
-fn find_artist_picture(s: &Arc<NodeState>, n: i64, name: String) {
-    let tried = format!("artist.picture_check.{n}");
-    {
-        let lib = s.library.lock().expect("library poisoned");
-        let now = pm_library::db::now_unix();
-        let last: i64 = lib
-            .get_setting(&tried)
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        if now - last < 86_400 {
-            return;
-        }
-        let _ = lib.set_setting(&tried, &now.to_string());
-    }
-    let s = s.clone();
-    tokio::spawn(async move {
-        let q = CandidateQuery {
-            uri: String::new(),
-            kind: "artist".into(),
-            title: name,
-            artist: None,
-            item: Some(format!("lib-{n}")),
-        };
-        let Ok(Json(c)) = candidates(State(s.clone()), axum::extract::Query(q)).await else {
-            return;
-        };
-        if let Some(img) = c
-            .iter()
-            .find(|x| x.likely)
-            .and_then(|x| x.image.clone())
-            .filter(|i| i.starts_with("https://"))
-        {
-            let _ = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .set_setting(&format!("artist.picture.{n}"), &img);
-            tracing::info!(artist = n, "artist picture from the likely match");
-        }
-    });
 }
 
 /// A version's own page id on a page of `kind`.
@@ -708,10 +660,6 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
             .map(|j| j.0)
             .unwrap_or_default(),
     );
-    versions.extend(matches_for(s, &format!("lib:song:{n}")));
-    if let Some((u, _)) = &t.canonical {
-        versions.extend(matches_for(s, &u.to_url()));
-    }
     let canonical = t.canonical.as_ref().map(|(u, _)| u.to_url());
     let on_pubky = match &canonical {
         Some(u) => crate::discover::on_pubky_for(s, u).await,
@@ -844,7 +792,6 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
             .map(|j| j.0)
             .unwrap_or_default(),
     );
-    versions.extend(matches_for(s, &format!("lib:album:{n}")));
     let canonical = a
         .release_group_mbid
         .map(|m| format!("https://musicbrainz.org/release-group/{m}"))
@@ -1013,9 +960,6 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 .flatten()
                 .is_some();
             let own = info.as_ref().is_some_and(|i| i.image);
-            if !own && !matched && !unknown {
-                find_artist_picture(s, n, a.name.clone());
-            }
             (own || matched).then(|| format!("/v1/library/artists/{n}/image"))
         },
         source: "Your library".into(),
@@ -1045,7 +989,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 })
             })
             .collect(),
-        versions: matches_for(s, &format!("lib:artist:{n}")),
+        versions: Vec::new(),
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
@@ -1105,11 +1049,6 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         }
     }
     versions.extend(it.also_on.iter().cloned());
-    for m in matches_for(s, url) {
-        if !versions.iter().any(|v| v.url == m.url) {
-            versions.push(m);
-        }
-    }
     let on_pubky = match &ext.card {
         Some(r) => crate::discover::on_pubky_for(s, &r.card.uri).await,
         None => None,
@@ -1243,373 +1182,6 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         related: Vec::new(),
         concerts: Vec::new(),
     }
-}
-
-// ---- "Find on other services": the owner's own matches (never written to Pinakes) ----
-
-fn match_key(uri: &str) -> String {
-    format!("match.{uri}")
-}
-
-/// The links the owner confirmed as the same item (local match store).
-pub(crate) fn matches_for(s: &NodeState, uri: &str) -> Vec<Version> {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(&match_key(uri))
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default()
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CandidateQuery {
-    /// The item's canonical URL or service link; a library item without one gives `item`.
-    #[serde(default)]
-    pub uri: String,
-    pub kind: String,
-    pub title: String,
-    #[serde(default)]
-    pub artist: Option<String>,
-    /// The page id (`lib-6`), so library facts (albums, ISRC, length) can back a match.
-    #[serde(default)]
-    pub item: Option<String>,
-}
-
-/// What a match is stored under: the item's URL, else its library id (`lib:artist:6`).
-pub(crate) fn match_target(kind: &str, uri: Option<&str>, item: Option<&str>) -> Option<String> {
-    if let Some(u) = uri.map(str::trim).filter(|u| !u.is_empty()) {
-        return Some(u.to_string());
-    }
-    let n: i64 = item?.strip_prefix("lib-")?.parse().ok()?;
-    matches!(kind, "song" | "album" | "artist").then(|| format!("lib:{kind}:{n}"))
-}
-
-fn norm(x: &str) -> String {
-    x.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
-}
-
-/// What the library knows about an item, to weigh candidates with.
-#[derive(Default)]
-struct Known {
-    albums: Vec<String>,
-    isrc: Option<String>,
-    upc: Option<String>,
-    year: Option<i32>,
-    duration_ms: Option<u64>,
-    lib_id: Option<i64>,
-}
-
-fn known(s: &NodeState, kind: &str, item: Option<&str>) -> Known {
-    let Some(n) = item
-        .and_then(|i| i.strip_prefix("lib-"))
-        .and_then(|n| n.parse::<i64>().ok())
-    else {
-        return Known::default();
-    };
-    let lib = s.library.lock().expect("library poisoned");
-    let mut k = Known {
-        lib_id: Some(n),
-        ..Default::default()
-    };
-    match kind {
-        "artist" => {
-            k.albums = lib
-                .artist_albums(n)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|a| a.title)
-                .collect();
-        }
-        "album" => {
-            if let Ok(Some(a)) = lib.get_album(n) {
-                k.upc = a.upc.map(|u| u.to_string());
-                k.year = a.year;
-            }
-        }
-        _ => {
-            if let Ok(Some(t)) = lib.get_track(TrackId(n)) {
-                k.isrc = t.isrc.map(|i| i.to_string());
-                k.duration_ms = t.duration_ms;
-            }
-        }
-    }
-    k
-}
-
-fn thousands(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// `GET /v1/item/candidates?uri&kind&title&artist&item`: the same title (and artist) on the
-/// connected services, as "possibly the same", with what tells same-named ones apart and the
-/// evidence for each (an artist that has your album, the same ISRC or barcode), best first.
-pub(crate) async fn candidates(
-    State(s): State<Arc<NodeState>>,
-    axum::extract::Query(q): axum::extract::Query<CandidateQuery>,
-) -> ApiResult<Vec<MatchCandidate>> {
-    let term = if q.kind == "artist" {
-        q.title.trim().to_string()
-    } else {
-        format!("{} {}", q.artist.clone().unwrap_or_default(), q.title)
-            .trim()
-            .to_string()
-    };
-    let want = if q.kind == "song" {
-        "track"
-    } else {
-        q.kind.as_str()
-    };
-    let title = norm(&q.title);
-    let key = match_target(&q.kind, Some(&q.uri), q.item.as_deref());
-    let have: Vec<String> = key
-        .as_deref()
-        .map(|k| matches_for(&s, k).into_iter().map(|v| v.url).collect())
-        .unwrap_or_default();
-    let k = known(&s, &q.kind, q.item.as_deref());
-    let mut hits = Vec::new();
-    for r in crate::streaming::unified_search(&s, &term, 10).await {
-        for h in r.items {
-            if h.kind != want || h.url == q.uri || have.contains(&h.url) {
-                continue;
-            }
-            let t = norm(&h.title);
-            if t.is_empty() || !(t.starts_with(&title) || title.starts_with(&t)) {
-                continue;
-            }
-            hits.push((r.source.clone(), h));
-        }
-    }
-    // An artist: does it have one of your albums? (each service's artist page, at once)
-    let lib_albums: Vec<(String, String)> = k
-        .albums
-        .iter()
-        .map(|a| (norm(a), a.clone()))
-        .filter(|(n, _)| !n.is_empty())
-        .collect();
-    let artist_albums: Vec<Vec<String>> = if q.kind == "artist" && !lib_albums.is_empty() {
-        let futs = hits.iter().take(8).map(|(src, h)| {
-            let s = s.clone();
-            let (src, id) = (src.clone(), h.id.clone());
-            async move {
-                let Ok(svc) = crate::streaming::find(&src) else {
-                    return Vec::new();
-                };
-                match tokio::time::timeout(std::time::Duration::from_secs(4), svc.artist(&s, &id)).await {
-                    Ok(Ok(a)) => a.albums.into_iter().map(|x| x.title).collect(),
-                    _ => Vec::new(),
-                }
-            }
-        });
-        futures_util::future::join_all(futs).await
-    } else {
-        Vec::new()
-    };
-    let mut out: Vec<(usize, u64, MatchCandidate)> = hits
-        .into_iter()
-        .enumerate()
-        .map(|(i, (src, h))| {
-            let mut evidence = Vec::new();
-            if let Some(albums) = artist_albums.get(i) {
-                for (n, name) in &lib_albums {
-                    if albums
-                        .iter()
-                        .any(|a| norm(a) == *n || norm(a).starts_with(n.as_str()))
-                        && evidence.len() < 2
-                    {
-                        evidence.push(format!("has your album {name}"));
-                    }
-                }
-            }
-            if k.isrc.is_some() && h.isrc.as_deref().map(str::to_ascii_uppercase) == k.isrc {
-                evidence.push("same ISRC".into());
-            }
-            if k.upc.is_some() && h.upc == k.upc {
-                evidence.push("same barcode (UPC)".into());
-            }
-            if q.kind == "album" && k.year.is_some() && h.year == k.year {
-                evidence.push(format!("same year {}", h.year.unwrap_or_default()));
-            }
-            if let (Some(a), Some(b)) = (k.duration_ms, h.duration_ms) {
-                if a.abs_diff(b) <= 2000 {
-                    evidence.push(format!("same length {}:{:02}", b / 60_000, b / 1000 % 60));
-                }
-            }
-            if k.lib_id.is_some() && (h.library_album_id == k.lib_id || h.library_track_id == k.lib_id) {
-                evidence.push("matches your copy".into());
-            }
-            // A song or album by someone else (Queen + Adam Lambert for Queen) is not the same
-            let other_artist = q.kind != "artist"
-                && q.artist.as_deref().is_some_and(|a| {
-                    h.creator
-                        .as_deref()
-                        .is_some_and(|c| !norm(c).is_empty() && norm(c) != norm(a))
-                });
-            if other_artist {
-                evidence.clear();
-            }
-            let fans = if other_artist { 0 } else { h.downloads.unwrap_or(0) };
-            let detail = match q.kind.as_str() {
-                "artist" => h.downloads.map(|n| {
-                    format!(
-                        "{} {}",
-                        thousands(n),
-                        if src == "deezer" { "fans" } else { "followers" }
-                    )
-                }),
-                _ => {
-                    let parts: Vec<String> = [h.year.map(|y| y.to_string()), h.creator.clone()]
-                        .into_iter()
-                        .flatten()
-                        .collect();
-                    (!parts.is_empty()).then(|| parts.join(" · "))
-                }
-            };
-            let c = MatchCandidate {
-                version: Version {
-                    page: None,
-                    source: src.clone(),
-                    id: h.id.clone(),
-                    label: format!(
-                        "{} · {}{}",
-                        crate::discover::service_title(&src),
-                        h.title,
-                        h.creator.clone().map(|c| format!(" · {c}")).unwrap_or_default()
-                    ),
-                    url: h.url.clone(),
-                    uri: h.uri.clone(),
-                },
-                image: h.image.clone(),
-                detail,
-                evidence,
-                likely: false,
-            };
-            (i, fans, c)
-        })
-        .collect();
-    // Evidence first, then the better known one, else the services' own order
-    out.sort_by(|a, b| {
-        b.2.evidence
-            .len()
-            .cmp(&a.2.evidence.len())
-            .then(b.1.cmp(&a.1))
-            .then(a.0.cmp(&b.0))
-    });
-    // Likely: the only one with evidence on its service (the same artist on Deezer and on TIDAL
-    // are not competitors)
-    let mut per_service: HashMap<String, usize> = HashMap::new();
-    for c in out.iter().filter(|c| !c.2.evidence.is_empty()) {
-        *per_service.entry(c.2.version.source.clone()).or_default() += 1;
-    }
-    for c in out.iter_mut() {
-        if !c.2.evidence.is_empty() && per_service.get(&c.2.version.source) == Some(&1) {
-            c.2.likely = true;
-        }
-    }
-    Ok(Json(out.into_iter().map(|c| c.2).collect()))
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ConfirmMatch {
-    /// The item's URL; a library item without one names itself by `kind` and `id` (`lib-6`).
-    #[serde(default)]
-    pub uri: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub id: Option<String>,
-    pub version: Version,
-    /// The match's picture (a library artist without one shows it).
-    #[serde(default)]
-    pub image: Option<String>,
-}
-
-/// `POST /v1/item/matches {uri | kind+id, version, image?}`: the owner confirms "the same";
-/// stored on this node only.
-pub(crate) async fn confirm_match(
-    State(s): State<Arc<NodeState>>,
-    Json(body): Json<ConfirmMatch>,
-) -> ApiResult<Vec<Version>> {
-    let kind = body.kind.clone().unwrap_or_else(|| "song".into());
-    let key = match_target(&kind, body.uri.as_deref(), body.id.as_deref()).ok_or_else(|| {
-        ApiError::bad_request("Couldn't tell which item to match: give its uri, or kind and id")
-    })?;
-    let mut v = matches_for(&s, &key);
-    if !v.iter().any(|x| x.url == body.version.url) {
-        let mut m = body.version.clone();
-        m.label = format!("{} · matched by you", crate::discover::service_title(&m.source));
-        v.push(m);
-    }
-    {
-        let lib = s.library.lock().expect("library poisoned");
-        lib.set_setting(&match_key(&key), &serde_json::to_string(&v).unwrap_or_default())?;
-        // The cached contents may now come from the matched service.
-        let _ = lib.delete_setting(&format!("item.contents.{key}"));
-        // A library artist's picture from the match, when it has none
-        if let (Some(n), Some(img)) = (
-            key.strip_prefix("lib:artist:"),
-            body.image.as_deref().filter(|i| i.starts_with("https://")),
-        ) {
-            if lib
-                .get_setting(&format!("artist.picture.{n}"))
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                lib.set_setting(&format!("artist.picture.{n}"), img)?;
-            }
-        }
-    }
-    Ok(Json(v))
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct UnlinkMatch {
-    #[serde(default)]
-    pub uri: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub id: Option<String>,
-    /// The linked source's URL.
-    pub url: String,
-}
-
-/// `DELETE /v1/item/matches {uri | kind+id, url}`: "Wrong match": unlink a source the owner
-/// linked by hand.
-pub(crate) async fn unlink_match(
-    State(s): State<Arc<NodeState>>,
-    Json(body): Json<UnlinkMatch>,
-) -> ApiResult<Vec<Version>> {
-    let kind = body.kind.clone().unwrap_or_else(|| "song".into());
-    let key = match_target(&kind, body.uri.as_deref(), body.id.as_deref()).ok_or_else(|| {
-        ApiError::bad_request("Couldn't tell which item to change: give its uri, or kind and id")
-    })?;
-    let mut v = matches_for(&s, &key);
-    let before = v.len();
-    v.retain(|x| x.url.trim_end_matches('/') != body.url.trim_end_matches('/'));
-    if v.len() == before {
-        return Err(ApiError::not_found(
-            "That source wasn't linked by hand, so there is nothing to unlink",
-        ));
-    }
-    let lib = s.library.lock().expect("library poisoned");
-    if v.is_empty() {
-        lib.delete_setting(&match_key(&key))?;
-    } else {
-        lib.set_setting(&match_key(&key), &serde_json::to_string(&v).unwrap_or_default())?;
-    }
-    let _ = lib.delete_setting(&format!("item.contents.{key}"));
-    Ok(Json(v))
 }
 
 #[cfg(test)]
