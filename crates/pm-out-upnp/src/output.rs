@@ -24,6 +24,8 @@ pub struct UpnpOutput {
     stream_url: String,
     caps: OutputCaps,
     kind: StreamKind,
+    /// An OpenHome renderer (Linn): WAV with OpenHome's continuous-stream header (`live.wav`).
+    openhome: bool,
     describe: Option<Describe>,
     meta: Mutex<Option<TrackMeta>>,
 }
@@ -59,6 +61,7 @@ impl UpnpOutput {
                 bits: 16,
             };
         }
+        let openhome = is_openhome(&renderer);
         Self {
             renderer,
             pull,
@@ -67,6 +70,7 @@ impl UpnpOutput {
             kind: StreamKind::Wav {
                 mime: "audio/wav".into(),
             },
+            openhome,
             describe: None,
             meta: Mutex::new(None),
         }
@@ -98,10 +102,14 @@ impl UpnpOutput {
         &self.kind
     }
 
-    /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`).
+    /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`, or
+    /// `…/live.wav` for an OpenHome renderer).
     fn url(&self) -> String {
-        self.stream_url
-            .replacen("/stream.wav", &format!("/{}", self.kind.file()), 1)
+        let file = match self.kind {
+            StreamKind::Wav { .. } if self.openhome => "live.wav",
+            ref k => k.file(),
+        };
+        self.stream_url.replacen("/stream.wav", &format!("/{file}"), 1)
     }
 
     pub fn renderer(&self) -> &Renderer {
@@ -111,6 +119,14 @@ impl UpnpOutput {
     pub fn pull(&self) -> &Arc<PullOutput> {
         &self.pull
     }
+}
+
+/// A renderer on Linn's OpenHome pipeline (Linn's own players). Its WAV codec reads the header's
+/// sizes literally, so it needs OpenHome's continuous-stream header.
+pub fn is_openhome(r: &Renderer) -> bool {
+    r.manufacturer
+        .as_deref()
+        .is_some_and(|m| m.to_ascii_lowercase().starts_with("linn"))
 }
 
 fn soap_err(e: UpnpError) -> SinkError {
@@ -184,25 +200,51 @@ impl Output for UpnpOutput {
                     ("CurrentURIMetaData", &meta),
                 ],
             )?;
-            // TVs answer 701 while they still open the URI: try again for a moment.
-            let mut tries = 0;
-            loop {
-                match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
-                    Ok(_) => return Ok(av),
-                    Err(e) if tries < 4 => {
-                        tries += 1;
-                        tracing::debug!(tries, "renderer Play refused, retrying: {e}");
-                        std::thread::sleep(std::time::Duration::from_millis(400));
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            Ok(av)
         })
         .await
         .map_err(soap_err)?;
+        // Play goes out on its own thread, and the sink is writable at once: a Linn answers Play
+        // only once it has read the start of the stream, and the stream has no bytes until the
+        // zone writes into the sink (waiting for Play here stalled both for 5 s, then the Linn
+        // gave up). A refused Play shows up on the next write.
+        let (played_tx, played) = std::sync::mpsc::channel();
+        let av = target.clone();
+        let (pull, generation) = (self.pull.clone(), self.pull.generation());
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_retrying = cancelled.clone();
+        std::thread::Builder::new()
+            .name("upnp-play".into())
+            .spawn(move || {
+                // TVs answer 701 while they still open the URI: try again for a moment.
+                let mut tries = 0;
+                let result = loop {
+                    match soap::call(&av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
+                        Ok(_) => break Ok(()),
+                        // The sink closed meanwhile: no Play after its Stop
+                        Err(e) if stop_retrying.load(std::sync::atomic::Ordering::SeqCst) => {
+                            break Err(e.to_string())
+                        }
+                        Err(e) if tries < 4 => {
+                            tries += 1;
+                            tracing::debug!(tries, "renderer Play refused, retrying: {e}");
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                        }
+                        Err(e) => break Err(e.to_string()),
+                    }
+                };
+                if let Err(e) = &result {
+                    // Nobody will fetch the stream: the zone hears why now, not after 15 s
+                    pull.abort(generation, format!("the renderer refused Play: {e}"));
+                }
+                let _ = played_tx.send(result);
+            })
+            .map_err(|e| SinkError::Device(format!("cannot start the Play call: {e}")))?;
         Ok(Box::new(UpnpSink {
             inner,
             av_transport: target,
+            played: Some(played),
+            cancelled,
         }))
     }
 
@@ -263,6 +305,28 @@ fn set_volume_blocking(rc: &str, v: Volume) -> Result<(), UpnpError> {
 struct UpnpSink {
     inner: Box<dyn AudioSink>,
     av_transport: String,
+    /// The answer to Play, until it came.
+    played: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Set on close: the Play thread stops retrying.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl UpnpSink {
+    /// Play's answer if it came: a refusal is this sink's error from now on.
+    fn play_refused(&mut self) -> Option<SinkError> {
+        let rx = self.played.as_ref()?;
+        match rx.try_recv() {
+            Ok(Ok(())) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.played = None;
+                None
+            }
+            Ok(Err(e)) => {
+                self.played = None;
+                Some(SinkError::Device(format!("the renderer refused Play: {e}")))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        }
+    }
 }
 
 impl AudioSink for UpnpSink {
@@ -270,7 +334,13 @@ impl AudioSink for UpnpSink {
         self.inner.format()
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
-        self.inner.write(block)
+        if let Some(e) = self.play_refused() {
+            return Err(e);
+        }
+        // A renderer that refused Play never fetches: say that, not "listener stalled"
+        self.inner
+            .write(block)
+            .map_err(|e| self.play_refused().unwrap_or(e))
     }
     fn buffer_level(&self) -> BufferLevel {
         self.inner.buffer_level()
@@ -288,6 +358,11 @@ impl AudioSink for UpnpSink {
 
 impl Drop for UpnpSink {
     fn drop(&mut self) {
+        // Stop after Play's answer (briefly), so the renderer does not start after it
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(rx) = self.played.take() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        }
         if let Err(e) = soap::call(&self.av_transport, AV_TRANSPORT, "Stop", &[("InstanceID", "0")]) {
             tracing::debug!("renderer Stop: {e}");
         }
@@ -395,9 +470,8 @@ mod tests {
             sink.drain().unwrap();
             drop(sink); // sends Stop
         });
-        let header = live.rx.recv().await.unwrap();
-        assert_eq!(&header[0..4], b"RIFF");
-        let data = live.rx.recv().await.unwrap();
+        // PCM only: the HTTP server puts a header before it for each listener
+        let data = live.next_chunk().await.unwrap();
         assert_eq!(data, vec![1, 0, 0xff, 0xff, 2, 0, 0xfe, 0xff]);
         writer.join().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -417,5 +491,200 @@ mod tests {
         let actions = log.lock().unwrap().clone();
         assert!(actions.iter().any(|a| a == "SetVolume"));
         assert!(actions.iter().any(|a| a == "GetVolume"));
+
+        // A Linn gets the continuous WAV; others keep stream.wav
+        let linn = Renderer {
+            udn: "uuid:4c494e4e-0026".into(),
+            friendly_name: "Klimax DS".into(),
+            manufacturer: Some("Linn Products Ltd.".into()),
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let linn = UpnpOutput::new(
+            linn,
+            Arc::new(PullOutput::new("linn")),
+            "http://node.local:7788/v1/outputs/pull/linn/stream.wav?k=1".into(),
+        );
+        assert_eq!(
+            linn.url(),
+            "http://node.local:7788/v1/outputs/pull/linn/live.wav?k=1"
+        );
+        assert_eq!(
+            out.url(),
+            "http://node.local:7788/v1/outputs/pull/fake/stream.wav"
+        );
+    }
+
+    /// A renderer like a Linn DS: it answers Play only once it has read the start of the stream.
+    /// The sink must be writable before Play's answer (it waited for it, and both waited 5 s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renderer_that_answers_play_after_reading_the_stream_gets_audio_at_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let heard = Arc::new(AtomicBool::new(false));
+        let heard2 = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let heard = heard2.clone();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        let n = s.read(&mut tmp).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(idx) = text.find("\r\n\r\n") {
+                            let len = text
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .map(str::to_string)
+                                })
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= idx + 4 + len {
+                                break;
+                            }
+                        }
+                    }
+                    if String::from_utf8_lossy(&buf).contains("#Play\"") {
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while !heard.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                    let body = "<s:Envelope><s:Body><u:Response/></s:Body></s:Envelope>";
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                });
+            }
+        });
+        let renderer = Renderer {
+            udn: "uuid:4c494e4e-1".into(),
+            friendly_name: "Klimax DS".into(),
+            manufacturer: Some("Linn".into()),
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let pull = Arc::new(PullOutput::new("linn-play"));
+        let out = UpnpOutput::new(
+            renderer,
+            pull.clone(),
+            "http://node/v1/outputs/pull/linn-play/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let started = std::time::Instant::now();
+        let mut sink = out.open(fmt).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "open waited for Play: {:?}",
+            started.elapsed()
+        );
+        let writer = std::thread::spawn(move || {
+            sink.write(&AudioBlock::pcm_i32(fmt, vec![1, -1])).unwrap();
+            sink
+        });
+        let mut live = pull.take_stream(std::time::Duration::from_secs(2)).await.unwrap();
+        assert_eq!(live.next_chunk().await.unwrap(), vec![1, 0, 0xff, 0xff]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "audio came late: {:?}",
+            started.elapsed()
+        );
+        heard.store(true, Ordering::SeqCst);
+        drop(writer.join().unwrap());
+    }
+
+    /// A renderer that refuses Play never fetches: the zone hears it in seconds, not after the
+    /// listener timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_play_fails_the_sink_soon_with_the_reason() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = s.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(idx) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_string)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= idx + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let play = String::from_utf8_lossy(&buf).contains("#Play\"");
+                let (status, body) = if play {
+                    ("500 Internal Server Error", "<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>714</errorCode><errorDescription>Illegal MIME-type</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>")
+                } else {
+                    (
+                        "200 OK",
+                        "<s:Envelope><s:Body><u:Response/></s:Body></s:Envelope>",
+                    )
+                };
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        let renderer = Renderer {
+            udn: "uuid:tv".into(),
+            friendly_name: "TV".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let pull = Arc::new(PullOutput::new("tv-refuses"));
+        let out = UpnpOutput::new(
+            renderer,
+            pull,
+            "http://node/v1/outputs/pull/tv-refuses/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let mut sink = out.open(fmt).await.unwrap();
+        let started = std::time::Instant::now();
+        let e = std::thread::spawn(move || loop {
+            if let Err(e) = sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 4096])) {
+                break e;
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(e.to_string().contains("refused Play"), "{e}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

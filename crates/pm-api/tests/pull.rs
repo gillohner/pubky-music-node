@@ -1,5 +1,6 @@
 //! A zone playing into a pull output: the HTTP WAV stream is the exact PCM
-//! of the source, and a listener is required.
+//! of the source, and a listener is required. A fake Linn DS (OpenHome) fetches it the way
+//! Linn's pipeline does.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -257,4 +258,246 @@ async fn renderers_open_pull_streams_with_the_stream_key_only() {
         OutputRegistry::new(),
     );
     assert_eq!(again.stream_key("tv"), key);
+}
+
+/// What Linn's WAV codec (ohPipeline `CodecWav`) makes of a stream's start, ported line by line:
+/// where the audio starts, and how many bytes it plays (`None`: a continuous stream). Chunk sizes
+/// are 32-bit and an odd one is rounded up, so `0xFFFFFFFF` wraps to 0.
+fn openhome_wav(b: &[u8]) -> Result<(usize, Option<u32>), String> {
+    let u32_at = |i: usize| -> Result<u32, String> {
+        b.get(i..i + 4)
+            .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+            .ok_or_else(|| "stream ended in the header".to_string())
+    };
+    if b.get(0..4) != Some(b"RIFF") || b.get(8..12) != Some(b"WAVE") {
+        return Err("not recognised as WAV".into());
+    }
+    let file_size = u32_at(4)?; // 0: continuous stream
+    let mut i = 12;
+    let mut find = |id: &[u8]| -> Result<(usize, u32), String> {
+        loop {
+            let bytes = u32_at(i + 4)?;
+            let bytes = bytes.wrapping_add(bytes % 2);
+            let at = i + 8;
+            if b.get(i..i + 4) == Some(id) {
+                i = at + bytes as usize;
+                return Ok((at, bytes));
+            }
+            i = at + bytes as usize;
+        }
+    };
+    let (fmt_at, fmt_bytes) = find(b"fmt ")?;
+    if ![16, 18, 40].contains(&fmt_bytes) {
+        return Err("CodecStreamCorrupt: fmt size".into());
+    }
+    let audio_format = u16::from_le_bytes([b[fmt_at], b[fmt_at + 1]]);
+    if audio_format != 1 && audio_format != 0xfffe {
+        return Err("CodecStreamFeatureUnsupported".into());
+    }
+    let channels = u16::from_le_bytes([b[fmt_at + 2], b[fmt_at + 3]]) as u32;
+    let bits = u16::from_le_bytes([b[fmt_at + 14], b[fmt_at + 15]]) as u32;
+    let sample_bytes = channels * (bits / 8);
+    let (data_at, data_bytes) = find(b"data")?;
+    let total = (file_size != 0).then(|| data_bytes - data_bytes % sample_bytes);
+    Ok((data_at, total))
+}
+
+#[test]
+fn the_usual_live_wav_header_ends_at_once_on_a_linn_and_the_continuous_one_plays() {
+    let fmt = pm_model::AudioFormat::pcm(44_100, 16, 2);
+    let (_, plays) = openhome_wav(&pm_zones::outputs::wav_header(fmt)).unwrap();
+    assert_eq!(
+        plays,
+        Some(0),
+        "0xFFFFFFFF wraps: the Linn ends the stream before its first sample"
+    );
+    let (at, plays) = openhome_wav(&pm_zones::outputs::wav_header_continuous(fmt)).unwrap();
+    assert_eq!((at, plays), (44, None), "RIFF size 0: continuous");
+}
+
+/// One HTTP/1.1 GET as Linn's pipeline sends it (or, with `keep_alive`, as most other clients
+/// do: no `Connection: close`); returns the status line, the headers and a reader positioned at
+/// the body (de-chunked when the answer is chunked).
+fn linn_get(
+    addr: std::net::SocketAddr,
+    path: &str,
+    keep_alive: bool,
+) -> (String, Vec<String>, Box<dyn std::io::Read>) {
+    use std::io::{BufRead, BufReader, Write};
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: LWIP/1.4.2-linn\r\n{}Icy-MetaData: 1\r\nRange: bytes=0-\r\n\r\n",
+        if keep_alive { "" } else { "Connection: close\r\n" }
+    )
+    .unwrap();
+    let mut r = BufReader::new(s);
+    let mut status = String::new();
+    r.read_line(&mut status).unwrap();
+    let mut headers = Vec::new();
+    loop {
+        let mut l = String::new();
+        r.read_line(&mut l).unwrap();
+        if l == "\r\n" || l.is_empty() {
+            break;
+        }
+        headers.push(l.trim().to_ascii_lowercase());
+    }
+    let chunked = headers.iter().any(|h| h == "transfer-encoding: chunked");
+    // A Linn DS stops on a chunked live stream (the owner's Klimax DS, 0.2.0)
+    assert!(
+        !(chunked && path.ends_with("live.wav")),
+        "a Linn does not play a chunked stream: {status} {headers:?}"
+    );
+    let body: Box<dyn std::io::Read> = if chunked {
+        Box::new(Dechunk {
+            r,
+            left: 0,
+            done: false,
+        })
+    } else {
+        Box::new(r)
+    };
+    (status.trim().to_string(), headers, body)
+}
+
+/// HTTP/1.1 chunked transfer decoding (Linn's `ReaderHttpChunked`).
+struct Dechunk<R: std::io::BufRead> {
+    r: R,
+    left: usize,
+    done: bool,
+}
+
+impl<R: std::io::BufRead> std::io::Read for Dechunk<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.done {
+            return Ok(0);
+        }
+        if self.left == 0 {
+            let mut line = String::new();
+            self.r.read_line(&mut line)?;
+            if line == "\r\n" {
+                line.clear();
+                self.r.read_line(&mut line)?;
+            }
+            let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16)
+                .map_err(|e| std::io::Error::other(format!("chunk size {line:?}: {e}")))?;
+            if size == 0 {
+                self.done = true;
+                return Ok(0);
+            }
+            self.left = size;
+        }
+        let n = buf.len().min(self.left);
+        let n = self.r.read(&mut buf[..n])?;
+        self.left -= n;
+        Ok(n)
+    }
+}
+
+/// A fake Linn DS: it fetches a live stream as Linn's pipeline does (ohPipeline `ProtocolHttp`).
+/// No Content-Length means live: it reads the start to recognise the codec, closes the
+/// connection, and opens it again once its pipeline is ready. The second connection must get the
+/// stream from the top, with a header its WAV codec reads as continuous, and every sample.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("a.wav");
+    let pcm = write_wav(&wav, 40_000);
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/outputs/pull")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"linn"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), listener));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/zones/stream-linn/queue")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"items":[{{"uri":"{}"}}],"replace":true,"play":true}}"#,
+            wav.display()
+        )))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let heard = tokio::task::spawn_blocking(move || {
+        let path = "/v1/outputs/pull/linn/live.wav";
+        // First connection: recognise the stream from its first bytes, then hang up
+        let (status, headers, mut body) = linn_get(addr, path, false);
+        assert!(status.starts_with("HTTP/1.0 200"), "{status}");
+        assert!(
+            !headers.iter().any(|h| h.starts_with("content-length")),
+            "live: no length {headers:?}"
+        );
+        assert!(
+            headers.iter().any(|h| h.starts_with("content-type: audio/wav")),
+            "{headers:?}"
+        );
+        let mut start = vec![0u8; 8 * 1024];
+        body.read_exact(&mut start).unwrap();
+        let (at, plays) = openhome_wav(&start).unwrap();
+        assert_eq!(plays, None, "the Linn must see a continuous stream");
+        assert_eq!(&start[at..at + 64], &pcm[..64]);
+        drop(body);
+        // The pipeline is ready: open it again and play. This time as a keep-alive client: the
+        // answer is still HTTP/1.0, unchunked, says it closes, and ends when the zone stops.
+        let (status, headers, mut body) = linn_get(addr, path, true);
+        assert!(
+            status.starts_with("HTTP/1.0 200"),
+            "the stream waited for the Linn: {status}"
+        );
+        assert!(
+            headers.iter().any(|h| h == "connection: close")
+                && !headers.iter().any(|h| h.starts_with("transfer-encoding")),
+            "{headers:?}"
+        );
+        let mut all = Vec::new();
+        body.read_to_end(&mut all).unwrap();
+        let (at, plays) = openhome_wav(&all).unwrap();
+        assert_eq!(plays, None);
+        (all.split_off(at), pcm)
+    })
+    .await
+    .unwrap();
+    let (got, pcm) = heard;
+    assert_eq!(got.len(), pcm.len(), "every byte, from the first");
+    assert!(got == pcm, "the PCM differs from the source");
+    let zone = s.zones.get(&ZoneId::new("stream-linn")).unwrap();
+    let st = zone.wait_stopped().await;
+    assert_eq!(st.error, None, "{st:?}");
 }

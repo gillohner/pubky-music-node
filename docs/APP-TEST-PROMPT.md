@@ -23,7 +23,8 @@ pass/fail with a screenshot or log line for each check, and the exact OS version
    stays on the node.
 6. Desktops only, the built-in player: Zones lists "<this computer> · <DAC>". Play an album to it;
    on Linux with the DAC free of PipeWire the signal path is bit-perfect. The node must reach this
-   machine on TCP 7790 (firewall prompts on macOS and Windows: allow).
+   machine on TCP 7790 (firewall prompts on macOS and Windows: allow); a node on the same machine
+   (`localhost`) reaches it on loopback, and no firewall prompt should appear then.
 7. Android only: phone and Google TV (if any) both start and connect; the UI is usable at phone
    width and with a TV remote (D-pad focus moves through the UI).
 ```

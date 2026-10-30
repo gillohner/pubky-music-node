@@ -75,8 +75,8 @@ services:
       start_period: 120s
 
   node:
-    # The v0.1.0 release image (multi-arch), pinned by digest.
-    image: ghcr.io/gillohner/pubky-music-node:0.1.0@sha256:821ae8aca3b16c728905489cd43ab68bbd726f9e51079c5caff05a71b8e80447
+    # The v0.2.0 release image (multi-arch), pinned by digest.
+    image: ghcr.io/gillohner/pubky-music-node:0.2.0@sha256:324d0b0e27761bcecf6526f5de80a289160ac921c29bb73c91baea15dd80767a
     restart: on-failure
     stop_grace_period: 10s
     network_mode: host

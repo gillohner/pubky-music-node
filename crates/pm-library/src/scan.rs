@@ -182,6 +182,9 @@ impl<'a> Scanner<'a> {
         };
         // Writes go in batches of a few hundred files (or half a second), not one commit each.
         let batch = Batch::new(self.lib)?;
+        // Files a busy database turned away: tried again after the walk, before files not seen
+        // count as removed.
+        let mut busy: Vec<(PathBuf, u64, i64, Option<TrackId>)> = Vec::new();
 
         for entry in WalkDir::new(&root).follow_links(true).into_iter() {
             let entry = match entry {
@@ -192,7 +195,10 @@ impl<'a> Scanner<'a> {
                     continue;
                 }
             };
-            if !entry.file_type().is_file() || !tags::is_supported(entry.path()) {
+            if !entry.file_type().is_file()
+                || !tags::is_supported(entry.path())
+                || is_apple_double(entry.path())
+            {
                 continue;
             }
             report.files_seen += 1;
@@ -233,7 +239,40 @@ impl<'a> Scanner<'a> {
                         report.files_added += 1;
                     }
                 }
+                Err(e) if e.is_busy() => {
+                    tracing::debug!(path = %path.display(), "database busy; trying this file again later: {e}");
+                    busy.push((path, size, mtime, existing.map(|r| r.track_id)));
+                }
                 Err(e) => {
+                    tracing::warn!(path = %path.display(), "skipping file: {e}");
+                    report.errors.push((path, e.to_string()));
+                }
+            }
+        }
+        for (path, size, mtime, existing) in busy {
+            let mut tries = 0;
+            let outcome = loop {
+                batch.restart()?;
+                match self.index_file(&path, size, mtime, existing) {
+                    Err(e) if e.is_busy() && tries < BUSY_RETRIES => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(250 * tries as u64));
+                    }
+                    other => break other,
+                }
+            };
+            match outcome {
+                Ok(_) => {
+                    self.lib.mark_file_seen(&path, scan_id)?;
+                    if existing.is_some() {
+                        report.files_updated += 1;
+                    } else {
+                        report.files_added += 1;
+                    }
+                }
+                Err(e) => {
+                    // Not marked seen, but a busy database is not a missing file: keep its row
+                    self.lib.mark_file_seen(&path, scan_id).ok();
                     tracing::warn!(path = %path.display(), "skipping file: {e}");
                     report.errors.push((path, e.to_string()));
                 }
@@ -393,12 +432,38 @@ struct Batch<'a> {
     since: std::cell::Cell<std::time::Instant>,
 }
 
+/// `._name.flac`: the resource fork a Mac writes next to each file on a share (AppleDouble), not
+/// audio. Reading them failed every one and filled the scan's errors.
+fn is_apple_double(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("._"))
+}
+
+/// How often a file (or a batch) is tried again while another connection keeps the database
+/// busy; each try waits up to the connection's busy timeout.
+const BUSY_RETRIES: u32 = 4;
+
+/// Begin a batch, waiting through a busy database (each try waits the busy timeout).
+fn begin_waiting(lib: &Library) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        match lib.begin_batch() {
+            Err(e) if e.is_busy() && tries < BUSY_RETRIES => {
+                tries += 1;
+                tracing::info!("scan waits for the database (another writer holds it): {e}");
+            }
+            other => return other,
+        }
+    }
+}
+
 impl<'a> Batch<'a> {
     const FILES: u32 = 250;
     const MAX_AGE: std::time::Duration = std::time::Duration::from_millis(500);
 
     fn new(lib: &'a Library) -> Result<Self> {
-        lib.begin_batch()?;
+        begin_waiting(lib)?;
         Ok(Self {
             lib,
             files: 0.into(),
@@ -409,11 +474,19 @@ impl<'a> Batch<'a> {
     fn tick(&self) -> Result<()> {
         self.files.set(self.files.get() + 1);
         if self.files.get() >= Self::FILES || self.since.get().elapsed() >= Self::MAX_AGE {
-            self.lib.commit_batch()?;
-            self.lib.begin_batch()?;
-            self.files.set(0);
-            self.since.set(std::time::Instant::now());
+            self.restart()?;
         }
+        Ok(())
+    }
+
+    /// Commit what is batched and start a new batch (other writers get their turn).
+    fn restart(&self) -> Result<()> {
+        self.lib.commit_batch()?;
+        // A moment without the lock: another writer waiting for it gets its turn
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        begin_waiting(self.lib)?;
+        self.files.set(0);
+        self.since.set(std::time::Instant::now());
         Ok(())
     }
 

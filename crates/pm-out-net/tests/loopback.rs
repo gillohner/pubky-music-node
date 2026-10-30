@@ -1,12 +1,15 @@
 //! A node zone playing through a `pm-endpoint` on loopback into a WAV
 //! output: the file is the exact concatenation of the sources, the
 //! endpoint refuses a second session on a busy output, and volume on an
-//! output without a mixer is refused end to end.
+//! output without a mixer is refused end to end. Only the node holding the
+//! player's key gets in, and a new key for the same address (the app
+//! restarted) reaches the outputs the node already has.
 
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_endpoint::Endpoint;
 use pm_model::{AudioFormat, Samples, Volume};
-use pm_out_net::NetOutput;
+use pm_out_net::{KeyCell, NetOutput};
+use pm_stream::Key;
 use pm_zones::outputs::{read_wav, NullOutput, WavFileOutput};
 use pm_zones::{Insert, Output, OutputRegistry, QueueItem, SinkError, Zone, ZoneId};
 use std::net::TcpListener;
@@ -37,7 +40,8 @@ async fn zone_plays_bit_exact_through_an_endpoint() {
     let outputs = OutputRegistry::new();
     outputs.register(Arc::new(WavFileOutput::new(&out_wav)));
     outputs.register(Arc::new(NullOutput::new()));
-    let endpoint = Endpoint::new("Test endpoint", outputs);
+    let key = Key::random();
+    let endpoint = Endpoint::new("Test endpoint", outputs, key.clone());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     {
@@ -45,7 +49,7 @@ async fn zone_plays_bit_exact_through_an_endpoint() {
         std::thread::spawn(move || ep.serve(listener).unwrap());
     }
 
-    let remotes = NetOutput::connect(addr).unwrap();
+    let remotes = NetOutput::connect(addr, &KeyCell::new(key)).unwrap();
     assert_eq!(remotes.len(), 2);
     let wav_out = remotes
         .into_iter()
@@ -114,15 +118,56 @@ async fn zone_plays_bit_exact_through_an_endpoint() {
 fn a_block_larger_than_a_frame_arrives_whole() {
     let outputs = OutputRegistry::new();
     outputs.register(Arc::new(NullOutput::new()));
-    let endpoint = Endpoint::new("Big", outputs);
+    let key = Key::random();
+    let endpoint = Endpoint::new("Big", outputs, key.clone());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || endpoint.serve(listener).unwrap());
-    let out = NetOutput::connect(addr).unwrap().into_iter().next().unwrap();
+    let out = NetOutput::connect(addr, &KeyCell::new(key))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
     let fmt = AudioFormat::pcm(768_000, 32, 8);
     let mut sink = pm_stream::block_on(out.open(fmt)).unwrap();
     let frames = (pm_stream::MAX_FRAME as usize * 5 / 2) / 32;
     let block = pm_model::AudioBlock::pcm_i32(fmt, vec![7; frames * 8]);
     sink.write(&block).unwrap();
     assert_eq!(sink.frames_written(), frames as u64);
+}
+
+fn null_endpoint(key: &Key) -> Arc<Endpoint> {
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    Endpoint::new("Laptop", outputs, key.clone())
+}
+
+/// A node without the player's key gets nothing; the app's next start (new key, same address)
+/// reaches the output the node already has once the node stores the new key.
+#[test]
+fn only_the_key_holder_plays_and_a_new_key_reaches_existing_outputs() {
+    let first = Key::random();
+    let serving = null_endpoint(&first)
+        .spawn(TcpListener::bind("127.0.0.1:0").unwrap())
+        .unwrap();
+    let addr = serving.addr();
+    for wrong in [KeyCell::default(), KeyCell::new(Key::random())] {
+        let err = NetOutput::connect(addr, &wrong).err().expect("refused");
+        assert!(err.to_string().contains("key"), "{err}");
+    }
+    let cell = KeyCell::new(first);
+    let out = NetOutput::connect(addr, &cell).unwrap().remove(0);
+    let fmt = AudioFormat::pcm(48_000, 16, 2);
+    drop(pm_stream::block_on(out.open(fmt)).unwrap());
+
+    // The app restarts: the same address, a new key
+    drop(serving);
+    let second = Key::random();
+    let _serving = null_endpoint(&second)
+        .spawn(TcpListener::bind(addr).unwrap())
+        .unwrap();
+    let err = pm_stream::block_on(out.open(fmt)).err().expect("old key refused");
+    assert!(err.to_string().contains("wrong key"), "{err}");
+    cell.set(second);
+    drop(pm_stream::block_on(out.open(fmt)).unwrap());
 }
