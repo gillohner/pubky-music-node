@@ -597,7 +597,8 @@
       return;
     }
     if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    if (replace) startWait('play', state.zone, qitems[0].title || '');
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
@@ -859,8 +860,10 @@
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
+    if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     audio.play().catch(async (e) => {
       if (e.name === 'AbortError') return;
+      startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
       // Ask what came back: a busy node or a proxy in front of it can answer with an error page
       // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
@@ -926,11 +929,12 @@
       if (state.view === 'queue') render();
       return;
     }
+    if (replace) startWait('play', state.zone, tracks[0].title);
     try {
       await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
   };
   const transport = async (action) => {
     if (isBrowser()) {
@@ -943,6 +947,8 @@
       return;
     }
     if (!state.zones[state.zone]) return;
+    const zt = state.zones[state.zone];
+    if ((action.action === 'play' || (action.action === 'toggle' && zt.transport !== 'playing')) && zt.queue && zt.queue.length) startWait('play', state.zone, zt.now_playing ? zt.now_playing.item.title || '' : '');
     try {
       const st = await api('POST', `/zones/${state.zone}/transport`, action);
       state.zones[st.id] = st;
@@ -1017,22 +1023,124 @@
   // Zone picker.
   const zonePop = $('#zonepop');
   const closePop = (fromBack) => { if (zonePop.hidden) return; zonePop.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
-  $('#zonebtn').onclick = () => {
-    if (!zonePop.hidden) { closePop(); return; }
-    closeJobPop();
+  // What a device is, in words (owner, 2026-10-29: the line showed raw ids like airplay:9056…):
+  // the protocol of its output id, and the device's maker and model when the node knows them
+  // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
+  const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', browser: 'This browser' };
+  const deviceWords = (z) => {
+    if (z.id === BROWSER) return 'Streams the files to this browser';
+    const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
+    return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
+  };
+  // Something to move: the zone's queue, or the browser's.
+  const hasQueue = (z) => !!z && (z.id === BROWSER ? state.browserQueue.length > 0 : !!(z.queue && z.queue.length));
+  const otherZones = () => zoneList().filter((z) => z.id !== state.zone);
+  // The browser takes over a queue at a song and a position; paused stays paused.
+  const browserResumeAt = (index, posMs, paused) => {
+    const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
+    if (ytOf(it.uri)) { browserPlay(index); return; } // YouTube's player starts from the top
+    if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
+    state.browserIndex = index;
+    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    audio.addEventListener('loadedmetadata', () => { try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (paused) { audio.preload = 'metadata'; audio.load(); } else audio.play().catch(() => {});
+    mediaSessionUpdate(it); renderBar();
+  };
+  // Move what plays to another device (owner, 2026-10-29): the song at its position, the queue,
+  // repeat and radio; paused stays paused. Zone to zone is the node's transfer. This browser is no
+  // zone of the node's, so out of it the target loads the browser's queue (POST /zones/{id}/load)
+  // and the browser stops; into it the browser takes the zone's queue and the zone empties (radio
+  // is the node's: it does not come along). The node's errors (403: a zone not open to listeners;
+  // 400: an empty queue) show in the menu when it is open, else as a toast.
+  let moving = false; // one move at a time (review: a second Move here sent the same queue twice)
+  const moveTo = async (target) => {
+    const from = state.zone;
+    if (target === from || moving) return;
+    moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
+    let resume = null; // the browser, paused for the move: back on when the move fails
+    const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
+    const wasPlaying = cur && cur.transport === 'playing';
+    try {
+      if (from === BROWSER) {
+        let queue = state.browserQueue;
+        const cur = state.browserIndex >= 0 ? queue[state.browserIndex] : null;
+        // YouTube plays in this page: a zone takes it only with yt-dlp on (as playSourceItems)
+        const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
+        if (!ytZones && queue.some((q) => ytOf(q.uri))) {
+          if (cur && ytOf(cur.uri)) throw new Error('YouTube plays only in This browser');
+          const rest = queue.filter((q) => !ytOf(q.uri));
+          toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
+          queue = rest;
+        }
+        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null }));
+        if (!items.length) throw new Error('Nothing to move: the queue is empty');
+        const index = cur ? queue.indexOf(cur) : -1;
+        const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
+        // Pause here first: the node may take seconds to open the track, and both would play meanwhile
+        if (transport === 'playing') { audio.pause(); resume = true; }
+        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
+        state.zones[zs.id] = zs;
+        if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
+        resume = null;
+        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
+        state.browserQueue = []; state.browserIndex = -1; try { localStorage.removeItem('pm.browserAt'); } catch { /* storage unavailable */ }
+      } else if (target === BROWSER) {
+        const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
+        if (!z.queue || !z.queue.length) throw new Error('Nothing to move: the queue is empty');
+        const np = z.now_playing; const index = np ? np.index : (z.queue_index != null ? z.queue_index : -1); const pos = np ? np.position_ms || 0 : 0;
+        await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
+        if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
+        state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
+        try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
+        if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
+      } else {
+        const was = state.zones[from];
+        const zs = await api('POST', `/zones/${encodeURIComponent(from)}/transfer`, { to: target });
+        state.zones[zs.id] = zs;
+        if (state.zones[from]) state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' };
+        if (was && was.transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
+      }
+      state.zone = target; try { localStorage.setItem('pm.zone', target); } catch { /* storage unavailable */ }
+      // The bar says "Moving to …" until the target plays (the node answered, but its player may still be opening the track)
+      const tz = state.zones[target];
+      if (target !== BROWSER && wasPlaying && tz && tz.transport !== 'playing') startWait('move', target, curTitle);
+      renderZoneName(); renderBar(); refreshQueue();
+      const name = (currentZone() || {}).name || target;
+      if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
+    } catch (e) {
+      if (resume) audio.play().catch(() => {});
+      startFail(e.message, true);
+      if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
+    } finally { moving = false; }
+  };
+  const renderZonePop = (err) => {
+    const movable = hasQueue(currentZone());
+    const moving = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
-      <button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
-        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub">${esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</span></span>
+      <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
+        ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>`).join('')
+      </button>${moving === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
+      + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
-      + `<div class="pop-title">This zone</div><button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+      + `<div class="pop-title">This zone</div>`
+      + (movable && otherZones().length ? `<button class="pop-item" id="zpmove">${icon('zone')}<span><span class="name">Move to…</span><span class="sub">the song where it is, the queue, repeat and radio</span></span></button>` : '')
+      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
+    const zm = $('#zpmove', zonePop); if (zm) zm.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Move to' }, ...otherZones().map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]); };
+    $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
+  };
+  $('#zonebtn').onclick = () => {
+    if (!zonePop.hidden) { closePop(); return; }
+    closeJobPop();
+    renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
+    // The devices' models: the owner's output list, fetched once
+    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
   $('#me').onclick = () => setView('settings');
@@ -1041,7 +1149,7 @@
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); closeJobPop(); };
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); closeQPanel(); };
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
@@ -1085,6 +1193,31 @@
   // ---- player bar ----------------------------------------------------------
   const ORDER = { bit_perfect: 0, enhanced: 1, lossless: 2, lossy: 3 };
   const LABEL = { bit_perfect: 'Bit-perfect', enhanced: 'Enhanced', lossless: 'Lossless', lossy: 'Lossy' };
+  const Q_COLOUR = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
+  // The signal path as a block: the headline, then one row per stage (Now playing's Details and
+  // the sound panel share it)
+  const pathHtml = (np, cls = '') => {
+    const h = np.signal_path ? headline(np.signal_path) : null;
+    const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
+    return `<div class="path${cls ? ' ' + cls : ''}">
+      <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? Q_COLOUR[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
+      ${np.signal_path ? np.signal_path.stages.map((st) => `<div class="path-row"><span class="pd" style="background:${Q_COLOUR[st.quality]}"></span><span class="pn">${esc(st.name)}</span><span class="pf">${esc(fmtFormat(st.in_format))} → ${esc(fmtFormat(st.out_format))}</span>${st.note ? `<span class="pnote">${esc(st.note)}</span>` : ''}</div>`).join('') : ''}
+    </div>`;
+  };
+  // Stages that are DSP, not conversion: the pill says "DSP" when the path has one
+  const DSP_STAGES = ['eq', 'convolution', 'crossfeed', 'loudness', 'headroom', 'volume'];
+  const dspOn = (np) => !!(np && np.signal_path && np.signal_path.stages.some((s) => DSP_STAGES.includes(s.name)));
+  // "24/96", "DSD64": bits and rate of a format, the short way
+  const rateBits = (f) => (!f ? '' : f.kind === 'dsd' ? `DSD${Math.round(f.rate_hz / 44100)}` : `${f.bits}/${kHz(f.rate_hz)}`);
+  // The pill's words (owner, 2026-10-29): what arrives, what the zone plays, and the verdict:
+  // "FLAC 24/96 → 24/96 · Bit-perfect", "AAC 320 kbps → 16/44.1 · Lossy"
+  const pathSummary = (np) => {
+    const f = np.format; const sf = np.source_format; const of = np.output_format;
+    const h = np.signal_path ? headline(np.signal_path) : null;
+    const arrive = f ? (f.lossless || !f.codec ? `${f.codec || ''} ${rateBits(sf)}`.trim() : `${f.codec}${f.bitrate_kbps ? ` ${f.bitrate_kbps} kbps` : ''}`) : rateBits(sf);
+    const out = of ? rateBits(of) : '';
+    return [arrive + (out ? ` → ${out}` : ''), h ? LABEL[h] : ''].filter(Boolean).join(' · ');
+  };
   // What is arriving, as people say it (STEWARD-UX-PLAYER-SOURCES §2): "FLAC 44.1/16 · TIDAL",
   // "AAC 320 kbps · Deezer", "MP3 128 kbps · preview", "FLAC 96/24 · local file", and "→ 48 kHz"
   // when the node converts for the zone. Null when the node doesn't say (older nodes).
@@ -1223,32 +1356,142 @@
     $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
     $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
     const q = $('#quality');
+    // Pressing play answers at once (owner, 2026-10-29): "Starting on <device>…" until the zone
+    // plays, or what went wrong, for a few seconds
+    const st = state.starting && state.starting.zone === state.zone ? state.starting : null;
+    const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
+    const waitHtml = st ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title np-wait" role="status"><span class="spin"></span> ${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
+    const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
     if (!np) {
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
-      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
+      $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
       $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
-      q.className = 'quality'; $('.qtext', q).textContent = '—'; q.title = 'Signal path';
+      q.className = 'quality'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, DSP and volume';
+      q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
+      syncQPanel();
       return;
     }
     const it = np.item;
     const live = np.stream_title;
     const links = npLinksHtml(it, live);
-    $('#np').innerHTML = `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
+    if (!waitHtml && !errHtml) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
+    // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
+    // and whether DSP is on; on phones the device and a quality badge (CSS swaps .qtext for .qshort)
     const h = np.signal_path ? headline(np.signal_path) : null;
-    q.className = 'quality ' + (h ? 'q-' + h : '');
-    const sl = streamLabel(np);
-    $('.qtext', q).textContent = sl || (h ? LABEL[h] : 'In this browser'); q.setAttribute('aria-label', `Sound quality: ${sl || (h ? LABEL[h] : 'played by this browser')}. Change the quality`);
+    const dsp = dspOn(np);
+    q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
+    const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
+    $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
+    const words = np.signal_path || np.format ? pathSummary(np) : 'Played by this browser';
+    $('.qtext', q).textContent = words;
+    $('.qdsp', q).hidden = !dsp;
+    const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
+    $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
+    q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
     q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
+    syncQPanel();
   };
+  // ---- immediate feedback on play (owner, 2026-10-29) ----
+  // The play control just pressed: it shows a spinner until the music starts (capture phase, so
+  // every play button on every page counts without each call site knowing)
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
+  const startWait = (what, zoneId = state.zone, title = '') => {
+    startDone(true);
+    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
+    if (a) a.classList.add('starting');
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a }; state.startError = null;
+    setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
+    renderBar();
+  };
+  const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
+  const startFail = (msg, quiet) => {
+    const s = state.starting; if (!s) return; startDone(true);
+    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now() };
+    if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? 'This browser' : 'The zone')}: ${state.startError.msg}`, 'error');
+    renderBar(); setTimeout(renderBar, 10500);
+  };
+  // The browser's own player: it starts (or fails) by itself
+  audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
   // an older node) the label opens Now playing, where the signal path is
-  $('#quality').onclick = () => { const z = currentZone(); if (z && z.now_playing && z.now_playing.format) qualitySheet(); else toggleNowPlaying(true); };
+  // ---- the sound panel (owner, 2026-10-29): the pill in full ----
+  // Zone and device, the source, the signal path, this zone's DSP with quick switches, volume.
+  const qPanel = $('#qpanel');
+  let qPanelKey = null;
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $('#quality').focus(); if (fromBack !== true) popTransient(); };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}`; };
+  // Re-render the open panel only when what it says changed (renderBar runs often while playing)
+  const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
+  const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
+  // A quick switch: the whole config goes back with one part changed (what was set stays set)
+  const toggleDsp = async (what, on) => {
+    const zone = state.zone; const cfg = { ...((state.dspCfg || {})[zone] || {}) }; delete cfg.error;
+    if (what === 'eq') cfg.eq = (cfg.eq || []).map((b) => ({ ...b, enabled: on }));
+    if (what === 'room' && cfg.convolution) cfg.convolution = { ...cfg.convolution, enabled: on };
+    if (what === 'loudness') { if (!on && cfg.loudness && cfg.loudness !== 'off') state.loudnessLast = cfg.loudness; cfg.loudness = on ? (state.loudnessLast || 'album') : 'off'; }
+    if (what === 'crossfeed') { if (!on && cfg.crossfeed) state.crossfeedLast = cfg.crossfeed; cfg.crossfeed = on ? { ...(state.crossfeedLast || { level_db: -6, cutoff_hz: 700, delay_us: 300 }), enabled: true } : null; }
+    try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
+    qPanelKey = null; // re-render whatever the node says now (a refused change too)
+    await loadDsp();
+  };
+  const renderQPanel = () => {
+    const z = currentZone(); if (!z) return; const np = z.now_playing; const cfg = (state.dspCfg || {})[state.zone];
+    // A re-render (the outputs arrived, a switch answered) keeps the keyboard where it was
+    const ae = document.activeElement; const had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
+    const svc = np && npSvc(np);
+    const row = (id, label, on, disabled, note) => `<label class="qp-row${disabled ? ' off' : ''}"><span class="grow"><span class="name">${label}</span>${note ? `<span class="sub">${esc(note)}</span>` : ''}</span><input type="checkbox" class="switch" data-dsp="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"></label>`;
+    let dsp;
+    if (isBrowser()) dsp = '<p class="qp-note">This browser plays the file as it is: the node’s DSP is for its zones.</p>';
+    else if (!cfg) dsp = '<p class="qp-note"><span class="spin"></span> Reading this zone’s DSP…</p>';
+    else if (cfg.error) dsp = `<p class="qp-note">${esc(cfg.error)}</p>`;
+    else {
+      const eq = cfg.eq || []; const eqOn = eq.some((b) => b.enabled !== false); const conv = cfg.convolution; const cf = cfg.crossfeed; const ro = !isOwner();
+      dsp = row('eq', 'Parametric EQ', eq.length > 0 && eqOn, ro || !eq.length, eq.length ? countOf(eq.length, 'bands') : 'no bands set')
+        + row('room', 'Room correction', !!(conv && conv.enabled !== false), ro || !conv, conv ? String(conv.path).split('/').pop() : 'no impulse response set')
+        + row('loudness', 'Volume leveling', !!cfg.loudness && cfg.loudness !== 'off', ro, cfg.loudness && cfg.loudness !== 'off' ? `ReplayGain by ${cfg.loudness}` : 'ReplayGain off')
+        + row('crossfeed', 'Headphone crossfeed', !!(cf && cf.enabled !== false), ro, cf && cf.enabled !== false ? `${cf.level_db} dB below ${cf.cutoff_hz} Hz` : 'off')
+        + (isOwner() ? `<button class="btn sm ghost" id="qpdsp">${icon('settings')} All DSP settings</button>` : '');
+    }
+    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
+    const bar = $('#vol');
+    const vmin = hv ? hv.min : -60; const vmax = hv ? hv.max : 0; const vstep = hv ? hv.step || 1 : 1; const vval = Math.min(vmax, Math.max(vmin, Number(bar.value)));
+    const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
+    qPanel.innerHTML = `<div class="pop-title">Playing on</div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="pop-title">Source</div>
+      <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? 'Decoded by this browser' : ''))}</span>` : ''}</span></div>
+      <div class="pop-title">Signal path</div>
+      ${np && np.signal_path ? pathHtml(np, 'compact') : `<p class="qp-note">${isBrowser() ? 'This browser decodes the file itself; the node makes no signal-path claim.' : 'Nothing playing.'}</p>`}
+      <div class="pop-title">DSP · ${esc(z.name)}</div>
+      <div class="qp-dsp">${dsp}</div>
+      <div class="pop-title">Volume</div>
+      <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>
+      <div class="qp-foot">${np && np.format ? '<button class="btn sm ghost" id="qpquality">Quality choices…</button>' : ''}<button class="btn sm ghost" id="qpnow">${icon('play')} Now playing</button></div>`;
+    qPanelKey = qpKey();
+    $$('[data-dsp]', qPanel).forEach((c) => c.onchange = () => { c.disabled = true; toggleDsp(c.dataset.dsp, c.checked); });
+    const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
+    const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
+    const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
+    const v = $('#qpvol', qPanel); setFill(v);
+    if (had) { const back = $(had, qPanel); if (back) back.focus(); }
+    v.oninput = () => setFill(v);
+    v.onchange = () => { bar.value = v.value; setFill(bar); if (isBrowser()) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); };
+  };
+  $('#quality').onclick = () => {
+    if (!qPanel.hidden) { closeQPanel(); return; }
+    closePop(); closeJobPop();
+    renderQPanel();
+    qPanel.hidden = false; $('#scrim').hidden = false; $('#quality').setAttribute('aria-expanded', 'true'); pushTransient();
+    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
+    loadDsp();
+    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
+  };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -1354,7 +1597,7 @@
     const idx = z.queue_index != null && q[z.queue_index] && q[z.queue_index].id === it.id ? z.queue_index : q.findIndex((x) => x.id === it.id);
     const rest = idx >= 0 ? q.slice(idx + 1) : [];
     const h = np.signal_path ? headline(np.signal_path) : null;
-    const colour = { bit_perfect: 'var(--q-bit)', enhanced: 'var(--q-enh)', lossless: 'var(--q-lossless)', lossy: 'var(--q-lossy)' };
+    const colour = Q_COLOUR;
     const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
     const sheet = npSheetNow();
     const songPage = npPageId(it.uri);
@@ -1367,11 +1610,8 @@
       }
       if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
-        return `<div class="path">
-              <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? colour[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
-              ${np.signal_path ? np.signal_path.stages.map((st) => `<div class="path-row"><span class="pd" style="background:${colour[st.quality]}"></span><span class="pn">${esc(st.name)}</span><span class="pf">${esc(fmtFormat(st.in_format))} → ${esc(fmtFormat(st.out_format))}</span>${st.note ? `<span class="pnote">${esc(st.note)}</span>` : ''}</div>`).join('') : ''}
-            </div>
-            <dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
+        return pathHtml(np)
+            + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
       }
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';
@@ -1856,7 +2096,7 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); return; }
+    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
@@ -2168,7 +2408,7 @@
     document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
   }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
-  transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !jobPop().hidden, close: closeJobPop });
+  transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   const OWNER_MENU = /favourite|playlist|^tag|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   const showMenu = (anchor, items) => {
@@ -4015,7 +4255,7 @@
           await refreshQueue(false);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && !isBrowser() && zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).length ? `<button class="btn" id="qtransfer" title="Move this queue and position to another zone">${icon('zone')} Transfer…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
@@ -4085,9 +4325,7 @@
             }
             try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/shuffle`); toast('Upcoming tracks shuffled'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
           };
-          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Transfer to' }, ...zoneList().filter((o) => o.id !== state.zone && o.id !== BROWSER).map((o) => ({ label: o.name, icon: 'zone', run: async () => {
-            try { const zs = await api('POST', `/zones/${encodeURIComponent(state.zone)}/transfer`, { to: o.id }); state.zones[zs.id] = zs; state.zone = zs.id; localStorage.setItem('pm.zone', state.zone); toast(`Moved playback to ${zs.name}`); renderZoneName(); renderBar(); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
-          } }))]);
+          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: 'Queue · this browser' } : { zone: state.zone };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
@@ -4915,8 +5153,15 @@
         if (ev.seq > link.seq + 1) ws.send(JSON.stringify({ type: 'resync' }));
         if (ev.seq > link.seq) link.seq = ev.seq;
       }
+      if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
+        if (state.starting && ev.state.id === state.starting.zone) {
+          if (ev.state.transport === 'playing' || (state.starting.what === 'move' && ev.state.transport !== 'stopped')) startDone(true);
+          // Only an error that is new fails the start: the engine keeps the last error until a track starts
+          else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
+        }
+        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
