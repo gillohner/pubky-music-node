@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Fixes to listens, comments, collections, smart playlists and Live sharing:**
+  - Listens moved to private while a sync ran no longer keep their public copies. A history deleted on one node is deleted on your other nodes too. The listen stats no longer hold up the node with a long history.
+  - What you type in a comment survives the song page refreshing.
+  - Play and Shuffle skip web links and posts in a collection instead of playing nothing. On phones a link or post row has a ⋯ menu (Open, Copy link, Move). Many links no longer slow down playback clicks. Someone else's shared collection shows its links as links, not as broken songs.
+  - Smart playlists with tags from the network save every rule, keep "any of the rules", and list what the saved feed says (tagged by the people you chose and matching the rules). "Tagged by" names only those people.
+  - Listening posts: a resume or a seek tells listeners where you are, a paused post doesn't expire mid-pause, and a session without an expiry ends after a day. A short homeserver hiccup no longer turns Live sharing off; when the homeserver does refuse, the Live switch goes off and says why.
+
 ### 2026-10-30
 
 - **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.
