@@ -1683,7 +1683,7 @@ async fn roon_exports_move_over_with_a_report() {
     // The row not in this library stays in the playlist as a search for its words (B4)
     assert_eq!(
         (r["playlist"]["imported"].as_u64(), r["playlist"]["kept"].as_u64()),
-        (Some(2), Some(1)),
+        (Some(1), Some(1)),
         "{r}"
     );
 

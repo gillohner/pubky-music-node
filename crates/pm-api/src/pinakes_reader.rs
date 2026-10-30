@@ -203,6 +203,18 @@ pub(crate) async fn get_card(
     if uri.is_empty() {
         return Err(crate::ApiError::bad_request("uri is required"));
     }
+    // An import's search link holds a private playlist's words: never asked of Pinakes
+    if crate::activity::is_search_link(&uri) {
+        return Ok(axum::Json(CardView {
+            uri,
+            status: "unknown",
+            kind: None,
+            name: None,
+            description: None,
+            image: None,
+            site: None,
+        }));
+    }
     let web = |u: Option<String>| u.filter(|u| u.starts_with("https://") || u.starts_with("http://"));
     let view = |status, r: Option<Box<ResourceDetail>>| {
         let c = r.map(|r| r.card);

@@ -1159,6 +1159,7 @@ pub struct ImportedPlaylist {
     pub name: String,
     /// Entries found in the file (or sent).
     pub parsed: usize,
+    /// Lines matched to a song (the kept links are not counted: see `kept`).
     pub imported: usize,
     /// The lines no song, ISRC, MusicBrainz id or service link was found for.
     pub unresolved: Vec<DescribedTrack>,

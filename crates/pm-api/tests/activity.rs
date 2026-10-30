@@ -236,7 +236,7 @@ async fn record_and_import_resolve_through_the_library() {
     assert_eq!(imp["parsed"], 6);
     assert_eq!(
         (imp["imported"].as_u64(), imp["kept"].as_u64()),
-        (Some(6), Some(2)),
+        (Some(4), Some(2)),
         "{imp}"
     );
     assert_eq!(imp["unresolved"][0]["title"], "Missing");
@@ -297,9 +297,10 @@ async fn record_and_import_resolve_through_the_library() {
     // A media server's playlist (review of #156): streams with their sign-in in them, on the
     // LAN, or longer than a v1 reference are never kept; the lines fall back to their words,
     // and the import still works. Lines without `#EXTINF` take their words from the address's
-    // path only, never its sign-in; one with no path is unresolved.
+    // path only, never its sign-in; one with no path is unresolved. A share link (the secret in
+    // its path), a stream mount, another port or a home router's name is never kept either.
     let m3u = format!(
-        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\nhttp://jf.example.com/Audio/x/universal?UserId=u&api_key=hunter2\nhttp://admin:hunter2@radio.example.com:8000\n",
+        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\nhttp://jf.example.com/Audio/x/universal?UserId=u&api_key=hunter2\nhttp://admin:hunter2@radio.example.com:8000\n#EXTINF:1,Nobody - Shared Song\nhttps://cloud.example.com/s/hunter2/download\n#EXTINF:-1,Radio Paradise\nhttps://stream.radioparadise.com/mp3-192\n#EXTINF:1,Nobody - Port Song\nhttps://music.example.com:4533/x\n#EXTINF:1,Nobody - Router Song\nhttp://nas.fritz.box/x\n",
         "a".repeat(3000)
     );
     let req = Request::builder()
@@ -312,14 +313,14 @@ async fn record_and_import_resolve_through_the_library() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(st, StatusCode::OK, "{imp}");
-    assert_eq!(imp["kept"], 5, "{imp}");
+    assert_eq!(imp["kept"], 9, "{imp}");
     assert_eq!(
         (
             imp["imported"].as_u64(),
             imp["unresolved"].as_array().map(Vec::len)
         ),
-        (Some(5), Some(6)),
-        "the radio line has no words: unresolved, not kept: {imp}"
+        (Some(0), Some(10)),
+        "nothing matched; the radio line without words is unresolved, not kept: {imp}"
     );
     let (_, server) = call(
         &app,
@@ -346,6 +347,10 @@ async fn record_and_import_resolve_through_the_library() {
             "https://musicbrainz.org/search?type=recording&query=Nobody+Nas+Song",
             "https://musicbrainz.org/search?type=recording&query=Nobody+Long+Song",
             "https://musicbrainz.org/search?type=recording&query=universal",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Shared+Song",
+            "https://musicbrainz.org/search?type=recording&query=Radio+Paradise",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Port+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Router+Song",
         ],
         "{server}"
     );

@@ -1089,7 +1089,9 @@ pub(crate) async fn import_playlist(
                     }
                 }));
             }
-            // A local file in the playlist (no Spotify id): kept as a search for its words
+            // A local file in the playlist (no Spotify id): kept as a search for its words. An
+            // episode or anything else unnamed is left out (it isn't a recording to search for)
+            None if it["track"]["is_local"].as_bool() != Some(true) => skipped += 1,
             None => match crate::activity::search_link(
                 it["track"]["artists"][0]["name"].as_str(),
                 it["track"]["name"].as_str(),
