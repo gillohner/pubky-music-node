@@ -835,12 +835,13 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
-    /// Create (or reuse) a pull output under `name`, registered for the HTTP route.
+    /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
+    /// renderer the node tells when to fetch ([`pm_zones::outputs::PullOutput::controlled`]).
     pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
         let mut pulls = self.pulls.lock().expect("pulls lock");
         pulls
             .entry(name.to_string())
-            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::new(name)))
+            .or_insert_with(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
             .clone()
     }
 

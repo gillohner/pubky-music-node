@@ -501,3 +501,87 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
     let st = zone.wait_stopped().await;
     assert_eq!(st.error, None, "{st:?}");
 }
+
+/// A stopped Linn polls its old URI every 15 s, and the node held each request for a stream: one
+/// that was waiting when the next stream opened took it, and the Linn dropped it ("listener went
+/// away", NUC 2026-10-30). Now that request is answered 410 at once, and the fetch the Linn makes
+/// after SetAVTransportURI gets the new stream from its first byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_linn_request_does_not_take_the_new_stream() {
+    use pm_model::{AudioBlock, AudioFormat};
+    use pm_zones::Output;
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    // The renderer's stream, as the node makes it for a UPnP renderer
+    let pull = s.pull_output("klimax");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), listener));
+    let fmt = AudioFormat::pcm(44_100, 16, 2);
+    let path = "/v1/outputs/pull/klimax/live.wav";
+    // The last session ended; the stopped Linn asks again for its old URI
+    drop(pm_stream::block_on(pull.open(fmt)).unwrap());
+    let stale = tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let (status, _, _) = linn_get(addr, path, false);
+        (status, t.elapsed())
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Play: the node opens the next stream, then the Linn fetches it
+    let mut sink = pm_stream::block_on(pull.open(fmt)).unwrap();
+    let samples: Vec<i32> = (0..4410 * 2).map(|i| (i % 1000) - 500).collect();
+    let writer = std::thread::spawn(move || {
+        sink.write(&AudioBlock::pcm_i32(fmt, samples)).unwrap();
+        sink
+    });
+    let (status, took) = stale.await.unwrap();
+    assert!(
+        status.starts_with("HTTP/1.0 410") || status.starts_with("HTTP/1.1 410"),
+        "{status}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "answered at once: {took:?}"
+    );
+    let first = tokio::task::spawn_blocking(move || {
+        let (status, _, mut body) = linn_get(addr, path, false);
+        assert!(
+            status.starts_with("HTTP/1.0 200"),
+            "the fresh fetch plays: {status}"
+        );
+        let mut start = vec![0u8; 44 + 4];
+        body.read_exact(&mut start).unwrap();
+        start[44..].to_vec()
+    })
+    .await
+    .unwrap();
+    // The first sample, as the zone wrote it (16-bit LE)
+    assert_eq!(first, [0x0c, 0xfe, 0x0d, 0xfe], "from the first byte");
+    drop(writer.join().unwrap());
+}
