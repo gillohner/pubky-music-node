@@ -397,3 +397,69 @@ fn round_trips_do_not_add_up_in_a_group() {
     }
     drop(serving);
 }
+
+/// Audio on its way to a player is written and held all the same (#194 review): a zone takes
+/// `frames_written` as a track's start (gapless, a crossfade's end) and a group's position is its
+/// count less the leader's level, so leaving that audio out put the position ahead by up to
+/// [`pm_out_net::IN_FLIGHT`]. The players here play nothing yet, so the position is 0.
+#[test]
+fn audio_on_its_way_is_not_heard_yet() {
+    let at = Arc::new(AtomicU64::new(0));
+    let far = |dac: Arc<Dac>| {
+        let registry = OutputRegistry::new();
+        registry.register(dac as Arc<dyn Output>);
+        let key = Key::random();
+        let s = Endpoint::new("Laptop", registry, key.clone())
+            .spawn(TcpListener::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let addr = delayed(s.addr(), Duration::from_millis(15));
+        (s, NetOutput::connect(addr, &KeyCell::new(key)).unwrap().remove(0))
+    };
+    let dac = |i: usize| {
+        Dac::new(
+            &format!("hw:{i},0"),
+            Clock::Virtual {
+                at: at.clone(),
+                ratio: 1.0,
+            },
+        )
+    };
+    let fmt = AudioFormat::pcm(48_000, 24, 2);
+    let block = AudioBlock::pcm_i32(fmt, (0..960).map(|i| i * 1000).collect());
+    // A reading may count down by the real time since an answer came, should one come early
+    let slack = 5 * 48;
+
+    // One player: everything sent is written, and nothing of it is heard
+    let (serving, out) = far(dac(0));
+    let mut sink = pm_stream::block_on(out.open(fmt)).unwrap();
+    for _ in 0..5 {
+        sink.write(&block).unwrap();
+    }
+    assert_eq!(sink.frames_written(), 5 * 480);
+    let heard = sink.frames_written() - sink.buffer_level().queued_frames;
+    assert!(heard <= slack, "{heard} frames heard of none played");
+    drop(sink);
+    drop(serving);
+
+    // A group led by such players
+    let mut serving = Vec::new();
+    let mut members: Vec<Arc<dyn Output>> = Vec::new();
+    for i in 0..3 {
+        let (s, o) = far(dac(i));
+        serving.push(s);
+        members.push(Arc::new(o));
+    }
+    let g = GroupOutput::new("Everywhere", members)
+        .unwrap()
+        .with_drift_correction(false);
+    let mut sink = pm_stream::block_on(g.open(fmt)).unwrap();
+    for _ in 0..30 {
+        sink.write(&block).unwrap();
+    }
+    let heard = sink
+        .frames_written()
+        .saturating_sub(sink.buffer_level().queued_frames);
+    assert!(heard <= slack, "{heard} frames heard of none played");
+    drop(sink);
+    drop(serving);
+}
