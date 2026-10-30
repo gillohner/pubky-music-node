@@ -9,6 +9,7 @@
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
 //     replaced and shown once; the login dialog says where the token is;
+//   * an item page credits Wikipedia's text and a Commons picture (source, licence, links);
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
 //   * Play to: while something plays or is queued, every other device gets Move here (This zone
@@ -140,6 +141,22 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
 
+    // ---- About credits: Wikipedia's text and a Commons picture carry their source and licence ----
+    c = await ctx(); p = await c.newPage();
+    const credited = { kind: 'artist', id: 'lib-777', uri: null, target: { artist_id: 777 }, title: 'Credit Test', source: 'Your library', source_id: 'library',
+      songs: [], albums: [], versions: [], also_on: [], open_on: [], connect: [], about: [], section: 'artists', reading: false, pending: false, total_ms: 0,
+      blurb: 'Credit Test ist eine Band.',
+      about_text: { text: 'Credit Test ist eine Band.', source: 'Wikipedia', url: 'https://de.wikipedia.org/wiki/Credit_Test', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: '<b>Jane</b> Doe', licence: 'CC BY 2.0', licence_url: 'javascript:alert(1)', file_page: 'https://commons.wikimedia.org/wiki/File:Credit.jpg', source: 'Wikimedia Commons' } };
+    await p.route(/\/v1\/item\/artist\/lib-777(\?.*)?$/, (r) => r.fulfill({ json: credited }));
+    await p.goto(BASE + '/artist/lib-777');
+    check(await visible(p, '#iabout .credit'), 'About shows a credit line');
+    const credit = await p.textContent('#iabout .credit').catch(() => '');
+    const links = await p.$$eval('#iabout .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
+    check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
+    check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
+    check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
+    await c.close();
     // ---- Provider badges on covers ----
     // A mocked TIDAL artist page: a TIDAL album and a library album as tiles, a streamed and a
     // library song as rows; then album pages from TIDAL and from the library.

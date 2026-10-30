@@ -84,6 +84,14 @@
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-copykey]'); if (!b) return; e.preventDefault(); e.stopPropagation(); const k = b.dataset.copykey; (navigator.clipboard ? navigator.clipboard.writeText(k) : Promise.reject()).then(() => toast('Key copied')).catch(() => toast(k)); }, true);
   const artists = (t) => (t.artists || []).map((a) => a.name).join(', ');
   const hue = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+  // The credit Wikipedia's text (CC BY-SA) and a Commons picture need: source, licence and a link to each
+  const creditLink = (href, text) => (webUrl(href) ? `<a href="${esc(webUrl(href))}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text));
+  const aboutCredit = (pg) => {
+    const t = pg.about_text; const c = pg.image_credit; const lines = [];
+    if (t && t.source) lines.push(`Text: ${t.url ? creditLink(t.url, t.source === 'Wikipedia' ? 'Read more on Wikipedia' : t.source) : esc(t.source)}${t.licence ? ` · ${creditLink(t.licence_url, t.licence)}` : ''}`);
+    if (c) lines.push(`Picture: ${c.author ? `${esc(c.author)} · ` : ''}${c.licence ? `${creditLink(c.licence_url, c.licence)} · ` : ''}${creditLink(c.file_page, c.source || 'Wikimedia Commons')}`);
+    return lines.length ? `<p class="muted small credit">${lines.join('<br>')}</p>` : '';
+  };
   // Two letters for an artwork placeholder: the first word and the next real word ("I'm in Love…"
   // gives "IL", not "II", which reads as a pause button)
   const initials = (s) => {
@@ -4176,7 +4184,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
-            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
+            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${aboutCredit(pg)}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
@@ -4227,7 +4235,8 @@
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
+          // About from open sources comes in the background too: ask again until it is there
+          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.reading ? 4000 : 3000); }
           break;
         }
         case 'queue': {
