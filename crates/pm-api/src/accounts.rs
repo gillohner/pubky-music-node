@@ -12,12 +12,12 @@
 //! Listeners' own playlists, favourites and history (on their own homeserver) come with the
 //! node agent's per-person sync; until then a listener's writes to them are refused.
 
-use crate::sources::Reach;
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
 use axum::extract::State;
 use axum::http::{Method, StatusCode};
 use axum::Json;
+use pm_zones::FetchLimit;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -358,10 +358,15 @@ pub fn refused(why: &str) -> ApiError {
 }
 
 /// What a listener may put in a queue (or announce): library songs, the services' own track ids,
-/// and http(s) links to public addresses, fetched only there (each redirect and each address it
-/// resolves to is checked when the node connects, `sources::guard`). Never a path or a
-/// `file:` URL, nothing on the node's machine or its network: those are the owner's to play.
-pub fn check_listener_uri(uri: &str) -> Result<(), ApiError> {
+/// and http(s) links to public addresses, fetched only there (each redirect, playlist entry and
+/// address it resolves to is checked when the node connects: the item carries
+/// [`FetchLimit::PUBLIC`], whatever the request said). Never a path or a `file:` URL, nothing on
+/// the node's machine or its network: those are the owner's to play. The URI is trimmed: the one
+/// checked is the one queued.
+pub fn check_listener_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError> {
+    it.uri = it.uri.trim().to_string();
+    it.limit = Some(it.limit.map_or(FetchLimit::PUBLIC, |l| l.and(FetchLimit::PUBLIC)));
+    let uri = it.uri.as_str();
     use crate::*;
     const SERVICES: [&str; 13] = [
         sources::TRACK_SCHEME,
@@ -378,14 +383,10 @@ pub fn check_listener_uri(uri: &str) -> Result<(), ApiError> {
         youtube::VIDEO_URI_PREFIX,
         librespot::LIVE_URI,
     ];
-    let uri = uri.trim();
     if SERVICES.iter().any(|p| uri.starts_with(p)) {
         return Ok(());
     }
-    let public = Reach {
-        peer: None,
-        lan: false,
-    };
+    let public = FetchLimit::PUBLIC;
     let url = url::Url::parse(uri)
         .ok()
         .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
@@ -399,10 +400,10 @@ pub fn check_listener_uri(uri: &str) -> Result<(), ApiError> {
         Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::from(ip)),
         _ => None,
     };
-    if literal.is_some_and(|ip| !public.allows(ip)) || url.host_str() == Some("localhost") {
+    if literal.is_some_and(|ip| !sources::allows(public, ip)) || url.host_str() == Some("localhost") {
         return Err(refused("that address is on the node's own network"));
     }
-    sources::guard(uri, public).map_err(|e| ApiError::new(StatusCode::TOO_MANY_REQUESTS, e))
+    Ok(())
 }
 
 /// A listener's JSON answers show a library file by its name, not by where the owner keeps it

@@ -24,6 +24,38 @@ pub struct QueueItem {
     /// Cover image URL for items that are not library tracks (streaming sources).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Where fetching it may go, when someone other than the owner queued it (a listener, a
+    /// UPnP controller); none for the owner's. Kept with the item: moved, saved and restored
+    /// with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<FetchLimit>,
+}
+
+/// Where the node may connect to fetch an item for someone other than the owner: addresses that
+/// someone at `peer` could reach (loopback only for a peer on the node's own machine), LAN
+/// addresses only with `lan` (see `pm_renderer::ip_allowed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchLimit {
+    #[serde(default)]
+    pub peer: Option<std::net::IpAddr>,
+    #[serde(default)]
+    pub lan: bool,
+}
+
+impl FetchLimit {
+    /// A listener's: public addresses only.
+    pub const PUBLIC: FetchLimit = FetchLimit {
+        peer: None,
+        lan: false,
+    };
+
+    /// The stricter of two.
+    pub fn and(self, other: FetchLimit) -> FetchLimit {
+        FetchLimit {
+            peer: (self.peer == other.peer).then_some(self.peer).flatten(),
+            lan: self.lan && other.lan,
+        }
+    }
 }
 
 impl QueueItem {
@@ -36,6 +68,7 @@ impl QueueItem {
             album: None,
             duration_ms: None,
             image: None,
+            limit: None,
         }
     }
 

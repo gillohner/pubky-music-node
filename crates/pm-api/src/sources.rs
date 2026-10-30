@@ -7,7 +7,7 @@
 use pm_audio::{LocalFiles, PipelineConfig};
 use pm_library::Library;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, TrackId};
-use pm_zones::{FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
+use pm_zones::{FetchLimit, FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -463,60 +463,16 @@ pub fn open_http_stream_with(
     headers: &[(String, String)],
     ext_hint: Option<&str>,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
-    open_http_stream_via(http_client(), uri, headers, ext_hint)
+    open_http_stream_via(http_client(), uri, headers, ext_hint, None)
 }
 
-/// Where someone other than the owner may make the node fetch: a UPnP controller (`peer`, its
-/// LAN) or a listener (no peer, public addresses only). See `pm_renderer::ip_allowed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reach {
-    pub peer: Option<std::net::IpAddr>,
-    /// LAN (private) addresses too.
-    pub lan: bool,
+/// Whether a fetch for `limit` (an item someone other than the owner queued) may connect to `ip`.
+pub fn allows(limit: FetchLimit, ip: std::net::IpAddr) -> bool {
+    pm_renderer::ip_allowed(ip, limit.peer, limit.lan)
 }
 
-impl Reach {
-    pub fn allows(&self, ip: std::net::IpAddr) -> bool {
-        pm_renderer::ip_allowed(ip, self.peer, self.lan)
-    }
-
-    /// The stricter of two: a URI two people gave keeps to what both may reach.
-    fn and(self, other: Reach) -> Reach {
-        Reach {
-            peer: (self.peer == other.peer).then_some(self.peer).flatten(),
-            lan: self.lan && other.lan,
-        }
-    }
-}
-
-/// http(s) items someone other than the owner put in a queue, and where their fetches may go.
-/// Kept until the node restarts (queues are, too); full, it takes no more such items rather
-/// than forget one, which would then be fetched unchecked.
-static GUARDED: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Reach>>> =
-    std::sync::LazyLock::new(Default::default);
-const MAX_GUARDED: usize = 10_000;
-
-/// Fetch `uri` only within `reach` whenever it plays: each redirect and each address it
-/// resolves to, checked when the connection is made (no DNS rebinding).
-pub fn guard(uri: &str, reach: Reach) -> Result<(), String> {
-    let mut g = GUARDED.lock().expect("guarded");
-    if let Some(r) = g.get_mut(uri) {
-        *r = r.and(reach);
-        return Ok(());
-    }
-    if g.len() >= MAX_GUARDED {
-        return Err("too many links were queued here; restart the node".into());
-    }
-    g.insert(uri.to_string(), reach);
-    Ok(())
-}
-
-fn reach_of(uri: &str) -> Option<Reach> {
-    GUARDED.lock().expect("guarded").get(uri).copied()
-}
-
-/// DNS for a guarded fetch: only the addresses its [`Reach`] allows.
-struct GuardResolver(Reach);
+/// DNS for a guarded fetch: only the addresses its [`FetchLimit`] allows.
+struct GuardResolver(FetchLimit);
 
 impl reqwest::dns::Resolve for GuardResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
@@ -524,7 +480,7 @@ impl reqwest::dns::Resolve for GuardResolver {
         Box::pin(async move {
             let found: Vec<std::net::SocketAddr> =
                 tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let ok: Vec<std::net::SocketAddr> = found.into_iter().filter(|a| reach.allows(a.ip())).collect();
+            let ok: Vec<std::net::SocketAddr> = found.into_iter().filter(|a| allows(reach, a.ip())).collect();
             if ok.is_empty() {
                 return Err(format!("{host} is not an address this stream may be fetched from").into());
             }
@@ -534,10 +490,10 @@ impl reqwest::dns::Resolve for GuardResolver {
 }
 
 /// Whether a URL's host is allowed when it is an address (names go through [`GuardResolver`]).
-fn literal_ok(url: &url::Url, reach: Reach) -> bool {
+fn literal_ok(url: &url::Url, reach: FetchLimit) -> bool {
     match url.host() {
-        Some(url::Host::Ipv4(ip)) => reach.allows(ip.into()),
-        Some(url::Host::Ipv6(ip)) => reach.allows(ip.into()),
+        Some(url::Host::Ipv4(ip)) => allows(reach, ip.into()),
+        Some(url::Host::Ipv6(ip)) => allows(reach, ip.into()),
         Some(url::Host::Domain(_)) => true,
         None => false,
     }
@@ -545,7 +501,7 @@ fn literal_ok(url: &url::Url, reach: Reach) -> bool {
 
 /// A client for one guarded stream: its resolver and every redirect keep to `reach`; no proxy
 /// (a proxy would resolve the name itself).
-fn guarded_client(reach: Reach) -> Result<reqwest::blocking::Client, String> {
+fn guarded_client(reach: FetchLimit) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -570,8 +526,8 @@ fn guarded_client(reach: Reach) -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// [`open_http_stream`] for an item someone other than the owner queued ([`guard`]).
-pub fn open_http_stream_guarded(uri: &str, reach: Reach) -> Result<Box<dyn FrameSource>, SourceError> {
+/// [`open_http_stream`] for an item someone other than the owner queued (its [`FetchLimit`]).
+pub fn open_http_stream_guarded(uri: &str, reach: FetchLimit) -> Result<Box<dyn FrameSource>, SourceError> {
     let err = |reason: String| SourceError::Open {
         uri: uri.to_string(),
         reason,
@@ -583,14 +539,16 @@ pub fn open_http_stream_guarded(uri: &str, reach: Reach) -> Result<Box<dyn Frame
         ));
     }
     let client = guarded_client(reach).map_err(err)?;
-    open_http_stream_via(&client, uri, &[], None)
+    open_http_stream_via(&client, uri, &[], None, Some(reach))
 }
 
+/// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
 fn open_http_stream_via(
     client: &reqwest::blocking::Client,
     uri: &str,
     headers: &[(String, String)],
     ext_hint: Option<&str>,
+    limit: Option<FetchLimit>,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
     {
         let err = |reason: String| SourceError::Open {
@@ -616,6 +574,15 @@ fn open_http_stream_via(
             if is_playlist(&url, &mime) && hop == 0 {
                 let text = resp.text().map_err(|e| err(e.to_string()))?;
                 url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
+                if let Some(limit) = limit {
+                    let ok = url::Url::parse(&url)
+                        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && literal_ok(&u, limit));
+                    if !ok {
+                        return Err(err(
+                            "the playlist points at an address this stream may not be fetched from".into(),
+                        ));
+                    }
+                }
                 continue;
             }
             let ext = ext_for_mime(&mime).or_else(|| ext_for_url(&url)).or(ext_hint);
@@ -692,8 +659,8 @@ impl SourceFactory for NodeSources {
             });
         }
         if is_http_uri(&item.uri) {
-            return match reach_of(&item.uri) {
-                Some(reach) => open_http_stream_guarded(&item.uri, reach),
+            return match item.limit {
+                Some(limit) => open_http_stream_guarded(&item.uri, limit),
                 None => open_http_stream(&item.uri),
             };
         }
@@ -954,6 +921,15 @@ mod tests {
                     "/to-name" => {
                         let _ = s.write_all(redirect(format!("http://localhost:{port}/ok")).as_bytes());
                     }
+                    // A playlist's stream is a second request, not a redirect
+                    "/metadata.m3u" | "/local.m3u" => {
+                        let body = if path == "/metadata.m3u" {
+                            "http://169.254.169.254/latest/meta-data/\n".to_string()
+                        } else {
+                            format!("http://127.0.0.1:{port}/ok\n")
+                        };
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
                     _ => {
                         let _ = s.write_all(
                             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -971,18 +947,15 @@ mod tests {
     #[test]
     fn guarded_streams_keep_to_where_their_sender_may_reach() {
         let port = redirecting_server();
-        let here = Reach {
+        let here = FetchLimit {
             peer: Some("127.0.0.1".parse().unwrap()),
             lan: true,
         };
-        let lan = Reach {
+        let lan = FetchLimit {
             peer: Some("192.168.1.5".parse().unwrap()),
             lan: true,
         };
-        let public = Reach {
-            peer: None,
-            lan: false,
-        };
+        let public = FetchLimit::PUBLIC;
         let reason = |r: Result<Box<dyn FrameSource>, SourceError>| match r {
             Ok(_) => String::new(),
             Err(e) => e.to_string(),
@@ -1024,16 +997,41 @@ mod tests {
             ));
             assert!(!r.is_empty(), "{reach:?}: a name for this machine was fetched");
         }
-        // Queued URIs remember who sent them; the stricter wins
-        let uri = format!("http://127.0.0.1:{port}/ok?guard-test");
-        guard(&uri, here).unwrap();
-        guard(&uri, public).unwrap();
-        assert_eq!(reach_of(&uri), Some(public));
-        assert!(public.allows("93.184.216.34".parse().unwrap()));
-        assert!(!public.allows("10.1.2.3".parse().unwrap()));
-        assert!(!public.allows("100.64.0.1".parse().unwrap()));
-        assert!(!public.allows("fd00::1".parse().unwrap()));
-        assert!(lan.allows("10.1.2.3".parse().unwrap()));
-        assert!(!lan.allows("169.254.169.254".parse().unwrap()));
+        // A playlist that points somewhere the sender may not reach is not followed (review of
+        // #177, high 1); one that points where it may, is
+        let r = reason(open_http_stream_guarded(
+            &format!("http://127.0.0.1:{port}/metadata.m3u"),
+            here,
+        ));
+        assert!(r.contains("playlist points at an address"), "{r}");
+        assert_eq!(
+            reason(open_http_stream_guarded(
+                &format!("http://127.0.0.1:{port}/local.m3u"),
+                here
+            )),
+            ""
+        );
+        // The stricter of two limits wins
+        assert_eq!(here.and(public), public);
+        assert!(allows(public, "93.184.216.34".parse().unwrap()));
+        for no in [
+            "10.1.2.3",
+            "100.64.0.1",
+            "fd00::1",
+            "0.1.2.3",
+            "198.18.0.1",
+            "240.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "64:ff9b::a01:203",
+        ] {
+            assert!(!allows(public, no.parse().unwrap()), "{no}");
+        }
+        assert!(allows(lan, "10.1.2.3".parse().unwrap()));
+        assert!(!allows(lan, "169.254.169.254".parse().unwrap()));
+        assert!(
+            !allows(lan, "64:ff9b::a9fe:a9fe".parse().unwrap()),
+            "NAT64 to the metadata address"
+        );
     }
 }

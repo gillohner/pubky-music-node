@@ -146,6 +146,34 @@ async fn a_listener_queues_library_songs_service_tracks_and_public_links_only() 
         .await;
         assert_eq!(st, StatusCode::OK, "{ok}: {body}");
     }
+    // The URI checked is the one queued (spaces around it), and a listener's item is fetched
+    // only from public addresses, whatever limit it claims (review of #177)
+    let (st, body) = call(
+        &app,
+        &listener,
+        "POST",
+        &format!("/v1/zones/{zone}/queue"),
+        Some(serde_json::json!({"items": [{"uri": " http://169.254.169.254.nip.io/latest/ ", "limit": {"peer": "127.0.0.1", "lan": true}}], "play": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, q) = call(&app, OWNER, "GET", &format!("/v1/zones/{zone}/queue"), None).await;
+    let q: serde_json::Value = serde_json::from_str(&q).unwrap();
+    let items = q["items"]
+        .as_array()
+        .or(q.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let it = items
+        .iter()
+        .find(|i| i["uri"].as_str().is_some_and(|u| u.contains("nip.io")))
+        .unwrap_or_else(|| panic!("{q}"));
+    assert_eq!(it["uri"], "http://169.254.169.254.nip.io/latest/");
+    assert_eq!(
+        it["limit"],
+        serde_json::json!({"peer": null, "lan": false}),
+        "{it}"
+    );
     // The owner plays their own files and LAN streams
     for ok in ["/music/a.flac", "http://192.168.1.10/a.mp3"] {
         let (st, body) = call(

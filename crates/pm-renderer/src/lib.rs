@@ -102,19 +102,24 @@ fn allowed(ip: IpAddr, peer: Option<IpAddr>) -> bool {
 /// service), unspecified, multicast or broadcast; loopback only for a peer on this machine;
 /// private and shared (CGNAT) addresses only with `lan`.
 pub fn ip_allowed(ip: IpAddr, peer: Option<IpAddr>, lan: bool) -> bool {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
-    };
+    let ip = embedded_v4(ip);
     let link_local = match ip {
         IpAddr::V4(v4) => v4.is_link_local() || v4.is_broadcast(),
         IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
     };
-    if ip.is_unspecified() || ip.is_multicast() || link_local {
+    // "This network" (0/8) and the reserved 240/4 are never a place to fetch from
+    let reserved = matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 0 || v4.octets()[0] >= 240);
+    if ip.is_unspecified() || ip.is_multicast() || link_local || reserved {
         return false;
     }
     let private = match ip {
-        IpAddr::V4(v4) => v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64),
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                // benchmarking networks, used inside some LANs and appliances
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+        }
         IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
     };
     if private && !lan {
@@ -130,6 +135,24 @@ pub fn ip_allowed(ip: IpAddr, peer: Option<IpAddr>, lan: bool) -> bool {
         });
     }
     true
+}
+
+/// The IPv4 address an IPv6 one carries and leads to: IPv4-mapped, NAT64 (`64:ff9b::/96`) and
+/// 6to4 (`2002::/16`); otherwise the address itself.
+fn embedded_v4(ip: IpAddr) -> IpAddr {
+    let IpAddr::V6(v6) = ip else { return ip };
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return IpAddr::V4(v4);
+    }
+    let seg = v6.segments();
+    let o = v6.octets();
+    if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return IpAddr::V4(std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    if seg[0] == 0x2002 {
+        return IpAddr::V4(std::net::Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
+    ip
 }
 
 /// What a controller said (or the zone has) about the current item.
@@ -604,7 +627,14 @@ async fn events(
                 "uuid:{}",
                 r.udn(&format!("{zone}/{service}/{:?}", Instant::now()))
             );
-            r.subs.lock().expect("subs").insert(
+            let mut subs = r.subs.lock().expect("subs");
+            // Counted again: subscriptions checked at once, before their callbacks resolved,
+            // must not pass the caps together
+            let mine = subs.values().filter(|s| s.peer == peer).count();
+            if subs.len() >= MAX_SUBS || mine >= MAX_SUBS_PER_PEER {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            subs.insert(
                 sid.clone(),
                 Sub {
                     zone,

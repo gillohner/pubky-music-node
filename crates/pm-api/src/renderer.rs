@@ -33,7 +33,8 @@ impl ZoneRenderers {
     }
 }
 
-fn item(uri: String, meta: Meta) -> QueueItem {
+/// A controller's URI as a queue item, fetched only where the controller at `peer` could reach.
+fn item(uri: String, meta: Meta, peer: Option<std::net::IpAddr>) -> QueueItem {
     QueueItem {
         id: 0,
         uri,
@@ -42,6 +43,7 @@ fn item(uri: String, meta: Meta) -> QueueItem {
         album: meta.album,
         duration_ms: meta.duration_ms,
         image: meta.art,
+        limit: Some(pm_zones::FetchLimit { peer, lan: true }),
     }
 }
 
@@ -116,15 +118,13 @@ impl Host for ZoneRenderers {
         match act {
             // Fetched only where the controller could reach itself, every redirect and address
             Act::SetUri { uri, meta, peer } => {
-                crate::sources::guard(&uri, crate::sources::Reach { peer, lan: true })?;
                 z.stop();
                 z.clear();
-                z.enqueue(vec![item(uri, meta)], Insert::End);
+                z.enqueue(vec![item(uri, meta, peer)], Insert::End);
             }
             Act::SetNextUri { uri, meta, peer } => {
                 if !uri.is_empty() {
-                    crate::sources::guard(&uri, crate::sources::Reach { peer, lan: true })?;
-                    z.enqueue(vec![item(uri, meta)], Insert::Next);
+                    z.enqueue(vec![item(uri, meta, peer)], Insert::Next);
                 }
             }
             Act::Play => z.play(),

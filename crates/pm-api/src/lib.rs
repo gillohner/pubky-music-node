@@ -1554,12 +1554,13 @@ async fn enqueue(
             }
         }
     }
-    for it in body.items {
-        if it.uri.trim().is_empty() {
+    for mut it in body.items {
+        it.uri = it.uri.trim().to_string();
+        if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
         }
         if caller.role != accounts::Role::Owner {
-            accounts::check_listener_uri(&it.uri)?;
+            accounts::check_listener_item(&mut it)?;
         }
         items.push(it);
     }
@@ -1873,15 +1874,17 @@ async fn load(
     axum::Extension(caller): axum::Extension<accounts::Caller>,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<ZoneState> {
+    let mut body = body;
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
-    if body.items.iter().any(|it| it.uri.trim().is_empty()) {
-        return Err(ApiError::bad_request("item uri is empty"));
-    }
-    if caller.role != accounts::Role::Owner {
-        for it in &body.items {
-            accounts::check_listener_uri(&it.uri)?;
+    for it in &mut body.items {
+        it.uri = it.uri.trim().to_string();
+        if it.uri.is_empty() {
+            return Err(ApiError::bad_request("item uri is empty"));
+        }
+        if caller.role != accounts::Role::Owner {
+            accounts::check_listener_item(it)?;
         }
     }
     let to = zone_of(&s, &id)?;
@@ -2807,12 +2810,22 @@ fn may_start_login<'a>(waiting: impl Iterator<Item = &'a str>, origin: &str) -> 
     all < MAX_LOGINS && mine < MAX_LOGINS_PER_ORIGIN
 }
 
-/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: the address a proxy or tunnel names
-/// (Cloudflare's, then `X-Forwarded-For`'s first), iroh for the remote tunnel, else the
-/// connection's own. A forged header only picks another bucket; [`MAX_LOGINS`] still holds.
+/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: iroh for the remote tunnel; the address
+/// a proxy or tunnel on this machine names (Cloudflare's, then `X-Forwarded-For`'s first); else
+/// the connection's own.
 fn login_origin(req: &axum::extract::Request) -> String {
     if req.extensions().get::<peer::Remote>().is_some() {
         return "iroh".into();
+    }
+    let conn = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    // The forwarded address counts only from a proxy or tunnel on this machine (cloudflared, a
+    // local reverse proxy): from anyone else it is whatever they wrote, a new bucket each time
+    // (review of #177)
+    if !conn.is_some_and(|ip| ip.is_loopback()) {
+        return conn.map_or_else(|| "unknown".into(), |ip| ip.to_string());
     }
     let h = req.headers();
     let named = h
@@ -2826,13 +2839,7 @@ fn login_origin(req: &axum::extract::Request) -> String {
                 .and_then(|v| v.split(',').next())
                 .map(|v| v.trim().to_string())
         });
-    named
-        .or_else(|| {
-            req.extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0.ip().to_string())
-        })
-        .unwrap_or_else(|| "unknown".into())
+    named.unwrap_or_else(|| conn.map_or_else(|| "unknown".into(), |ip| ip.to_string()))
 }
 
 /// A QR code of `text` as an SVG string (dark modules on a light tile, a
@@ -2865,15 +2872,14 @@ async fn controller_login_start(
 ) -> ApiResult<ControllerLoginStarted> {
     // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
     let origin = login_origin(&req);
-    {
-        let mut logins = s.controller_logins.lock().await;
-        logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-        if !may_start_login(logins.values().map(|(_, _, o)| o.as_str()), &origin) {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many sign-ins are waiting; finish one or try again in a few minutes",
-            ));
-        }
+    // Held from the check to the insert: sign-ins started at once can't pass the caps together
+    let mut logins = s.controller_logins.lock().await;
+    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    if !may_start_login(logins.values().map(|(_, _, o)| o.as_str()), &origin) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many sign-ins are waiting; finish one or try again in a few minutes",
+        ));
     }
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
@@ -2892,15 +2898,8 @@ async fn controller_login_start(
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
-    let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    if logins.len() >= MAX_LOGINS {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many sign-ins are waiting; try again in a few minutes",
-        ));
-    }
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
+    drop(logins);
     let qr_svg = qr_svg(&url);
     Ok(Json(ControllerLoginStarted {
         id,
@@ -8109,8 +8108,26 @@ mod tests {
             "203.0.113.7"
         );
         assert_eq!(
-            login_origin(&req(Some(("x-forwarded-for", "198.51.100.2, 10.0.0.1")), None)),
+            login_origin(&req(
+                Some(("x-forwarded-for", "198.51.100.2, 10.0.0.1")),
+                Some("127.0.0.1:1")
+            )),
             "198.51.100.2"
+        );
+        // From anyone else a forwarded address is ignored: one client can't pose as many
+        assert_eq!(
+            login_origin(&req(
+                Some(("x-forwarded-for", "198.51.100.2")),
+                Some("192.168.1.9:5000")
+            )),
+            "192.168.1.9"
+        );
+        assert_eq!(
+            login_origin(&req(
+                Some(("cf-connecting-ip", "203.0.113.8")),
+                Some("203.0.113.1:443")
+            )),
+            "203.0.113.1"
         );
         let mut tunnel = req(None, Some("127.0.0.1:1"));
         tunnel.extensions_mut().insert(peer::Remote);

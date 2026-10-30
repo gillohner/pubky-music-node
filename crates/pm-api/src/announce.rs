@@ -150,7 +150,7 @@ pub(crate) async fn announce(
                     "a listener announces a web link, not a file",
                 ));
             }
-            crate::accounts::check_listener_uri(u)?;
+            crate::accounts::check_listener_item(&mut QueueItem::new(u))?;
         }
     }
     if let Some(v) = req.volume_percent {
@@ -203,6 +203,9 @@ pub(crate) async fn announce(
     if let Some(u) = uri {
         let mut it = QueueItem::new(u);
         it.title = Some(req.title.clone().unwrap_or_else(|| "Announcement".into()));
+        if caller.role != crate::accounts::Role::Owner {
+            it.limit = Some(pm_zones::FetchLimit::PUBLIC);
+        }
         items.push(it);
     }
     let count = items.len();
