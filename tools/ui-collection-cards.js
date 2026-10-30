@@ -10,6 +10,8 @@ const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const KEY = 'o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy';
 const LINK = 'https://example.com/liner-notes';
 const POST = `pubky://${KEY}/pub/social/v1/posts/0033SCZXVEPNG`;
+// An import's line that matched nothing: shown with its words, never asked of Pinakes
+const SEARCH = 'https://musicbrainz.org/search?type=recording&query=Nobody+Missing';
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}/v1${path}`, { method, headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => null);
@@ -18,7 +20,7 @@ const api = async (method, path, body) => {
 };
 (async () => {
   const SONG = 'https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69';
-  const c = await api('POST', '/collections', { name: 'Cards check', uris: [SONG, LINK, POST] });
+  const c = await api('POST', '/collections', { name: 'Cards check', uris: [SONG, LINK, POST, SEARCH] });
   const id = c.summary.id;
   const browser = await chromium.launch();
   try {
@@ -38,14 +40,18 @@ const api = async (method, path, body) => {
       const list = page.locator('#plsongs .list');
       await list.locator('.card-row .name', { hasText: 'Liner notes' }).waitFor();
       const rows = await list.locator(':scope > .list-row').evaluateAll((els) => els.map((e) => (e.classList.contains('card-row') ? 'card' : 'song')));
-      assert.deepEqual(rows, ['song', 'card', 'card'], 'one list, in the collection\'s order');
+      assert.deepEqual(rows, ['song', 'card', 'card', 'card'], 'one list, in the collection\'s order');
+      const search = list.locator('.card-row').nth(2);
+      assert.equal(await search.locator('.name').textContent(), 'Nobody Missing', 'the search shows its words');
+      assert.match(await search.locator('.card-sub').textContent(), /Not matched to a song yet/);
+      assert.equal(await search.locator('a', { hasText: 'Find on MusicBrainz' }).getAttribute('href'), SEARCH);
       const card = list.locator('.card-row').first();
       assert.match(await card.locator('.card-sub').textContent(), /example\.com · How it was made/);
       assert.equal(await card.locator('a', { hasText: 'Open' }).getAttribute('href'), LINK);
       assert.equal(await card.locator('[data-splay]').count(), 0, 'a card has no Play');
-      assert.deepEqual([...new Set(asked)].sort(), [LINK, POST].sort(), 'both cards are asked for');
+      assert.deepEqual([...new Set(asked)].sort(), [LINK, POST].sort(), 'both cards are asked for, the search never');
       assert.match(await list.locator('.card-row').nth(1).locator('.card-sub').textContent(), /A link/);
-      assert.match(await page.locator('.hero .sub').textContent(), /1 song · 2 links/);
+      assert.match(await page.locator('.hero .sub').textContent(), /1 song · 3 links/);
       // A card's ⋯ (review of #155, M2): Copy link always; on a phone the row's moves too
       await card.locator('[data-cmore]').click();
       const menu = page.locator('.popover.menu:not([hidden])'); await menu.waitFor();
@@ -53,8 +59,15 @@ const api = async (method, path, body) => {
       assert.ok(labels.some((l) => /Copy link/.test(l)), `Copy link: ${labels}`);
       if (width < 600) assert.ok(labels.some((l) => /Remove from playlist/.test(l)), `a phone reaches the row's moves: ${labels}`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(200);
-      // Clicking a card's row plays nothing and breaks nothing
+      // Clicking a card's row, or an unmatched line's words, plays nothing and breaks nothing
+      // (review of #156: the search row's click replaced the queue from song 1)
+      const sent = []; page.on('request', (r) => { if (r.method() !== 'GET' && r.url().includes('/v1/')) sent.push(`${r.method()} ${new URL(r.url()).pathname}`); });
       await card.locator('.grow').click();
+      await search.locator('.grow').click();
+      await page.waitForTimeout(500);
+      assert.deepEqual(sent, [], 'nothing was played');
+      assert.equal(await page.locator('#toast.show').count(), 0, 'nothing was tried');
+      assert.equal(await search.locator('a', { hasText: 'Find on MusicBrainz' }).getAttribute('aria-label'), 'Find “Nobody Missing” on MusicBrainz');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       assert.ok(overflow <= 0, `no sideways scroll at ${width} px (${overflow})`);
       assert.deepEqual(errors, []);
