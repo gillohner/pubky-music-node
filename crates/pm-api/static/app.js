@@ -2447,14 +2447,19 @@
     q: null,
     items: () => $$('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow'),
     reset() {
-      this.at = -1; search.removeAttribute('aria-activedescendant');
+      this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant');
       $$('#sresults .kfocus').forEach((el) => el.classList.remove('kfocus'));
     },
-    // After a re-render: the same search keeps its row (or the last one, if fewer came back)
+    // A row by what it is (its group and its first lines), not its place: answers arriving later
+    // move rows around
+    keyOf: (el) => `${(el.closest('[data-skind]') || { dataset: {} }).dataset.skind || ''}|${(el.innerText || '').split('\n').filter(Boolean).slice(0, 2).join('|')}`,
+    // After a re-render: the same search keeps the same row wherever it went; when it is gone the
+    // highlight goes too (and says so), so Enter never opens a row nobody announced
     keep(q) {
-      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      const n = this.items().length; if (!n) { this.at = -1; search.removeAttribute('aria-activedescendant'); return; }
-      this.at = Math.min(this.at, n - 1); this.show(false);
+      if (q !== this.q || this.at < 0) { this.q = q; this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); return; }
+      const items = this.items(); const k = items.findIndex((el) => this.keyOf(el) === this.key);
+      if (k < 0) { this.at = -1; this.key = null; search.removeAttribute('aria-activedescendant'); const said = $('#sresults-said'); if (said) said.textContent = 'The results changed'; return; }
+      this.at = k; this.show(false);
     },
     show(scroll) {
       const items = this.items(); const el = items[this.at]; if (!el) return;
@@ -2467,6 +2472,7 @@
     move(d) {
       const items = this.items(); if (!items.length) return;
       this.at = Math.max(0, Math.min(items.length - 1, this.at + d));
+      this.key = this.keyOf(items[this.at]);
       this.show(true);
       const said = $('#sresults-said'); if (said) said.textContent = `${(items[this.at].innerText || '').split('\n').filter(Boolean).slice(0, 2).join(', ')} (${this.at + 1} of ${items.length})`;
     },

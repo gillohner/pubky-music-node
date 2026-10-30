@@ -949,11 +949,15 @@ impl Library {
     }
 
     /// Put a file back: the next scan reads it again.
+    /// Back in the library: the song shows again at once (its file counts as there; the next scan
+    /// of its folder says otherwise if it is gone).
     pub fn unhide(&self, path: &str) -> Result<bool> {
-        Ok(self
-            .lock()
-            .execute("DELETE FROM hidden_files WHERE path = ?1", params![path])?
-            > 0)
+        let conn = self.lock();
+        let n = conn.execute("DELETE FROM hidden_files WHERE path = ?1", params![path])?;
+        if n > 0 {
+            conn.execute("UPDATE files SET missing = 0 WHERE path = ?1", params![path])?;
+        }
+        Ok(n > 0)
     }
 
     /// Library files by their file name (the last part of the path), for joining the
@@ -4070,6 +4074,9 @@ mod identify_tests {
         assert_eq!(lib.hidden_files().unwrap()[0].0, "/m/lucky.flac");
         assert!(lib.unhide("/m/lucky.flac").unwrap());
         assert!(!lib.is_hidden(Path::new("/m/lucky.flac")).unwrap());
+        // back at once, before any scan (a running scan or a remote folder may not read it soon)
+        assert!(lib.get_track(id).unwrap().is_some(), "back without a scan");
+        assert_eq!(lib.stats().unwrap().files, 2);
         // the next scan sees the file: the same song, with its plays and its edit
         lib.mark_file_seen(Path::new("/m/lucky.flac"), 0).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();

@@ -664,8 +664,41 @@ async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
         .discovery()
         .ok_or_else(|| "Posts on Pubky need the upstream contact (Settings)".to_string())?;
     let nexus = d.nexus();
-    let found = match hash_tags(q).first() {
-        Some(label) => nexus.posts_by_tag(label, limit.min(10)).await,
+    let tags = hash_tags(q);
+    let found = match tags.first() {
+        // One tag: Nexus' own list. Several: posts carrying all of them (each tag's list, kept
+        // where they meet, in the first tag's order)
+        Some(label) if tags.len() == 1 => nexus.posts_by_tag(label, limit.min(10)).await,
+        Some(_) => {
+            let lists =
+                futures_util::future::join_all(tags.iter().take(5).map(|l| nexus.posts_by_tag(l, 100))).await;
+            let mut lists = lists.into_iter();
+            match lists.next() {
+                Some(Ok(first)) => {
+                    let mut rest = Vec::new();
+                    let mut failed = None;
+                    for l in lists {
+                        match l {
+                            Ok(k) => rest.push(k.into_iter().collect::<std::collections::HashSet<_>>()),
+                            Err(e) => {
+                                failed = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    match failed {
+                        Some(e) => Err(e),
+                        None => Ok(first
+                            .into_iter()
+                            .filter(|k| rest.iter().all(|r| r.contains(k)))
+                            .take(limit.min(10) as usize)
+                            .collect()),
+                    }
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(Vec::new()),
+            }
+        }
         None => {
             // Nexus searches 2 to 30 characters and at most 4 words
             let term: String = text_words(q)

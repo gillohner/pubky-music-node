@@ -13680,7 +13680,11 @@ exec sleep 300
             )
             .route(
                 "/nexus/v0/search/posts/by_tag/{t}",
-                get(|| async { Json(serde_json::json!([{"post_key": "author1:0033", "score": 1}])) }),
+                // every tag carries post 0033; `rare` carries only another post
+                get(|Path(t): Path<String>| async move {
+                    let key = if t == "rare" { "author2:0044" } else { "author1:0033" };
+                    Json(serde_json::json!([{"post_key": key, "score": 1}]))
+                }),
             )
             .route(
                 "/nexus/v0/stream/posts/by_ids",
@@ -13788,6 +13792,27 @@ exec sleep 300
         // answers are cached per process)
         let (sources, _) = lines(app.clone(), "/v1/search?q=tag%3Alofi".into()).await;
         assert_eq!(sources, "library,pubky,posts");
+        // several tags: posts carrying all of them
+        let (_, ans) = lines(app.clone(), "/v1/search?tags=lofi,deep".into()).await;
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(
+            posts["hits"].as_array().map(Vec::len),
+            Some(1),
+            "both tags on 0033: {posts}"
+        );
+        let (_, ans) = lines(app.clone(), "/v1/search?tags=lofi,rare".into()).await;
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(
+            posts["hits"].as_array().map(Vec::len),
+            Some(0),
+            "no post has both: {posts}"
+        );
         let (sources2, ans) = lines(app.clone(), "/v1/search?tags=lofi".into()).await;
         assert_eq!(sources2, sources);
         // the tag reaches the posts search (Nexus's by_tag answers the post)
