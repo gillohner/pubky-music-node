@@ -597,8 +597,8 @@
       return;
     }
     if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
-    if (replace) startWait('play', state.zone, qitems[0].title || '');
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    if (replace) startWait('play', state.zone, qitems[0].title || '', true);
+    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (replace) startSent(); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
@@ -862,7 +862,7 @@
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     audio.play().catch(async (e) => {
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
       // Ask what came back: a busy node or a proxy in front of it can answer with an error page
@@ -872,7 +872,9 @@
       if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
-    if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    // A song moved in from a zone was counted there already
+    if (it.track_id != null && !it.moved) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    it.moved = false;
     mediaSessionUpdate(it);
     renderBar();
     if (state.view === 'queue') render();
@@ -929,9 +931,10 @@
       if (state.view === 'queue') render();
       return;
     }
-    if (replace) startWait('play', state.zone, tracks[0].title);
+    if (replace) startWait('play', state.zone, tracks[0].title, true);
     try {
       await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
+      if (replace) startSent();
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
     } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
@@ -953,7 +956,7 @@
       const st = await api('POST', `/zones/${state.zone}/transport`, action);
       state.zones[st.id] = st;
       renderBar();
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
   };
   const playStation = async (st) => {
     if (isBrowser()) {
@@ -961,14 +964,17 @@
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }
-    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    startWait('play', state.zone, st.name, true);
+    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const playPlaylist = async (id) => {
     try {
       if (isBrowser()) { const d = await api('GET', `/playlists/${id}`); playTracks(d.tracks.filter(Boolean), true); return; }
+      startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
       const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
+      startSent();
       toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const refreshQueue = async (rerender = true) => {
     if (!isBrowser()) {
@@ -1040,12 +1046,16 @@
     const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
     if (ytOf(it.uri)) { browserPlay(index); return; } // YouTube's player starts from the top
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
+    // The seek is for this song only: a later song (this one never loaded) is not moved
+    audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
     state.browserIndex = index;
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
-    audio.addEventListener('loadedmetadata', () => { try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
-    if (paused) { audio.preload = 'metadata'; audio.load(); } else audio.play().catch(() => {});
+    audio.preload = 'metadata'; audio.load();
     mediaSessionUpdate(it); renderBar();
   };
+  // Whether this browser can play a queue item: a library file, a stream it reaches, YouTube
+  const browserCanPlay = (it) => !!it && (/^track:\d+$/.test(it.uri || '') || !!ytOf(it.uri) || !!streamUrlFor(it.uri));
   // Move what plays to another device (owner, 2026-10-29): the song at its position, the queue,
   // repeat and radio; paused stays paused. Zone to zone is the node's transfer. This browser is no
   // zone of the node's, so out of it the target loads the browser's queue (POST /zones/{id}/load)
@@ -1057,6 +1067,8 @@
     const from = state.zone;
     if (target === from || moving) return;
     moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
+    // Zone to zone can take a while (the node opens the track first): say so at once when the menu is closed
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: 'This browser' } : state.zones[target]; toast(`Moving to ${(tz0 && tz0.name) || 'the zone'}…`); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -1088,6 +1100,9 @@
         const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
         if (!z.queue || !z.queue.length) throw new Error('Nothing to move: the queue is empty');
         const np = z.now_playing; const index = np ? np.index : (z.queue_index != null ? z.queue_index : -1); const pos = np ? np.position_ms || 0 : 0;
+        // Refused before the zone empties: the song in hand must be one this browser can play
+        const cur = index >= 0 ? z.queue[index] : null;
+        if (cur && z.transport !== 'stopped' && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
         await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
         state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
@@ -1106,8 +1121,10 @@
       if (target !== BROWSER && wasPlaying && tz && tz.transport !== 'playing') startWait('move', target, curTitle);
       renderZoneName(); renderBar(); refreshQueue();
       const name = (currentZone() || {}).name || target;
+      moving = false; // before the menu draws again, so its Move here buttons are on
       if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
     } catch (e) {
+      moving = false;
       if (resume) audio.play().catch(() => {});
       startFail(e.message, true);
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
@@ -1146,12 +1163,12 @@
   };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
-    const moving = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
+    const movingTo = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
-      </button>${moving === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
+      </button>${movingTo === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" ${moving ? 'disabled' : ''} data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
       + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
       + `<div class="pop-title">This zone</div>`
@@ -1432,23 +1449,36 @@
   // The play control just pressed: it shows a spinner until the music starts (capture phase, so
   // every play button on every page counts without each call site knowing)
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
-  const startWait = (what, zoneId = state.zone, title = '') => {
+  // `replace`: the queue is being replaced, so the song still playing does not end the wait
+  const startWait = (what, zoneId = state.zone, title = '', replace = false) => {
     startDone(true);
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
-    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a }; state.startError = null;
+    const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
+    // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
+    // (its song ended) isn't taken for the new one starting
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace }; state.startError = null;
     setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
     renderBar();
+  };
+  // The node took the replace: from now on the zone playing another song ends the wait (it may
+  // already be playing it)
+  const startSent = () => {
+    const s = state.starting; if (!s || s.sent) return; s.sent = true;
+    const z = state.zones[s.zone]; if (z && z.transport === 'playing' && z.now_playing && z.now_playing.item.id !== s.oldItem) startDone();
   };
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
   const startFail = (msg, quiet) => {
     const s = state.starting; if (!s) return; startDone(true);
-    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now() };
+    // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
+    const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
+    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
     if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? 'This browser' : 'The zone')}: ${state.startError.msg}`, 'error');
     renderBar(); setTimeout(renderBar, 10500);
   };
   // The browser's own player: it starts (or fails) by itself
   audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
+  audio.addEventListener('pause', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
   $('#np').onclick = () => toggleNowPlaying();
   $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
@@ -1463,20 +1493,36 @@
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
   // A quick switch: the whole config goes back with one part changed (what was set stays set)
+  // One switch at a time (a second one is built on the first's answer), and nothing set is lost:
+  // EQ remembers which bands were on (kept in this browser per zone), crossfeed and room correction
+  // switch their own `enabled` and keep their values.
+  const eqKey = (zone) => `pm.eqOn.${zone}`;
   const toggleDsp = async (what, on) => {
+    if (state.dspBusy) return;
+    state.dspBusy = true; state.dspFocus = what;
+    $$('[data-dsp]', qPanel).forEach((c) => { c.disabled = true; });
+    try {
     const zone = state.zone; const cfg = { ...((state.dspCfg || {})[zone] || {}) }; delete cfg.error;
-    if (what === 'eq') cfg.eq = (cfg.eq || []).map((b) => ({ ...b, enabled: on }));
+    if (what === 'eq') {
+      const bands = cfg.eq || [];
+      if (!on) { try { localStorage.setItem(eqKey(zone), JSON.stringify(bands.map((b) => b.enabled !== false))); } catch { /* no storage: all come back on */ } }
+      let was = null; if (on) { try { was = JSON.parse(localStorage.getItem(eqKey(zone)) || 'null'); } catch { was = null; } }
+      const back = Array.isArray(was) && was.length === bands.length && was.some(Boolean) ? was : null;
+      cfg.eq = bands.map((b, i) => ({ ...b, enabled: on ? (back ? back[i] : true) : false }));
+    }
     if (what === 'room' && cfg.convolution) cfg.convolution = { ...cfg.convolution, enabled: on };
     if (what === 'loudness') { if (!on && cfg.loudness && cfg.loudness !== 'off') state.loudnessLast = cfg.loudness; cfg.loudness = on ? (state.loudnessLast || 'album') : 'off'; }
-    if (what === 'crossfeed') { if (!on && cfg.crossfeed) state.crossfeedLast = cfg.crossfeed; cfg.crossfeed = on ? { ...(state.crossfeedLast || { level_db: -6, cutoff_hz: 700, delay_us: 300 }), enabled: true } : null; }
-    try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
-    qPanelKey = null; // re-render whatever the node says now (a refused change too)
+    if (what === 'crossfeed') cfg.crossfeed = cfg.crossfeed ? { ...cfg.crossfeed, enabled: on } : on ? { level_db: -6, cutoff_hz: 700, delay_us: 300, enabled: true } : null;
+    try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); (state.dspCfg = state.dspCfg || {})[zone] = cfg; toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
     await loadDsp();
+    } finally { state.dspBusy = false; qPanelKey = null; syncQPanel(); }
   };
   const renderQPanel = () => {
     const z = currentZone(); if (!z) return; const np = z.now_playing; const cfg = (state.dspCfg || {})[state.zone];
     // A re-render (the outputs arrived, a switch answered) keeps the keyboard where it was
-    const ae = document.activeElement; const had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
+    const ae = document.activeElement; let had = qPanel.contains(ae) ? (ae.id ? '#' + ae.id : ae.dataset && ae.dataset.dsp ? `[data-dsp="${ae.dataset.dsp}"]` : null) : null;
+    // A switch that answered gets the keyboard back (disabling it while it saved dropped the focus)
+    if (!had && state.dspFocus && !state.dspBusy) { had = `[data-dsp="${state.dspFocus}"]`; state.dspFocus = null; }
     const svc = np && npSvc(np);
     const row = (id, label, on, disabled, note) => `<label class="qp-row${disabled ? ' off' : ''}"><span class="grow"><span class="name">${label}</span>${note ? `<span class="sub">${esc(note)}</span>` : ''}</span><input type="checkbox" class="switch" data-dsp="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"></label>`;
     let dsp;
@@ -1507,7 +1553,7 @@
       <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>
       <div class="qp-foot">${np && np.format ? '<button class="btn sm ghost" id="qpquality">Quality choices…</button>' : ''}<button class="btn sm ghost" id="qpnow">${icon('play')} Now playing</button></div>`;
     qPanelKey = qpKey();
-    $$('[data-dsp]', qPanel).forEach((c) => c.onchange = () => { c.disabled = true; toggleDsp(c.dataset.dsp, c.checked); });
+    $$('[data-dsp]', qPanel).forEach((c) => { if (state.dspBusy) c.disabled = true; c.onchange = () => toggleDsp(c.dataset.dsp, c.checked); });
     const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
     const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
@@ -2572,7 +2618,7 @@
   const svcBadge = (site, extra = '') => site ? `<span class="src-badge ico${extra ? ' ' + extra : ''}" title="${esc(site)}">${svcIcon(site)}</span>` : '';
   // A service we can name on a cover: the library, or one with an accent or a glyph. Not a
   // MusicBrainz or Pubky page (nothing plays from those) and not a plain link.
-  const knownSvc = (k) => (k && k !== 'musicbrainz' && (k === 'library' || Object.hasOwn(SRC_ACCENT, k) || Object.hasOwn(SERVICE_GLYPHS, k)) ? k : null);
+  const knownSvc = (k) => (k && k !== 'musicbrainz' && (k === 'library' || Object.prototype.hasOwnProperty.call(SRC_ACCENT, k) || Object.prototype.hasOwnProperty.call(SERVICE_GLYPHS, k)) ? k : null);
   // The provider badge on a cover (owner, 2026-10-29): where this plays from, in the cover's bottom
   // left corner. The service's glyph in its own colour on a dark disc with a light ring, so it reads
   // on light and dark covers; our own files get a white glyph. Absolute over the cover (no layout
@@ -4155,9 +4201,10 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
-            api('GET', `/tags?${refQs(songRef)}`).then((r) => r.tags).catch(() => null),
+            // An item with no identity yet (needs_match): the "match it first" message, no editor
+            api('GET', `/tags?${refQs(songRef)}`).then((r) => (r.needs_match ? null : r.tags)).catch(() => null),
             linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
-            api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
+            api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
@@ -5177,11 +5224,12 @@
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
         if (state.starting && ev.state.id === state.starting.zone) {
-          if (ev.state.transport === 'playing' || (state.starting.what === 'move' && ev.state.transport !== 'stopped')) startDone(true);
+          const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
+          if (state.starting.sent !== false && ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped'))) startDone(true);
           // Only an error that is new fails the start: the engine keeps the last error until a track starts
           else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
-        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
+        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id && !(ev.state.now_playing && ev.state.now_playing.item.id === state.startError.still)) state.startError = null;
         if (!old) { renderZoneName(); refreshAlong(); }
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();

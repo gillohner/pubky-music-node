@@ -224,7 +224,7 @@ pub struct SourceArtist {
 }
 
 /// Where else a library album or track can be streamed from (Roon's "Versions").
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Version {
     pub source: String,
     /// Source item id (`album:<id>` / `track:<id>`), for `/v1/sources/{source}/items/{id}`.
@@ -374,6 +374,10 @@ pub struct Tags {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub tags: Vec<TagEntry>,
+    /// The item has no identity yet (an album or artist without a MusicBrainz id): it can't
+    /// take tags until it is matched. An unmatched song still takes tags that wait for a match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +421,9 @@ pub struct Reviews {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub reviews: Vec<ReviewEntry>,
+    /// The item has no identity yet: it can't be reviewed until it is matched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -971,12 +978,79 @@ pub struct ArtistDetail {
     pub albums: Vec<Album>,
 }
 
-/// What open sources know about an artist (see `artist_info`).
+/// A short "About" text, where it is from and the credit it needs.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AboutText {
+    pub text: String,
+    /// `Wikipedia` or `TheAudioDB`.
+    pub source: String,
+    /// The article's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// "Read more on Wikipedia".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::web::serialize_link"
+    )]
+    pub url: Option<String>,
+    /// The article's language (the reader's, else `en`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// `CC BY-SA 4.0` for Wikipedia.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licence: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::web::serialize_link"
+    )]
+    pub licence_url: Option<String>,
+}
+
+/// The credit line a picture from Wikimedia Commons needs.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ImageCredit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// `CC BY-SA 3.0`, `Public domain`…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licence: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::web::serialize_link"
+    )]
+    pub licence_url: Option<String>,
+    /// The file's page on Commons.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::web::serialize_link"
+    )]
+    pub file_page: Option<String>,
+    /// `Wikimedia Commons`.
+    pub source: String,
+}
+
+/// What open sources know about an artist (see `artist_info`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ArtistInfo {
-    /// Opening paragraph of the English Wikipedia article.
+    /// Opening paragraph of the Wikipedia article (in the reader's language, else English).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
+    /// The same text with its source, language and licence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<AboutText>,
+    /// The portrait's credit when it is from Wikimedia Commons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_credit: Option<ImageCredit>,
+    /// Origin, active years, genres, members (Wikidata, labels in the reader's language).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<Fact>,
+    /// "Also on": the artist on TIDAL, Qobuz, Spotify… from MusicBrainz's links.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Version>,
     /// A portrait is cached; fetch it from `/v1/library/artists/{id}/image`.
     #[serde(default)]
     pub image: bool,
@@ -1187,8 +1261,18 @@ pub struct ItemPage {
     /// An artist's upcoming concerts (once Pinakes keys event performers).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub concerts: Vec<DiscoverItem>,
+    /// The About text with its source and licence (Wikipedia, in the reader's language).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about_text: Option<AboutText>,
+    /// The picture's credit when it is from Wikimedia Commons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_credit: Option<ImageCredit>,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
+    /// A library artist's or album's MusicBrainz id (an album's release group) and where it came
+    /// from: the tags, or the node's lookup. None while unmatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mb_match: Option<pm_library::matching::MbMatch>,
 }
 
 /// One song on an item page (an album's tracks, an artist's top songs).
