@@ -12110,13 +12110,13 @@ exec sleep 300
     }
 
     /// The LAN address the node picks for speakers when public_url is empty is not where the
-    /// browser is: sign-in callbacks follow the request (localhost, umbrel.local, a proxy). A
+    /// browser is: sign-in callbacks follow the request (localhost, a `.local` name, a proxy). A
     /// public_url the owner set is used as it is.
     #[tokio::test]
     async fn a_guessed_public_url_leaves_sign_in_callbacks_to_the_request() {
         let dir = tempfile::tempdir().unwrap();
         let lan = "http://192.168.1.10:7788";
-        for host in ["localhost:7788", "umbrel.local:7788"] {
+        for host in ["localhost:7788", "nas.local:7788"] {
             let s = state_at(dir.path(), lan, true).await;
             assert_eq!(
                 tidal_redirect(s, host).await,

@@ -309,7 +309,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/');
     await p.waitForSelector('#login[open]');
     const hint = await p.textContent('#login details');
-    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && /Umbrel/.test(hint), 'the login dialog says where the token is');
+    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint), 'the login dialog says where the token is');
     check(await p.locator('#login a[href*="troubleshooting.md"]').count() === 1, 'and links the guide');
     await c.close();
   } finally {

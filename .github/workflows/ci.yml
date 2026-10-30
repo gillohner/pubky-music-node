@@ -293,25 +293,10 @@ jobs:
           ./restore.sh "$B"
           python3 -I ../../tools/bundle-backup-check.py compare . $RUNNER_TEMP/before.json
       - run: python3 -I tools/bundle-check.py deploy/bundle
-      - name: the Umbrel app, as umbrelOS runs it (Umbrel's variables, this commit's node image)
-        run: |
-          (cd deploy/bundle && docker compose down)
-          U=$RUNNER_TEMP/umbrel
-          mkdir -p $U/root/data/storage
-          # umbrelOS copies the package to app-data/<app-id> and drops the placeholders
-          cp -r deploy/umbrel/pubky-music-node $U/app && find $U/app -name .gitkeep -delete
-          # ... as its own user, uid 1000 (the node's uid too); the runner's user is 1001
-          sudo chown -R 1000:1000 $U/app
-          printf 'services:\n  node:\n    image: pubky-music-node:ci\n    devices: !reset []\n' > $U/ci.yml
-          export APP_DATA_DIR=$U/app UMBREL_ROOT=$U/root DEVICE_DOMAIN_NAME=umbrel.local
-          export APP_SEED=$(openssl rand -hex 32) APP_PASSWORD=$(openssl rand -hex 32)
-          docker compose -p pubky-music-node -f $U/app/docker-compose.yml -f $U/ci.yml up -d
-          python3 -I tools/umbrel-check.py pubky-music-node "$APP_SEED" "$APP_PASSWORD" "$APP_DATA_DIR"
       - if: failure()
         working-directory: deploy/bundle
         run: |
           docker compose ps -a && docker compose logs --no-color --tail 80
-          docker compose -p pubky-music-node ps -a; docker compose -p pubky-music-node logs --no-color --tail 80 || true
   webdav:
     # A WebDAV share as a library root against a real WebDAV server (WsgiDAV, pinned), with a
     # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).

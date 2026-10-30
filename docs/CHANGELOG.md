@@ -8,6 +8,7 @@ Newest first. Dates are when the change landed on `main`.
 
 - **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.
 - **Settings › This node › Service apps can be changed.** Each service says whether this build's own app is in use or yours, and what the service limits in plain words: Spotify's 25 people, TIDAL's previews, Qobuz's partner-only apps, Google's 100 people before verification. "Advanced: use your own app" takes the admin's own app, with the redirect address it lists, and "Use built-in" goes back. TIDAL, Jamendo, Google Drive and OneDrive, which only node.toml could set before, take one here too (`PUT /v1/node/apps/{id}`). It is kept like a sign-in, never answered, and node.toml still wins.
+- **Removed: the Umbrel app.** Not supported for now; use the Linux bundle or Docker. `deploy/umbrel/`, its install guide, its CI check and the store mirror are gone; the store repository stays as it is.
 
 ## 0.2.1
 
