@@ -383,7 +383,7 @@ enum Paused {
     Held,
     /// Stopped instead (it ignores Pause on a live stream): the resume starts it again.
     Stopped,
-    /// It refused: it plays its buffer out, as before.
+    /// It refused both Pause and Stop (or never started): it plays its buffer out, as before.
     Refused,
 }
 
@@ -418,7 +418,7 @@ fn pause_renderer(
         return if closed() { Paused::Held } else { stop() };
     }
     let deadline = std::time::Instant::now() + PAUSE_CONFIRM;
-    let mut last = None;
+    let mut last: Option<String>;
     loop {
         if closed() {
             return Paused::Held;
@@ -431,14 +431,14 @@ fn pause_renderer(
             Some("STOPPED") => return Paused::Stopped,
             _ => {}
         }
-        last = state.or(last);
+        last = state;
         if std::time::Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    // A renderer that never said its state may well have paused: nothing learned from that
-    if last.is_none() || closed() {
+    // Only a renderer last seen playing on is learned; one that didn't say may well have paused
+    if !matches!(last.as_deref(), Some("PLAYING" | "TRANSITIONING")) || closed() {
         return Paused::Held;
     }
     tracing::info!("the renderer plays on after Pause; stopping it for pauses from now on");
@@ -604,10 +604,12 @@ impl AudioSink for UpnpSink {
                     self.pauses_pending -= 1;
                     outcome = Some(how);
                 }
-                Err(_) => {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     self.pauses_pending = 0;
                     break;
                 }
+                // Still coming: the next resume reads it first
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
         if outcome == Some(Paused::Stopped) {
