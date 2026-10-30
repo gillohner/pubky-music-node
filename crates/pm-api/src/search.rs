@@ -63,6 +63,15 @@ pub struct SearchHit {
     /// Found through a Pubky tag: the label (the row says "tagged #chill").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tagged: Option<String>,
+    /// A library file's format in words: `FLAC 16/44.1`, `MP3 320 kbps`, `DSD64`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// `hi_res`, `lossless` or `lossy` (library files); a facet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    /// The site a Pubky card is from (`tidal.com`, `open.spotify.com`); a facet and a badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
 }
 
 /// One source's answer (one NDJSON line).
@@ -87,12 +96,26 @@ pub struct SourceAnswer {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchParams {
+    #[serde(default)]
     pub q: String,
     /// `everywhere` (default), `library`, `pubky`, or a service id.
     #[serde(default, rename = "in")]
     pub scope: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Tag labels, comma-separated: the same as `#label` words in `q` (several: all of them).
+    #[serde(default)]
+    pub tags: Option<String>,
+}
+
+/// `q` with the `tags` parameter folded in as `#label` words, so one grammar serves both.
+pub(crate) fn query_with_tags(p: &SearchParams) -> String {
+    let mut q = p.q.trim().to_string();
+    for label in p.tags.iter().flat_map(|t| t.split(',')).flat_map(tag_labels) {
+        q.push_str(" #");
+        q.push_str(&label);
+    }
+    q.trim().to_string()
 }
 
 /// The sources a scope asks.
@@ -102,13 +125,25 @@ pub fn sources_for(s: &NodeState, scope: &str) -> Vec<String> {
         .filter(|x| s.source_enabled(x.id()) && x.unified(s))
         .map(|x| x.id().to_string())
         .collect();
+    // People and posts come from Nexus, which the node reaches through its discovery setup
+    let social: Vec<String> = if s.discovery().is_some() {
+        vec!["people".to_string(), "posts".to_string()]
+    } else {
+        Vec::new()
+    };
     match scope {
         "" | "everywhere" => {
             let mut v = vec!["library".to_string(), "pubky".to_string()];
+            v.extend(social);
             v.extend(svcs);
             v
         }
-        "library" | "pubky" => vec![scope.to_string()],
+        "pubky" => {
+            let mut v = vec!["pubky".to_string()];
+            v.extend(social);
+            v
+        }
+        "library" => vec![scope.to_string()],
         other if services().iter().any(|x| x.id() == other) && s.source_enabled(other) => {
             vec![other.to_string()]
         }
@@ -130,15 +165,25 @@ fn cache() -> &'static AnswerCache {
 }
 
 /// `GET /v1/search?q=&in=`: NDJSON, one line per source as it answers.
-pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<SearchParams>) -> Response {
-    let q = p.q.trim().to_string();
+pub(crate) async fn search(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<crate::accounts::Caller>,
+    Query(p): Query<SearchParams>,
+) -> Response {
+    let owner = c.role == crate::accounts::Role::Owner;
+    let q = query_with_tags(&p);
     let scope = p.scope.clone().unwrap_or_default();
     let limit = p.limit.unwrap_or(20).clamp(1, 50);
     let sources = if q.is_empty() {
         Vec::new()
     } else if !hash_tags(&q).is_empty() {
-        // `#tag`: tags only, yours and everyone's
-        vec!["library".to_string(), "pubky".to_string()]
+        // `#tag`: tags only, yours and everyone's (posts carrying the tag too, unless the scope is
+        // the library)
+        let mut v = vec!["library".to_string(), "pubky".to_string()];
+        if s.discovery().is_some() && matches!(scope.as_str(), "" | "everywhere" | "pubky") {
+            v.push("posts".to_string());
+        }
+        v
     } else {
         sources_for(&s, &scope)
     };
@@ -147,7 +192,15 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
     for src in sources {
         let (s, q, tx) = (s.clone(), q.clone(), tx.clone());
         tokio::spawn(async move {
-            let key = (q.to_lowercase(), src.clone());
+            // The library's answer differs for a listener (no owner's playlists): cached apart
+            let key = (
+                q.to_lowercase(),
+                if owner {
+                    src.clone()
+                } else {
+                    format!("{src}|listener")
+                },
+            );
             let hit = cache()
                 .lock()
                 .expect("search cache")
@@ -161,7 +214,8 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
                 }
                 None => {
                     let started = Instant::now();
-                    let res = tokio::time::timeout(SOURCE_TIMEOUT, one_source(&s, &src, &q, limit)).await;
+                    let res =
+                        tokio::time::timeout(SOURCE_TIMEOUT, one_source(&s, &src, &q, limit, owner)).await;
                     let ms = started.elapsed().as_millis() as u64;
                     let a = match res {
                         Ok(Ok((hits, counts))) => SourceAnswer {
@@ -220,10 +274,21 @@ pub(crate) async fn search(State(s): State<Arc<NodeState>>, Query(p): Query<Sear
 
 type Found = (Vec<SearchHit>, Vec<(String, i64)>);
 
-async fn one_source(s: &Arc<NodeState>, src: &str, q: &str, limit: u32) -> Result<Found, String> {
+async fn one_source(
+    s: &Arc<NodeState>,
+    src: &str,
+    q: &str,
+    limit: u32,
+    owner: bool,
+) -> Result<Found, String> {
     match src {
-        "library" => Ok((library(s, q, limit).map_err(|e| e.to_string())?, Vec::new())),
+        "library" => Ok((
+            library(s, q, limit, owner).map_err(|e| e.to_string())?,
+            Vec::new(),
+        )),
         "pubky" => pubky(s, q, limit).await,
+        "people" => people(s, q, limit).await,
+        "posts" => posts(s, q, limit).await,
         other => {
             let svc = services()
                 .into_iter()
@@ -267,6 +332,8 @@ pub(crate) fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
         album_id: t.album.as_ref().and_then(|a| a.id).map(|i| format!("lib-{i}")),
         duration_ms: t.duration_ms,
         keys,
+        format: Some(file_format(&t.file)),
+        quality: Some(file_quality(&t.file).into()),
         ..Default::default()
     })
 }
@@ -300,6 +367,34 @@ pub(crate) fn album_hit(a: &pm_model::Album) -> Option<SearchHit> {
             .unwrap_or_default(),
         ..Default::default()
     })
+}
+
+/// A file's format in words: `FLAC 16/44.1`, `MP3 320 kbps` (no bitrate known: `MP3`), `DSD64`.
+pub(crate) fn file_format(f: &pm_model::AudioFile) -> String {
+    let fm = &f.format;
+    if matches!(fm.kind, pm_model::SampleKind::Dsd) {
+        return format!("DSD{}", (fm.rate_hz / 44_100).max(1));
+    }
+    let codec = f.container.to_uppercase();
+    if file_quality(f) == "lossy" {
+        return codec;
+    }
+    let k = fm.rate_hz as f64 / 1000.0;
+    let rate = format!("{:.1}", k).trim_end_matches(".0").to_string();
+    format!("{codec} {}/{rate}", fm.bits)
+}
+
+/// `hi_res`, `lossless` or `lossy`, from the container and the sample format.
+pub(crate) fn file_quality(f: &pm_model::AudioFile) -> &'static str {
+    let fm = &f.format;
+    let lossy = pm_library::tags::is_lossy_container(&f.container.to_lowercase());
+    if lossy {
+        "lossy"
+    } else if matches!(fm.kind, pm_model::SampleKind::Dsd) || fm.bits > 16 || fm.rate_hz > 48_000 {
+        "hi_res"
+    } else {
+        "lossless"
+    }
 }
 
 /// `#chill #90s` in the library: what you tagged with all of them (your tags table, offline).
@@ -358,7 +453,8 @@ fn library_tagged(
     Ok(out)
 }
 
-fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchHit>> {
+/// `owner`: the node's own playlists are the owner's; a listener's search leaves them out.
+fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Result<Vec<SearchHit>> {
     let lib = s.library.lock().expect("library poisoned");
     let hashed = hash_tags(q);
     if !hashed.is_empty() {
@@ -373,6 +469,24 @@ fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchH
         .take(8)
     {
         out.push(artist_hit(&a));
+    }
+    let own_playlists = if owner {
+        crate::playlists::summaries_named(&lib, &needle, 6).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for pl in own_playlists {
+        out.push(SearchHit {
+            kind: "playlist".into(),
+            title: pl.name.clone(),
+            subtitle: Some(format!(
+                "{} · your playlist",
+                crate::plural(pl.items as u64, "song")
+            )),
+            image: pl.image.clone(),
+            id: pl.id.clone(),
+            ..Default::default()
+        });
     }
     for a in lib.search_albums(q, 12)? {
         out.extend(album_hit(&a));
@@ -416,12 +530,26 @@ pub(crate) fn tag_labels(term: &str) -> Vec<String> {
     out
 }
 
-/// `#chill #90s` → `["chill", "90s"]`; none when the term has no `#` word.
+/// `#chill #90s` (or `tag:chill tag:90s`) → `["chill", "90s"]`; none when the term has no tag word.
 pub(crate) fn hash_tags(q: &str) -> Vec<String> {
     q.split_whitespace()
-        .filter(|w| w.starts_with('#') && w.len() > 1)
+        .filter_map(|w| {
+            if w.starts_with('#') && w.len() > 1 {
+                Some(w)
+            } else {
+                w.strip_prefix("tag:").filter(|r| !r.is_empty())
+            }
+        })
         .flat_map(tag_labels)
         .collect()
+}
+
+/// The words of `q` that are not tags (`#x` or `tag:x`): what text search gets.
+pub(crate) fn text_words(q: &str) -> String {
+    q.split_whitespace()
+        .filter(|w| !(w.starts_with('#') && w.len() > 1) && !w.starts_with("tag:"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn card_hit(c: &pm_pubky::pinakes::Card) -> Option<SearchHit> {
@@ -450,8 +578,163 @@ pub(crate) fn card_hit(c: &pm_pubky::pinakes::Card) -> Option<SearchHit> {
         uri: crate::discover::playable_uri(&c.uri),
         page: Some(c.uri.clone()),
         keys,
+        site: c.site.clone(),
         ..Default::default()
     })
+}
+
+/// People on Pubky whose name starts with the term (Nexus).
+/// Until when Nexus asked the node to wait (a 429): people and posts aren't asked meanwhile, so a
+/// search per keystroke doesn't keep it busy.
+fn nexus_wait() -> &'static Mutex<Option<Instant>> {
+    static WAIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    WAIT.get_or_init(|| Mutex::new(None))
+}
+
+const NEXUS_BUSY: &str = "Pubky search is busy: try again in a few seconds";
+
+fn nexus_ready() -> Result<(), String> {
+    match *nexus_wait().lock().expect("nexus wait") {
+        Some(until) if Instant::now() < until => Err(NEXUS_BUSY.into()),
+        _ => Ok(()),
+    }
+}
+
+fn nexus_error(e: pm_pubky::nexus::NexusError) -> String {
+    if let pm_pubky::nexus::NexusError::RateLimited(after) = e {
+        let wait = after
+            .unwrap_or(Duration::from_secs(10))
+            .min(Duration::from_secs(120));
+        *nexus_wait().lock().expect("nexus wait") = Some(Instant::now() + wait);
+        return NEXUS_BUSY.into();
+    }
+    e.to_string()
+}
+
+async fn people(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String> {
+    nexus_ready()?;
+    let d = s
+        .discovery()
+        .ok_or_else(|| "People on Pubky need the upstream contact (Settings)".to_string())?;
+    let term = text_words(q);
+    if term.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if term.chars().count() < 2 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let users = match d.nexus().users_by_name(&term, limit.min(10)).await {
+        Ok(u) => u,
+        Err(pm_pubky::nexus::NexusError::NotFound) => Vec::new(),
+        Err(e) => return Err(nexus_error(e)),
+    };
+    let hits = users
+        .into_iter()
+        .map(|u| {
+            let id = u.details.id.clone();
+            let bio = u.details.bio.clone().unwrap_or_default();
+            let bio = bio.trim();
+            SearchHit {
+                kind: "person".into(),
+                title: u.details.name.clone(),
+                subtitle: Some(if bio.is_empty() {
+                    "on Pubky".to_string()
+                } else {
+                    bio.chars().take(80).collect()
+                }),
+                image: u
+                    .details
+                    .image
+                    .as_ref()
+                    .map(|_| format!("/v1/profiles/{id}/avatar")),
+                id: id.clone(),
+                page: Some(format!("https://pubky.app/profile/{id}")),
+                uri: Some(format!("pubky://{id}")),
+                ..Default::default()
+            }
+        })
+        .collect();
+    Ok((hits, Vec::new()))
+}
+
+/// Posts on Pubky whose text matches the term, or that carry the `#tag` (Nexus).
+async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String> {
+    nexus_ready()?;
+    let d = s
+        .discovery()
+        .ok_or_else(|| "Posts on Pubky need the upstream contact (Settings)".to_string())?;
+    let nexus = d.nexus();
+    let found = match hash_tags(q).first() {
+        Some(label) => nexus.posts_by_tag(label, limit.min(10)).await,
+        None => {
+            // Nexus searches 2 to 30 characters and at most 4 words
+            let term: String = text_words(q)
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(30)
+                .collect();
+            if term.trim().chars().count() < 2 {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            nexus.posts_by_content(term.trim(), limit.min(10)).await
+        }
+    };
+    let keys = match found {
+        Ok(k) => k,
+        Err(pm_pubky::nexus::NexusError::NotFound) => Vec::new(),
+        Err(e) => return Err(nexus_error(e)),
+    };
+    let views = nexus.posts_by_ids(&keys).await.map_err(|e| e.to_string())?;
+    let authors: Vec<String> = {
+        let mut a: Vec<String> = views.iter().map(|p| p.details.author.clone()).collect();
+        a.sort();
+        a.dedup();
+        a
+    };
+    let names: HashMap<String, String> = nexus
+        .users_by_ids(&authors, None)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| (u.details.id.clone(), u.details.name.clone()))
+        .collect();
+    let hits = views
+        .into_iter()
+        .map(|p| {
+            let d = p.details;
+            let first = d
+                .content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            let title: String = if first.is_empty() {
+                "Untitled post".to_string()
+            } else if first.chars().count() > 120 {
+                format!("{}…", first.chars().take(119).collect::<String>())
+            } else {
+                first.to_string()
+            };
+            let by = names.get(&d.author).cloned().unwrap_or_else(|| "someone".into());
+            SearchHit {
+                kind: "post".into(),
+                title,
+                // The kind when it says more than "a post" (Nexus' social kind is "" when unknown)
+                subtitle: Some(match d.kind.as_str() {
+                    "" | "short" | "long" => by,
+                    k => format!("{by} · {k}"),
+                }),
+                id: format!("post-{}:{}", d.author, d.id),
+                page: Some(format!("https://pubky.app/post/{}/{}", d.author, d.id)),
+                uri: Some(d.uri.clone()).filter(|u| !u.is_empty()),
+                ..Default::default()
+            }
+        })
+        .collect();
+    Ok((hits, Vec::new()))
 }
 
 /// Pubky: the text query and, in parallel, the term as tags (STEWARD-FIX-search-tags.md); a

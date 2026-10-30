@@ -135,10 +135,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!asksContact && (!hsecs.includes('Trending songs') || !hsecs.includes('Tags people use for music'))) errors.push('home sections incomplete');
   if (w.document.querySelector('.nav-item[data-view="discover"]')) errors.push('the Discover sidebar entry is still there');
   // Identify library: a card in Settings; an unidentified row's mark asks "Which song is this?".
-  w.document.querySelector('.nav-item[data-view="settings"]').click(); await sleep(1500);
+  // The Identify card lives in Your library › Node library
+  w.document.querySelector('.nav-item[data-view="library"]').click(); await sleep(900);
+  w.document.querySelector('[data-libtab="node"]').click(); await sleep(1800);
   const idbox = w.document.querySelector('#idbox');
   console.log('identify card:', idbox ? idbox.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) : null);
-  if (!idbox || /Loading/.test(idbox.textContent)) errors.push('no identify card in Settings');
+  if (!idbox || /Loading/.test(idbox.textContent)) errors.push('no identify card in Your library › Node library');
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(900);
   const mark = w.document.querySelector('.track .idmark');
   if (mark) {
