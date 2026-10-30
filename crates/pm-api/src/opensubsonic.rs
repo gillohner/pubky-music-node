@@ -606,6 +606,7 @@ pub(crate) async fn import_playlist(
         imported,
         skipped,
         playlist: Some(detail),
+        ..Default::default()
     }))
 }
 
