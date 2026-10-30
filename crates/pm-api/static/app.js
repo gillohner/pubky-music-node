@@ -3154,11 +3154,13 @@
     const b = $('#livebtn'); if (!b) return;
     if (!(await pubkyUser())) { b.hidden = true; return; }
     const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
+    state.liveShow = show;
     try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
     b.onclick = async () => {
       const on = b.getAttribute('aria-pressed') !== 'true';
       b.disabled = true;
-      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+      // On an error the switch shows what the node has now, not what was asked
+      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); try { show(await api('GET', '/me/listening')); } catch { /* keep it */ } } finally { b.disabled = false; }
     };
   };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
@@ -5344,6 +5346,7 @@
         const zn = state.zones[ev.zone]; toast(`${zn ? zn.name : 'This zone'}: ${ev.event.message || 'something went wrong'}`, 'error');
       }
       else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
+      else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };

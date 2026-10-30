@@ -576,11 +576,24 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
-    Snapshot { zones: Vec<ZoneState> },
-    Zone { state: ZoneState },
-    ZoneEvent { zone: ZoneId, event: ZoneEvent },
-    ZoneRemoved { zone: ZoneId },
+    Snapshot {
+        zones: Vec<ZoneState>,
+    },
+    Zone {
+        state: ZoneState,
+    },
+    ZoneEvent {
+        zone: ZoneId,
+        event: ZoneEvent,
+    },
+    ZoneRemoved {
+        zone: ZoneId,
+    },
     LibraryChanged,
+    /// The homeserver refused the owner's listening post: "Share what I'm listening to" is off.
+    ListeningStopped {
+        error: String,
+    },
 }
 
 // ---- playlists (ADR 0006) ----
