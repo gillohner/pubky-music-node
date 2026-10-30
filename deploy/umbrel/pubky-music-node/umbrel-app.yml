@@ -2,7 +2,7 @@ manifestVersion: 1
 id: pubky-music-node
 category: media
 name: Pubky Music Node
-version: "0.2.0"
+version: "0.2.1"
 tagline: Bit-perfect music server and zones, built on Pubky
 icon: https://raw.githubusercontent.com/gillohner/pubky-music-node/main/deploy/umbrel/pubky-music-node/icon.svg
 description: >-
@@ -34,11 +34,11 @@ defaultPassword: ""
 # APP_PASSWORD (shown by umbrelOS): the token for the web UI, the apps and Subsonic clients.
 deterministicPassword: true
 releaseNotes: >-
-  v0.2.0. Your Umbrel storage is read at start and listed in Settings › Library folders, with
-  no folder to add. Sonos and UPnP/Cast speakers get the box's network address without any
-  setting. Settings now has four groups (You, This device, This node, This homeserver), matching
-  the guides. Group Sonos, HEOS and BluOS speakers from Settings. Get started shows only what is
-  left and can be hidden. Security fixes from the October review; offline downloads in the
-  phone and desktop app; the player shows what it is streaming.
+  v0.2.1, playback fixes. AirPlay 2 speakers that refused the stream (Bluesound and others) play,
+  and a Linn's AirPlay survives a pause. BluOS zones no longer die on play and hear the whole
+  queue. A zone's error now shows in the player bar and on its card. Scans skip a Mac's ._ files
+  and no longer skip files on a busy database. MusicBrainz is asked one request at a time, so a
+  big Identify stops getting errors. Covers show where they play from. Known issue: a Linn DS
+  over UPnP still does not start; play to it over AirPlay until the next update.
 submitter: Pubky Music
 submission: https://github.com/gillohner/pubky-music-node
