@@ -1427,7 +1427,9 @@
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
   const startFail = (msg, quiet) => {
     const s = state.starting; if (!s) return; startDone(true);
-    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now() };
+    // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
+    const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
+    state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
     if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? 'This browser' : 'The zone')}: ${state.startError.msg}`, 'error');
     renderBar(); setTimeout(renderBar, 10500);
   };
@@ -5184,7 +5186,7 @@
           // Only an error that is new fails the start: the engine keeps the last error until a track starts
           else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
-        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
+        if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id && !(ev.state.now_playing && ev.state.now_playing.item.id === state.startError.still)) state.startError = null;
         if (!old) renderZoneName();
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
