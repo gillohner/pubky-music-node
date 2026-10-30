@@ -288,8 +288,10 @@ impl NexusClient {
     pub async fn users_by_name(&self, username: &str, limit: u32) -> Result<Vec<UserView>, NexusError> {
         let resp = self
             .http
-            .get(self.url("/stream/users/username"))
-            .query(&[("username", username), ("limit", &limit.to_string())])
+            .get(with_query(
+                &self.url("/stream/users/username"),
+                &[("username", username), ("limit", &limit.to_string())],
+            ))
             .send()
             .await?;
         Self::json(resp).await
@@ -303,8 +305,10 @@ impl NexusClient {
         }
         let resp = self
             .http
-            .get(self.url("/search/posts/by_content"))
-            .query(&[("q", q), ("limit", &limit.to_string())])
+            .get(with_query(
+                &self.url("/search/posts/by_content"),
+                &[("q", q), ("limit", &limit.to_string())],
+            ))
             .send()
             .await?;
         let hits: Vec<Hit> = Self::json(resp).await?;
@@ -316,11 +320,13 @@ impl NexusClient {
     pub async fn posts_by_tag(&self, label: &str, limit: u32) -> Result<Vec<String>, NexusError> {
         let resp = self
             .http
-            .get(self.url(&format!(
-                "/search/posts/by_tag/{}",
-                url::form_urlencoded::byte_serialize(label.as_bytes()).collect::<String>()
-            )))
-            .query(&[("limit", &limit.to_string())])
+            .get(with_query(
+                &self.url(&format!(
+                    "/search/posts/by_tag/{}",
+                    url::form_urlencoded::byte_serialize(label.as_bytes()).collect::<String>()
+                )),
+                &[("limit", &limit.to_string())],
+            ))
             .send()
             .await?;
         let raw: Vec<Value> = Self::json(resp).await?;
