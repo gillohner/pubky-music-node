@@ -29,3 +29,8 @@ grouped zone never claims bit-perfect.
   its hardware (the null output, a renderer that hides its buffer) appears in time and is not
   corrected.
 * DSD groups are not corrected.
+* The app's players (`net:` outputs) on ALSA `hw:` devices report `caps.groupable`: each `Ack`
+  carries the endpoint's frames written and what its device still holds. The node counts that
+  level down by the time since the `Ack`, so a member whose `Ack`s come later than the leader's
+  (a slower network) is measured at the same instant and not slipped back. A player on a system
+  mixer (`cpal`) is not groupable.

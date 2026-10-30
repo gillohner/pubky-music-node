@@ -72,7 +72,7 @@ pub async fn lan_only(mut req: Request, next: Next) -> Response {
 /// Layer for the whole API: a node without an API token answers only requests that reached its
 /// listener directly, never through iroh or a tunnel (it would make whoever is there the owner).
 pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
-    if s.token.is_none() && !direct(&req) {
+    if s.token().is_none() && !direct(&req) {
         return (
             StatusCode::UNAUTHORIZED,
             "this node has no API token, so it answers only directly; set [api] token to reach it remotely",

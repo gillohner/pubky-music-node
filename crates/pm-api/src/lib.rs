@@ -9,6 +9,7 @@
 //! trusts whoever can reach the socket, so bind to localhost. Remote access
 //! by pubkey (M5) wraps this API rather than replacing it.
 
+pub mod access_token;
 pub mod activity;
 pub mod archive;
 pub mod art;
@@ -43,6 +44,7 @@ pub mod drives;
 pub mod events;
 pub mod files;
 pub mod first_run;
+pub mod first_steps;
 pub mod gpodder;
 pub mod groups;
 pub mod health;
@@ -212,6 +214,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node", get(groups::index))
         .route("/node/apps", get(apps::get))
         .route("/node/settings", get(node_settings).put(update_node_settings))
+        .route("/node/token", post(access_token::replace))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))
@@ -668,6 +671,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
         .route("/me/prefs", get(prefs::get).put(prefs::put))
+        .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route(
             "/me/listening",
@@ -804,9 +808,36 @@ pub fn router(state: Arc<NodeState>) -> Router {
 
 /// Bind and serve until the task is cancelled.
 pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!(%listen, "API listening");
+    let listener = bind(listen).await?;
     serve_listener(state, listener).await
+}
+
+/// Bind the API's address. A port in use is the one fatal port: the error names it and the
+/// likely cause, so a restart loop says what to fix.
+pub async fn bind(listen: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => {
+            tracing::info!(%listen, "API port bound; serving once the node has started");
+            Ok(l)
+        }
+        Err(e) => Err(anyhow::anyhow!(bind_error(listen, &e))),
+    }
+}
+
+/// What to say when the API cannot listen on `listen`.
+pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "cannot listen on {listen}: the port is already in use, most likely by another Pubky Music Node \
+             on this machine (an older install, or a second container on the host network). Stop it, or set \
+             [api] listen (PM_LISTEN) to a free port"
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "cannot listen on {listen}: permission denied (ports below 1024 need root); pick a port above 1024 \
+             in [api] listen (PM_LISTEN)"
+        ),
+        _ => format!("cannot listen on {listen}: {e}"),
+    }
 }
 
 /// Serve on an already bound listener (tests bind port 0).
@@ -875,7 +906,7 @@ fn token_ok(
     headers: &HeaderMap,
     query: &std::collections::HashMap<String, String>,
 ) -> bool {
-    let Some(token) = &state.token else { return true };
+    let Some(token) = state.token() else { return true };
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1038,8 +1069,43 @@ async fn upnp_description(State(s): State<Arc<NodeState>>) -> Response {
     ([(header::CONTENT_TYPE, "text/xml; charset=utf-8")], xml).into_response()
 }
 
-async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputInfo>> {
-    Json(s.outputs.list())
+/// An output as `GET /v1/outputs` lists it.
+#[derive(Debug, serde::Serialize)]
+struct OutputView {
+    #[serde(flatten)]
+    info: OutputInfo,
+    /// The speaker system that groups it with others of its kind itself (`sonos`, `heos`,
+    /// `bluos`): a zone of only those is that system's own group, in sync (`POST /v1/zones`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_by: Option<&'static str>,
+}
+
+async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
+    // One lock at a time
+    fn ids<T>(m: &std::collections::HashMap<OutputId, T>) -> std::collections::HashSet<OutputId> {
+        m.keys().cloned().collect()
+    }
+    let sonos = ids(&s.sonos.lock().expect("sonos lock"));
+    let heos = ids(&s.heos.lock().expect("heos lock"));
+    let bluos = ids(&s.bluos_players.lock().expect("bluos lock"));
+    Json(
+        s.outputs
+            .list()
+            .into_iter()
+            .map(|info| {
+                let group_by = if sonos.contains(&info.id) {
+                    Some("sonos")
+                } else if heos.contains(&info.id) {
+                    Some("heos")
+                } else if bluos.contains(&info.id) {
+                    Some("bluos")
+                } else {
+                    None
+                };
+                OutputView { info, group_by }
+            })
+            .collect(),
+    )
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -1070,8 +1136,6 @@ async fn create_pull(State(s): State<Arc<NodeState>>, Json(body): Json<CreatePul
     Ok(Json(info))
 }
 
-/// The live WAV stream of a pull output. Waits up to 15 s for a zone to
-/// start playing into it; a second listener replaces the first.
 /// `GET /v1/outputs/pull/{name}/url`: the keyed URL to give a renderer or player by hand.
 async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
     if !s.pulls.lock().expect("pulls lock").contains_key(&name) {
@@ -1080,6 +1144,8 @@ async fn pull_url(State(s): State<Arc<NodeState>>, Path(name): Path<String>) -> 
     Ok(Json(serde_json::json!({ "url": s.pull_url(&name) })))
 }
 
+/// The live stream of a pull output. Waits up to 15 s for a zone to play into it; a listener that
+/// leaves gives it back for the next one (see `pm_zones::outputs::pull`).
 async fn pull_stream(
     State(s): State<Arc<NodeState>>,
     Path((name, file)): Path<(String, String)>,
@@ -1099,8 +1165,13 @@ async fn pull_stream(
         "stream.wav" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "audio/wav".into(),
         },
+        // OpenHome renderers (Linn): the same WAV, with the RIFF size 0 their pipeline reads as
+        // "continuous stream" (see `wav_header_continuous`).
+        "live.wav" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "audio/wav".into(),
+        },
         "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
-        // Slimproto players: the WAV's PCM without its header (squeezelite would play the header).
+        // Slimproto players: the PCM without a header (squeezelite would play the header).
         "stream.pcm" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "application/octet-stream".into(),
         },
@@ -1124,6 +1195,9 @@ async fn pull_stream(
                 (header::CONTENT_TYPE, mime),
                 (header::CACHE_CONTROL, "no-store".to_string()),
                 (header::ACCEPT_RANGES, "none".to_string()),
+                // The body ends when the connection closes: say so, so a keep-alive client
+                // (and hyper) treat this as the last answer on the connection.
+                (header::CONNECTION, "close".to_string()),
             ],
             body,
         )
@@ -1133,6 +1207,10 @@ async fn pull_stream(
                 r.headers_mut().insert(*k, v);
             }
         }
+        // An HTTP/1.0 answer: the body runs until the connection closes. HTTP/1.1 would send a
+        // live stream chunked, and a Linn DS stops at once on a chunked stream (seen on the
+        // owner's Klimax: it plays the same stream unchunked).
+        *r.version_mut() = axum::http::Version::HTTP_10;
         r
     };
     // A HEAD must not take the live stream: the GET that follows needs it.
@@ -1157,78 +1235,35 @@ async fn pull_stream(
         ));
     }
     let mime = kind.mime(fmt.rate_hz, fmt.channels);
-    let rx = tokio_stream::wrappers::ReceiverStream::new(live.rx);
-    let body = match kind {
-        pm_out_upnp::dlna::StreamKind::Wav { .. } if file == "stream.pcm" => {
-            let mut pcm = RawPcm::default();
-            axum::body::Body::from_stream(
-                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(pcm.convert(&chunk))),
-            )
-        }
-        pm_out_upnp::dlna::StreamKind::Wav { .. } => {
-            axum::body::Body::from_stream(rx.map(Ok::<_, std::convert::Infallible>))
-        }
-        pm_out_upnp::dlna::StreamKind::L16 => {
-            let mut l16 = L16::default();
-            axum::body::Body::from_stream(
-                rx.map(move |chunk| Ok::<_, std::convert::Infallible>(l16.convert(&chunk))),
-            )
-        }
+    // Each listener gets its own header: one that leaves and comes back (OpenHome renderers do,
+    // after reading the start) decodes the stream from the top again.
+    let header = match file.as_str() {
+        "stream.wav" => Some(pm_zones::outputs::wav_header(fmt)),
+        "live.wav" => Some(pm_zones::outputs::wav_header_continuous(fmt)),
+        _ => None,
     };
-    Ok(with_headers(mime, body))
+    let to_l16 = kind == pm_out_upnp::dlna::StreamKind::L16;
+    // The live stream moves into the body; when the listener goes, it is given back
+    let chunks = futures_util::stream::unfold(live, |mut live| async move {
+        live.next_chunk().await.map(|c| (c, live))
+    });
+    let mut l16 = L16::default();
+    let body = futures_util::stream::iter(header)
+        .chain(chunks.map(move |c| if to_l16 { l16.convert(&c) } else { c }))
+        .map(Ok::<_, std::convert::Infallible>);
+    Ok(with_headers(mime, axum::body::Body::from_stream(body)))
 }
 
-/// WAV to its raw PCM: the header (any length: 24-bit streams use WAVE_FORMAT_EXTENSIBLE) is
-/// dropped up to the end of the `data` chunk header, across chunk boundaries.
-#[derive(Default)]
-struct RawPcm {
-    /// Header bytes seen so far, until the `data` chunk starts.
-    head: Vec<u8>,
-    started: bool,
-}
-
-impl RawPcm {
-    fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
-        if self.started {
-            return chunk.to_vec();
-        }
-        self.head.extend_from_slice(chunk);
-        // RIFF, size, WAVE, then chunks: id (4), size (u32 LE), body (padded to even).
-        let mut i = 12;
-        while i + 8 <= self.head.len() {
-            let size = u32::from_le_bytes([
-                self.head[i + 4],
-                self.head[i + 5],
-                self.head[i + 6],
-                self.head[i + 7],
-            ]);
-            if &self.head[i..i + 4] == b"data" {
-                self.started = true;
-                return self.head.split_off(i + 8);
-            }
-            i += 8 + size as usize + (size as usize & 1);
-        }
-        Vec::new()
-    }
-}
-
-/// WAV (44-byte header, little-endian 16-bit) to DLNA LPCM (no header, big-endian), across chunk
-/// boundaries.
+/// Little-endian 16-bit PCM to DLNA LPCM (big-endian), across chunk boundaries.
 #[derive(Default)]
 struct L16 {
-    /// Header bytes still to drop.
-    skipped: usize,
     /// A sample's first byte when a chunk ended between its two bytes.
     carry: Option<u8>,
 }
 
 impl L16 {
-    const HEADER: usize = 44;
-
     fn convert(&mut self, chunk: &[u8]) -> Vec<u8> {
-        let skip = (Self::HEADER - self.skipped).min(chunk.len());
-        self.skipped += skip;
-        let mut data = &chunk[skip..];
+        let mut data = chunk;
         let mut out = Vec::with_capacity(data.len() + 1);
         if let Some(lo) = self.carry.take() {
             match data.split_first() {
@@ -1309,6 +1344,14 @@ async fn discovery_report(
             local_address.as_deref().unwrap_or("<node ip>")
         ));
     }
+    if s.public_url_guessed() {
+        if let Some(why) = doubtful_guess(&s.public_url) {
+            notes.push(format!(
+                "public_url is not set, so the node picked {}, which {why}. If speakers stay silent, set [api] public_url (PM_PUBLIC_URL) to the address they reach.",
+                s.public_url
+            ));
+        }
+    }
     Ok(Json(DiscoveryReport {
         upnp: upnp
             .into_iter()
@@ -1338,6 +1381,23 @@ async fn discovery_report(
         saved_endpoints: s.endpoint_addresses(),
         node: s.name.clone(),
     }))
+}
+
+/// Why an address the node picked for itself may not be the one speakers reach: a VPN's or
+/// another non-home address, or Docker's default bridge (the container is not on the host
+/// network). `None` when it looks like a home network address.
+fn doubtful_guess(public_url: &str) -> Option<&'static str> {
+    let host = url::Url::parse(public_url).ok()?.host_str()?.to_string();
+    let std::net::IpAddr::V4(ip) = host.parse().ok()? else {
+        return None;
+    };
+    if ip.octets()[..2] == [172, 17] {
+        Some("looks like Docker's bridge network (run the container on the host network)")
+    } else if !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() {
+        Some("is not a home network address (a VPN?)")
+    } else {
+        None
+    }
 }
 
 /// The address this node talks to the network from.
@@ -1381,16 +1441,23 @@ async fn remove_upnp_address(
     Ok(Json(s.upnp_addresses()))
 }
 
-/// `POST /v1/outputs/endpoints {address}`: add a `pm-endpoint` (the desktop
-/// app registers its player this way) at `host:port`; its outputs become
-/// zones and the address is kept for the next start.
+/// `POST /v1/outputs/endpoints {address, key}`: the desktop app registers its player at
+/// `host:port` with the key it made; the outputs become zones, and the address and key are kept
+/// for the next start (a new key for the same address replaces the old).
 async fn add_endpoint(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<AddEndpoint>,
 ) -> ApiResult<Vec<OutputInfo>> {
+    let key = pm_stream::Key::parse(body.key.expose()).map_err(|_| {
+        ApiError::bad_request(if body.key.is_empty() {
+            "the player's key is missing: update the Pubky Music app".to_string()
+        } else {
+            "the player's key is not 32 to 256 visible ASCII characters".to_string()
+        })
+    })?;
     let st = s.clone();
     let address = body.address.clone();
-    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address))
+    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| {
@@ -1819,7 +1886,7 @@ async fn transfer(
             loop {
                 match events.recv().await {
                     Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
-                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                    Ok(pm_zones::ZoneEvent::Error { .. }) | Err(_) => break false,
                     Ok(_) => {}
                 }
             }
@@ -2368,22 +2435,14 @@ async fn home(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiRes
 }
 
 async fn folders(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<(String, bool)>> {
-    let f = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .list_folders()?
-        .into_iter()
-        .map(|(p, present)| (p.to_string_lossy().into_owned(), present))
-        .collect();
-    Ok(Json(f))
+    Ok(Json(folder_list(&s).await?))
 }
 
 fn settings_view(s: &NodeState) -> NodeSettingsView {
     let copy_rate = files::copy_rate(s);
     // One lock, taken and released here: a guard in a struct literal lives until the end of the
     // whole expression, so a second `lock()` in another field would wait for ever
-    let (jukebox_zone, dev_setting, genre_tags, prefer_full) = {
+    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden) = {
         let lib = s.library.lock().expect("library poisoned");
         let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
         (
@@ -2394,6 +2453,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             on(DEV_OUTPUTS_KEY),
             tags::genre_tags_on(&lib),
             on(item::PREFER_FULL_KEY),
+            on(first_steps::HIDDEN_KEY),
         )
     };
     NodeSettingsView {
@@ -2404,6 +2464,9 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         dev_outputs: std::env::var("PM_DEV_OUTPUTS").is_ok_and(|v| v == "1") || dev_setting,
         genre_tags,
         prefer_full,
+        first_steps_hidden,
+        config_folders: config_folders(s),
+        token_replaceable: s.token_file().is_some(),
     }
 }
 
@@ -2478,6 +2541,12 @@ async fn update_node_settings(
             tracing::info!(tags = n, "files' genres published as tags");
         }
     }
+    if let Some(h) = req.first_steps_hidden {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(first_steps::HIDDEN_KEY, if h { "1" } else { "0" })?;
+    }
     if let Some(d) = req.dev_outputs {
         s.library
             .lock()
@@ -2493,14 +2562,37 @@ async fn update_node_settings(
     Ok(Json(settings_view(&s)))
 }
 
-fn folder_list(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
-    Ok(s.library
-        .lock()
-        .expect("library poisoned")
-        .list_folders()?
+/// `[path, present]` for the config's folders, then the ones added through the API; present: the
+/// folder is there now. Off the async threads: a stale network mount can hang the check.
+async fn folder_list(s: &Arc<NodeState>) -> Result<Vec<(String, bool)>, ApiError> {
+    let st = s.clone();
+    tokio::task::spawn_blocking(move || folder_list_now(&st))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+}
+
+fn folder_list_now(s: &NodeState) -> Result<Vec<(String, bool)>, ApiError> {
+    let added = s.library.lock().expect("library poisoned").list_folders()?;
+    let mut out: Vec<(std::path::PathBuf, bool)> = s.scan_folders.iter().map(|p| (p.clone(), true)).collect();
+    for (p, enabled) in added {
+        if !out.iter().any(|(q, _)| *q == p) {
+            out.push((p, enabled));
+        }
+    }
+    Ok(out
         .into_iter()
-        .map(|(p, present)| (p.to_string_lossy().into_owned(), present))
+        .map(|(p, enabled)| {
+            let present = enabled && p.is_dir();
+            (p.to_string_lossy().into_owned(), present)
+        })
         .collect())
+}
+
+fn config_folders(s: &NodeState) -> Vec<String> {
+    s.scan_folders
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// `POST /v1/library/folders {path}`: add a folder, watch it, scan it.
@@ -2526,7 +2618,8 @@ async fn add_folder(
     s.watch_more(&path);
     let scan_started = matches!(s.start_scan(vec![path]), Ok(true));
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
+        config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
         removed_tracks: 0,
@@ -2540,6 +2633,15 @@ async fn remove_folder(
     Query(req): Query<FolderRequest>,
 ) -> ApiResult<FoldersChanged> {
     let path = std::path::PathBuf::from(req.path.trim());
+    if s.is_config_folder(&path) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker), which reads it at every start: take it out there and restart the node, then remove it here to forget its songs",
+                path.display()
+            ),
+        ));
+    }
     if s.is_scanning() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -2550,7 +2652,8 @@ async fn remove_folder(
     let (removed_files, removed_tracks) = s.library.lock().expect("library poisoned").remove_folder(&path)?;
     s.notify_library();
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
+        config_folders: config_folders(&s),
         scan_started: false,
         removed_files,
         removed_tracks,
@@ -2571,6 +2674,15 @@ async fn move_folder(
     State(s): State<Arc<NodeState>>,
     Json(m): Json<FolderMove>,
 ) -> ApiResult<FoldersChanged> {
+    if s.is_config_folder(std::path::Path::new(m.from.trim())) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is in the node's config ([library] folders, or PM_FOLDERS in Docker): put the new place there and restart the node",
+                m.from.trim()
+            ),
+        ));
+    }
     let to = tokio::fs::canonicalize(m.to.trim())
         .await
         .map_err(|e| ApiError::bad_request(format!("{}: {e}", m.to.trim())))?;
@@ -2595,7 +2707,8 @@ async fn move_folder(
     let scan_started = matches!(s.start_scan(vec![to]), Ok(true));
     s.notify_library();
     Ok(Json(FoldersChanged {
-        folders: folder_list(&s)?,
+        folders: folder_list(&s).await?,
+        config_folders: config_folders(&s),
         scan_started,
         removed_files: 0,
         removed_tracks: 0,
@@ -2807,7 +2920,7 @@ async fn controller_login_poll(
             tracing::info!(%who, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
                 status: "ok".into(),
-                token: s.token.clone(),
+                token: s.token(),
                 user: Some(who),
                 role: Some("owner".into()),
             }))
@@ -2904,47 +3017,18 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
 
 #[cfg(test)]
 mod l16_tests {
-    use super::{RawPcm, L16};
+    use super::L16;
 
     #[test]
-    fn raw_pcm_drops_any_wav_header_across_any_chunking() {
-        // The pull sink's own 44-byte header, and a longer one: an extensible fmt chunk (40
-        // bytes) and an odd-sized LIST chunk with its pad byte before `data`.
-        let pcm: Vec<u8> = (1..=12).collect();
-        let mut long = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
-        long.extend_from_slice(&40u32.to_le_bytes());
-        long.extend_from_slice(&[7u8; 40]);
-        long.extend_from_slice(b"LIST");
-        long.extend_from_slice(&3u32.to_le_bytes());
-        long.extend_from_slice(&[1, 2, 3, 0]);
-        long.extend_from_slice(b"data\xff\xff\xff\xff");
-        let short = pm_zones::outputs::wav_header(pm_model::AudioFormat::pcm(96_000, 24, 2));
-        for header in [short, long] {
-            let mut wav = header;
-            wav.extend_from_slice(&pcm);
-            for cut in 1..wav.len() {
-                for cut2 in cut..wav.len() {
-                    let mut c = RawPcm::default();
-                    let mut got = c.convert(&wav[..cut]);
-                    got.extend(c.convert(&wav[cut..cut2]));
-                    got.extend(c.convert(&wav[cut2..]));
-                    assert_eq!(got, pcm, "cuts at {cut}, {cut2}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn wav_becomes_big_endian_lpcm_across_any_chunking() {
-        let mut wav = vec![0xAAu8; 44];
-        wav.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    fn pcm_becomes_big_endian_lpcm_across_any_chunking() {
+        let pcm = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06];
         let want = vec![0x02, 0x01, 0x04, 0x03, 0x06, 0x05];
-        for cut in 1..wav.len() {
-            for cut2 in cut..wav.len() {
+        for cut in 0..pcm.len() {
+            for cut2 in cut..pcm.len() {
                 let mut c = L16::default();
-                let mut got = c.convert(&wav[..cut]);
-                got.extend(c.convert(&wav[cut..cut2]));
-                got.extend(c.convert(&wav[cut2..]));
+                let mut got = c.convert(&pcm[..cut]);
+                got.extend(c.convert(&pcm[cut..cut2]));
+                got.extend(c.convert(&pcm[cut2..]));
                 assert_eq!(got, want, "cuts at {cut}, {cut2}");
             }
         }
@@ -3338,7 +3422,9 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["removed_tracks"], 1);
-        assert!(r["folders"].as_array().unwrap().is_empty());
+        // Only the config's folder is left
+        let music = dir.path().join("music");
+        assert_eq!(r["folders"], serde_json::json!([[music.to_string_lossy(), true]]));
         let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
         assert!(tracks["tracks"].as_array().unwrap().is_empty());
     }
@@ -5636,7 +5722,7 @@ mod tests {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hits2 = hits.clone();
         let mock = Router::new().route(
-            "/release-group",
+            "/ws/2/release-group",
             get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
                 let hits = hits2.clone();
                 let recent = recent.clone();
@@ -5785,7 +5871,8 @@ mod tests {
     async fn an_endpoint_can_be_added_by_address() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let ep = pm_endpoint::Endpoint::new("Gil's laptop", pm_endpoint::local_outputs());
+        let key = pm_stream::Key::random();
+        let ep = pm_endpoint::Endpoint::new("Gil's laptop", pm_endpoint::local_outputs(), key.clone());
         std::thread::spawn(move || ep.serve(listener));
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
@@ -5794,7 +5881,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": address})),
+            Some(serde_json::json!({"address": address, "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{outs}");
@@ -5818,7 +5905,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": address})),
+            Some(serde_json::json!({"address": address, "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -5829,7 +5916,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/endpoints",
-            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+            Some(serde_json::json!({"address": "127.0.0.1:1", "key": key.expose()})),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
@@ -5845,6 +5932,97 @@ mod tests {
             .all(|z| z["output"] != outs[0]["id"]));
         let (_, outs3) = call(&app, "GET", "/v1/outputs", None).await;
         assert!(outs3.as_array().unwrap().iter().all(|o| o["protocol"] != "net"));
+    }
+
+    /// The player's key: the node stores it per address in a
+    /// private file, replaces it when the app registers again with a new one, uses it after a
+    /// restart, and never shows it; a missing or wrong key is refused with a reason.
+    #[tokio::test]
+    async fn an_endpoint_key_is_kept_per_address_and_never_shown() {
+        fn endpoint(key: &pm_stream::Key, l: std::net::TcpListener) -> pm_endpoint::Serving {
+            let outs = pm_zones::OutputRegistry::new();
+            outs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
+            pm_endpoint::Endpoint::new("Laptop", outs, key.clone())
+                .spawn(l)
+                .unwrap()
+        }
+        let first = pm_stream::Key::random();
+        let serving = endpoint(&first, std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+        let address = serving.addr().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let register = |key: serde_json::Value| {
+            let (app, address) = (app.clone(), address.clone());
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/outputs/endpoints",
+                    Some(serde_json::json!({"address": address, "key": key})),
+                )
+                .await
+            }
+        };
+        let stored = || std::fs::read_to_string(dir.path().join("endpoint-keys.json")).unwrap_or_default();
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/outputs/endpoints",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(e.to_string().contains("update the Pubky Music app"), "{e}");
+        let (st, e) = register(serde_json::json!(pm_stream::Key::random().expose())).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(e.to_string().contains("wrong key"), "{e}");
+        assert!(stored().is_empty(), "a key that did not work is not kept");
+
+        let (st, outs) = register(serde_json::json!(first.expose())).await;
+        assert_eq!(st, StatusCode::OK, "{outs}");
+        let out_id = outs[0]["id"].as_str().unwrap().to_string();
+        assert!(stored().contains(first.expose()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("endpoint-keys.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        for path in ["/v1/outputs", "/v1/zones", "/v1/outputs/discovery?quick=1"] {
+            let (_, body) = call(&app, "GET", path, None).await;
+            assert!(!body.to_string().contains(first.expose()), "{path} shows the key");
+        }
+        assert!(!outs.to_string().contains(first.expose()));
+
+        // The app starts again: the same address, a new key. The zone it had plays with it.
+        drop(serving);
+        let second = pm_stream::Key::random();
+        let _serving = endpoint(&second, std::net::TcpListener::bind(&address).unwrap());
+        let (st, again) = register(serde_json::json!(second.expose())).await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        assert!(stored().contains(second.expose()) && !stored().contains(first.expose()));
+        let out = s.outputs.get(&OutputId(out_id.clone())).unwrap();
+        let fmt = pm_model::AudioFormat::pcm(48_000, 16, 2);
+        drop(out.open(fmt).await.unwrap());
+
+        // The node restarts: the stored key reaches the player
+        let s2 = state(dir.path(), None).await;
+        assert!(s2.outputs.get(&OutputId(out_id.clone())).is_none());
+        let st2 = s2.clone();
+        let found = tokio::task::spawn_blocking(move || st2.restore_endpoint_addresses())
+            .await
+            .unwrap();
+        assert_eq!(found, vec![OutputId(out_id.clone())]);
+
+        // Forgotten: the key goes too
+        let enc = address.replace(':', "%3A");
+        let (st, _) = call(&app, "DELETE", &format!("/v1/outputs/endpoints/{enc}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!stored().contains(second.expose()));
     }
 
     /// an output and a zone, is remembered for the next start, and can be
@@ -10626,7 +10804,7 @@ exec sleep 300
                     started = true;
                     assert_eq!(source_format.rate_hz, 44_100);
                 }
-                Ok(Ok(pm_zones::ZoneEvent::Error(e))) => panic!("playback error: {e}"),
+                Ok(Ok(pm_zones::ZoneEvent::Error { message })) => panic!("playback error: {message}"),
                 Ok(Ok(pm_zones::ZoneEvent::Stopped)) if started => break,
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break,
@@ -11993,5 +12171,94 @@ exec sleep 300
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// A node at `public_url`, which the binary guessed (none configured) or the owner set.
+    async fn state_at(dir: &std::path::Path, public_url: &str, guessed: bool) -> Arc<NodeState> {
+        let db = dir.join("lib.sqlite");
+        let s = NodeState::new(
+            NodeSettings {
+                name: "test".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.join("art"),
+                mirror_dir: dir.join("homeserver"),
+                pipeline: PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: public_url.into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            Library::open(&db).unwrap(),
+            OutputRegistry::new(),
+        );
+        s.set_public_url_guessed(guessed);
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            scopes: String::new(),
+        };
+        s
+    }
+
+    async fn tidal_redirect(s: Arc<NodeState>, host: &str) -> String {
+        let req = Request::builder()
+            .uri("/v1/sources/tidal/status")
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(s).oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v["redirect_uri"].as_str().unwrap().to_string()
+    }
+
+    /// The LAN address the node picks for speakers when public_url is empty is not where the
+    /// browser is: sign-in callbacks follow the request (localhost, umbrel.local, a proxy). A
+    /// public_url the owner set is used as it is.
+    #[tokio::test]
+    async fn a_guessed_public_url_leaves_sign_in_callbacks_to_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lan = "http://192.168.1.10:7788";
+        for host in ["localhost:7788", "umbrel.local:7788"] {
+            let s = state_at(dir.path(), lan, true).await;
+            assert_eq!(
+                tidal_redirect(s, host).await,
+                format!("http://{host}/tidal/callback")
+            );
+        }
+        let s = state_at(dir.path(), lan, false).await;
+        assert_eq!(
+            tidal_redirect(s, "localhost:7788").await,
+            "http://192.168.1.10:7788/tidal/callback"
+        );
+    }
+
+    /// The network check says when an address the node picked for itself looks wrong for
+    /// speakers (Docker's bridge, a VPN); never about one the owner set.
+    #[tokio::test]
+    async fn the_network_check_doubts_a_guessed_bridge_or_vpn_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = |s: Arc<NodeState>| async move {
+            let (_, r) = call(&router(s), "GET", "/v1/outputs/discovery?quick=1", None).await;
+            r["notes"].to_string()
+        };
+        let docker = notes(state_at(dir.path(), "http://172.17.0.2:7788", true).await).await;
+        assert!(docker.contains("Docker's bridge network"), "{docker}");
+        let vpn = notes(state_at(dir.path(), "http://100.101.2.3:7788", true).await).await;
+        assert!(vpn.contains("a VPN?"), "{vpn}");
+        let home = notes(state_at(dir.path(), "http://192.168.1.10:7788", true).await).await;
+        assert!(!home.contains("picked"), "{home}");
+        let set = notes(state_at(dir.path(), "http://172.17.0.2:7788", false).await).await;
+        assert!(!set.contains("picked"), "{set}");
     }
 }

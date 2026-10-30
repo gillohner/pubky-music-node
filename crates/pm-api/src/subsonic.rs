@@ -264,7 +264,7 @@ async fn rest(
 }
 
 fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
-    let Some(token) = &s.token else {
+    let Some(token) = s.token() else {
         return Ok(());
     };
     let user = p.get("u").map(String::as_str).unwrap_or("");
@@ -648,7 +648,7 @@ async fn dispatch(
                             loop {
                                 match events.recv().await {
                                     Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
-                                    Ok(pm_zones::ZoneEvent::Error(_)) | Err(_) => break false,
+                                    Ok(pm_zones::ZoneEvent::Error { .. }) | Err(_) => break false,
                                     Ok(_) => {}
                                 }
                             }

@@ -129,8 +129,14 @@ pub struct NodeState {
     pub mirror_dir: PathBuf,
     pub outputs: OutputRegistry,
     pub zones: Zones,
-    /// Optional bearer token; `None` = no auth (bind to localhost only).
-    pub token: Option<String>,
+    /// Optional bearer token; `None` = no auth (bind to localhost only). Read with
+    /// [`NodeState::token`]; only [`crate::access_token`] changes it.
+    pub(crate) token: std::sync::RwLock<Option<String>>,
+    /// The file the token came from when the node made it itself (`<data_dir>/api-token`), so the
+    /// owner may replace it; `None` when it is set in the config or there is none.
+    token_file: std::sync::OnceLock<PathBuf>,
+    /// Counts token replacements; the owner's event sockets end when it moves.
+    pub(crate) token_changed: tokio::sync::watch::Sender<u64>,
     pub subsonic_user: String,
     pub public_url: String,
     pub upnp: bool,
@@ -169,6 +175,9 @@ pub struct NodeState {
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
+    /// The key of each registered endpoint, by address, shared with its outputs; loaded from
+    /// `endpoint-keys.json` on first use.
+    endpoint_keys: Mutex<Option<HashMap<String, pm_out_net::KeyCell>>>,
     /// Cover Art Archive origin; tests point it at a local server.
     pub caa_base: std::sync::RwLock<String>,
     /// Internet Archive origin; tests point it at a local server.
@@ -215,6 +224,9 @@ pub struct NodeState {
     scanning: Mutex<bool>,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
+    /// `public_url` was not configured: the binary picked this machine's network address for
+    /// speakers. Browser-facing addresses (sign-in callbacks) then follow the request instead.
+    public_url_guessed: std::sync::atomic::AtomicBool,
 }
 
 /// Library setting: JSON list of the source ids switched off.
@@ -230,8 +242,11 @@ fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
 
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
-/// Endpoint addresses (`pm-endpoint`, the desktop app) added by hand.
+/// Endpoint addresses (the desktop app's player) it registered.
 const ENDPOINT_ADDRESSES_KEY: &str = "outputs.endpoint_addresses";
+/// Their keys, by address, in the data folder (0600): `{"<host:port>": "<key>"}`. Not in the
+/// library database, so a library backup or copy never carries them.
+const ENDPOINT_KEYS_FILE: &str = "endpoint-keys.json";
 
 /// The public page of a Pubky identity, usable as an upstream contact.
 pub fn profile_url(z32: &str) -> String {
@@ -377,7 +392,9 @@ impl NodeState {
             outputs,
             zones: Zones::new(sources.clone()),
             sources,
-            token: settings.token,
+            token: std::sync::RwLock::new(settings.token),
+            token_file: std::sync::OnceLock::new(),
+            token_changed: tokio::sync::watch::channel(0).0,
             subsonic_user: settings.subsonic_user,
             public_url: settings.public_url,
             upnp: settings.upnp,
@@ -397,6 +414,7 @@ impl NodeState {
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
             discover: Mutex::new(None),
+            endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
             caa_base: std::sync::RwLock::new("https://coverartarchive.org".into()),
             info_bases: std::sync::RwLock::new(crate::artist_info::InfoBases::default()),
@@ -424,6 +442,7 @@ impl NodeState {
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
+            public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
             bundled_homeserver: std::sync::OnceLock::new(),
@@ -704,6 +723,31 @@ impl NodeState {
             }
         }
         out
+    }
+
+    /// Scan the config's folders that exist (`[library] folders`, `PM_FOLDERS` in Docker) in the
+    /// background, at start. The scan is incremental: files with the same size and time are not
+    /// opened again. When another scan holds the slot, this one waits for it.
+    pub fn scan_config_folders(self: &Arc<Self>) {
+        let folders: Vec<PathBuf> = self.scan_folders.iter().filter(|p| p.is_dir()).cloned().collect();
+        for p in self.scan_folders.iter().filter(|p| !p.is_dir()) {
+            tracing::warn!(folder = %p.display(), "library folder from the config not found; not scanned");
+        }
+        if folders.is_empty() {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            while let Ok(false) = state.start_scan(folders.clone()) {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+    }
+
+    /// Whether `path` is one of the config's library folders (they come back at every start, so
+    /// removing one needs the config).
+    pub fn is_config_folder(&self, path: &std::path::Path) -> bool {
+        self.scan_folders.iter().any(|p| p == path)
     }
 
     /// Start watching one more folder (after `watch_folders`); no-op without a watcher.
@@ -1027,8 +1071,8 @@ impl NodeState {
         new
     }
 
-    /// Endpoints (`pm-endpoint`, the desktop app's player) the owner added
-    /// by address; mDNS does not cross subnets and a laptop moves around.
+    /// Endpoints (the desktop app's player) registered by address; never discovered, since
+    /// each answers only the node that holds its key.
     pub fn endpoint_addresses(&self) -> Vec<String> {
         let lib = self.library.lock().expect("library poisoned");
         lib.get_setting(ENDPOINT_ADDRESSES_KEY)
@@ -1046,15 +1090,80 @@ impl NodeState {
         );
     }
 
-    /// Connect to the endpoint at `addr` (`host:port`), give each of its
-    /// outputs a zone, and remember the address for the next start. The
-    /// outputs it already has keep their zones. Blocking.
-    pub fn add_endpoint_address(self: &Arc<Self>, addr: &str) -> Result<Vec<pm_zones::OutputInfo>, String> {
+    /// The endpoint keys, loaded on first use; run `f` with them, saving when it says so.
+    fn with_endpoint_keys<T>(
+        &self,
+        f: impl FnOnce(&mut HashMap<String, pm_out_net::KeyCell>) -> (T, bool),
+    ) -> T {
+        let path = self.data_dir().join(ENDPOINT_KEYS_FILE);
+        let mut guard = self.endpoint_keys.lock().expect("endpoint keys");
+        let keys = guard.get_or_insert_with(|| {
+            let stored: HashMap<String, String> = std::fs::read(&path)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            stored
+                .into_iter()
+                .filter_map(|(a, k)| Some((a, pm_out_net::KeyCell::new(pm_stream::Key::parse(&k).ok()?))))
+                .collect()
+        });
+        let (out, changed) = f(keys);
+        if changed {
+            let stored: std::collections::BTreeMap<&str, String> = keys
+                .iter()
+                .map(|(a, c)| (a.as_str(), c.get().expose().to_string()))
+                .collect();
+            let json = serde_json::to_vec_pretty(&stored).expect("serializes");
+            if let Err(e) = crate::imports::write_private(&path, &json) {
+                tracing::warn!(path = %path.display(), "cannot save the endpoint keys: {e}");
+            }
+        }
+        out
+    }
+
+    /// Connect to the endpoint at `addr` (`host:port`), give each of its outputs a zone, and
+    /// remember the address and key for the next start. `key` is the one the app registers (a
+    /// new one each start replaces the old, for the outputs already here too); without it the
+    /// stored one is used. The outputs it already has keep their zones. Blocking.
+    pub fn add_endpoint_address(
+        self: &Arc<Self>,
+        addr: &str,
+        key: Option<&pm_stream::Key>,
+    ) -> Result<Vec<pm_zones::OutputInfo>, String> {
         let addr = addr.trim().to_string();
         if addr.is_empty() {
             return Err("address is required".into());
         }
-        let outs = pm_out_net::NetOutput::connect(addr.as_str()).map_err(|e| e.to_string())?;
+        let cell = self.with_endpoint_keys(|keys| (keys.get(&addr).cloned(), false));
+        let (cell, old) = match (cell, key) {
+            (Some(c), Some(k)) => {
+                let old = c.get();
+                c.set(k.clone());
+                (c, Some(old))
+            }
+            (Some(c), None) => (c, None),
+            (None, Some(k)) => (pm_out_net::KeyCell::new(k.clone()), None),
+            (None, None) => {
+                return Err("no key stored for it; the app registers it again on its next start".into())
+            }
+        };
+        let outs = match pm_out_net::NetOutput::connect(addr.as_str(), &cell) {
+            Ok(o) => o,
+            Err(e) => {
+                // A key that does not work leaves the one that did
+                if let Some(old) = old {
+                    cell.set(old);
+                }
+                return Err(e.to_string());
+            }
+        };
+        if key.is_some() {
+            let a = addr.clone();
+            self.with_endpoint_keys(move |keys| {
+                keys.insert(a, cell);
+                ((), true)
+            });
+        }
         let mut saved = self.endpoint_addresses();
         if !saved.contains(&addr) {
             saved.push(addr.clone());
@@ -1075,7 +1184,7 @@ impl NodeState {
         Ok(infos)
     }
 
-    /// Forget a saved endpoint address. Its outputs and zones go away too,
+    /// Forget a saved endpoint address and its key. Its outputs and zones go away too,
     /// so an app that moved to another address leaves nothing behind.
     pub fn remove_endpoint_address(self: &Arc<Self>, addr: &str) -> bool {
         let addr = addr.trim();
@@ -1085,6 +1194,10 @@ impl NodeState {
         if saved.len() != before {
             self.save_endpoint_addresses(&saved);
         }
+        let had_key = self.with_endpoint_keys(|keys| {
+            let had = keys.remove(addr).is_some();
+            (had, had)
+        });
         let prefix = format!("net:{addr}/");
         let gone: Vec<OutputId> = self
             .outputs
@@ -1101,16 +1214,17 @@ impl NodeState {
             }
             self.outputs.remove(id);
         }
-        saved.len() != before || !gone.is_empty()
+        saved.len() != before || had_key || !gone.is_empty()
     }
 
-    /// Re-add the saved endpoint addresses at start and on rescan. Blocking.
+    /// Re-add the saved endpoint addresses, with their stored keys, at start and on rescan.
+    /// Blocking.
     pub fn restore_endpoint_addresses(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = Vec::new();
         for addr in self.endpoint_addresses() {
             let before: std::collections::HashSet<OutputId> =
                 self.outputs.list().into_iter().map(|o| o.id).collect();
-            match self.add_endpoint_address(&addr) {
+            match self.add_endpoint_address(&addr, None) {
                 Ok(outs) => new.extend(outs.into_iter().map(|o| o.id).filter(|id| !before.contains(id))),
                 Err(e) => tracing::info!(%addr, "saved endpoint is not reachable now: {e}"),
             }
@@ -1495,8 +1609,33 @@ impl NodeState {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Whether `public_url` is the binary's guess (none configured), not the owner's.
+    pub fn public_url_guessed(&self) -> bool {
+        self.public_url_guessed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_public_url_guessed(&self, guessed: bool) {
+        self.public_url_guessed
+            .store(guessed, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_config_file(&self, path: Option<PathBuf>) {
         *self.config_file.lock().expect("config file lock") = path;
+    }
+
+    /// The API token clients must send now (`None`: the node has none).
+    pub fn token(&self) -> Option<String> {
+        self.token.read().expect("token lock").clone()
+    }
+
+    /// Set once at start when the node made its token itself and keeps it in `path`: then the
+    /// owner may replace it (`POST /v1/node/token`).
+    pub fn set_token_file(&self, path: PathBuf) {
+        let _ = self.token_file.set(path);
+    }
+
+    pub fn token_file(&self) -> Option<&std::path::Path> {
+        self.token_file.get().map(PathBuf::as_path)
     }
 
     pub fn is_scanning(&self) -> bool {
@@ -1606,7 +1745,7 @@ impl NodeState {
             name: self.name.clone(),
             port,
             version: self.version.clone(),
-            token_required: self.token.is_some(),
+            token_required: self.token().is_some(),
         }
     }
 }
