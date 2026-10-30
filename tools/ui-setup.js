@@ -32,7 +32,7 @@
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
-const TOKEN = process.argv[2] || ''; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
+const TOKEN = process.argv[2] || ''; const BASE = process.argv[3] || 'http://127.0.0.1:7788'; const OUT_SHOTS = process.env.UI_SHOTS || null;
 const problems = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) problems.push(what); };
 const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' + path, { method, headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }); if (!r.ok) throw new Error(`${method} ${path}: ${r.status}`); return r.status === 204 ? null : r.json(); };
@@ -147,6 +147,47 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
+
+    // ---- Every sidebar place on tablets and phones (TASK-tablet-nav) ----
+    // Desktop's sidebar destinations, each reached within two taps (the rail or tabs, else the
+    // Library chips; Queue through Now playing and Settings through the account button on phones),
+    // plus search and volume
+    {
+      const PLACES = ['home', 'library', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings'];
+      const pathOf = (d) => (d === 'home' ? '/' : '/' + d);
+      const shown = (sel) => p.locator(sel).first().isVisible().catch(() => false);
+      const reach = async (d) => {
+        for (const sel of [`.nav-item[data-view="${d}"]`, `[data-bnav="${d}"]`]) if (await shown(sel)) { await p.click(sel); return 1; }
+        if (await shown(`[data-libnav="${d}"]`)) { await p.click(`[data-libnav="${d}"]`); return 1; }
+        if (d === 'queue' && await shown('#np')) { await p.click('#np'); if (await visible(p, '#npq', 5000)) { await p.click('#npq'); return 2; } }
+        if (d === 'settings' && await shown('#me')) { await p.click('#me'); const it = p.locator('.popover.menu .pop-item', { hasText: 'Settings' }); if (await it.isVisible().catch(() => false)) await it.click(); return 2; }
+        if (await shown('[data-bnav="library"]')) { await p.click('[data-bnav="library"]'); if (await visible(p, `[data-libnav="${d}"]`, 5000)) { await p.click(`[data-libnav="${d}"]`); return 2; } }
+        return 0;
+      };
+      for (const [w, h, layout] of [[768, 1024], [1024, 768], [834, 1194], [1194, 834], [1024, 1366], [1366, 1024], [820, 1180], [1180, 820], [1345, 900, 'comfortable'], [390, 844]]) {
+        c = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1100 });
+        await c.addInitScript(([t, l]) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); if (l) localStorage.setItem('pm.layout', l); }, [TOKEN, layout || '']);
+        p = await c.newPage();
+        await p.goto(BASE + '/'); await p.waitForSelector('#main .page-head, #main h1, #main h2', { timeout: 20000 }).catch(() => {});
+        const missed = [];
+        for (const d of PLACES) {
+          await p.goto(BASE + (d === 'home' ? '/settings' : '/')); await p.waitForSelector('#main .page-head, #main h1, #main h2', { timeout: 20000 }).catch(() => {});
+          const taps = await reach(d);
+          const ok = taps > 0 && taps <= 2 && await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === pathOf(d)) return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })();
+          if (!ok) missed.push(d);
+        }
+        const shell = await p.evaluate(() => document.documentElement.dataset.shell);
+        check(!missed.length, `${w}×${h} (${shell}): every sidebar place within two taps${missed.length ? ` (missing ${missed.join(', ')})` : ''}`);
+        check(await shown('#search') || await shown('[data-bnav="search"]'), `${w}×${h}: search`);
+        let vol = await shown('#vol');
+        if (!vol && await shown('#volbtn')) { await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000); }
+        if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
+        check(vol, `${w}×${h}: volume (${(await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel'})`);
+        if (shell === 'tablet') check(await p.evaluate(() => { const r = document.querySelector('#bottomnav'); return r.scrollHeight <= r.clientHeight + 1 || getComputedStyle(r).overflowY === 'auto'; }), `${w}×${h}: the rail fits or scrolls`);
+        if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-rail-${w}x${h}.png` }); }
+        await c.close();
+      }
+    }
 
     // ---- About credits: Wikipedia's text and a Commons picture carry their source and licence ----
     c = await ctx(); p = await c.newPage();

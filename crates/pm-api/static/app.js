@@ -1517,7 +1517,7 @@
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'albums') : k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'library') : k); });
   $('#me').onclick = () => setView('settings');
   $('#main').addEventListener('click', (e) => { const b = e.target.closest('[data-libnav]'); if (b) setView(b.dataset.libnav); });
   $('#jobchip').onclick = () => {
@@ -1896,6 +1896,8 @@
     loadDsp();
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
   };
+  // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
+  $('#volbtn').onclick = () => { if (qPanel.hidden) $('#quality').click(); const v = $('#qpvol', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); } };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -2454,10 +2456,12 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Zones, Settings
+    // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Sources, Queue, Zones, Downloads, Settings
     const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // The tablet rail has Sources of its own; on phones it is a Library section
+    const srcView = v === 'sources' || v === 'source-item'; const railSources = shellMode() === 'tablet';
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) && !(srcView && railSources) : k === 'sources' ? srcView : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
@@ -3545,9 +3549,9 @@
   // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
   const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
-    if (!LIB_TOP.some(([k]) => k === state.view)) return '';
+    if (!LIB_TOP.some(([k]) => k === state.view) && state.view !== 'downloads') return '';
     const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
-    const items = LIB_TOP.filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
+    const items = [...LIB_TOP, ...(isOffline() ? [['downloads', 'Downloads']] : [])].filter(([k]) => !(isListener() && LISTENER_VIEWS_OFF.has(k)) && !off.has(k));
     return `<nav class="libnav chips" aria-label="Library">${items.map(([k, l]) => `<button class="chip ${k === state.view ? 'on' : ''}" data-libnav="${k}" ${k === state.view ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
   };
   const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;

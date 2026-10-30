@@ -250,6 +250,7 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .quality.q-lossless .qdot { background: var(--q-lossless); }
 .quality.q-lossy .qdot { background: var(--q-lossy); }
 .volume { display: flex; align-items: center; gap: 6px; width: 130px; color: var(--muted); }
+.volbtn { display: none; }
 /* The Live switch (share what I'm listening to) next to the device pill */
 .live-btn { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
 .live-btn.on { color: var(--accent-fg, #fff); background: var(--accent); border-color: var(--accent); }
@@ -495,6 +496,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .node-status { justify-content: center; }
   .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
   .volume { display: none; }
+  html[data-shell="desktop"] .volbtn { display: inline-flex; }
 }
 /* ☰ on desktop and tablet: the sidebar collapses to icons, or (when narrow) expands to names. */
 .shell.collapsed { --sidebar: 72px; }
@@ -1101,12 +1103,21 @@ html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56p
 /* Now playing fills the screen down to the tabs */
 html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
 
-/* Tablets: a rail (Home, Search, Library, Zones; Settings at the foot) and the full player bar */
+/* Tablets: a rail with the sidebar's places (Home, Search, Library, Sources, Queue, Zones,
+   Downloads when offline; Settings at the foot), scrolling when short, and the full player bar */
 html[data-shell="tablet"] .shell { grid-template-columns: 84px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--player); grid-template-areas: "bnav content" "player player"; }
-html[data-shell="tablet"] .sidebar, html[data-shell="tablet"] .menu-btn, html[data-shell="tablet"] .volume { display: none; }
+html[data-shell="tablet"] .sidebar, html[data-shell="tablet"] .menu-btn { display: none; }
 html[data-shell="tablet"] .bottomnav { grid-area: bnav; display: flex; flex-direction: column; gap: 6px; padding: 14px 8px; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
-html[data-shell="tablet"] .bnav { min-height: 58px; }
-html[data-shell="tablet"] .bnav.rail-only { margin-top: auto; }
+html[data-shell="tablet"] .bnav { min-height: 58px; flex: none; }
+html[data-shell="tablet"] .bnav.rail-foot { margin-top: auto; }
+html[data-shell="tablet"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
+/* Volume: the slider when the bar has room, else a button that opens it in the Sound panel */
+html[data-shell="tablet"] .volume { display: flex; width: 110px; }
+html[data-shell="tablet"] .volbtn { display: none; }
+@media (max-width: 899px) {
+  html[data-shell="tablet"] .volume { display: none; }
+  html[data-shell="tablet"] .volbtn { display: inline-flex; }
+}
 html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
 html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
 /* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
@@ -1254,8 +1265,8 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
 .set-row.flash, .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; transition: outline-color 1.2s ease; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
-.nav-item.nav-offline { display: none; }
-body.offline .nav-item.nav-offline { display: flex; }
+.nav-item.nav-offline, .bnav.nav-offline { display: none; }
+body.offline .nav-item.nav-offline, html[data-shell="tablet"] body.offline .bnav.nav-offline { display: flex; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,

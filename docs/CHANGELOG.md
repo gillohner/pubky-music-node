@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **Tablets reach everything the desktop does** (owner's ask): the rail now has Home, Search, Library, Sources, Queue, Zones and Downloads (when this device keeps downloads), with Settings at the foot, scrolling when the screen is short; the account button is on tablets too. The player bar has volume on tablets: the slider where there is room, else a volume button that opens it in the Sound panel (also on desktops narrower than 1100 px). The Library button opens the library section used last, else Your library; on phones Downloads joins the Library chips when there are downloads. Every desktop place is within two taps on tablets and phones (ui-screens checks 768 to 1366 px wide, both ways up, and a phone).
 - **Playlist imports keep every line** (file, JSON and Roon imports, and a Spotify playlist's local files). Each line is matched the same way: the library's song, else its MusicBrainz id, its ISRC (new `isrc` and `mbid` fields) or a music link in the line. A line that matches nothing stays in its place as a link instead of being dropped:
   - the web page it names, when that is a public page: never an address with a sign-in, a file, share or stream address, another port or a home network's name, so a media server's links are never kept, shown through Pinakes or published;
   - else a MusicBrainz search for its words (never taken from an address's sign-in), shown in the playlist with those words and "Find on MusicBrainz", and never sent to Pinakes;
